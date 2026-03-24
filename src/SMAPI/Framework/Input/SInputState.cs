@@ -251,34 +251,24 @@ internal sealed class SInputState : InputState
         if (pressed.Count == 0 && released.Count == 0)
             return false;
 
-        // group keys by type
-        IDictionary<SButton, SButtonState> keyboardOverrides = new Dictionary<SButton, SButtonState>();
-        IDictionary<SButton, SButtonState> controllerOverrides = new Dictionary<SButton, SButtonState>();
-        IDictionary<SButton, SButtonState> mouseOverrides = new Dictionary<SButton, SButtonState>();
-        foreach (SButton button in pressed.Concat(released))
-        {
-            SButtonState newState = SInputState.DeriveState(
-                oldState: this.GetState(button),
-                isDown: pressed.Contains(button)
-            );
-
-            if (button is SButton.MouseLeft or SButton.MouseMiddle or SButton.MouseRight or SButton.MouseX1 or SButton.MouseX2)
-                mouseOverrides[button] = newState;
-            else if (button.TryGetKeyboard(out Keys _))
-                keyboardOverrides[button] = newState;
-            else if (button.TryGetController(out Buttons _))
-                controllerOverrides[button] = newState;
-        }
-
-        // override states
-        if (keyboardOverrides.Count > 0)
-            keyboard.OverrideButtons(keyboardOverrides);
-        if (controllerOverrides.Count > 0)
-            controller.OverrideButtons(controllerOverrides);
-        if (mouseOverrides.Count > 0)
-            mouse.OverrideButtons(mouseOverrides);
+        foreach (SButton button in pressed)
+            Apply(button, this.GetState(button), isDown: true, controller, keyboard, mouse);
+        foreach (SButton button in released)
+            Apply(button, this.GetState(button), isDown: pressed.Contains(button), controller, keyboard, mouse);
 
         return true;
+
+        static void Apply(SButton button, SButtonState oldState, bool isDown, GamePadStateBuilder controller, KeyboardStateBuilder keyboard, MouseStateBuilder mouse)
+        {
+            SButtonState newState = SInputState.DeriveState(oldState, isDown);
+
+            if (button is SButton.MouseLeft or SButton.MouseMiddle or SButton.MouseRight or SButton.MouseX1 or SButton.MouseX2)
+                mouse.OverrideButton(button, newState);
+            else if (button.TryGetKeyboard(out Keys key))
+                keyboard.OverrideButton(key, newState);
+            else if (button.TryGetController(out Buttons controllerButton))
+                controller.OverrideButton(controllerButton, newState);
+        }
     }
 
     /// <summary>Update active button states based on the currently pressed buttons.</summary>
