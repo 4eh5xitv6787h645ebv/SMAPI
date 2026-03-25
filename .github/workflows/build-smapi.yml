@@ -88,10 +88,11 @@ jobs:
                     ./build/scripts/prepare-install-package.ps1 "$env:VERSION"
 
             -   name: Upload installer
-                uses: actions/upload-artifact@v4
+                uses: actions/upload-artifact@v7
                 with:
                     name: 'SMAPI ${{env.VERSION}} installer'
                     path: 'bin/SMAPI-${{env.VERSION}}-installer.zip'
+                    archive: false
                     if-no-files-found: 'error'
 
             -   name: Generate artifact attestations
