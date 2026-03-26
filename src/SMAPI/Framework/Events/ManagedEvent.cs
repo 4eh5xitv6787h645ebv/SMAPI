@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using StardewModdingAPI.Events;
+using StardewModdingAPI.Framework.Extensions;
 using StardewModdingAPI.Internal;
 
 namespace StardewModdingAPI.Framework.Events;
