@@ -105,15 +105,13 @@ internal class PlayerTracker : IDisposable
     /// <returns>Returns whether anything changed.</returns>
     public bool TryGetInventoryChanges([NotNullWhen(true)] out SnapshotItemListDiff? changes)
     {
-        IDictionary<Item, int> current = this.GetInventory();
-
         ISet<Item> added = new HashSet<Item>(new ObjectReferenceComparer<Item>());
         ISet<Item> removed = new HashSet<Item>(new ObjectReferenceComparer<Item>());
-        foreach (Item item in this.PreviousInventory.Keys.Union(current.Keys))
+        foreach (Item item in this.PreviousInventory.Keys.Union(this.CurrentInventory.Keys))
         {
             if (!this.PreviousInventory.ContainsKey(item))
                 added.Add(item);
-            else if (!current.ContainsKey(item))
+            else if (!this.CurrentInventory.ContainsKey(item))
                 removed.Add(item);
         }
 
