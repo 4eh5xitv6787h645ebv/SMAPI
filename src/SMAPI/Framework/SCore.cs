@@ -465,15 +465,15 @@ internal class SCore : IDisposable
 
             // log loose files
             {
-                string[] looseFiles = new DirectoryInfo(this.ModsPath).GetFiles().Select(p => p.Name).ToArray();
-                if (looseFiles.Any())
+                FileInfo[] looseFiles = new DirectoryInfo(this.ModsPath).GetFiles();
+                if (looseFiles.Length > 0)
                 {
-                    if (looseFiles.Any(name => name.Equals("manifest.json", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
+                    if (looseFiles.Any(file => file.Name.Equals("manifest.json", StringComparison.OrdinalIgnoreCase) || file.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
                     {
                         this.Monitor.Log($"Detected mod files directly inside the '{Path.GetFileName(this.ModsPath)}' folder. These will be ignored. Each mod must have its own subfolder instead.", LogLevel.Error);
                     }
 
-                    this.Monitor.Log($"  Ignored loose files: {string.Join(", ", looseFiles.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))}");
+                    this.Monitor.Log($"  Ignored loose files: {string.Join(", ", looseFiles.Select(p => p.Name).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))}");
                 }
             }
 
@@ -481,9 +481,18 @@ internal class SCore : IDisposable
             IModMetadata[] mods = resolver.ReadManifests(toolkit, this.ModsPath, modBlacklist, modDatabase, useCaseInsensitiveFilePaths: this.Settings.UseCaseInsensitivePaths).ToArray();
 
             // filter out ignored mods
-            foreach (IModMetadata mod in mods.Where(p => p.IsIgnored))
-                this.Monitor.Log($"  Skipped {mod.GetRelativePathWithRoot()} (folder name starts with a dot).");
-            mods = mods.Where(p => !p.IsIgnored).ToArray();
+            {
+                bool anyIgnored = false;
+
+                foreach (IModMetadata mod in mods.Where(p => p.IsIgnored))
+                {
+                    anyIgnored = true;
+                    this.Monitor.Log($"  Skipped {mod.GetRelativePathWithRoot()} (folder name starts with a dot).");
+                }
+
+                if (anyIgnored)
+                    mods = mods.Where(p => !p.IsIgnored).ToArray();
+            }
 
             // validate manifests
             resolver.ValidateManifests(mods, Constants.ApiVersion, Constants.GameVersion, toolkit.GetUpdateUrl, getFileLookup: this.GetFileLookup);
@@ -994,8 +1003,8 @@ internal class SCore : IDisposable
                     // location list changes
                     if (state.Locations.LocationList.IsChanged && (events.LocationListChanged.HasListeners || verbose))
                     {
-                        var added = state.Locations.LocationList.Added.ToArray();
-                        var removed = state.Locations.LocationList.Removed.ToArray();
+                        var added = state.Locations.LocationList.Added;
+                        var removed = state.Locations.LocationList.Removed;
 
                         if (verbose)
                         {
@@ -1400,7 +1409,7 @@ internal class SCore : IDisposable
 
     /// <summary>A callback invoked after assets have been invalidated from the content cache.</summary>
     /// <param name="assetNames">The invalidated asset names.</param>
-    private void OnAssetsInvalidated(IList<IAssetName> assetNames)
+    private void OnAssetsInvalidated(ICollection<IAssetName> assetNames)
     {
         if (this.EventManager.AssetsInvalidated.HasListeners)
             this.EventManager.AssetsInvalidated.Raise(new AssetsInvalidatedEventArgs(assetNames, assetNames.Select(p => p.GetBaseAssetName())));
@@ -1730,7 +1739,7 @@ internal class SCore : IDisposable
                                 .GetUpdateKeys(validOnly: true)
                                 .Select(p => p.ToString())
                                 .ToArray();
-                            searchMods.Add(new ModSearchEntryModel(mod.Manifest.UniqueID, mod.Manifest.Version, updateKeys.ToArray(), isBroken: mod.Status == ModMetadataStatus.Failed));
+                            searchMods.Add(new ModSearchEntryModel(mod.Manifest.UniqueID, mod.Manifest.Version, updateKeys, isBroken: mod.Status == ModMetadataStatus.Failed));
                         }
 
                         // fetch results
@@ -1955,7 +1964,7 @@ internal class SCore : IDisposable
         this.Monitor.Log("Loading mods...", LogLevel.Debug);
 
         // load mods
-        IList<IModMetadata> skippedMods = new List<IModMetadata>();
+        List<IModMetadata> skippedMods = [];
         using (AssemblyLoader modAssemblyLoader = new(Constants.Platform, this.Monitor, this.Settings.ParanoidWarnings, this.Settings.RewriteMods, this.Settings.LogTechnicalDetailsForBrokenMods))
         {
             // init
@@ -1981,7 +1990,7 @@ internal class SCore : IDisposable
         this.ModRegistry.AreAllModsLoaded = true;
 
         // log mod info
-        this.LogManager.LogModInfo(loaded, loadedContentPacks, loadedMods, skippedMods.ToArray(), this.Settings.ParanoidWarnings, this.Settings.LogTechnicalDetailsForBrokenMods, this.Settings.FixHarmony);
+        this.LogManager.LogModInfo(loaded, loadedContentPacks, loadedMods, skippedMods, this.Settings.ParanoidWarnings, this.Settings.LogTechnicalDetailsForBrokenMods, this.Settings.FixHarmony);
 
         // initialize translations
         this.ReloadTranslations(loaded);
@@ -2458,12 +2467,12 @@ internal class SCore : IDisposable
         }
 
         // validate translations
-        foreach (string locale in translations.Keys.ToArray())
+        foreach (string locale in translations.Keys)
         {
             // handle duplicates
             HashSet<string> keys = new(StringComparer.OrdinalIgnoreCase);
             HashSet<string> duplicateKeys = new(StringComparer.OrdinalIgnoreCase);
-            foreach (string key in translations[locale].Keys.ToArray())
+            foreach (string key in translations[locale].Keys)
             {
                 if (!keys.Add(key))
                 {

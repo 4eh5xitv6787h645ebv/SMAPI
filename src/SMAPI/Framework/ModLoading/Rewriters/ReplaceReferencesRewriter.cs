@@ -349,14 +349,19 @@ internal class ReplaceReferencesRewriter : BaseInstructionHandler
                 // resolve generic method to a specific implementation
                 if (toMethod.DeclaringType?.IsGenericTypeDefinition is true && fromMember.DeclaringType is GenericInstanceType generic)
                 {
-                    Type?[] arguments = generic.GenericArguments.Select(RewriteHelper.GetCSharpType).ToArray();
-                    foreach (Type? argument in arguments)
+                    // get generic argument types
+                    Type[] genericArgTypes = new Type[generic.GenericArguments.Count];
+                    for (int i = 0; i < generic.GenericArguments.Count; i++)
                     {
-                        if (argument is null)
+                        Type? type = RewriteHelper.GetCSharpType(generic.GenericArguments[i]);
+                        if (type is null)
                             return false;
+
+                        genericArgTypes[i] = type;
                     }
 
-                    MethodInfo? newMethod = toMethod.DeclaringType.MakeGenericType(arguments!)?.GetMethod(toMethod.Name);
+                    // get method
+                    MethodInfo? newMethod = toMethod.DeclaringType.MakeGenericType(genericArgTypes!)?.GetMethod(toMethod.Name);
                     if (newMethod is null)
                         return false;
 
