@@ -16,10 +16,10 @@ internal class PlayerTracker : IDisposable
     ** Fields
     *********/
     /// <summary>The player's inventory as of the last reset.</summary>
-    private IDictionary<Item, int> PreviousInventory;
+    private readonly Dictionary<Item, int> PreviousInventory;
 
     /// <summary>The player's inventory change as of the last update.</summary>
-    private IDictionary<Item, int> CurrentInventory;
+    private readonly Dictionary<Item, int> CurrentInventory = [];
 
     /// <summary>The player's last valid location.</summary>
     private GameLocation? LastValidLocation;
@@ -50,7 +50,7 @@ internal class PlayerTracker : IDisposable
     {
         // init player data
         this.Player = player;
-        this.CurrentInventory = this.GetInventory();
+        this.SaveInventoryTo(this.CurrentInventory);
         this.PreviousInventory = new Dictionary<Item, int>(this.CurrentInventory);
 
         // init trackers
@@ -81,16 +81,21 @@ internal class PlayerTracker : IDisposable
             watcher.Update();
 
         // update inventory
-        this.CurrentInventory = this.GetInventory();
+        this.CurrentInventory.Clear();
+        this.SaveInventoryTo(this.CurrentInventory);
     }
 
     /// <summary>Reset all trackers so their current values are the baseline.</summary>
     public void Reset()
     {
+        // reset watchers
         foreach (IWatcher watcher in this.Watchers)
             watcher.Reset();
 
-        this.PreviousInventory = this.CurrentInventory;
+        // reset PreviousInventory to match current
+        this.PreviousInventory.Clear();
+        foreach ((Item item, int stack) in this.CurrentInventory)
+            this.PreviousInventory.Add(item, stack);
     }
 
     /// <summary>Get the player's current location, ignoring temporary null values.</summary>
@@ -105,8 +110,8 @@ internal class PlayerTracker : IDisposable
     /// <returns>Returns whether anything changed.</returns>
     public bool TryGetInventoryChanges([NotNullWhen(true)] out SnapshotItemListDiff? changes)
     {
-        ISet<Item> added = new HashSet<Item>(new ObjectReferenceComparer<Item>());
-        ISet<Item> removed = new HashSet<Item>(new ObjectReferenceComparer<Item>());
+        HashSet<Item> added = new(new ObjectReferenceComparer<Item>());
+        HashSet<Item> removed = new(new ObjectReferenceComparer<Item>());
         foreach (Item item in this.PreviousInventory.Keys.Union(this.CurrentInventory.Keys))
         {
             if (!this.PreviousInventory.ContainsKey(item))
@@ -133,10 +138,13 @@ internal class PlayerTracker : IDisposable
     ** Private methods
     *********/
     /// <summary>Get the player's current inventory.</summary>
-    private IDictionary<Item, int> GetInventory()
+    /// <param name="inventory">The dictionary to fill with the player's inventory.</param>
+    private void SaveInventoryTo(Dictionary<Item, int> inventory)
     {
-        return this.Player.Items
-            .Where(n => n != null)
-            .ToDictionary(n => n, n => n.Stack);
+        foreach (Item? item in this.Player.Items)
+        {
+            if (item is not null)
+                inventory[item] = item.Stack;
+        }
     }
 }

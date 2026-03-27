@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.Linq;
 using StardewModdingAPI.Framework.StateTracking.Comparers;
 using StardewModdingAPI.Framework.StateTracking.FieldWatchers;
 using StardewValley;
@@ -16,7 +15,7 @@ internal class ChestTracker : IDisposable
     ** Fields
     *********/
     /// <summary>The item stack sizes as of the last update.</summary>
-    private readonly IDictionary<Item, int> StackSizes;
+    private readonly Dictionary<Item, int> StackSizes = [];
 
     /// <summary>Items added since the last update.</summary>
     private readonly HashSet<Item> Added = new(new ObjectReferenceComparer<Item>());
@@ -46,9 +45,11 @@ internal class ChestTracker : IDisposable
         this.Chest = chest;
         this.InventoryWatcher = WatcherFactory.ForInventory($"{name}.{nameof(chest.Items)}", chest.Items);
 
-        this.StackSizes = this.Chest.Items
-            .Where(n => n != null)
-            .ToDictionary(n => n, n => n.Stack);
+        foreach (Item? item in this.Chest.Items)
+        {
+            if (item is not null)
+                this.StackSizes[item] = item.Stack;
+        }
     }
 
     /// <summary>Update the current values if needed.</summary>
