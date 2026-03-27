@@ -137,7 +137,6 @@ internal class PlayerTracker : IDisposable
     {
         return this.Player.Items
             .Where(n => n != null)
-            .Distinct()
             .ToDictionary(n => n, n => n.Stack);
     }
 }

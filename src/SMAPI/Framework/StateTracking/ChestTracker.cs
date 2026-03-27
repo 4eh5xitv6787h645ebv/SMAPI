@@ -48,7 +48,6 @@ internal class ChestTracker : IDisposable
 
         this.StackSizes = this.Chest.Items
             .Where(n => n != null)
-            .Distinct()
             .ToDictionary(n => n, n => n.Stack);
     }
 
