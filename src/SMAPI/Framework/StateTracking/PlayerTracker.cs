@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.Linq;
 using StardewModdingAPI.Enums;
 using StardewModdingAPI.Framework.StateTracking.Comparers;
 using StardewModdingAPI.Framework.StateTracking.FieldWatchers;
@@ -112,12 +111,17 @@ internal class PlayerTracker : IDisposable
     {
         HashSet<Item> added = new(new ObjectReferenceComparer<Item>());
         HashSet<Item> removed = new(new ObjectReferenceComparer<Item>());
-        foreach (Item item in this.PreviousInventory.Keys.Union(this.CurrentInventory.Keys))
+
+        foreach (Item item in this.PreviousInventory.Keys)
+        {
+            if (!this.CurrentInventory.ContainsKey(item))
+                removed.Add(item);
+        }
+
+        foreach (Item item in this.CurrentInventory.Keys)
         {
             if (!this.PreviousInventory.ContainsKey(item))
                 added.Add(item);
-            else if (!this.CurrentInventory.ContainsKey(item))
-                removed.Add(item);
         }
 
         return SnapshotItemListDiff.TryGetChanges(added: added, removed: removed, stackSizes: this.PreviousInventory, out changes);
