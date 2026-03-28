@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Framework.Extensions;
@@ -174,7 +173,17 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
             {
                 // recheck priorities
                 if (this.HasRemovedHandlers)
-                    this.HasPriorities = this.Handlers.Any(p => p.Priority != EventPriority.Normal);
+                {
+                    this.HasPriorities = false;
+                    foreach (var handler in this.Handlers)
+                    {
+                        if (handler.Priority != EventPriority.Normal)
+                        {
+                            this.HasPriorities = true;
+                            break;
+                        }
+                    }
+                }
 
                 // sort by priority if needed
                 if (this.HasPriorities)

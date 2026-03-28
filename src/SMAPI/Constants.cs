@@ -10,6 +10,7 @@ using StardewModdingAPI.Framework.ModLoading;
 using StardewModdingAPI.Toolkit.Framework;
 using StardewModdingAPI.Toolkit.Utilities;
 using StardewValley;
+using StardewValley.Extensions;
 
 namespace StardewModdingAPI;
 
@@ -298,7 +299,7 @@ public static class Constants
     /// <param name="targetPlatform">The target game platform.</param>
     internal static PlatformAssemblyMap GetAssemblyMap(Platform targetPlatform)
     {
-        var removeAssemblyReferences = new List<string>();
+        var removeAssemblyReferences = new HashSet<string>();
         var targetAssemblies = new List<Assembly>();
 
         // get assembly renamed in SMAPI 3.0
