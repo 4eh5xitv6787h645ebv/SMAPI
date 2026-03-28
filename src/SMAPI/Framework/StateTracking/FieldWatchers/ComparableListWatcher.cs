@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using StardewValley.Extensions;
 
 namespace StardewModdingAPI.Framework.StateTracking.FieldWatchers;
 
@@ -14,6 +15,9 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
 
     /// <summary>The values during the previous update.</summary>
     private HashSet<TValue> LastValues;
+
+    /// <summary>A pooled set used to update <see cref="LastValues"/> each update.</summary>
+    private HashSet<TValue> NewValues;
 
     /// <summary>The pairs added since the last reset.</summary>
     private readonly List<TValue> AddedImpl = [];
@@ -50,6 +54,7 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
         this.Name = name;
         this.CurrentValues = values;
         this.LastValues = new HashSet<TValue>(comparer);
+        this.NewValues = new HashSet<TValue>(comparer);
     }
 
     /// <inheritdoc />
@@ -68,19 +73,24 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
             return;
         }
 
+        // get new values
+        this.NewValues.Clear();
+        this.NewValues.AddRange(this.CurrentValues);
+
         // detect changes
-        HashSet<TValue> curValues = new HashSet<TValue>(this.CurrentValues, this.LastValues.Comparer);
         foreach (TValue value in this.LastValues)
         {
-            if (!curValues.Contains(value))
+            if (!this.NewValues.Contains(value))
                 this.RemovedImpl.Add(value);
         }
-        foreach (TValue value in curValues)
+        foreach (TValue value in this.NewValues)
         {
             if (!this.LastValues.Contains(value))
                 this.AddedImpl.Add(value);
         }
-        this.LastValues = curValues;
+
+        // save result
+        (this.LastValues, this.NewValues) = (this.NewValues, this.LastValues); // reuse the now-unused previous 'LastValues' set on the next update
     }
 
     /// <inheritdoc />

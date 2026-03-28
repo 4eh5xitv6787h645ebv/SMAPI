@@ -20,6 +20,12 @@ internal class PlayerTracker : IDisposable
     /// <summary>The player's inventory change as of the last update.</summary>
     private readonly Dictionary<Item, int> CurrentInventory = [];
 
+    /// <summary>A pooled set used to track the added items when detecting changes.</summary>
+    private readonly HashSet<Item> PooledAdded;
+
+    /// <summary>A pooled set used to track the removed items when detecting changes.</summary>
+    private readonly HashSet<Item> PooledRemoved;
+
     /// <summary>The player's last valid location.</summary>
     private GameLocation? LastValidLocation;
 
@@ -67,6 +73,11 @@ internal class PlayerTracker : IDisposable
         // track watchers for convenience
         this.Watchers.Add(this.LocationWatcher);
         this.Watchers.AddRange(this.SkillWatchers.Values);
+
+        // init pooled sets
+        var comparer = new ObjectReferenceComparer<Item>();
+        this.PooledAdded = new HashSet<Item>(comparer);
+        this.PooledRemoved = new HashSet<Item>(comparer);
     }
 
     /// <summary>Update the current values if needed.</summary>
@@ -109,22 +120,22 @@ internal class PlayerTracker : IDisposable
     /// <returns>Returns whether anything changed.</returns>
     public bool TryGetInventoryChanges([NotNullWhen(true)] out SnapshotItemListDiff? changes)
     {
-        HashSet<Item> added = new(new ObjectReferenceComparer<Item>());
-        HashSet<Item> removed = new(new ObjectReferenceComparer<Item>());
+        this.PooledAdded.Clear();
+        this.PooledRemoved.Clear();
 
         foreach (Item item in this.PreviousInventory.Keys)
         {
             if (!this.CurrentInventory.ContainsKey(item))
-                removed.Add(item);
+                this.PooledRemoved.Add(item);
         }
 
         foreach (Item item in this.CurrentInventory.Keys)
         {
             if (!this.PreviousInventory.ContainsKey(item))
-                added.Add(item);
+                this.PooledAdded.Add(item);
         }
 
-        return SnapshotItemListDiff.TryGetChanges(added: added, removed: removed, stackSizes: this.PreviousInventory, out changes);
+        return SnapshotItemListDiff.TryGetChanges(added: this.PooledAdded, removed: this.PooledRemoved, stackSizes: this.PreviousInventory, out changes);
     }
 
     /// <summary>Release watchers and resources.</summary>
