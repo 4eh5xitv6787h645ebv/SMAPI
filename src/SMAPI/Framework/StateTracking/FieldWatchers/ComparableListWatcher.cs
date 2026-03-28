@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 
 namespace StardewModdingAPI.Framework.StateTracking.FieldWatchers;
 
@@ -71,8 +70,16 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
 
         // detect changes
         HashSet<TValue> curValues = new HashSet<TValue>(this.CurrentValues, this.LastValues.Comparer);
-        this.RemovedImpl.AddRange(from value in this.LastValues where !curValues.Contains(value) select value);
-        this.AddedImpl.AddRange(from value in curValues where !this.LastValues.Contains(value) select value);
+        foreach (TValue value in this.LastValues)
+        {
+            if (!curValues.Contains(value))
+                this.RemovedImpl.Add(value);
+        }
+        foreach (TValue value in curValues)
+        {
+            if (!this.LastValues.Contains(value))
+                this.AddedImpl.Add(value);
+        }
         this.LastValues = curValues;
     }
 
