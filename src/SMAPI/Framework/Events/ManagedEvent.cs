@@ -97,8 +97,7 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     /// <param name="args">The event arguments to pass.</param>
     public void Raise(TEventArgs args)
     {
-        // skip if no handlers
-        if (this.Handlers.Count == 0)
+        if (!this.HasListeners)
             return;
 
         // raise event
@@ -125,8 +124,7 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     /// <param name="invoke">Invoke an event handler. This receives the mod which registered the handler, and should invoke the callback with the event arguments to pass it.</param>
     public void Raise(Action<IModMetadata, Action<TEventArgs>> invoke)
     {
-        // skip if no handlers
-        if (this.Handlers.Count == 0)
+        if (!this.HasListeners)
             return;
 
         // raise event
