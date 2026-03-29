@@ -33,7 +33,7 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
     public string Name { get; }
 
     /// <inheritdoc />
-    public bool IsChanged => this.AddedImpl.Count > 0 || this.RemovedImpl.Count > 0;
+    public bool IsChanged { get; private set; }
 
     /// <inheritdoc />
     public IReadOnlyCollection<TValue> Added => this.AddedImpl;
@@ -61,6 +61,7 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
     public void Update()
     {
         this.AssertNotDisposed();
+        this.IsChanged = false;
 
         // optimize for zero items
         if (this.CurrentValues.Count == 0)
@@ -69,6 +70,7 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
             {
                 this.RemovedImpl.AddRange(this.LastValues);
                 this.LastValues.Clear();
+                this.IsChanged = true;
             }
             return;
         }
@@ -78,19 +80,30 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
         this.NewValues.AddRange(this.CurrentValues);
 
         // detect changes
+        bool changed = false;
         foreach (TValue value in this.LastValues)
         {
             if (!this.NewValues.Contains(value))
+            {
                 this.RemovedImpl.Add(value);
+                changed = true;
+            }
         }
         foreach (TValue value in this.NewValues)
         {
             if (!this.LastValues.Contains(value))
+            {
                 this.AddedImpl.Add(value);
+                changed = true;
+            }
         }
 
         // save result
-        (this.LastValues, this.NewValues) = (this.NewValues, this.LastValues); // reuse the now-unused previous 'LastValues' set on the next update
+        if (changed)
+        {
+            this.IsChanged = true;
+            (this.LastValues, this.NewValues) = (this.NewValues, this.LastValues); // reuse the now-unused previous 'LastValues' set on the next update
+        }
     }
 
     /// <inheritdoc />
@@ -100,5 +113,6 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
 
         this.AddedImpl.Clear();
         this.RemovedImpl.Clear();
+        this.IsChanged = false;
     }
 }
