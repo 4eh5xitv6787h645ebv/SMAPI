@@ -39,14 +39,22 @@ internal class CaseInsensitiveFileLookup : IFileLookup
         if (string.IsNullOrWhiteSpace(relativePath))
             throw new InvalidOperationException("Can't get a file from an empty relative path.");
 
-        // already cached
+        relativePath = PathUtilities.NormalizePath(relativePath);
+
+        // use the exact path without building the recursive compatibility index
+        FileInfo file = new(Path.Combine(this.RootPath, relativePath));
+        if (file.Exists)
+        {
+            if (this.RelativePathCache.IsValueCreated)
+                this.RelativePathCache.Value[relativePath] = relativePath;
+            return file;
+        }
+
+        // fall back to a case-insensitive match
         if (this.RelativePathCache.Value.TryGetValue(relativePath, out string? resolved))
             return new(Path.Combine(this.RootPath, resolved));
 
-        // keep capitalization as-is
-        FileInfo file = new(Path.Combine(this.RootPath, relativePath));
-        if (file.Exists)
-            this.RelativePathCache.Value[relativePath] = relativePath;
+        // keep capitalization as-is for a missing path
         return file;
     }
 
