@@ -78,11 +78,11 @@ public class AssetRequestedEventArgs : EventArgs
     {
         IModMetadata mod = this.GetMod();
         this.LoadOperations.Add(
-            new AssetLoadOperation(
-                Mod: mod,
-                OnBehalfOf: this.GetOnBehalfOf(mod, onBehalfOf, "load assets"),
-                Priority: priority,
-                GetData: _ => load()
+            new DelegateAssetLoadOperation(
+                mod: mod,
+                onBehalfOf: this.GetOnBehalfOf(mod, onBehalfOf, "load assets"),
+                priority: priority,
+                load: load
             )
         );
     }
@@ -97,12 +97,7 @@ public class AssetRequestedEventArgs : EventArgs
     {
         IModMetadata mod = this.GetMod();
         this.LoadOperations.Add(
-            new AssetLoadOperation(
-                Mod: mod,
-                OnBehalfOf: null,
-                Priority: priority,
-                GetData: _ => mod.Mod!.Helper.ModContent.Load<TAsset>(relativePath)
-            )
+            new ModFileAssetLoadOperation<TAsset>(mod, priority, relativePath)
         );
     }
 

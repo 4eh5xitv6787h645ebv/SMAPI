@@ -191,7 +191,7 @@ internal class GameContentManager : BaseContentManager
         Context.HeuristicModsRunningCode.Push(loader.Mod);
         try
         {
-            data = (T)loader.GetData(info);
+            data = (T)loader.GetData();
             this.Monitor.Log($"{mod.DisplayName} loaded asset '{info.Name}'{this.GetOnBehalfOfLabel(loader.OnBehalfOf)}.");
         }
         catch (Exception ex)
