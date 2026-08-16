@@ -31,31 +31,31 @@ public class ButtonsChangedEventArgs : EventArgs
     /// <param name="inputState">The game's current input state.</param>
     internal ButtonsChangedEventArgs(ICursorPosition cursor, SInputState inputState)
     {
-        var pressed = new List<SButton>();
-        var held = new List<SButton>();
-        var released = new List<SButton>();
+        List<SButton>? pressed = null;
+        List<SButton>? held = null;
+        List<SButton>? released = null;
 
         foreach ((SButton button, SButtonState state) in inputState.GetActiveButtonStates())
         {
             switch (state)
             {
                 case SButtonState.Pressed:
-                    pressed.Add(button);
+                    (pressed ??= []).Add(button);
                     break;
 
                 case SButtonState.Held:
-                    held.Add(button);
+                    (held ??= []).Add(button);
                     break;
 
                 case SButtonState.Released:
-                    released.Add(button);
+                    (released ??= []).Add(button);
                     break;
             }
         }
 
         this.Cursor = cursor;
-        this.Pressed = pressed;
-        this.Held = held;
-        this.Released = released;
+        this.Pressed = pressed is not null ? pressed : Array.Empty<SButton>();
+        this.Held = held is not null ? held : Array.Empty<SButton>();
+        this.Released = released is not null ? released : Array.Empty<SButton>();
     }
 }
