@@ -580,7 +580,8 @@ internal class ContentCoordinator : IDisposable
     {
         return this.AssetOperationsByKey.GetOrSet(
             info.Name,
-            () => this.RequestAssetOperations(info)
+            (Coordinator: this, Info: info),
+            static state => state.Coordinator.RequestAssetOperations(state.Info)
         );
     }
 

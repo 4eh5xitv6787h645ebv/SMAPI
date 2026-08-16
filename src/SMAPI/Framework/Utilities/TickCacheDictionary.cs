@@ -27,6 +27,16 @@ internal class TickCacheDictionary<TKey, TValue>
     /// <param name="get">Get the latest data if it's not in the cache yet.</param>
     public TValue GetOrSet(TKey cacheKey, Func<TValue> get)
     {
+        return this.GetOrSet(cacheKey, get, static callback => callback());
+    }
+
+    /// <summary>Get a value from the cache, fetching it first if it's not cached yet.</summary>
+    /// <typeparam name="TState">The factory state type.</typeparam>
+    /// <param name="cacheKey">The unique key for the cached value.</param>
+    /// <param name="state">The state to pass to the value factory.</param>
+    /// <param name="get">Get the latest data from the state if it isn't cached yet.</param>
+    public TValue GetOrSet<TState>(TKey cacheKey, TState state, Func<TState, TValue> get)
+    {
         // clear cache on new tick
         if (SCore.ProcessTicksElapsed != this.LastGameTick)
         {
@@ -36,7 +46,7 @@ internal class TickCacheDictionary<TKey, TValue>
 
         // fetch value
         if (!this.Cache.TryGetValue(cacheKey, out TValue? cached))
-            this.Cache[cacheKey] = cached = get();
+            this.Cache[cacheKey] = cached = get(state);
         return cached;
     }
 
@@ -62,7 +72,22 @@ internal class TickCacheDictionary<TKey> : TickCacheDictionary<TKey, object>
     /// <param name="get">Get the latest data if it's not in the cache yet.</param>
     public TValue GetOrSet<TValue>(TKey cacheKey, Func<TValue> get)
     {
-        object? value = base.GetOrSet(cacheKey, () => get()!);
+        return this.GetOrSet(cacheKey, get, static callback => callback());
+    }
+
+    /// <summary>Get a value from the cache, fetching it first if it's not cached yet.</summary>
+    /// <typeparam name="TValue">The value type.</typeparam>
+    /// <typeparam name="TState">The factory state type.</typeparam>
+    /// <param name="cacheKey">The unique key for the cached value.</param>
+    /// <param name="state">The state to pass to the value factory.</param>
+    /// <param name="get">Get the latest data from the state if it isn't cached yet.</param>
+    public TValue GetOrSet<TValue, TState>(TKey cacheKey, TState state, Func<TState, TValue> get)
+    {
+        object? value = base.GetOrSet(
+            cacheKey,
+            (State: state, Get: get),
+            static factory => factory.Get(factory.State)!
+        );
 
         try
         {

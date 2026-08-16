@@ -811,11 +811,12 @@ internal class CoreAssetPropagator
     {
         return this.WorldCache.GetOrSet(
             nameof(this.GetCharacters),
-            () =>
+            this,
+            static propagator =>
             {
                 List<NPC> characters = [];
 
-                foreach (GameLocation location in this.GetLocations())
+                foreach (GameLocation location in propagator.GetLocations())
                 {
                     foreach (NPC character in location.characters)
                         characters.Add(character);
@@ -837,11 +838,12 @@ internal class CoreAssetPropagator
     {
         return this.WorldCache.GetOrSet(
             nameof(this.GetCharactersByName),
-            () =>
+            this,
+            static propagator =>
             {
                 Dictionary<string, List<NPC>> charactersByName = new(StringComparer.Ordinal);
 
-                foreach (NPC character in this.GetCharacters())
+                foreach (NPC character in propagator.GetCharacters())
                 {
                     if (!charactersByName.TryGetValue(character.Name, out List<NPC>? matches))
                         charactersByName[character.Name] = matches = [];
@@ -872,11 +874,12 @@ internal class CoreAssetPropagator
     {
         return this.WorldCache.GetOrSet(
             nameof(this.GetFarmAnimals),
-            () =>
+            this,
+            static propagator =>
             {
                 List<FarmAnimal> animals = [];
 
-                foreach (GameLocation location in this.GetLocations())
+                foreach (GameLocation location in propagator.GetLocations())
                 {
                     if (location.animals.Length > 0)
                     {
@@ -895,8 +898,19 @@ internal class CoreAssetPropagator
     private IReadOnlyList<GameLocation> GetLocations(bool buildingInteriors = true)
     {
         return this.WorldCache.GetOrSet(
-            $"{nameof(this.GetLocations)}_{buildingInteriors}",
-            () => this.GetLocationsWithInfo(buildingInteriors).Select(info => info.Location).ToArray()
+            buildingInteriors
+                ? nameof(this.GetLocations) + "_True"
+                : nameof(this.GetLocations) + "_False",
+            (Propagator: this, BuildingInteriors: buildingInteriors),
+            static state =>
+            {
+                IReadOnlyList<LocationInfo> locationsWithInfo = state.Propagator.GetLocationsWithInfo(state.BuildingInteriors);
+                GameLocation[] locations = new GameLocation[locationsWithInfo.Count];
+                for (int i = 0; i < locations.Length; i++)
+                    locations[i] = locationsWithInfo[i].Location;
+
+                return locations;
+            }
         );
     }
 
@@ -905,8 +919,11 @@ internal class CoreAssetPropagator
     private IReadOnlyList<LocationInfo> GetLocationsWithInfo(bool buildingInteriors = true)
     {
         return this.WorldCache.GetOrSet(
-            $"{nameof(this.GetLocationsWithInfo)}_{buildingInteriors}",
-            () =>
+            buildingInteriors
+                ? nameof(this.GetLocationsWithInfo) + "_True"
+                : nameof(this.GetLocationsWithInfo) + "_False",
+            buildingInteriors,
+            static includeBuildingInteriors =>
             {
                 List<LocationInfo> locations = [];
 
@@ -920,10 +937,12 @@ internal class CoreAssetPropagator
                 }
 
                 // get child locations
-                if (buildingInteriors)
+                if (includeBuildingInteriors)
                 {
-                    foreach (LocationInfo location in locations.ToArray())
+                    int rootLocationCount = locations.Count;
+                    for (int i = 0; i < rootLocationCount; i++)
                     {
+                        LocationInfo location = locations[i];
                         foreach (Building building in location.Location.buildings)
                         {
                             GameLocation indoors = building.indoors.Value;
