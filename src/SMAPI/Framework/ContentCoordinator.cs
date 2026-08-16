@@ -85,6 +85,9 @@ internal class ContentCoordinator : IDisposable
     /// <summary>The language enum values indexed by locale code.</summary>
     private Lazy<Dictionary<string, LocalizedContentManager.LanguageCode>> LocaleCodes;
 
+    /// <summary>Parse a locale suffix in an asset name.</summary>
+    private readonly Func<string, LocalizedContentManager.LanguageCode?> ParseLocale;
+
     /// <summary>The cached asset load/edit operations to apply, indexed by asset name.</summary>
     private readonly TickCacheDictionary<IAssetName, AssetOperationGroup?> AssetOperationsByKey = new();
 
@@ -165,6 +168,7 @@ internal class ContentCoordinator : IDisposable
         this.VanillaContentManager = new LocalizedContentManager(serviceProvider, rootDirectory);
         this.CoreAssets = new CoreAssetPropagator(this.MainContentManager, contentManagerForAssetPropagation, this.Monitor, multiplayer, reflection, name => this.ParseAssetName(name, allowLocales: true));
         this.LocaleCodes = new Lazy<Dictionary<string, LocalizedContentManager.LanguageCode>>(() => this.GetLocaleCodes(customLanguages: []));
+        this.ParseLocale = this.TryParseLocale;
     }
 
     /// <summary>Get a new content manager which handles reading files from the game content folder with support for interception.</summary>
@@ -290,10 +294,19 @@ internal class ContentCoordinator : IDisposable
             ? AssetName.Parse(
                 rawName: rawName,
                 parseLocale: allowLocales
-                    ? locale => this.LocaleCodes.Value.TryGetValue(locale, out LocalizedContentManager.LanguageCode langCode) ? langCode : null
+                    ? this.ParseLocale
                     : _ => null
             )
             : throw new ArgumentException("The asset name can't be null or empty.", nameof(rawName));
+    }
+
+    /// <summary>Parse a locale suffix in an asset name.</summary>
+    /// <param name="locale">The raw locale code.</param>
+    private LocalizedContentManager.LanguageCode? TryParseLocale(string locale)
+    {
+        return this.LocaleCodes.Value.TryGetValue(locale, out LocalizedContentManager.LanguageCode langCode)
+            ? langCode
+            : null;
     }
 
     /// <summary>Get whether this asset is mapped to a mod folder.</summary>
