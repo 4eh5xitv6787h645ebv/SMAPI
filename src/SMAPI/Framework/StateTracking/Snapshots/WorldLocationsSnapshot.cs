@@ -47,7 +47,7 @@ internal class WorldLocationsSnapshot
             if (!this.LocationsDict.TryGetValue(locationWatcher.Location, out LocationSnapshot? snapshot))
                 this.LocationsDict[locationWatcher.Location] = snapshot = new LocationSnapshot(locationWatcher.Location);
 
-            snapshot.Update(locationWatcher);
+            snapshot.Update(locationWatcher, watcher.TrackChestInventoryChanges);
         }
     }
 

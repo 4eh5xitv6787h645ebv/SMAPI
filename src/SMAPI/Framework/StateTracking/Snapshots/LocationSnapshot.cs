@@ -53,7 +53,8 @@ internal class LocationSnapshot
 
     /// <summary>Update the tracked values.</summary>
     /// <param name="watcher">The watcher to snapshot.</param>
-    public void Update(LocationTracker watcher)
+    /// <param name="trackChestInventoryChanges">Whether to snapshot changes needed for the chest inventory event.</param>
+    public void Update(LocationTracker watcher, bool trackChestInventoryChanges)
     {
         // main lists
         this.Buildings.Update(watcher.BuildingsWatcher);
@@ -66,10 +67,13 @@ internal class LocationSnapshot
 
         // chest inventories
         this.ChestItems.Clear();
-        foreach (ChestTracker tracker in watcher.ChestWatchers.Values)
+        if (trackChestInventoryChanges)
         {
-            if (tracker.TryGetInventoryChanges(out SnapshotItemListDiff? changes))
-                this.ChestItems[tracker.Chest] = changes;
+            foreach (ChestTracker tracker in watcher.ChestWatchers.Values)
+            {
+                if (tracker.TryGetInventoryChanges(out SnapshotItemListDiff? changes))
+                    this.ChestItems[tracker.Chest] = changes;
+            }
         }
     }
 }

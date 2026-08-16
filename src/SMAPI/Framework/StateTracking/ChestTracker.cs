@@ -26,6 +26,9 @@ internal class ChestTracker : IDisposable
     /// <summary>The underlying inventory watcher.</summary>
     private readonly ICollectionWatcher<Item> InventoryWatcher;
 
+    /// <summary>Whether inventory changes are currently being tracked.</summary>
+    private bool IsTrackingInventoryChanges;
+
 
     /*********
     ** Accessors
@@ -44,17 +47,39 @@ internal class ChestTracker : IDisposable
     {
         this.Chest = chest;
         this.InventoryWatcher = WatcherFactory.ForInventory($"{name}.{nameof(chest.Items)}", chest.Items);
-
-        foreach (Item? item in this.Chest.Items)
-        {
-            if (item is not null)
-                this.StackSizes[item] = item.Stack;
-        }
     }
 
     /// <summary>Update the current values if needed.</summary>
-    public void Update()
+    /// <param name="trackInventoryChanges">Whether to track changes needed for the chest inventory event.</param>
+    public void Update(bool trackInventoryChanges)
     {
+        // activate/deactivate with a fresh baseline, so changes from while tracking was disabled aren't reported
+        if (this.IsTrackingInventoryChanges != trackInventoryChanges)
+        {
+            this.IsTrackingInventoryChanges = trackInventoryChanges;
+            this.StackSizes.Clear();
+            this.Added.Clear();
+            this.Removed.Clear();
+            this.InventoryWatcher.Reset();
+
+            if (trackInventoryChanges)
+            {
+                foreach (Item? item in this.Chest.Items)
+                {
+                    if (item is not null)
+                        this.StackSizes[item] = item.Stack;
+                }
+            }
+            return;
+        }
+
+        // discard inventory notifications without scanning item stacks when no mod needs the event
+        if (!trackInventoryChanges)
+        {
+            this.InventoryWatcher.Reset();
+            return;
+        }
+
         // update watcher
         this.InventoryWatcher.Update();
         foreach (Item item in this.InventoryWatcher.Added)
@@ -73,6 +98,14 @@ internal class ChestTracker : IDisposable
     /// <summary>Reset all trackers so their current values are the baseline.</summary>
     public void Reset()
     {
+        if (!this.IsTrackingInventoryChanges)
+        {
+            this.InventoryWatcher.Reset();
+            this.Added.Clear();
+            this.Removed.Clear();
+            return;
+        }
+
         // update stack sizes
         foreach (Item item in this.StackSizes.Keys)
             this.StackSizes[item] = item.Stack;
@@ -90,6 +123,12 @@ internal class ChestTracker : IDisposable
     /// <returns>Returns whether anything changed.</returns>
     public bool TryGetInventoryChanges([NotNullWhen(true)] out SnapshotItemListDiff? changes)
     {
+        if (!this.IsTrackingInventoryChanges)
+        {
+            changes = null;
+            return false;
+        }
+
         return SnapshotItemListDiff.TryGetChanges(added: this.Added, removed: this.Removed, stackSizes: this.StackSizes, out changes);
     }
 

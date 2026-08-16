@@ -836,7 +836,7 @@ internal class SCore : IDisposable
             ** Update watchers
             **   (Watchers need to be updated, checked, and reset in one go so we can detect any changes mods make in event handlers.)
             *********/
-            instance.Watchers.Update();
+            instance.Watchers.Update(events.ChestInventoryChanged.HasListeners);
             instance.WatcherSnapshot.Update(instance.Watchers);
             instance.Watchers.Reset();
             WatcherSnapshot state = instance.WatcherSnapshot;

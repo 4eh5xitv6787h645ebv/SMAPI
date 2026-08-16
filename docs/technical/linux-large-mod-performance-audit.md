@@ -26,7 +26,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Steady gameplay and memory.
 - **Expected benefit:** Lower baseline main-thread work, scaling with world size rather than charging every player the full tracking cost.
 - **Risk:** High. Some tracked state is needed for internal context and newly registered listeners need a correct baseline; activation must be granular rather than disabling the entire watcher graph.
-- **Status:** Confirmed; architectural fix deferred until listener-to-tracker dependencies are mapped.
+- **Status:** Confirmed; the chest-inventory stage is fixed by disabling stack baselines, comparisons, and snapshot construction when the event has no listeners, with a fresh baseline on activation. Granular listener-driven location collection tracking remains deferred.
 
 ### 3. Exact asset invalidation performs a general cache scan
 
