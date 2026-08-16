@@ -41,10 +41,13 @@ internal class SGameRunner : GameRunner
     private readonly Action<LoadStage> OnLoadStageChanged;
 
     /// <summary>Raised when XNA is updating (roughly 60 times per second).</summary>
-    private readonly Action<GameTime, Action> OnGameUpdating;
+    private readonly Action<GameTime, Action<GameTime>> OnGameUpdating;
 
     /// <summary>Raised when the game instance for a local split-screen player is updating (once per <see cref="OnGameUpdating"/> per player).</summary>
-    private readonly Action<SGame, GameTime, Action> OnPlayerInstanceUpdating;
+    private readonly Action<SGame, GameTime, Action<GameTime>> OnPlayerInstanceUpdating;
+
+    /// <summary>Invoke the base update loop without allocating a capturing callback each tick.</summary>
+    private readonly Action<GameTime> RunBaseUpdate;
 
     /// <summary>Raised before the game exits.</summary>
     private readonly Action OnGameExiting;
@@ -76,7 +79,7 @@ internal class SGameRunner : GameRunner
     /// <param name="onPlayerInstanceUpdating">Raised when the game instance for a local split-screen player is updating (once per <see cref="OnGameUpdating"/> per player).</param>
     /// <param name="onPlayerInstanceRendered">Raised after an instance finishes a draw loop.</param>
     /// <param name="onGameExiting">Raised before the game exits.</param>
-    public SGameRunner(Monitor monitor, Reflector reflection, SModHooks modHooks, IGameLogger gameLogger, SMultiplayer multiplayer, Action<string> exitGameImmediately, Action onGameContentLoaded, Action<LoadStage> onLoadStageChanged, Action<GameTime, Action> onGameUpdating, Action<SGame, GameTime, Action> onPlayerInstanceUpdating, Action onGameExiting, Action<RenderTarget2D> onPlayerInstanceRendered)
+    public SGameRunner(Monitor monitor, Reflector reflection, SModHooks modHooks, IGameLogger gameLogger, SMultiplayer multiplayer, Action<string> exitGameImmediately, Action onGameContentLoaded, Action<LoadStage> onLoadStageChanged, Action<GameTime, Action<GameTime>> onGameUpdating, Action<SGame, GameTime, Action<GameTime>> onPlayerInstanceUpdating, Action onGameExiting, Action<RenderTarget2D> onPlayerInstanceRendered)
     {
         // init XNA
         Game1.graphics.GraphicsProfile = GraphicsProfile.HiDef;
@@ -96,6 +99,7 @@ internal class SGameRunner : GameRunner
         this.OnPlayerInstanceUpdating = onPlayerInstanceUpdating;
         this.OnPlayerInstanceRendered = onPlayerInstanceRendered;
         this.OnGameExiting = onGameExiting;
+        this.RunBaseUpdate = this.RunBaseUpdateImpl;
     }
 
     /// <summary>Create a game instance for a local player.</summary>
@@ -170,7 +174,14 @@ internal class SGameRunner : GameRunner
     /// <param name="gameTime">A snapshot of the game timing state.</param>
     protected override void Update(GameTime gameTime)
     {
-        this.OnGameUpdating(gameTime, () => base.Update(gameTime));
+        this.OnGameUpdating(gameTime, this.RunBaseUpdate);
+    }
+
+    /// <summary>Run the underlying game update.</summary>
+    /// <param name="gameTime">A snapshot of the game timing state.</param>
+    private void RunBaseUpdateImpl(GameTime gameTime)
+    {
+        base.Update(gameTime);
     }
 
     /// <summary>Update metadata when a split screen is added or removed.</summary>

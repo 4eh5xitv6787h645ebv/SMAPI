@@ -228,6 +228,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Medium. Source arrays can represent a packed subarea or a row window into a larger raw image, so source-to-target coordinate mapping must remain exact for overlay and mask modes.
 - **Status:** Fixed. Overlay and mask patches now retain the existing fast endpoint checks, scan horizontal alpha bounds only when needed, and transfer/blend the exact nontransparent rectangle.
 
+### 23. Core update wrappers allocate capturing callbacks every tick
+
+- **Affected code:** `Framework/SGameRunner.cs` (`Update`) and `Framework/SGame.cs` (`Update`), with callback consumers in `Framework/SCore.cs`.
+- **Scenario:** Every Linux gameplay update, including ordinary walking; the inner allocation repeats for each local split-screen instance.
+- **Root cause:** Both update overrides construct a lambda which captures the current `GameTime` solely so SMAPI can let `SCore` invoke the corresponding base update inside its event and error boundaries.
+- **Impact:** Steady gameplay and garbage collection.
+- **Expected benefit:** Cached base-update delegates remove the two continuous closure allocations per single-player tick, plus the additional per-screen closures in split-screen, reducing Gen 0 pressure without changing update ordering.
+- **Risk:** Low. The callback must receive the exact `GameTime` for its invocation and remain synchronous.
+- **Status:** Fixed. The wrapper delegates now accept `GameTime` directly and each game object reuses one cached base-update callback, preserving the existing synchronous control flow without per-tick closures.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.

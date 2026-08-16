@@ -570,8 +570,8 @@ internal class SCore : IDisposable
 
     /// <summary>Raised when the game is updating its state (roughly 60 times per second).</summary>
     /// <param name="gameTime">A snapshot of the game timing state.</param>
-    /// <param name="runGameUpdate">Invoke the game's update logic.</param>
-    private void OnGameUpdating(GameTime gameTime, Action runGameUpdate)
+    /// <param name="runGameUpdate">Invoke the game's update logic for the given timing state.</param>
+    private void OnGameUpdating(GameTime gameTime, Action<GameTime> runGameUpdate)
     {
         try
         {
@@ -644,7 +644,7 @@ internal class SCore : IDisposable
             /*********
             ** Run game update
             *********/
-            runGameUpdate();
+            runGameUpdate(gameTime);
 
             /*********
             ** Reset crash timer
@@ -670,8 +670,8 @@ internal class SCore : IDisposable
     /// <summary>Raised when the game instance for a local player is updating (once per <see cref="OnGameUpdating"/> per player).</summary>
     /// <param name="instance">The game instance being updated.</param>
     /// <param name="gameTime">A snapshot of the game timing state.</param>
-    /// <param name="runUpdate">Invoke the game's update logic.</param>
-    private void OnPlayerInstanceUpdating(SGame instance, GameTime gameTime, Action runUpdate)
+    /// <param name="runUpdate">Invoke the game's update logic for the given timing state.</param>
+    private void OnPlayerInstanceUpdating(SGame instance, GameTime gameTime, Action<GameTime> runUpdate)
     {
         EventManager events = this.EventManager;
         bool verbose = this.Monitor.IsVerbose;
@@ -780,7 +780,7 @@ internal class SCore : IDisposable
             if (Game1.gameMode == Game1.loadingMode)
             {
                 events.UnvalidatedUpdateTicking.RaiseEmpty();
-                runUpdate();
+                runUpdate(gameTime);
                 events.UnvalidatedUpdateTicked.RaiseEmpty();
                 return;
             }
@@ -811,7 +811,7 @@ internal class SCore : IDisposable
 
                 // suppress non-save events
                 events.UnvalidatedUpdateTicking.RaiseEmpty();
-                runUpdate();
+                runUpdate(gameTime);
                 events.UnvalidatedUpdateTicked.RaiseEmpty();
                 return;
             }
@@ -1173,7 +1173,7 @@ internal class SCore : IDisposable
                 try
                 {
                     instance.Input.ApplyOverrides(); // if mods added any new overrides since the update, process them now
-                    runUpdate();
+                    runUpdate(gameTime);
                 }
                 catch (Exception ex)
                 {
