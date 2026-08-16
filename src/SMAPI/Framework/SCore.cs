@@ -1482,7 +1482,8 @@ internal class SCore : IDisposable
         // raise event
         AssetRequestedEventArgs args = new(asset, this.GetOnBehalfOfContentPack);
         requestedEvent.Raise(
-            invoke: (mod, invoke) =>
+            state: ref args,
+            invoke: static (ref AssetRequestedEventArgs args, IModMetadata mod, Action<AssetRequestedEventArgs> invoke) =>
             {
                 args.SetMod(mod);
                 invoke(args);
@@ -1552,14 +1553,15 @@ internal class SCore : IDisposable
                 modIds.Remove(message.FromModId); // don't send a broadcast back to the sender
 
             // raise events
-            ModMessageReceivedEventArgs? args = null;
+            var dispatchState = (ModIds: modIds, Message: message, Core: this, Args: (ModMessageReceivedEventArgs?)null);
             this.EventManager.ModMessageReceived.Raise(
-                invoke: (mod, invoke) =>
+                state: ref dispatchState,
+                invoke: static (ref (HashSet<string> ModIds, ModMessageModel Message, SCore Core, ModMessageReceivedEventArgs? Args) state, IModMetadata mod, Action<ModMessageReceivedEventArgs> invoke) =>
                 {
-                    if (modIds.Contains(mod.Manifest.UniqueID))
+                    if (state.ModIds.Contains(mod.Manifest.UniqueID))
                     {
-                        args ??= new(message, this.Toolkit.JsonHelper);
-                        invoke(args);
+                        state.Args ??= new(state.Message, state.Core.Toolkit.JsonHelper);
+                        invoke(state.Args);
                     }
                 }
             );

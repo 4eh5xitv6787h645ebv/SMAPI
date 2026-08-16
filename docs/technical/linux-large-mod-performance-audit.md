@@ -162,11 +162,11 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 - **Affected code:** `Framework/Events/ManagedEvent.cs` (`Raise`) and `Framework/Events/ManagedEventHandler.cs`.
 - **Scenario:** High-frequency update/input events with many subscribers, and repeated live asset requests while walking or transitioning.
-- **Root cause:** Each handler invocation pushes and pops the current mod context and enters exception-handling logic. The lazy dispatch overload also creates a new callback delegate for every handler on every raise.
+- **Root cause:** Each handler invocation pushes and pops the current mod context and enters exception-handling logic. Lazy dispatch originally created a new callback delegate for every handler on every raise; after caching those callbacks, high-frequency callers still created a capturing outer dispatch closure for each live asset request or routed network message.
 - **Impact:** Steady gameplay, transitions, and garbage collection.
 - **Expected benefit:** Caching lazy callbacks removes repeat dispatch allocations; a correctly scoped context fast path could further reduce framework overhead, although mod handler time will usually dominate.
 - **Risk:** High. Current-mod attribution and exception isolation are correctness features and must not be weakened.
-- **Status:** Partially fixed. Each registered handler now owns one cached lazy-dispatch callback instead of allocating one on every asset request or filtered message dispatch. Context stack operations and exception boundaries remain unchanged pending runtime evidence.
+- **Status:** Partially fixed. Each registered handler owns one cached lazy-dispatch callback, and stateful raises now pass stack-held per-raise state by reference to cached static invokers. Live asset requests and routed network messages therefore avoid both the per-handler callback allocations and their per-raise capturing dispatch closure. Context stack operations and exception boundaries remain unchanged pending runtime evidence.
 
 ### 17. World event manager identifiers for locations and buildings are swapped
 

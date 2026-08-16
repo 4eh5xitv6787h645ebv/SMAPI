@@ -7,6 +7,14 @@ using StardewModdingAPI.Internal;
 
 namespace StardewModdingAPI.Framework.Events;
 
+/// <summary>Invoke one handler for a stateful managed-event raise.</summary>
+/// <typeparam name="TState">The per-raise state type.</typeparam>
+/// <typeparam name="TEventArgs">The event arguments type.</typeparam>
+/// <param name="state">The per-raise state, which may be updated between handlers.</param>
+/// <param name="sourceMod">The mod which registered the handler.</param>
+/// <param name="callback">Invoke the registered handler with its event arguments.</param>
+internal delegate void ManagedEventInvoker<TState, TEventArgs>(ref TState state, IModMetadata sourceMod, Action<TEventArgs> callback);
+
 /// <summary>An event wrapper which intercepts and logs errors in handler code.</summary>
 /// <typeparam name="TEventArgs">The event arguments type.</typeparam>
 internal class ManagedEvent<TEventArgs> : IManagedEvent
@@ -121,8 +129,10 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     }
 
     /// <summary>Raise the event and notify all handlers.</summary>
-    /// <param name="invoke">Invoke an event handler. This receives the mod which registered the handler, and should invoke the callback with the event arguments to pass it.</param>
-    public void Raise(Action<IModMetadata, Action<TEventArgs>> invoke)
+    /// <typeparam name="TState">The per-raise state type.</typeparam>
+    /// <param name="state">The per-raise state, which may be updated between handlers.</param>
+    /// <param name="invoke">Invoke an event handler. This receives the state, mod which registered the handler, and callback to invoke with the event arguments.</param>
+    public void Raise<TState>(ref TState state, ManagedEventInvoker<TState, TEventArgs> invoke)
     {
         if (!this.HasListeners)
             return;
@@ -134,7 +144,7 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
 
             try
             {
-                invoke(handler.SourceMod, handler.Callback);
+                invoke(ref state, handler.SourceMod, handler.Callback);
             }
             catch (Exception ex)
             {
