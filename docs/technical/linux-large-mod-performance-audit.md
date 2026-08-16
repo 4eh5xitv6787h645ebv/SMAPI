@@ -18,15 +18,15 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. The fix must retain one update and reset in the same tick phase.
 - **Status:** Fixed. `WatcherCore` now processes `LocationsWatcher` once through its general watcher collection, preserving change flags for the snapshot and avoiding the duplicate traversal.
 
-### 2. World and chest tracking runs even when no related event has listeners
+### 2. World, chest, and player inventory tracking runs even when no related event has listeners
 
-- **Affected code:** `Framework/SCore.cs` (`OnPlayerInstanceUpdating`), `StateTracking/WorldLocationsTracker.cs` (`Update`/`Reset`), `StateTracking/LocationTracker.cs` (`Update`/`Reset`), `StateTracking/Snapshots/WorldLocationsSnapshot.cs` (`Update`), and `StateTracking/Snapshots/LocationSnapshot.cs` (`Update`).
+- **Affected code:** `Framework/SCore.cs` (`OnPlayerInstanceUpdating`), `Framework/WatcherCore.cs` (`Update`), `StateTracking/PlayerTracker.cs` (`Update`/`Reset`), `StateTracking/WorldLocationsTracker.cs` (`Update`/`Reset`), `StateTracking/LocationTracker.cs` (`Update`/`Reset`), `StateTracking/Snapshots/WorldLocationsSnapshot.cs` (`Update`), and `StateTracking/Snapshots/LocationSnapshot.cs` (`Update`).
 - **Scenario:** Normal gameplay in expansion-heavy saves, including ticks where no mod subscribes to world collection or chest inventory events.
-- **Root cause:** SMAPI unconditionally walks all tracked locations, copies every location collection watcher's added/removed values into snapshots, retains snapshots for unchanged locations, and scans chest trackers before checking whether the corresponding events have listeners.
+- **Root cause:** SMAPI unconditionally walks all tracked locations, copies every location collection watcher's added/removed values into snapshots, retains snapshots for unchanged locations, scans chest trackers, and rebuilds the player's inventory snapshots before checking whether the corresponding events have listeners.
 - **Impact:** Steady gameplay and memory.
 - **Expected benefit:** Lower baseline main-thread work, scaling with world size rather than charging every player the full tracking cost.
 - **Risk:** High. Some tracked state is needed for internal context and newly registered listeners need a correct baseline; activation must be granular rather than disabling the entire watcher graph.
-- **Status:** Partially fixed. The chest-inventory stage disables stack baselines, comparisons, and snapshot construction when the event has no listeners, with a fresh baseline on activation. World snapshots now copy only event families which have listeners, contain only locations with relevant changes, avoid all per-location snapshot traversal when no location-content event is subscribed, and use the aggregate watcher change flag to skip traversal on unchanged non-chest ticks. The underlying collection watchers and building-interior topology scan remain always active because SMAPI needs them to discover locations independently of public event subscriptions.
+- **Status:** Partially fixed. The chest-inventory and player-inventory stages disable stack baselines, comparisons, and snapshot construction when their events have no listeners, with a fresh baseline on activation; verbose diagnostic logging keeps player inventory tracking active when requested. World snapshots now copy only event families which have listeners, contain only locations with relevant changes, avoid all per-location snapshot traversal when no location-content event is subscribed, and use the aggregate watcher change flag to skip traversal on unchanged non-chest ticks. The underlying collection watchers and building-interior topology scan remain always active because SMAPI needs them to discover locations independently of public event subscriptions.
 
 ### 3. Exact asset invalidation performs a general cache scan
 
