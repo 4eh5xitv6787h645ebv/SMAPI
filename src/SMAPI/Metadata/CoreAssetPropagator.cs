@@ -271,38 +271,46 @@ internal class CoreAssetPropagator
                 ? assetName
                 : assetName.GetBaseAssetName();
 
-            // get new texture to copy
-            Lazy<Texture2D?> newTexture = new(() =>
-            {
-                if (this.DisposableContentManager.DoesAssetExist<Texture2D>(name))
-                    return this.DisposableContentManager.LoadLocalized<Texture2D>(name, currentLanguage, useCache: false);
-
-                this.Monitor.Log($"Skipped reload for '{name.Name}' because the underlying asset no longer exists.", LogLevel.Warn);
-                return null;
-            });
-
             // Apply only to the content managers found during invalidation. If this is the base-name half of a
             // localized invalidation, it may not have been part of that exact cache lookup; retain the full scan
             // for that uncommon compatibility case.
             IEnumerable<IContentManager> contentManagers = loadedTextureManagers?.TryGetValue(name, out List<IContentManager>? knownManagers) is true
                 ? knownManagers
                 : allContentManagers;
-            foreach (IContentManager contentManager in contentManagers)
+
+            // Load one temporary replacement only if a matching cached texture still exists. Avoid Lazy here: this
+            // is already a delayed branch, and a Lazy plus its capturing factory would be allocated for every
+            // invalidated texture. Always dispose the temporary in case a target texture rejects the copy.
+            Texture2D? newTexture = null;
+            bool triedLoadingNewTexture = false;
+            try
             {
-                if (contentManager.IsLoaded(name))
+                foreach (IContentManager contentManager in contentManagers)
                 {
-                    if (newTexture.Value is null)
+                    if (!contentManager.IsLoaded(name))
+                        continue;
+
+                    if (!triedLoadingNewTexture)
+                    {
+                        triedLoadingNewTexture = true;
+                        if (this.DisposableContentManager.DoesAssetExist<Texture2D>(name))
+                            newTexture = this.DisposableContentManager.LoadLocalized<Texture2D>(name, currentLanguage, useCache: false);
+                        else
+                            this.Monitor.Log($"Skipped reload for '{name.Name}' because the underlying asset no longer exists.", LogLevel.Warn);
+                    }
+
+                    if (newTexture is null)
                         break;
 
                     Texture2D texture = contentManager.LoadLocalized<Texture2D>(name, currentLanguage, useCache: true);
-                    texture.CopyFromTexture(newTexture.Value);
+                    texture.CopyFromTexture(newTexture);
                     changed = true;
                 }
             }
-
-            // drop temporary texture
-            if (newTexture.IsValueCreated)
-                newTexture.Value?.Dispose();
+            finally
+            {
+                newTexture?.Dispose();
+            }
         }
 
         // update game state if needed

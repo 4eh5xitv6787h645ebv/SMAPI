@@ -278,6 +278,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. Factory state must be ignored on hits exactly like the old closure, and typed values in the type-erased cache must retain the existing cast diagnostics.
 - **Status:** Fixed. Tick caches now accept explicit factory state, asset requests and world helpers use cached static delegates and stable keys, the derived cache no longer creates an adapter closure, and location enumeration fills its result directly without LINQ or root-list snapshots.
 
+### 28. Texture propagation allocates a lazy factory and can strand its temporary texture
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`PropagateTexture`).
+- **Scenario:** Linux transitions or Content Patcher context changes which invalidate loaded textures, especially batches containing many texture keys or an incompatible target texture that throws during the in-place copy.
+- **Root cause:** Each localized/base-name propagation pass constructs a `Lazy<Texture2D?>` and capturing factory even though the surrounding loop is already the lazy boundary. The replacement texture is disposed only after every target copy completes, so an exception caught by the outer per-asset propagation handler skips disposal of that temporary GPU resource.
+- **Impact:** Transitions, garbage collection, and memory on propagation failures.
+- **Expected benefit:** Direct delayed loading removes the lazy object and closure from each propagated texture pass, while guaranteed disposal prevents failed in-place copies from retaining temporary GPU resources until the propagation content manager is disposed.
+- **Risk:** Low. The replacement is still loaded at most once and only after a matching cached target is found; all targets receive the same replacement instance and successful propagation order is unchanged.
+- **Status:** Fixed. Texture propagation now uses an explicit one-shot load guard and disposes the temporary replacement in a `finally` block.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.
