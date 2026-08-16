@@ -30,18 +30,23 @@ internal class ManagedEventTests
         Action<EventArgs>? secondCallback = null;
 
         // act
-        managedEvent.Raise((sourceMod, callback) =>
+        var firstState = (Mod: mod.Object, Callback: firstCallback);
+        managedEvent.Raise(ref firstState, static (ref (IModMetadata Mod, Action<EventArgs>? Callback) state, IModMetadata sourceMod, Action<EventArgs> callback) =>
         {
-            sourceMod.Should().BeSameAs(mod.Object);
-            firstCallback = callback;
+            sourceMod.Should().BeSameAs(state.Mod);
+            state.Callback = callback;
             callback(EventArgs.Empty);
         });
-        managedEvent.Raise((sourceMod, callback) =>
+        firstCallback = firstState.Callback;
+
+        var secondState = (Mod: mod.Object, Callback: secondCallback);
+        managedEvent.Raise(ref secondState, static (ref (IModMetadata Mod, Action<EventArgs>? Callback) state, IModMetadata sourceMod, Action<EventArgs> callback) =>
         {
-            sourceMod.Should().BeSameAs(mod.Object);
-            secondCallback = callback;
+            sourceMod.Should().BeSameAs(state.Mod);
+            state.Callback = callback;
             callback(EventArgs.Empty);
         });
+        secondCallback = secondState.Callback;
 
         // assert
         invocationCount.Should().Be(2);
