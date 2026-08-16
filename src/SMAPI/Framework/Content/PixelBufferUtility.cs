@@ -5,6 +5,35 @@ namespace StardewModdingAPI.Framework.Content;
 /// <summary>Provides low-level pixel-buffer operations.</summary>
 internal static class PixelBufferUtility
 {
+    /// <summary>Find the horizontal bounds containing nontransparent packed RGBA pixels.</summary>
+    /// <param name="pixels">The packed RGBA pixels.</param>
+    /// <param name="startIndex">The first known nontransparent pixel.</param>
+    /// <param name="endIndex">The last known nontransparent pixel.</param>
+    /// <param name="rowWidth">The number of pixels in each row.</param>
+    /// <param name="minOpacity">The minimum alpha value to consider nontransparent.</param>
+    /// <param name="left">The leftmost nontransparent column.</param>
+    /// <param name="right">The rightmost nontransparent column.</param>
+    public static void GetHorizontalBounds(ReadOnlySpan<uint> pixels, int startIndex, int endIndex, int rowWidth, byte minOpacity, out int left, out int right)
+    {
+        left = rowWidth - 1;
+        right = 0;
+
+        for (int i = startIndex; i <= endIndex; i++)
+        {
+            if ((byte)(pixels[i] >> 24) < minOpacity)
+                continue;
+
+            int x = i % rowWidth;
+            if (x < left)
+                left = x;
+            if (x > right)
+                right = x;
+
+            if (left == 0 && right == rowWidth - 1)
+                return;
+        }
+    }
+
     /// <summary>Copy tightly packed pixel rows while omitting any source row padding.</summary>
     /// <param name="source">The source pixel buffer.</param>
     /// <param name="sourceRowBytes">The number of source bytes per row, including padding.</param>
