@@ -85,6 +85,31 @@ internal class CoreAssetPropagator
             Type imageType = typeof(Texture2D);
             Type mapType = typeof(Map);
             Dictionary<FarmHouse, string?>? spouseRoomMapPathCache = null; // constructed later if needed
+            Dictionary<string, List<NPC>>? charactersByName = null;
+
+            // Index NPCs only when a batch contains multiple targeted dialogue/schedule assets. A single
+            // invalidation is cheaper as a direct scan, while a large content update can otherwise scan the
+            // entire world once for every NPC asset.
+            if (!ignoreWorld)
+            {
+                int targetedNpcAssets = 0;
+                foreach ((IAssetName assetName, Type assetType) in assets)
+                {
+                    if (
+                        assetType != mapType
+                        && !imageType.IsAssignableFrom(assetType)
+                        && (
+                            assetName.IsDirectlyUnderPath("Characters/Dialogue")
+                            || assetName.IsDirectlyUnderPath("Characters/schedules")
+                        )
+                        && ++targetedNpcAssets > 1
+                    )
+                    {
+                        charactersByName = this.GetCharactersByName();
+                        break;
+                    }
+                }
+            }
 
             foreach ((IAssetName assetName, Type assetType) in assets)
             {
@@ -105,7 +130,7 @@ internal class CoreAssetPropagator
 
                     // any other type
                     else
-                        changed = this.PropagateOther(assetName, ignoreWorld);
+                        changed = this.PropagateOther(assetName, ignoreWorld, charactersByName);
                 }
                 catch (Exception ex)
                 {
@@ -298,9 +323,10 @@ internal class CoreAssetPropagator
     /// <summary>Propagate changes to an asset which isn't a map (handled by <see cref="PropagateMap"/>) or texture (handled by <see cref="PropagateTexture"/>).</summary>
     /// <param name="assetName">The asset name that changed.</param>
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
+    /// <param name="charactersByName">The NPCs indexed by exact name for a multi-asset propagation batch, if applicable.</param>
     /// <returns>Returns whether any assets were updated.</returns>
     [SuppressMessage("ReSharper", "StringLiteralTypo", Justification = "These deliberately match the asset names.")]
-    private bool PropagateOther(IAssetName assetName, bool ignoreWorld)
+    private bool PropagateOther(IAssetName assetName, bool ignoreWorld, Dictionary<string, List<NPC>>? charactersByName)
     {
         var content = this.MainContentManager;
         string baseName = assetName.BaseName;
@@ -494,10 +520,10 @@ internal class CoreAssetPropagator
                 if (!ignoreWorld)
                 {
                     if (assetName.IsDirectlyUnderPath("Characters/Dialogue"))
-                        return this.UpdateNpcDialogue(assetName);
+                        return this.UpdateNpcDialogue(assetName, charactersByName);
 
                     if (assetName.IsDirectlyUnderPath("Characters/schedules"))
-                        return this.UpdateNpcSchedules(assetName);
+                        return this.UpdateNpcSchedules(assetName, charactersByName);
                 }
 
                 return false;
@@ -589,17 +615,19 @@ internal class CoreAssetPropagator
 
     /// <summary>Update the dialogue data for matching NPCs.</summary>
     /// <param name="assetName">The asset name to update.</param>
+    /// <param name="charactersByName">The NPCs indexed by exact name for a multi-asset propagation batch, if applicable.</param>
     /// <returns>Returns whether any NPCs were updated.</returns>
-    private bool UpdateNpcDialogue(IAssetName assetName)
+    private bool UpdateNpcDialogue(IAssetName assetName, Dictionary<string, List<NPC>>? charactersByName)
     {
         string name = Path.GetFileName(assetName.BaseName);
+        IReadOnlyList<NPC> characters = this.GetCharacters(name, charactersByName);
 
         // update dialogue
         // Note that marriage dialogue isn't reloaded after reset, but it doesn't need to be
         // propagated anyway since marriage dialogue keys can't be added/removed and the field
         // doesn't store the text itself.
         bool anyChanged = false;
-        foreach (NPC npc in this.GetCharacters())
+        foreach (NPC npc in characters)
         {
             if (npc.Name != name || !npc.IsVillager)
                 continue;
@@ -631,14 +659,16 @@ internal class CoreAssetPropagator
 
     /// <summary>Update the schedules for matching NPCs.</summary>
     /// <param name="assetName">The asset name to update.</param>
+    /// <param name="charactersByName">The NPCs indexed by exact name for a multi-asset propagation batch, if applicable.</param>
     /// <returns>Returns whether any NPCs were updated.</returns>
-    private bool UpdateNpcSchedules(IAssetName assetName)
+    private bool UpdateNpcSchedules(IAssetName assetName, Dictionary<string, List<NPC>>? charactersByName)
     {
         string name = Path.GetFileName(assetName.BaseName);
+        IReadOnlyList<NPC> characters = this.GetCharacters(name, charactersByName);
 
         // update schedules
         bool anyChanged = false;
-        foreach (NPC npc in this.GetCharacters())
+        foreach (NPC npc in characters)
         {
             if (npc.Name != name || !npc.IsVillager)
                 continue;
@@ -769,6 +799,41 @@ internal class CoreAssetPropagator
                 return characters;
             }
         );
+    }
+
+    /// <summary>Get all NPCs in the game (excluding farm animals), indexed by their exact name.</summary>
+    private Dictionary<string, List<NPC>> GetCharactersByName()
+    {
+        return this.WorldCache.GetOrSet(
+            nameof(this.GetCharactersByName),
+            () =>
+            {
+                Dictionary<string, List<NPC>> charactersByName = new(StringComparer.Ordinal);
+
+                foreach (NPC character in this.GetCharacters())
+                {
+                    if (!charactersByName.TryGetValue(character.Name, out List<NPC>? matches))
+                        charactersByName[character.Name] = matches = [];
+
+                    matches.Add(character);
+                }
+
+                return charactersByName;
+            }
+        );
+    }
+
+    /// <summary>Get the NPC candidates for an exact name match.</summary>
+    /// <param name="name">The exact NPC name.</param>
+    /// <param name="charactersByName">The NPCs indexed by exact name for a multi-asset propagation batch, if applicable.</param>
+    private IReadOnlyList<NPC> GetCharacters(string name, Dictionary<string, List<NPC>>? charactersByName)
+    {
+        if (charactersByName is null)
+            return this.GetCharacters();
+
+        return charactersByName.TryGetValue(name, out List<NPC>? matches)
+            ? matches
+            : Array.Empty<NPC>();
     }
 
     /// <summary>Get all farm animals in the game.</summary>
