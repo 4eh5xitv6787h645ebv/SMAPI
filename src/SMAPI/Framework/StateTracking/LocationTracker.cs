@@ -71,13 +71,13 @@ internal class LocationTracker : IWatcher
         this.Location = location;
 
         // init watchers
-        this.BuildingsWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.buildings)}", location.buildings);
-        this.DebrisWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.debris)}", location.debris);
-        this.LargeTerrainFeaturesWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.largeTerrainFeatures)}", location.largeTerrainFeatures);
-        this.NpcsWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.characters)}", location.characters);
-        this.ObjectsWatcher = WatcherFactory.ForNetDictionary($"{this.Name}.{nameof(location.netObjects)}", location.netObjects);
-        this.TerrainFeaturesWatcher = WatcherFactory.ForNetDictionary($"{this.Name}.{nameof(location.terrainFeatures)}", location.terrainFeatures);
-        this.FurnitureWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.furniture)}", location.furniture);
+        this.BuildingsWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.buildings)}", location.buildings, this.OnContentChanged);
+        this.DebrisWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.debris)}", location.debris, this.OnContentChanged);
+        this.LargeTerrainFeaturesWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.largeTerrainFeatures)}", location.largeTerrainFeatures, this.OnContentChanged);
+        this.NpcsWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.characters)}", location.characters, this.OnContentChanged);
+        this.ObjectsWatcher = WatcherFactory.ForNetDictionary($"{this.Name}.{nameof(location.netObjects)}", location.netObjects, this.OnContentChanged);
+        this.TerrainFeaturesWatcher = WatcherFactory.ForNetDictionary($"{this.Name}.{nameof(location.terrainFeatures)}", location.terrainFeatures, this.OnContentChanged);
+        this.FurnitureWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.furniture)}", location.furniture, this.OnContentChanged);
 
         this.Watchers.AddRange([
             this.BuildingsWatcher,
@@ -102,19 +102,8 @@ internal class LocationTracker : IWatcher
     /// <param name="trackChestInventoryChanges">Whether to track changes needed for the chest inventory event.</param>
     public void Update(bool trackChestInventoryChanges)
     {
-        // track changes to location content
-        bool changed = false;
-        foreach (IWatcher watcher in this.Watchers)
-        {
-            watcher.Update();
-
-            if (!changed && watcher.IsChanged)
-                changed = true;
-        }
-        this.IsChanged = changed;
-
         // add/remove chests to match
-        if (changed && this.ObjectsWatcher.IsChanged)
+        if (this.ObjectsWatcher.IsChanged)
             this.UpdateChestWatcherList(added: this.ObjectsWatcher.Added, removed: this.ObjectsWatcher.Removed);
 
         // update chest inventory watchers only while the event is observed, or once when toggling their state
@@ -155,6 +144,12 @@ internal class LocationTracker : IWatcher
     /*********
     ** Private methods
     *********/
+    /// <summary>Mark the location content as changed when an underlying net collection changes.</summary>
+    private void OnContentChanged()
+    {
+        this.IsChanged = true;
+    }
+
     /// <summary>Update the watcher list for added or removed chests.</summary>
     /// <param name="added">The objects added to the location.</param>
     /// <param name="removed">The objects removed from the location.</param>
