@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using StardewModdingAPI.Framework.Logging;
@@ -140,8 +141,13 @@ internal class Monitor : IMonitor
     internal void LogUserInput(string input)
     {
         // user input already appears in the console, so just need to write to file
-        string prefix = this.GenerateMessagePrefix(this.Source, (ConsoleLogLevel)LogLevel.Info);
-        this.LogFile.WriteLine($"{prefix} $>{input}");
+        this.LogFile.WriteLine(
+            timestamp: DateTime.Now,
+            level: Monitor.LogStrings[(ConsoleLogLevel)LogLevel.Info],
+            screenId: this.GetScreenIdForLog(),
+            source: this.Source,
+            message: $"$>{input}"
+        );
     }
 
 
@@ -154,27 +160,30 @@ internal class Monitor : IMonitor
     /// <param name="level">The log level.</param>
     private void LogImpl(string source, string message, ConsoleLogLevel level)
     {
-        // generate message
-        string prefix = this.GenerateMessagePrefix(source, level);
-        string fullMessage = $"{prefix} {message}";
-        string consoleMessage = this.ShowFullStampInConsole ? fullMessage : $"[{source}] {message}";
+        DateTime timestamp = DateTime.Now;
+        string levelText = Monitor.LogStrings[level];
+        int? screenId = this.GetScreenIdForLog();
 
         // write to console
         if (this.WriteToConsole && (this.ShowTraceInConsole || level != ConsoleLogLevel.Trace || Monitor.ForceVerboseLoggingForAll || Monitor.ForceVerboseLogging.Contains(this.ModId)))
+        {
+            string consoleMessage = this.ShowFullStampInConsole
+                ? $"{Monitor.GenerateMessagePrefix(timestamp, source, levelText, screenId)} {message}"
+                : $"[{source}] {message}";
             this.ConsoleWriter.WriteLine(consoleMessage, level);
+        }
 
-        // write to log file
-        this.LogFile.WriteLine(fullMessage);
+        // Queue raw fields so the file writer formats them outside the game thread.
+        this.LogFile.WriteLine(timestamp, levelText, screenId, source, message);
     }
 
     /// <summary>Generate a message prefix for the current time.</summary>
+    /// <param name="timestamp">The time at which the message was logged.</param>
     /// <param name="source">The name of the mod logging the message.</param>
-    /// <param name="level">The log level.</param>
-    private string GenerateMessagePrefix(string source, ConsoleLogLevel level)
+    /// <param name="level">The padded log-level text.</param>
+    /// <param name="screenId">The split-screen ID associated with the caller, if any.</param>
+    private static string GenerateMessagePrefix(DateTime timestamp, string source, string level, int? screenId)
     {
-        string levelStr = Monitor.LogStrings[level];
-        int? playerIndex = this.GetScreenIdForLog();
-
-        return $"[{DateTime.Now:HH:mm:ss} {levelStr}{(playerIndex != null ? $" screen_{playerIndex}" : "")} {source}]";
+        return $"[{timestamp.ToString("HH:mm:ss", CultureInfo.InvariantCulture)} {level}{(screenId != null ? $" screen_{screenId}" : "")} {source}]";
     }
 }

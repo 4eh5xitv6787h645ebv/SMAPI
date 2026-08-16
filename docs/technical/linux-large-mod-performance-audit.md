@@ -29,7 +29,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 17. Finding 33 — asset-loader adapter closures — fixed.
 18. Finding 27 — tick-cache factory and world-helper allocations — fixed.
 19. Finding 6 — synchronous game-thread log flushing — fixed.
-20. Finding 46 — synchronous log formatting on the game thread — needs runtime evidence.
+20. Finding 46 — synchronous log formatting on the game thread — fixed.
 21. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
 22. Finding 41 — incomplete and duplicate world-location topology — fixed.
 23. Finding 43 — per-asset propagation key normalization allocations — fixed.
@@ -518,7 +518,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Potential frame-time spikes and allocation bursts under high log volume.
 - **Expected benefit:** Queue structured records, format file text on the writer thread, and only build console text when the level is visible.
 - **Risk:** Medium to high. Timestamp ordering, crash-time draining, mutable messages, and console/file consistency need explicit handling.
-- **Status:** Needs runtime evidence. Measure log-call counts and formatting cost in the target pack before changing record ownership and flush semantics.
+- **Status:** Fixed. `Monitor` captures only the timestamp, cached level text, screen ID, source, and message for file output. `LogFileManager` formats those fields on its writer thread, raw lines no longer allocate a newline-appended copy on callers, and console text is only created when that level is actually visible. Explicit flush ordering and bounded backpressure are unchanged.
 
 ### 47. Cursor coordinate derivation remains eager while walking
 
@@ -556,7 +556,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 
 ## Remaining implementation priority
 
-1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially chest polling, cursor-position consumption, log formatting, live `AssetRequested` frequency, and propagation side-effect repetition.
+1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially chest polling, cursor-position consumption, live `AssetRequested` frequency, and propagation side-effect repetition.
 2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
 3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
 4. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.

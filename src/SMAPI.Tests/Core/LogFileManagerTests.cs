@@ -40,6 +40,30 @@ internal class LogFileManagerTests
         }
     }
 
+    [Test(Description = "Assert that structured records are formatted on the writer thread with their captured metadata.")]
+    public void Flush_FormatsStructuredMessages()
+    {
+        string path = this.GetTempFilePath();
+        LogFileManager log = new(path);
+
+        try
+        {
+            log.WriteLine(new DateTime(2026, 8, 17, 14, 5, 9), "INFO ", screenId: null, "SMAPI", "first");
+            log.WriteLine(new DateTime(2026, 8, 17, 14, 5, 10), "TRACE", screenId: 2, "Example Mod", "second");
+            log.Flush();
+
+            File.ReadAllText(path).Should().Be(
+                "[14:05:09 INFO  SMAPI] first\r\n"
+                + "[14:05:10 TRACE screen_2 Example Mod] second\r\n"
+            );
+        }
+        finally
+        {
+            log.Dispose();
+            File.Delete(path);
+        }
+    }
+
     [Test(Description = "Assert that disposal drains concurrent messages without losing or corrupting entries.")]
     public void Dispose_DrainsConcurrentMessages()
     {

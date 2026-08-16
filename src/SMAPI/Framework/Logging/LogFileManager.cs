@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -86,16 +87,29 @@ internal class LogFileManager : IDisposable
     /// <param name="message">The message to log.</param>
     public void WriteLine(string message)
     {
-        // always use Windows-style line endings for convenience
-        // (Linux/macOS editors are fine with them, Windows editors often require them)
-        this.Enqueue(new LogEntry(message + "\r\n", FlushCompletion: null));
+        this.Enqueue(new LogEntry(message ?? "", StructuredMessage: null, FlushCompletion: null));
+    }
+
+    /// <summary>Write a structured log record whose file line will be formatted by the writer thread.</summary>
+    /// <param name="timestamp">The time at which the caller logged the message.</param>
+    /// <param name="level">The padded log-level text.</param>
+    /// <param name="screenId">The split-screen ID associated with the caller, if any.</param>
+    /// <param name="source">The name of the module logging the message.</param>
+    /// <param name="message">The message text.</param>
+    public void WriteLine(DateTime timestamp, string level, int? screenId, string source, string message)
+    {
+        this.Enqueue(new LogEntry(
+            RawMessage: null,
+            StructuredMessage: new StructuredLogMessage(timestamp, level, screenId, source, message),
+            FlushCompletion: null
+        ));
     }
 
     /// <summary>Wait until all messages queued so far have been flushed to disk.</summary>
     public void Flush()
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        this.Enqueue(new LogEntry(Message: null, FlushCompletion: completion));
+        this.Enqueue(new LogEntry(RawMessage: null, StructuredMessage: null, FlushCompletion: completion));
         completion.Task.GetAwaiter().GetResult();
     }
 
@@ -155,9 +169,15 @@ internal class LogFileManager : IDisposable
             {
                 currentEntry = entry;
 
-                if (entry.Message != null)
+                if (entry.StructuredMessage is StructuredLogMessage message)
                 {
-                    this.Stream.Write(entry.Message);
+                    this.WriteStructuredMessage(message);
+                    batchSize++;
+                }
+                else if (entry.RawMessage != null)
+                {
+                    this.Stream.Write(entry.RawMessage);
+                    this.Stream.Write("\r\n");
                     batchSize++;
                 }
 
@@ -203,12 +223,43 @@ internal class LogFileManager : IDisposable
         }
     }
 
+    /// <summary>Format and write one structured log message.</summary>
+    private void WriteStructuredMessage(StructuredLogMessage message)
+    {
+        this.Stream.Write('[');
+        this.Stream.Write(message.Timestamp.ToString("HH:mm:ss", CultureInfo.InvariantCulture));
+        this.Stream.Write(' ');
+        this.Stream.Write(message.Level);
+        if (message.ScreenId != null)
+        {
+            this.Stream.Write(" screen_");
+            this.Stream.Write(message.ScreenId.Value);
+        }
+        this.Stream.Write(' ');
+        this.Stream.Write(message.Source);
+        this.Stream.Write("] ");
+        this.Stream.Write(message.Message);
+
+        // always use Windows-style line endings for convenience
+        // (Linux/macOS editors are fine with them, Windows editors often require them)
+        this.Stream.Write("\r\n");
+    }
+
 
     /*********
     ** Private types
     *********/
     /// <summary>An entry queued for the log writer.</summary>
-    /// <param name="Message">The formatted message to write, or <c>null</c> for a flush-only entry.</param>
+    /// <param name="RawMessage">A raw message to write, or <c>null</c> for a structured/flush entry.</param>
+    /// <param name="StructuredMessage">A structured message to format and write, or <c>null</c> for a raw/flush entry.</param>
     /// <param name="FlushCompletion">A completion to signal after flushing this entry, if any.</param>
-    private readonly record struct LogEntry(string? Message, TaskCompletionSource<bool>? FlushCompletion);
+    private readonly record struct LogEntry(string? RawMessage, StructuredLogMessage? StructuredMessage, TaskCompletionSource<bool>? FlushCompletion);
+
+    /// <summary>A log message captured on the calling thread and formatted by the file writer.</summary>
+    /// <param name="Timestamp">The time at which the message was logged.</param>
+    /// <param name="Level">The padded log-level text.</param>
+    /// <param name="ScreenId">The split-screen ID associated with the caller, if any.</param>
+    /// <param name="Source">The name of the module logging the message.</param>
+    /// <param name="Message">The message text.</param>
+    private readonly record struct StructuredLogMessage(DateTime Timestamp, string Level, int? ScreenId, string Source, string Message);
 }
