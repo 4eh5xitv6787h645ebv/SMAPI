@@ -298,6 +298,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. Removals and additions retain their existing order within each source, but all changed sources now complete removal before any source is allowed to add.
 - **Status:** Fixed. Top-level location sources and changed building collections are processed in two phases, with all removals preceding all additions.
 
+### 30. Rectangular transformed tiles use the horizontal origin on both axes
+
+- **Affected code:** `Framework/Rendering/SDisplayDevice.cs` (`DrawImpl`).
+- **Scenario:** Linux gameplay on a custom map containing a non-square tile with SMAPI rotation or flip metadata.
+- **Root cause:** SMAPI calculates the correct two-dimensional center point, but offsets both the X and Y draw coordinates by `origin.X`. A rectangular source therefore shifts vertically by half its width instead of half its height before rotation.
+- **Impact:** Steady-gameplay rendering correctness.
+- **Expected benefit:** Rotated and flipped rectangular tiles stay centered at their intended map position instead of visibly jumping along the vertical axis.
+- **Risk:** Low. Square tiles are numerically unchanged, normal tiles still use xTile's base fast path, and only the transformed rectangular-tile Y offset changes.
+- **Status:** Fixed. The vertical draw offset now uses `origin.Y`.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.

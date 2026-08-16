@@ -49,7 +49,7 @@ internal class SDisplayDevice : XnaDisplayDevice
         var sourceRect = this.m_sourceRectangle;
         var origin = new Vector2(sourceRect.Width / 2f, sourceRect.Height / 2f);
         this.m_tilePosition.X += origin.X * Layer.zoom;
-        this.m_tilePosition.Y += origin.X * Layer.zoom;
+        this.m_tilePosition.Y += origin.Y * Layer.zoom;
 
         // apply
         this.m_spriteBatchAlpha.Draw(tileSheetTexture, this.m_tilePosition, sourceRect, this.m_modulationColour, rotation, origin, Layer.zoom, effects, layerDepth);
