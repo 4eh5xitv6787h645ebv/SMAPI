@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using Netcode;
 using StardewModdingAPI.Framework.StateTracking.Comparers;
 using StardewModdingAPI.Framework.StateTracking.FieldWatchers;
 using StardewValley;
@@ -28,6 +29,15 @@ internal class WorldLocationsTracker : IWatcher
 
     /// <summary>A lookup of registered buildings and their indoor location.</summary>
     private readonly Dictionary<Building, GameLocation?> BuildingIndoors = new(new ObjectReferenceComparer<Building>());
+
+    /// <summary>The field-change handlers registered for each building's indoor location.</summary>
+    private readonly Dictionary<Building, FieldChange<NetRef<GameLocation>, GameLocation>> BuildingIndoorsChangedHandlers = new(new ObjectReferenceComparer<Building>());
+
+    /// <summary>The buildings whose indoor location changed since the last update.</summary>
+    private readonly HashSet<Building> BuildingsWithChangedIndoors = new(new ObjectReferenceComparer<Building>());
+
+    /// <summary>A pooled buffer used to process <see cref="BuildingsWithChangedIndoors"/> without being affected by nested location changes.</summary>
+    private readonly List<Building> BuildingsWithChangedIndoorsBuffer = [];
 
     /// <summary>The backing field for <see cref="Added"/>.</summary>
     private readonly HashSet<GameLocation> AddedImpl = new(new ObjectReferenceComparer<GameLocation>());
@@ -128,8 +138,14 @@ internal class WorldLocationsTracker : IWatcher
         }
 
         // detect building interiors changed (e.g. construction completed)
-        foreach ((Building building, GameLocation? oldIndoors) in this.BuildingIndoors)
+        this.BuildingsWithChangedIndoorsBuffer.Clear();
+        this.BuildingsWithChangedIndoorsBuffer.AddRange(this.BuildingsWithChangedIndoors);
+        this.BuildingsWithChangedIndoors.Clear();
+        foreach (Building building in this.BuildingsWithChangedIndoorsBuffer)
         {
+            if (!this.BuildingIndoors.TryGetValue(building, out GameLocation? oldIndoors))
+                continue;
+
             GameLocation? newIndoors = building.indoors.Value;
             if (object.ReferenceEquals(oldIndoors, newIndoors))
                 continue;
@@ -178,6 +194,14 @@ internal class WorldLocationsTracker : IWatcher
         this.LocationListWatcher.Dispose();
         this.MineLocationListWatcher.Dispose();
         this.VolcanoLocationListWatcher.Dispose();
+
+        foreach ((Building building, FieldChange<NetRef<GameLocation>, GameLocation> handler) in this.BuildingIndoorsChangedHandlers)
+        {
+            building.indoors.fieldChangeEvent -= handler;
+            building.indoors.fieldChangeVisibleEvent -= handler;
+        }
+        this.BuildingIndoorsChangedHandlers.Clear();
+        this.BuildingsWithChangedIndoors.Clear();
 
         foreach (LocationTracker watcher in this.Locations)
             watcher.Dispose();
@@ -229,11 +253,17 @@ internal class WorldLocationsTracker : IWatcher
     /// <param name="building">The building to add.</param>
     public void Add(Building? building)
     {
-        if (building == null)
+        if (building == null || this.BuildingIndoors.ContainsKey(building))
             return;
 
         GameLocation? indoors = building.indoors.Value;
         this.BuildingIndoors[building] = indoors;
+
+        FieldChange<NetRef<GameLocation>, GameLocation> handler = (_, _, _) => this.BuildingsWithChangedIndoors.Add(building);
+        this.BuildingIndoorsChangedHandlers[building] = handler;
+        building.indoors.fieldChangeEvent += handler;
+        building.indoors.fieldChangeVisibleEvent += handler;
+
         this.Add(indoors);
     }
 
@@ -264,8 +294,15 @@ internal class WorldLocationsTracker : IWatcher
         if (building == null)
             return;
 
-        this.BuildingIndoors.Remove(building);
-        this.Remove(building.indoors.Value);
+        if (this.BuildingIndoorsChangedHandlers.Remove(building, out FieldChange<NetRef<GameLocation>, GameLocation>? handler))
+        {
+            building.indoors.fieldChangeEvent -= handler;
+            building.indoors.fieldChangeVisibleEvent -= handler;
+        }
+        this.BuildingsWithChangedIndoors.Remove(building);
+
+        if (this.BuildingIndoors.Remove(building, out GameLocation? indoors))
+            this.Remove(indoors);
     }
 
     /// <summary>Remove the given location.</summary>
