@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Microsoft.Xna.Framework;
 using StardewModdingAPI.Framework.StateTracking.FieldWatchers;
@@ -20,6 +21,9 @@ internal class LocationTracker : IWatcher
 
     /// <summary>Whether chest inventory changes are currently being tracked.</summary>
     private bool IsTrackingChestInventoryChanges;
+
+    /// <summary>Notify the world tracker when this location first changes after a reset.</summary>
+    private readonly Action<LocationTracker>? OnChanged;
 
 
     /*********
@@ -65,10 +69,12 @@ internal class LocationTracker : IWatcher
     *********/
     /// <summary>Construct an instance.</summary>
     /// <param name="location">The location to track.</param>
-    public LocationTracker(GameLocation location)
+    /// <param name="onChanged">Notify the world tracker when this location first changes after a reset.</param>
+    public LocationTracker(GameLocation location, Action<LocationTracker>? onChanged = null)
     {
         this.Name = $"Locations.{location.NameOrUniqueName}";
         this.Location = location;
+        this.OnChanged = onChanged;
 
         // init watchers
         this.BuildingsWatcher = WatcherFactory.ForNetCollection($"{this.Name}.{nameof(location.buildings)}", location.buildings, this.OnContentChanged);
@@ -147,7 +153,11 @@ internal class LocationTracker : IWatcher
     /// <summary>Mark the location content as changed when an underlying net collection changes.</summary>
     private void OnContentChanged()
     {
-        this.IsChanged = true;
+        if (!this.IsChanged)
+        {
+            this.IsChanged = true;
+            this.OnChanged?.Invoke(this);
+        }
     }
 
     /// <summary>Update the watcher list for added or removed chests.</summary>

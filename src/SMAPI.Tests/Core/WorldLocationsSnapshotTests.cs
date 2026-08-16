@@ -96,4 +96,51 @@ internal class WorldLocationsSnapshotTests
         tracker.Added.Should().BeEmpty();
         tracker.Removed.Should().BeEmpty();
     }
+
+    [Test(Description = "Assert that unobserved-chest updates and snapshots process only locations with collection changes.")]
+    public void Update_UsesDirtyLocationSetWithoutChestTracking()
+    {
+        // arrange
+        ObservableCollection<GameLocation> locations = [];
+        using WorldLocationsTracker tracker = new(locations, new List<MineShaft>(), new List<VolcanoDungeon>())
+        {
+            TrackChestInventoryChanges = false
+        };
+        WorldLocationsSnapshot snapshot = new();
+        WorldSnapshotOptions options = new(
+            TrackLocationList: false,
+            TrackBuildings: false,
+            TrackDebris: true,
+            TrackLargeTerrainFeatures: false,
+            TrackNpcs: false,
+            TrackObjects: false,
+            TrackChestInventories: false,
+            TrackTerrainFeatures: false,
+            TrackFurniture: false
+        );
+        GameLocation changedLocation = new();
+        GameLocation unchangedLocation = new();
+        locations.Add(changedLocation);
+        locations.Add(unchangedLocation);
+        tracker.Update();
+        tracker.Reset();
+
+        // act: change one location
+        changedLocation.debris.Add(new Debris());
+        tracker.Update();
+        snapshot.Update(tracker, options);
+
+        // assert: only the dirty location is processed
+        tracker.ChangedLocations.Should().ContainSingle().Which.Location.Should().BeSameAs(changedLocation);
+        snapshot.Locations.Should().ContainSingle().Which.Location.Should().BeSameAs(changedLocation);
+
+        // act: reset and update an unchanged tick
+        tracker.Reset();
+        tracker.Update();
+        snapshot.Update(tracker, options);
+
+        // assert: the idle tick doesn't traverse any location snapshots
+        tracker.ChangedLocations.Should().BeEmpty();
+        snapshot.Locations.Should().BeEmpty();
+    }
 }

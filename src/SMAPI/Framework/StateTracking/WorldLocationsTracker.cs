@@ -27,6 +27,12 @@ internal class WorldLocationsTracker : IWatcher
     /// <summary>A lookup of the tracked locations.</summary>
     private Dictionary<GameLocation, LocationTracker> LocationDict { get; } = new(new ObjectReferenceComparer<GameLocation>());
 
+    /// <summary>The locations whose content changed since the last reset.</summary>
+    private readonly HashSet<LocationTracker> LocationsWithContentChanges = new(new ObjectReferenceComparer<LocationTracker>());
+
+    /// <summary>A stable buffer of changed locations used while topology changes are processed.</summary>
+    private readonly List<LocationTracker> LocationsWithContentChangesBuffer = [];
+
     /// <summary>A lookup of registered buildings and their indoor location.</summary>
     private readonly Dictionary<Building, GameLocation?> BuildingIndoors = new(new ObjectReferenceComparer<Building>());
 
@@ -45,11 +51,8 @@ internal class WorldLocationsTracker : IWatcher
     /// <summary>The backing field for <see cref="Removed"/>.</summary>
     private readonly HashSet<GameLocation> RemovedImpl = new(new ObjectReferenceComparer<GameLocation>());
 
-    /// <summary>The pooled list instance for <see cref="GetLocationsWhoseBuildingsChanged"/>.</summary>
-    private static readonly List<LocationTracker> PooledLocationsWithBuildingsChanged = [];
-
-    /// <summary>Whether any of the <see cref="Locations"/> have content changes.</summary>
-    private bool LocationsHaveChanges;
+    /// <summary>Whether chest inventory changes were tracked during the previous update.</summary>
+    private bool IsTrackingChestInventoryChanges;
 
 
     /*********
@@ -62,13 +65,16 @@ internal class WorldLocationsTracker : IWatcher
     public bool IsLocationListChanged { get; private set; }
 
     /// <summary>Whether any tracked location has collection changes since the last reset.</summary>
-    public bool HaveLocationContentsChanged => this.LocationsHaveChanges;
+    public bool HaveLocationContentsChanged => this.LocationsWithContentChanges.Count > 0;
 
     /// <inheritdoc />
-    public bool IsChanged => this.IsLocationListChanged || this.LocationsHaveChanges;
+    public bool IsChanged => this.IsLocationListChanged || this.HaveLocationContentsChanged;
 
     /// <summary>The tracked locations.</summary>
     public IReadOnlyCollection<LocationTracker> Locations => this.LocationDict.Values;
+
+    /// <summary>The tracked locations whose content changed since the last reset.</summary>
+    public IReadOnlyCollection<LocationTracker> ChangedLocations => this.LocationsWithContentChanges;
 
     /// <summary>Whether to track changes needed for the chest inventory event.</summary>
     public bool TrackChestInventoryChanges { get; set; } = true;
@@ -97,21 +103,30 @@ internal class WorldLocationsTracker : IWatcher
     /// <inheritdoc />
     public void Update()
     {
-        this.LocationsHaveChanges = false;
         this.IsLocationListChanged = false;
+
+        this.LocationsWithContentChangesBuffer.Clear();
+        this.LocationsWithContentChangesBuffer.AddRange(this.LocationsWithContentChanges);
 
         // update watchers
         this.LocationListWatcher.Update();
         this.MineLocationListWatcher.Update();
         this.VolcanoLocationListWatcher.Update();
 
-        // update location content watchers
-        foreach (LocationTracker watcher in this.Locations)
+        // update location content watchers. Chest stack changes aren't event-driven, so they still
+        // require every location while observed; otherwise only dirty locations need processing.
+        bool updateAllLocations = this.TrackChestInventoryChanges || this.IsTrackingChestInventoryChanges != this.TrackChestInventoryChanges;
+        if (updateAllLocations)
         {
-            watcher.Update(this.TrackChestInventoryChanges);
-            if (watcher.IsChanged)
-                this.LocationsHaveChanges = true;
+            foreach (LocationTracker watcher in this.Locations)
+                watcher.Update(this.TrackChestInventoryChanges);
         }
+        else
+        {
+            foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
+                watcher.Update(trackChestInventoryChanges: false);
+        }
+        this.IsTrackingChestInventoryChanges = this.TrackChestInventoryChanges;
 
         // detect added/removed locations
         if (this.LocationListWatcher.IsChanged)
@@ -130,9 +145,16 @@ internal class WorldLocationsTracker : IWatcher
             this.Add(this.VolcanoLocationListWatcher.Added);
         }
 
-        // detect building changed
-        foreach (LocationTracker watcher in this.GetLocationsWhoseBuildingsChanged())
+        // detect building changes
+        foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
         {
+            if (
+                !watcher.BuildingsWatcher.IsChanged
+                || !this.LocationDict.TryGetValue(watcher.Location, out LocationTracker? currentWatcher)
+                || !object.ReferenceEquals(watcher, currentWatcher)
+            )
+                continue;
+
             this.Remove(watcher.BuildingsWatcher.Removed);
             this.Add(watcher.BuildingsWatcher.Added);
         }
@@ -173,12 +195,19 @@ internal class WorldLocationsTracker : IWatcher
     /// <inheritdoc />
     public void Reset()
     {
-        this.LocationsHaveChanges = false;
-
         this.ResetLocationList();
 
-        foreach (LocationTracker watcher in this.Locations)
-            watcher.Reset();
+        if (this.IsTrackingChestInventoryChanges)
+        {
+            foreach (LocationTracker watcher in this.Locations)
+                watcher.Reset();
+        }
+        else
+        {
+            foreach (LocationTracker watcher in this.LocationsWithContentChanges)
+                watcher.Reset();
+        }
+        this.LocationsWithContentChanges.Clear();
     }
 
     /// <summary>Get whether the given location is tracked.</summary>
@@ -202,6 +231,7 @@ internal class WorldLocationsTracker : IWatcher
         }
         this.BuildingIndoorsChangedHandlers.Clear();
         this.BuildingsWithChangedIndoors.Clear();
+        this.LocationsWithContentChanges.Clear();
 
         foreach (LocationTracker watcher in this.Locations)
             watcher.Dispose();
@@ -279,7 +309,7 @@ internal class WorldLocationsTracker : IWatcher
 
         // add location
         this.AddedImpl.Add(location);
-        this.LocationDict[location] = new LocationTracker(location);
+        this.LocationDict[location] = new LocationTracker(location, this.OnLocationContentChanged);
 
         // add buildings
         this.Add(location.buildings);
@@ -319,6 +349,7 @@ internal class WorldLocationsTracker : IWatcher
 
             // remove
             this.LocationDict.Remove(location);
+            this.LocationsWithContentChanges.Remove(watcher);
             watcher.Dispose();
             this.Remove(location.buildings);
 
@@ -326,22 +357,10 @@ internal class WorldLocationsTracker : IWatcher
         }
     }
 
-    /****
-    ** Helpers
-    ****/
-    /// <summary>Get the locations whose building list changed, if any.</summary>
-    private List<LocationTracker> GetLocationsWhoseBuildingsChanged()
+    /// <summary>Mark a location as having content changes.</summary>
+    /// <param name="watcher">The changed location tracker.</param>
+    private void OnLocationContentChanged(LocationTracker watcher)
     {
-        List<LocationTracker> list = WorldLocationsTracker.PooledLocationsWithBuildingsChanged;
-        if (list.Count > 0)
-            list.Clear();
-
-        foreach (LocationTracker watcher in this.LocationDict.Values)
-        {
-            if (watcher.IsChanged)
-                list.Add(watcher);
-        }
-
-        return list;
+        this.LocationsWithContentChanges.Add(watcher);
     }
 }
