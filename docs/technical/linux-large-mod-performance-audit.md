@@ -17,39 +17,46 @@ This is the current jank-first order, combining likely frame-time impact, freque
 5. Finding 40 — repeated current-screen dictionary lookups — fixed.
 6. Finding 24 — pressed-key polling allocation while walking — fixed.
 7. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
-8. Finding 25 — held-input event snapshot allocations — fixed.
-9. Finding 7 — normal-tile rendering overhead — fixed.
-10. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-11. Finding 37 — redundant invalidation-batch cloning — fixed.
-12. Finding 36 — per-parse locale delegate allocation — fixed.
-13. Finding 34 — layer work repeated for every patched map tile — fixed.
-14. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
-15. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-16. Finding 33 — asset-loader adapter closures — fixed.
-17. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-18. Finding 6 — synchronous game-thread log flushing — fixed.
-19. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-20. Finding 32 — per-map warp comparison sets — fixed.
-21. Finding 19 — repeated propagation side effects — deferred.
-22. Finding 4 — no first-class batched exact invalidation — fixed.
-23. Finding 3 — exact invalidation performing cache scans — fixed.
-24. Finding 22 — oversized sparse image-patch transfers — fixed.
-25. Finding 8 — PNG decode and conversion churn — partially fixed.
-26. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-27. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-28. Finding 9 — linear content-manager routing — fixed.
-29. Finding 10 — repeated asset-name strings — partially fixed.
-30. Finding 14 — retained dead disposable wrappers — fixed.
-31. Finding 29 — world trackers lost across reordered transfers — fixed.
-32. Finding 30 — rectangular transformed-tile origin — fixed.
-33. Finding 18 — reversed location event changes — fixed.
-34. Finding 17 — swapped managed-event identifiers — fixed.
-35. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-36. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-37. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-38. Finding 13 — repeated dependency-list scans — fixed.
-39. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-40. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+8. Finding 47 — eager cursor coordinate derivation while walking — needs runtime evidence.
+9. Finding 25 — held-input event snapshot allocations — fixed.
+10. Finding 7 — normal-tile rendering overhead — fixed.
+11. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
+12. Finding 37 — redundant invalidation-batch cloning — fixed.
+13. Finding 36 — per-parse locale delegate allocation — fixed.
+14. Finding 34 — layer work repeated for every patched map tile — fixed.
+15. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+16. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+17. Finding 33 — asset-loader adapter closures — fixed.
+18. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+19. Finding 6 — synchronous game-thread log flushing — fixed.
+20. Finding 46 — synchronous log formatting on the game thread — needs runtime evidence.
+21. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+22. Finding 41 — incomplete and duplicate world-location topology — queued.
+23. Finding 43 — per-asset propagation key normalization allocations — queued.
+24. Finding 32 — per-map warp comparison sets — fixed.
+25. Finding 19 — repeated propagation side effects — deferred.
+26. Finding 4 — no first-class batched exact invalidation — fixed.
+27. Finding 3 — exact invalidation performing cache scans — fixed.
+28. Finding 22 — oversized sparse image-patch transfers — fixed.
+29. Finding 8 — PNG decode and conversion churn — partially fixed.
+30. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+31. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+32. Finding 9 — linear content-manager routing — fixed.
+33. Finding 10 — repeated asset-name strings — partially fixed.
+34. Finding 14 — retained dead disposable wrappers — fixed.
+35. Finding 29 — world trackers lost across reordered transfers — fixed.
+36. Finding 42 — location trackers lack source ownership — queued.
+37. Finding 30 — rectangular transformed-tile origin — fixed.
+38. Finding 18 — reversed location event changes — fixed.
+39. Finding 17 — swapped managed-event identifiers — fixed.
+40. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+41. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+42. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+43. Finding 13 — repeated dependency-list scans — fixed.
+44. Finding 44 — repeated loaded-assembly scans and dependency parsing — queued.
+45. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+46. Finding 45 — incorrect overlay alpha composition — queued.
+47. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -453,38 +460,113 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. Split-screen switching, explicit screen access, writes, removals, and full reset must keep the fast cache coherent.
 - **Status:** Fixed. `PerScreen<T>` retains the most recently accessed screen/value, uses it only while the removed-screen generation matches, writes through on assignment, and invalidates it when that screen is removed or all screens reset.
 
+### 41. Propagation uses an incomplete and duplicate world-location topology
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`GetLocationsWithInfo`) and `Framework/ContentCoordinator.cs` (live-map invalidation discovery).
+- **Scenario:** Map, NPC, building, and texture invalidations in saves with expansion locations, nested building interiors, active mine levels, or volcano dungeon levels.
+- **Root cause:** Propagation combines `Game1.locations` and `SaveGame.loaded.locations` without reference de-duplication, follows only one interior level, and omits `MineShaft.activeMines` and `VolcanoDungeon.activeLevels`. Exact invalidation's live-map fallback scans only `Game1.locations`. `WorldLocationsTracker` already models more of this topology, but the implementations are separate.
+- **Impact:** Duplicate propagation work and side effects for overlapping roots, plus stale generated/nested locations that are never updated.
+- **Expected benefit:** One deterministic reference-deduplicated recursive traversal shared by invalidation, propagation, and world tracking.
+- **Risk:** Medium to high. Ordering, building ownership metadata, generated-level lifetime, and save-load overlap must be preserved.
+- **Status:** Queued. Centralize topology semantics and add nested/generated/duplicate-root coverage before replacing the existing traversals.
+
+### 42. Location trackers don't retain source ownership
+
+- **Affected code:** `Framework/StateTracking/WorldLocationsTracker.cs` (`Add` and `Remove`).
+- **Scenario:** A location is reachable from multiple roots, transfers between root/building/generated-location sources across ticks, or temporarily appears in overlapping source lists.
+- **Root cause:** `Add(GameLocation)` forcibly removes any existing tracker before recreating it, while `Remove(GameLocation)` has no source token or reference count. Removing one source can therefore dispose the only tracker even while another source still owns the same live location.
+- **Impact:** Walking-time change detection correctness and avoidable tracker churn; live locations can stop reporting content changes.
+- **Expected benefit:** Stable one-tracker-per-location ownership across transfers and overlapping roots, with less disposal/recreation work.
+- **Risk:** Medium to high. Source identities and same-tick transfer behavior need an explicit contract to prevent leaks or delayed removals.
+- **Status:** Queued. Replace unconditional remove/re-add with source membership or reference-counted ownership.
+
+### 43. Core propagation allocates normalized key strings per asset
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`PropagateTexture` and `PropagateOther`).
+- **Scenario:** Every large invalidation/propagation transaction.
+- **Root cause:** Dispatch calls `ToLower().Replace("\\", "/")` for each propagated key. `AssetName` already normalizes separators, so replacement is redundant; lowercasing remains a culture-sensitive full-string allocation.
+- **Impact:** Transition CPU and GC pressure proportional to invalidated asset count.
+- **Expected benefit:** Allocation-free ordinal-ignore-case dispatch over the already normalized asset name.
+- **Risk:** Low to medium. A replacement dispatch table must preserve every alias and the exact precedence of current cases.
+- **Status:** Queued. Introduce a static ordinal-ignore-case route lookup and verify all current switch labels before removing the normalization strings.
+
+### 44. Assembly loading repeats global scans and reparses visited local dependencies
+
+- **Affected code:** `Framework/ModLoading/AssemblyLoader.cs` (`Load` and `GetReferencedLocalAssemblies`).
+- **Scenario:** Startup with hundreds of code mods that share bundled dependencies.
+- **Root cause:** Each mod rebuilds a set by scanning all loaded AppDomain assemblies. Recursive local dependency discovery reads the full DLL, initializes symbol handling, and parses its metadata before checking whether that assembly name was already visited.
+- **Impact:** Startup disk I/O, allocations, and Cecil parsing time, especially for dependency-heavy packs.
+- **Expected benefit:** Maintain loaded-name state across the launch and skip already-visited canonical local files before reading/parsing them.
+- **Risk:** Medium. Assembly identity, duplicate-copy diagnostics, resolver search paths, and mods that load assemblies dynamically must remain correct.
+- **Status:** Queued. Separate per-load dependency-cycle tracking from launch-wide loaded identities and canonical-file parsing state.
+
+### 45. Image overlay composition calculates the wrong output alpha
+
+- **Affected code:** `Framework/Content/AssetDataForImage.cs` (`PatchImage` overlay loop).
+- **Scenario:** Content packs overlay translucent pixels onto translucent target pixels.
+- **Root cause:** RGB channels use premultiplied source-over composition, but alpha uses `Math.Max(sourceAlpha, targetAlpha)`. Two 50%-opaque pixels therefore remain about 50% alpha instead of composing to about 75%.
+- **Impact:** Visual correctness. Incorrect alpha can also cause later overlays to produce progressively wrong results.
+- **Expected benefit:** Mathematically consistent source-over output for layered translucent content-pack patches.
+- **Risk:** Medium to high. Some packs may have authored around the old behavior, so representative visual comparison is required.
+- **Status:** Queued as a correctness fix, separate from performance patches.
+
+### 46. Async log writing still formats every record on the game thread
+
+- **Affected code:** `Framework/Monitor.cs` (`LogImpl` and `GenerateMessagePrefix`).
+- **Scenario:** Trace-heavy mods during walking, asset loading, and invalidation reports; trace output may be hidden from the console but is still written to the log.
+- **Root cause:** The async writer removed synchronous file flushes, but each caller still formats the timestamp/prefix, full file line, and console line before enqueueing. Hidden trace lines pay for console text that is never displayed.
+- **Impact:** Potential frame-time spikes and allocation bursts under high log volume.
+- **Expected benefit:** Queue structured records, format file text on the writer thread, and only build console text when the level is visible.
+- **Risk:** Medium to high. Timestamp ordering, crash-time draining, mutable messages, and console/file consistency need explicit handling.
+- **Status:** Needs runtime evidence. Measure log-call counts and formatting cost in the target pack before changing record ownership and flush semantics.
+
+### 47. Cursor coordinate derivation remains eager while walking
+
+- **Affected code:** `Framework/Input/SInputState.cs` (`TrueUpdate`, `UpdateCursorPosition`, and `CursorPosition`).
+- **Scenario:** Every tick where the player tile or camera-relative cursor position changes, even when no mod reads `ICursorPosition`.
+- **Root cause:** Snapshot object creation is lazy, but SMAPI still calculates screen pixels, tile coordinates, radius checks, and `GetGrabTile` eagerly on the update path.
+- **Impact:** Possible steady walking CPU overhead in packs where cursor state is rarely consumed.
+- **Expected benefit:** Defer the coordinate/radius/grab calculations until the snapshot is actually requested.
+- **Risk:** Medium. The getter must reproduce the pre-game-update snapshot, so it must capture viewport, zoom, mouse, player position/tile/facing, and any other inputs instead of reading later live state.
+- **Status:** Needs runtime evidence. Trace request frequency and calculation cost before adding a larger tick-snapshot structure.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
 | --- | --- |
-| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, and 40 |
+| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, and 42 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Finding 2 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, and 39 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, and 34 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, and 37 |
-| Synchronous logging and `AutoFlush` stalls | Finding 6 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, and 43 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, and 43 |
+| Synchronous logging and `AutoFlush` stalls | Findings 6 and 46 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
-| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, and 28 |
+| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, and 45 |
 | Content-manager lookup scaling | Finding 9 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
-| Assembly loading and rewrite caching | Finding 12 |
+| Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, and 35 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, and 40 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, and 47 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, and 46 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
 
-1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially live `AssetRequested` frequency and propagation side-effect repetition.
-2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
-3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
-4. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
-5. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-6. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
-7. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially chest polling, cursor-position consumption, log formatting, live `AssetRequested` frequency, and propagation side-effect repetition.
+2. Centralize a deterministic recursive, reference-deduplicated world topology shared by tracking, live-map invalidation, and propagation.
+3. Add source ownership to world-location trackers so overlapping roots and cross-tick transfers cannot drop a live tracker.
+4. Replace per-asset propagation key lowercasing with verified ordinal-ignore-case route lookup.
+5. Cache launch-wide loaded assembly identities and canonical parsed local files without weakening duplicate-mod diagnostics.
+6. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
+7. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
+8. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
+9. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
+10. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
+11. Correct source-over alpha composition after representative content-pack visual comparisons.
+12. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.
