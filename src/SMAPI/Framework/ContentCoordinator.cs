@@ -63,6 +63,9 @@ internal class ContentCoordinator : IDisposable
     /// <summary>The loaded content managers (including the <see cref="MainContentManager"/>).</summary>
     private readonly List<IContentManager> ContentManagers = [];
 
+    /// <summary>The first registered namespaced content manager for each managed asset prefix.</summary>
+    private readonly Dictionary<string, IContentManager> NamespacedContentManagers = new(StringComparer.Ordinal);
+
     /// <summary>Whether the content coordinator has been disposed.</summary>
     private bool IsDisposed;
 
@@ -127,7 +130,7 @@ internal class ContentCoordinator : IDisposable
         this.OnAssetsInvalidated = onAssetsInvalidated;
         this.RequestAssetOperations = requestAssetOperations;
         this.FullRootDirectory = Path.Combine(Constants.GamePath, rootDirectory);
-        this.ContentManagers.Add(
+        this.AddContentManager(
             this.MainContentManager = new GameContentManager(
                 name: "Game1.content",
                 serviceProvider: serviceProvider,
@@ -154,7 +157,7 @@ internal class ContentCoordinator : IDisposable
             onLoadingFirstAsset: onLoadingFirstAsset,
             onAssetLoaded: onAssetLoaded
         );
-        this.ContentManagers.Add(contentManagerForAssetPropagation);
+        this.AddContentManager(contentManagerForAssetPropagation);
 
         this.VanillaContentManager = new LocalizedContentManager(serviceProvider, rootDirectory);
         this.CoreAssets = new CoreAssetPropagator(this.MainContentManager, contentManagerForAssetPropagation, this.Monitor, multiplayer, reflection, name => this.ParseAssetName(name, allowLocales: true));
@@ -179,7 +182,7 @@ internal class ContentCoordinator : IDisposable
                 onLoadingFirstAsset: this.OnLoadingFirstAsset,
                 onAssetLoaded: this.OnAssetLoaded
             );
-            this.ContentManagers.Add(manager);
+            this.AddContentManager(manager);
             return manager;
         });
     }
@@ -207,7 +210,7 @@ internal class ContentCoordinator : IDisposable
                 onDisposing: this.OnDisposing,
                 fileLookup: this.GetFileLookup(rootDirectory)
             );
-            this.ContentManagers.Add(manager);
+            this.AddContentManager(manager);
             return manager;
         });
     }
@@ -336,7 +339,7 @@ internal class ContentCoordinator : IDisposable
     {
         // get content manager
         IContentManager? contentManager = this.ContentManagerLock.InReadLock(() =>
-            this.ContentManagers.FirstOrDefault(p => p.IsNamespaced && p.Name == contentManagerId)
+            this.NamespacedContentManagers.GetValueOrDefault(contentManagerId)
         );
         if (contentManager == null)
             throw new InvalidOperationException($"The '{contentManagerId}' prefix isn't handled by any mod.");
@@ -354,7 +357,7 @@ internal class ContentCoordinator : IDisposable
     {
         // get content manager
         IContentManager? contentManager = this.ContentManagerLock.InReadLock(() =>
-            this.ContentManagers.FirstOrDefault(p => p.IsNamespaced && p.Name == contentManagerId)
+            this.NamespacedContentManagers.GetValueOrDefault(contentManagerId)
         );
         if (contentManager == null)
             throw new InvalidOperationException($"The '{contentManagerId}' prefix isn't handled by any mod.");
@@ -549,6 +552,7 @@ internal class ContentCoordinator : IDisposable
         foreach (IContentManager contentManager in this.ContentManagers)
             contentManager.Dispose();
         this.ContentManagers.Clear();
+        this.NamespacedContentManagers.Clear();
         this.MainContentManager = null!; // instance no longer usable
 
         this.ContentManagerLock.Dispose();
@@ -558,6 +562,17 @@ internal class ContentCoordinator : IDisposable
     /*********
     ** Private methods
     *********/
+    /// <summary>Register a content manager.</summary>
+    /// <remarks>The caller must hold a write lock if the coordinator is already available to other threads.</remarks>
+    private void AddContentManager(IContentManager contentManager)
+    {
+        this.ContentManagers.Add(contentManager);
+
+        // Preserve the existing first-match behavior if multiple managers use the same name.
+        if (contentManager.IsNamespaced)
+            this.NamespacedContentManagers.TryAdd(contentManager.Name, contentManager);
+    }
+
     /// <summary>A callback invoked when a content manager is disposed.</summary>
     /// <param name="contentManager">The content manager being disposed.</param>
     private void OnDisposing(IContentManager contentManager)
@@ -566,8 +581,18 @@ internal class ContentCoordinator : IDisposable
             return;
 
         this.ContentManagerLock.InWriteLock(() =>
-            this.ContentManagers.Remove(contentManager)
-        );
+        {
+            this.ContentManagers.Remove(contentManager);
+
+            if (contentManager.IsNamespaced && this.NamespacedContentManagers.GetValueOrDefault(contentManager.Name) == contentManager)
+            {
+                this.NamespacedContentManagers.Remove(contentManager.Name);
+
+                IContentManager? next = this.ContentManagers.FirstOrDefault(p => p.IsNamespaced && p.Name == contentManager.Name);
+                if (next != null)
+                    this.NamespacedContentManagers[contentManager.Name] = next;
+            }
+        });
     }
 
     /// <summary>Get a vanilla asset without interception.</summary>
