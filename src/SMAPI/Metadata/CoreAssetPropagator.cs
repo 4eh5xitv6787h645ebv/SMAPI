@@ -85,30 +85,33 @@ internal class CoreAssetPropagator
             Type imageType = typeof(Texture2D);
             Type mapType = typeof(Map);
             Dictionary<FarmHouse, string?>? spouseRoomMapPathCache = null; // constructed later if needed
+            Dictionary<IAssetName, List<LocationInfo>>? locationsByMapName = null;
             Dictionary<string, List<NPC>>? charactersByName = null;
 
-            // Index NPCs only when a batch contains multiple targeted dialogue/schedule assets. A single
-            // invalidation is cheaper as a direct scan, while a large content update can otherwise scan the
-            // entire world once for every NPC asset.
+            // Build world indexes only when a batch contains multiple matching assets. A single invalidation is
+            // cheaper as a direct scan, while a large content update can otherwise scan the world once per asset.
             if (!ignoreWorld)
             {
+                int mapAssets = 0;
                 int targetedNpcAssets = 0;
                 foreach ((IAssetName assetName, Type assetType) in assets)
                 {
-                    if (
-                        assetType != mapType
-                        && !imageType.IsAssignableFrom(assetType)
+                    if (assetType == mapType)
+                        mapAssets++;
+                    else if (
+                        !imageType.IsAssignableFrom(assetType)
                         && (
                             assetName.IsDirectlyUnderPath("Characters/Dialogue")
                             || assetName.IsDirectlyUnderPath("Characters/schedules")
                         )
-                        && ++targetedNpcAssets > 1
                     )
-                    {
-                        charactersByName = this.GetCharactersByName();
-                        break;
-                    }
+                        targetedNpcAssets++;
                 }
+
+                if (mapAssets > 1)
+                    locationsByMapName = this.GetLocationsByMapName(ref spouseRoomMapPathCache);
+                if (targetedNpcAssets > 1)
+                    charactersByName = this.GetCharactersByName();
             }
 
             foreach ((IAssetName assetName, Type assetType) in assets)
@@ -124,7 +127,7 @@ internal class CoreAssetPropagator
                     // map
                     else if (assetType == mapType)
                     {
-                        changed = this.PropagateMap(assetName, ref spouseRoomMapPathCache, ignoreWorld, out bool curChangedMapRoutes);
+                        changed = this.PropagateMap(assetName, ref spouseRoomMapPathCache, locationsByMapName, ignoreWorld, out bool curChangedMapRoutes);
                         changedWarpRoutes |= curChangedMapRoutes;
                     }
 
@@ -153,23 +156,34 @@ internal class CoreAssetPropagator
     /// <summary>Propagate changes to a map asset.</summary>
     /// <param name="assetName">The asset name that changed.</param>
     /// <param name="spouseRoomMapPathCache">A cache of spouse room map path lookups by farmhouse or cabin instance. This will be created the first time it's needed.</param>
+    /// <param name="locationsByMapName">The locations indexed by map asset name for a multi-map propagation batch, if applicable.</param>
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
     /// <param name="changedWarpRoutes">Whether the locations reachable by warps from this location changed as part of this propagation.</param>
     /// <returns>Returns whether any assets were updated.</returns>
-    private bool PropagateMap(IAssetName assetName, ref Dictionary<FarmHouse, string?>? spouseRoomMapPathCache, bool ignoreWorld, out bool changedWarpRoutes)
+    private bool PropagateMap(IAssetName assetName, ref Dictionary<FarmHouse, string?>? spouseRoomMapPathCache, Dictionary<IAssetName, List<LocationInfo>>? locationsByMapName, bool ignoreWorld, out bool changedWarpRoutes)
     {
         bool changed = false;
         changedWarpRoutes = false;
 
         if (!ignoreWorld)
         {
-            foreach (LocationInfo info in this.GetLocationsWithInfo())
+            IReadOnlyList<LocationInfo> locations;
+            if (locationsByMapName is null)
+                locations = this.GetLocationsWithInfo();
+            else if (!locationsByMapName.TryGetValue(assetName.GetBaseAssetName(), out List<LocationInfo>? indexedLocations))
+                locations = Array.Empty<LocationInfo>();
+            else
+                locations = indexedLocations;
+
+            foreach (LocationInfo info in locations)
             {
                 GameLocation location = info.Location;
 
                 bool shouldUpdateMap =
+                    locationsByMapName is not null
+
                     // edited this map
-                    this.IsSameBaseName(assetName, location.mapPath.Value)
+                    || this.IsSameBaseName(assetName, location.mapPath.Value)
 
                     // edited spouse room for this farmhouse
                     || (
@@ -904,6 +918,45 @@ internal class CoreAssetPropagator
 
                 return locations;
             });
+    }
+
+    /// <summary>Get all locations in the game, indexed by the map assets which can update them.</summary>
+    /// <param name="spouseRoomMapPathCache">A cache of spouse room map path lookups by farmhouse or cabin instance.</param>
+    private Dictionary<IAssetName, List<LocationInfo>> GetLocationsByMapName(ref Dictionary<FarmHouse, string?>? spouseRoomMapPathCache)
+    {
+        Dictionary<IAssetName, List<LocationInfo>> locationsByMapName = [];
+
+        foreach (LocationInfo info in this.GetLocationsWithInfo())
+        {
+            this.AddLocationByMapName(locationsByMapName, info, info.Location.mapPath.Value);
+
+            if (info.Location is FarmHouse farmhouse)
+            {
+                string? spouseRoomMapPath = this.GetDisplayedSpouseRoomPath(farmhouse, ref spouseRoomMapPathCache);
+                this.AddLocationByMapName(locationsByMapName, info, spouseRoomMapPath);
+            }
+        }
+
+        return locationsByMapName;
+    }
+
+    /// <summary>Add a location to a map asset index.</summary>
+    /// <param name="locationsByMapName">The index to update.</param>
+    /// <param name="location">The location to index.</param>
+    /// <param name="rawMapName">The raw map asset name.</param>
+    private void AddLocationByMapName(Dictionary<IAssetName, List<LocationInfo>> locationsByMapName, LocationInfo location, string? rawMapName)
+    {
+        IAssetName? mapName = this.ParseAssetNameOrNull(rawMapName)?.GetBaseAssetName();
+        if (mapName is null)
+            return;
+
+        if (!locationsByMapName.TryGetValue(mapName, out List<LocationInfo>? locations))
+            locationsByMapName[mapName] = locations = [];
+
+        // A farmhouse can reference the same asset as both its main map and spouse-room map. The direct scan
+        // updates that location only once for an asset, so preserve that behavior in the index.
+        if (locations.Count == 0 || !ReferenceEquals(locations[^1], location))
+            locations.Add(location);
     }
 
     /// <summary>Get the asset name for a farmhouse's spouse room, if it's currently displaying one.</summary>
