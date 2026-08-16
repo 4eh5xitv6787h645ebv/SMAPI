@@ -18,6 +18,9 @@ internal class LocationTracker : IWatcher
     /// <summary>The underlying watchers.</summary>
     private readonly List<IWatcher> Watchers = [];
 
+    /// <summary>Whether chest inventory changes are currently being tracked.</summary>
+    private bool IsTrackingChestInventoryChanges;
+
 
     /*********
     ** Accessors
@@ -114,9 +117,13 @@ internal class LocationTracker : IWatcher
         if (changed && this.ObjectsWatcher.IsChanged)
             this.UpdateChestWatcherList(added: this.ObjectsWatcher.Added, removed: this.ObjectsWatcher.Removed);
 
-        // update chest inventory watchers
-        foreach (var watcher in this.ChestWatchers)
-            watcher.Value.Update(trackChestInventoryChanges);
+        // update chest inventory watchers only while the event is observed, or once when toggling their state
+        if (trackChestInventoryChanges || this.IsTrackingChestInventoryChanges != trackChestInventoryChanges)
+        {
+            this.IsTrackingChestInventoryChanges = trackChestInventoryChanges;
+            foreach (ChestTracker watcher in this.ChestWatchers.Values)
+                watcher.Update(trackChestInventoryChanges);
+        }
     }
 
     /// <inheritdoc />
@@ -127,8 +134,11 @@ internal class LocationTracker : IWatcher
         foreach (IWatcher watcher in this.Watchers)
             watcher.Reset();
 
-        foreach (var watcher in this.ChestWatchers)
-            watcher.Value.Reset();
+        if (this.IsTrackingChestInventoryChanges)
+        {
+            foreach (ChestTracker watcher in this.ChestWatchers.Values)
+                watcher.Reset();
+        }
     }
 
     /// <inheritdoc />

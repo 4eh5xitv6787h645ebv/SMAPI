@@ -87,9 +87,10 @@ internal static class WatcherFactory
     /// <summary>Get a watcher for an item inventory.</summary>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="inventory">The item inventory.</param>
-    public static ICollectionWatcher<Item> ForInventory(string name, Inventory inventory)
+    /// <param name="isEnabled">Whether to start listening for inventory changes.</param>
+    public static InventoryWatcher ForInventory(string name, Inventory inventory, bool isEnabled = true)
     {
-        return new InventoryWatcher(name, inventory);
+        return new InventoryWatcher(name, inventory, isEnabled);
     }
 
     /// <summary>Get a watcher for a net collection.</summary>

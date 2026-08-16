@@ -24,7 +24,7 @@ internal class ChestTracker : IDisposable
     private readonly HashSet<Item> Removed = new(new ObjectReferenceComparer<Item>());
 
     /// <summary>The underlying inventory watcher.</summary>
-    private readonly ICollectionWatcher<Item> InventoryWatcher;
+    private readonly InventoryWatcher InventoryWatcher;
 
     /// <summary>Whether inventory changes are currently being tracked.</summary>
     private bool IsTrackingInventoryChanges;
@@ -46,7 +46,7 @@ internal class ChestTracker : IDisposable
     public ChestTracker(string name, Chest chest)
     {
         this.Chest = chest;
-        this.InventoryWatcher = WatcherFactory.ForInventory($"{name}.{nameof(chest.Items)}", chest.Items);
+        this.InventoryWatcher = WatcherFactory.ForInventory($"{name}.{nameof(chest.Items)}", chest.Items, isEnabled: false);
     }
 
     /// <summary>Update the current values if needed.</summary>
@@ -60,7 +60,7 @@ internal class ChestTracker : IDisposable
             this.StackSizes.Clear();
             this.Added.Clear();
             this.Removed.Clear();
-            this.InventoryWatcher.Reset();
+            this.InventoryWatcher.SetEnabled(trackInventoryChanges);
 
             if (trackInventoryChanges)
             {
@@ -73,12 +73,9 @@ internal class ChestTracker : IDisposable
             return;
         }
 
-        // discard inventory notifications without scanning item stacks when no mod needs the event
+        // no inventory notifications are registered when no mod needs the event
         if (!trackInventoryChanges)
-        {
-            this.InventoryWatcher.Reset();
             return;
-        }
 
         // update watcher
         this.InventoryWatcher.Update();
@@ -99,12 +96,7 @@ internal class ChestTracker : IDisposable
     public void Reset()
     {
         if (!this.IsTrackingInventoryChanges)
-        {
-            this.InventoryWatcher.Reset();
-            this.Added.Clear();
-            this.Removed.Clear();
             return;
-        }
 
         // update stack sizes
         foreach (Item item in this.StackSizes.Keys)

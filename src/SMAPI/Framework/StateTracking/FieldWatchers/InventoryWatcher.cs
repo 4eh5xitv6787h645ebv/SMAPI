@@ -27,6 +27,9 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
     /// <summary>A pooled set used to track the new inventory when detecting changes.</summary>
     private readonly HashSet<Item> PooledNewSet = new(new ObjectReferenceComparer<Item>());
 
+    /// <summary>Whether inventory event handlers are currently registered.</summary>
+    private bool IsEnabled;
+
 
     /*********
     ** Accessors
@@ -50,13 +53,37 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
     /// <summary>Construct an instance.</summary>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="inventory">The inventory to watch.</param>
-    public InventoryWatcher(string name, Inventory inventory)
+    /// <param name="isEnabled">Whether to start listening for inventory changes.</param>
+    public InventoryWatcher(string name, Inventory inventory, bool isEnabled = true)
     {
         this.Name = name;
         this.Inventory = inventory;
 
-        inventory.OnSlotChanged += this.OnSlotChanged;
-        inventory.OnInventoryReplaced += this.OnInventoryReplaced;
+        this.SetEnabled(isEnabled);
+    }
+
+    /// <summary>Enable or disable inventory change notifications.</summary>
+    /// <param name="enabled">Whether to listen for inventory changes.</param>
+    public void SetEnabled(bool enabled)
+    {
+        this.AssertNotDisposed();
+        if (this.IsEnabled == enabled)
+            return;
+
+        this.IsEnabled = enabled;
+        if (enabled)
+        {
+            this.Inventory.OnSlotChanged += this.OnSlotChanged;
+            this.Inventory.OnInventoryReplaced += this.OnInventoryReplaced;
+        }
+        else
+        {
+            this.Inventory.OnSlotChanged -= this.OnSlotChanged;
+            this.Inventory.OnInventoryReplaced -= this.OnInventoryReplaced;
+            this.PooledOldSet.Clear();
+            this.PooledNewSet.Clear();
+        }
+        this.Reset();
     }
 
     /// <inheritdoc />
@@ -76,7 +103,7 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
     /// <inheritdoc />
     public override void Dispose()
     {
-        if (!this.IsDisposed)
+        if (!this.IsDisposed && this.IsEnabled)
         {
             this.Inventory.OnSlotChanged -= this.OnSlotChanged;
             this.Inventory.OnInventoryReplaced -= this.OnInventoryReplaced;
