@@ -45,6 +45,9 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
     /// <summary>A list of disposable assets.</summary>
     private readonly List<WeakReference<IDisposable>> Disposables = [];
 
+    /// <summary>The number of uncached disposable loads before dead references are pruned.</summary>
+    private int UncachedDisposableLoadsUntilPrune = 256;
+
     /// <summary>The disposable assets tracked by the base content manager.</summary>
     /// <remarks>This should be kept empty to avoid keeping disposable assets referenced forever, which prevents garbage collection when they're unused. Disposable assets are tracked by <see cref="Disposables"/> instead, which avoids a hard reference.</remarks>
     private readonly List<IDisposable> BaseDisposableReferences;
@@ -336,7 +339,22 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
             return baseLoad(assetName.Name);
         }
 
-        return this.ReadAsset<T>(assetName.Name, disposable => this.Disposables.Add(new WeakReference<IDisposable>(disposable)));
+        return this.ReadAsset<T>(assetName.Name, this.TrackUncachedDisposable);
+    }
+
+    /// <summary>Track an uncached disposable asset without retaining it, and periodically prune collected assets.</summary>
+    /// <param name="disposable">The disposable asset to track.</param>
+    private void TrackUncachedDisposable(IDisposable disposable)
+    {
+        this.Disposables.Add(new WeakReference<IDisposable>(disposable));
+
+        if (--this.UncachedDisposableLoadsUntilPrune <= 0)
+        {
+            this.Disposables.RemoveAll(static reference => !reference.TryGetTarget(out _));
+
+            // Prune frequently while most entries are short-lived, but scale the interval when many assets remain alive.
+            this.UncachedDisposableLoadsUntilPrune = Math.Max(256, this.Disposables.Count);
+        }
     }
 
     /// <summary>Add tracking data to an asset and add it to the cache.</summary>

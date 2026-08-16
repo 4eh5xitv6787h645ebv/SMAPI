@@ -146,7 +146,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Memory and eventual disposal traversal time.
 - **Expected benefit:** Periodic opportunistic pruning bounds bookkeeping growth without changing asset lifetime.
 - **Risk:** Low to medium. Pruning must not lose live disposables or add a costly full scan to every load.
-- **Status:** Confirmed.
+- **Status:** Fixed. Uncached disposable registration now prunes collected weak references at an adaptive interval, keeping frequent cleanup for short-lived assets while avoiding repeated scans when many assets remain alive.
 
 ### 15. Asset operation discovery is cached for only one tick
 
