@@ -288,6 +288,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. The replacement is still loaded at most once and only after a matching cached target is found; all targets receive the same replacement instance and successful propagation order is unchanged.
 - **Status:** Fixed. Texture propagation now uses an explicit one-shot load guard and disposes the temporary replacement in a `finally` block.
 
+### 29. Add-before-remove world transfers can drop tracked locations
+
+- **Affected code:** `Framework/StateTracking/WorldLocationsTracker.cs` (`Update`).
+- **Scenario:** A Linux game or expansion mod moves a building between locations, or a temporary location between the main, active-mine, and active-volcano lists, by adding it to the destination before removing it from the source in the same update.
+- **Root cause:** SMAPI processes each changed source independently as remove-then-add. If the destination source is visited first, its addition is ignored because the object is still tracked; the later source removal then deletes the only tracker. Building indoor locations can consequently disappear from world event tracking even though the building remains in the world.
+- **Impact:** Steady-gameplay and transition correctness.
+- **Expected benefit:** Stable tracking across either transfer order prevents subsequent world and building-interior changes from being missed in large expansion saves.
+- **Risk:** Low. Removals and additions retain their existing order within each source, but all changed sources now complete removal before any source is allowed to add.
+- **Status:** Fixed. Top-level location sources and changed building collections are processed in two phases, with all removals preceding all additions.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.

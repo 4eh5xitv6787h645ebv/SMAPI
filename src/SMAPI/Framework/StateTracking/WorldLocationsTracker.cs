@@ -129,23 +129,25 @@ internal class WorldLocationsTracker : IWatcher
         this.IsTrackingChestInventoryChanges = this.TrackChestInventoryChanges;
 
         // detect added/removed locations
+        // Process every removal before any addition so moving a location between source lists in
+        // add-then-remove order can't leave the newly added destination untracked.
         if (this.LocationListWatcher.IsChanged)
-        {
             this.Remove(this.LocationListWatcher.Removed);
-            this.Add(this.LocationListWatcher.Added);
-        }
         if (this.MineLocationListWatcher.IsChanged)
-        {
             this.Remove(this.MineLocationListWatcher.Removed);
-            this.Add(this.MineLocationListWatcher.Added);
-        }
         if (this.VolcanoLocationListWatcher.IsChanged)
-        {
             this.Remove(this.VolcanoLocationListWatcher.Removed);
+
+        if (this.LocationListWatcher.IsChanged)
+            this.Add(this.LocationListWatcher.Added);
+        if (this.MineLocationListWatcher.IsChanged)
+            this.Add(this.MineLocationListWatcher.Added);
+        if (this.VolcanoLocationListWatcher.IsChanged)
             this.Add(this.VolcanoLocationListWatcher.Added);
-        }
 
         // detect building changes
+        // As with top-level locations, remove across every parent before adding to any parent. A
+        // building may be inserted into its destination before its source collection is updated.
         foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
         {
             if (
@@ -156,6 +158,16 @@ internal class WorldLocationsTracker : IWatcher
                 continue;
 
             this.Remove(watcher.BuildingsWatcher.Removed);
+        }
+        foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
+        {
+            if (
+                !watcher.BuildingsWatcher.IsChanged
+                || !this.LocationDict.TryGetValue(watcher.Location, out LocationTracker? currentWatcher)
+                || !object.ReferenceEquals(watcher, currentWatcher)
+            )
+                continue;
+
             this.Add(watcher.BuildingsWatcher.Added);
         }
 
