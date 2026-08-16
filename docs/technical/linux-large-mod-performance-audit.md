@@ -176,7 +176,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Correctness and diagnostics; negligible direct performance impact.
 - **Expected benefit:** Correct event identity in logs, attribution, and management operations.
 - **Risk:** Low. The public event fields and argument types remain unchanged; only the internal name is corrected.
-- **Status:** Confirmed.
+- **Status:** Fixed. Each managed event now uses the textual identifier matching its public world event.
 
 ### 18. Repeated propagation side effects are not coalesced
 
