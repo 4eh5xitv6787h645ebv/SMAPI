@@ -268,6 +268,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Medium. Cursor events need stable old/new objects, polling must still return current coordinates, and enabling a listener needs a fresh baseline rather than a delayed movement event.
 - **Status:** Fixed. Input polling now records the same pre-update coordinate values without constructing an object, cursor-diff tracking is listener-aware with an activation baseline, and button/wheel code requests the snapshot only when it will raise an event. Direct `IInputHelper` polling still materializes and returns the current immutable snapshot on demand.
 
+### 27. Tick-cache lookups allocate factories before checking the cache
+
+- **Affected code:** `Framework/Utilities/TickCacheDictionary.cs` (`GetOrSet`), `Framework/ContentCoordinator.cs` (`GetAssetOperations`), and `Metadata/CoreAssetPropagator.cs` world lookup helpers.
+- **Scenario:** Repeated live asset requests during gameplay and multi-asset propagation during warp, day, season, or context changes on Linux.
+- **Root cause:** Callers construct capturing value-factory closures for every lookup, including cache hits, and the type-erased world cache wraps each factory in another closure. Location helpers also interpolate boolean cache keys and snapshot root locations through temporary LINQ iterator/array objects.
+- **Impact:** Steady gameplay for live requests, transitions, and garbage collection.
+- **Expected benefit:** Stateful static factories make cache hits allocation-free and reduce temporary objects when a propagation miss must enumerate the world.
+- **Risk:** Low. Factory state must be ignored on hits exactly like the old closure, and typed values in the type-erased cache must retain the existing cast diagnostics.
+- **Status:** Fixed. Tick caches now accept explicit factory state, asset requests and world helpers use cached static delegates and stable keys, the derived cache no longer creates an adapter closure, and location enumeration fills its result directly without LINQ or root-list snapshots.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.
