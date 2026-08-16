@@ -76,7 +76,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Steady gameplay.
 - **Expected benefit:** A normal-tile fast path avoids SMAPI-specific transform overhead for the common case.
 - **Risk:** Low to medium. Animated tiles and maps edited at runtime must still observe changed transform properties.
-- **Status:** Confirmed.
+- **Status:** Fixed. Tiles without SMAPI flip or rotation properties now delegate to xTile's simpler base draw path; transformed tiles retain the existing rendering logic.
 
 ### 8. Mod PNG loads repeat synchronous decode and pixel conversion
 
