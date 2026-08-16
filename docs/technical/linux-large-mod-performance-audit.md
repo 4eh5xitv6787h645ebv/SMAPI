@@ -14,41 +14,42 @@ This is the current jank-first order, combining likely frame-time impact, freque
 2. Finding 1 — duplicate world-location processing — fixed.
 3. Finding 23 — per-tick core update closures — fixed.
 4. Finding 35 — render-stage reflection and mismatched sprite batches — fixed.
-5. Finding 24 — pressed-key polling allocation while walking — fixed.
-6. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
-7. Finding 25 — held-input event snapshot allocations — fixed.
-8. Finding 7 — normal-tile rendering overhead — fixed.
-9. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-10. Finding 37 — redundant invalidation-batch cloning — fixed.
-11. Finding 36 — per-parse locale delegate allocation — fixed.
-12. Finding 34 — layer work repeated for every patched map tile — fixed.
-13. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
-14. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-15. Finding 33 — asset-loader adapter closures — fixed.
-16. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-17. Finding 6 — synchronous game-thread log flushing — fixed.
-18. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-19. Finding 32 — per-map warp comparison sets — fixed.
-20. Finding 19 — repeated propagation side effects — deferred.
-21. Finding 4 — no first-class batched exact invalidation — fixed.
-22. Finding 3 — exact invalidation performing cache scans — fixed.
-23. Finding 22 — oversized sparse image-patch transfers — fixed.
-24. Finding 8 — PNG decode and conversion churn — partially fixed.
-25. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-26. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-27. Finding 9 — linear content-manager routing — fixed.
-28. Finding 10 — repeated asset-name strings — partially fixed.
-29. Finding 14 — retained dead disposable wrappers — fixed.
-30. Finding 29 — world trackers lost across reordered transfers — fixed.
-31. Finding 30 — rectangular transformed-tile origin — fixed.
-32. Finding 18 — reversed location event changes — fixed.
-33. Finding 17 — swapped managed-event identifiers — fixed.
-34. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-35. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-36. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-37. Finding 13 — repeated dependency-list scans — fixed.
-38. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-39. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+5. Finding 40 — repeated current-screen dictionary lookups — fixed.
+6. Finding 24 — pressed-key polling allocation while walking — fixed.
+7. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
+8. Finding 25 — held-input event snapshot allocations — fixed.
+9. Finding 7 — normal-tile rendering overhead — fixed.
+10. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
+11. Finding 37 — redundant invalidation-batch cloning — fixed.
+12. Finding 36 — per-parse locale delegate allocation — fixed.
+13. Finding 34 — layer work repeated for every patched map tile — fixed.
+14. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+15. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+16. Finding 33 — asset-loader adapter closures — fixed.
+17. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+18. Finding 6 — synchronous game-thread log flushing — fixed.
+19. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+20. Finding 32 — per-map warp comparison sets — fixed.
+21. Finding 19 — repeated propagation side effects — deferred.
+22. Finding 4 — no first-class batched exact invalidation — fixed.
+23. Finding 3 — exact invalidation performing cache scans — fixed.
+24. Finding 22 — oversized sparse image-patch transfers — fixed.
+25. Finding 8 — PNG decode and conversion churn — partially fixed.
+26. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+27. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+28. Finding 9 — linear content-manager routing — fixed.
+29. Finding 10 — repeated asset-name strings — partially fixed.
+30. Finding 14 — retained dead disposable wrappers — fixed.
+31. Finding 29 — world trackers lost across reordered transfers — fixed.
+32. Finding 30 — rectangular transformed-tile origin — fixed.
+33. Finding 18 — reversed location event changes — fixed.
+34. Finding 17 — swapped managed-event identifiers — fixed.
+35. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+36. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+37. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+38. Finding 13 — repeated dependency-list scans — fixed.
+39. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+40. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -442,11 +443,21 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Comparisons now use explicit ordinal asset-path semantics, and prefix removal only applies to a complete directory prefix.
 - **Status:** Fixed. Extension dispatch uses allocation-free ordinal-ignore-case comparisons, `.xnb` pre-normalization accepts any casing, and eager map prefixes include the normalized directory separator.
 
+### 40. Current-screen state repeats cleanup checks and dictionary hashing
+
+- **Affected code:** `Utilities/PerScreen.cs` (`Value`, `GetValueForScreen`, `SetValueForScreen`, and screen removal).
+- **Scenario:** Every update and draw where SMAPI or mods repeatedly query per-screen values such as `Context.IsWorldReady`, load stage, peer state, command queues, or mod-owned `PerScreen<T>` instances.
+- **Root cause:** Each read checks the global removed-screen marker and hashes the current screen ID into a dictionary, even though calls normally occur in long runs for the same active screen.
+- **Impact:** Steady walking/draw CPU overhead, multiplied by SMAPI and mod call volume.
+- **Expected benefit:** Repeated reads for the current screen become three scalar comparisons and a field read, with no dictionary hashing or cleanup method traversal.
+- **Risk:** Low to medium. Split-screen switching, explicit screen access, writes, removals, and full reset must keep the fast cache coherent.
+- **Status:** Fixed. `PerScreen<T>` retains the most recently accessed screen/value, uses it only while the removed-screen generation matches, writes through on assignment, and invalidates it when that screen is removed or all screens reset.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
 | --- | --- |
-| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, and 29 |
+| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, and 40 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Finding 2 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, and 39 |
@@ -463,7 +474,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, and 35 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, and 39 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, and 40 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
