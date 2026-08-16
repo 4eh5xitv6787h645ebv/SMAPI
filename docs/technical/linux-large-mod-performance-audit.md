@@ -110,13 +110,13 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 ### 11. Linux case-insensitive compatibility indexes each mod tree independently
 
-- **Affected code:** `Framework/Models/SConfig.cs` (`UseCaseInsensitivePaths`) and `SMAPI.Toolkit/Utilities/PathLookups/CaseInsensitiveFileLookup.cs` (`BuildCache`).
+- **Affected code:** `Framework/Models/SConfig.cs` (`UseCaseInsensitivePaths`) and `SMAPI.Toolkit/Utilities/PathLookups/CaseInsensitiveFileLookup.cs` (`GetFile` and `GetRelativePathCache`).
 - **Scenario:** Linux startup and first file access with hundreds of mod roots and many content files.
-- **Root cause:** Each lookup lazily performs recursive directory enumeration for its own root instead of reusing the mod discovery traversal or a shared session index.
+- **Root cause:** The first lookup for each root forces recursive directory enumeration before checking whether the requested path already exists with the exact casing. Normal manifest DLL and content paths therefore pay the compatibility-index cost even though they don't need case correction.
 - **Impact:** Startup and memory.
-- **Expected benefit:** A single discovery-time index with per-mod views avoids redundant filesystem traversal while retaining Windows-style path compatibility on Linux.
-- **Risk:** Medium to high. Runtime file creation, symlinks, case-colliding names, and invalidation need well-defined handling.
-- **Status:** Confirmed; shared-index design deferred.
+- **Expected benefit:** Exact-first lookup avoids recursive enumeration for correctly cased mods; a directory-level fallback could further limit work for the smaller set of mis-cased paths while retaining Windows-style compatibility.
+- **Risk:** Low for exact-first lookup. A replacement fallback is medium to high risk because runtime file creation, symlinks, case-colliding names, and invalidation need well-defined handling.
+- **Status:** Partially fixed. Exact paths are now normalized and checked before the recursive compatibility index is materialized, so correctly cased mods and content packs avoid indexing their trees entirely. Mis-cased paths retain the existing fallback behavior; replacing that fallback with a reusable directory-level index remains deferred pending evidence that those uncommon lookups are a material startup cost.
 
 ### 12. Mod assemblies are parsed and rewritten again on every launch
 
