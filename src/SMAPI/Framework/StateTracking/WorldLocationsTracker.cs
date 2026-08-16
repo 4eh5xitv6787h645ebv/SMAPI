@@ -36,6 +36,9 @@ internal class WorldLocationsTracker : IWatcher
     /// <summary>A stable buffer of changed locations used while topology changes are processed.</summary>
     private readonly List<LocationTracker> LocationsWithContentChangesBuffer = [];
 
+    /// <summary>Locations containing custom item stack implementations which need compatibility polling.</summary>
+    private readonly HashSet<LocationTracker> LocationsRequiringChestStackPolling = new(new ObjectReferenceComparer<LocationTracker>());
+
     /// <summary>A lookup of registered buildings and their indoor location.</summary>
     private readonly Dictionary<Building, GameLocation?> BuildingIndoors = new(new ObjectReferenceComparer<Building>());
 
@@ -119,20 +122,32 @@ internal class WorldLocationsTracker : IWatcher
         this.MineLocationListWatcher.Update();
         this.VolcanoLocationListWatcher.Update();
 
-        // update location content watchers. Chest stack changes aren't event-driven, so they still
-        // require every location while observed; otherwise only dirty locations need processing.
-        bool updateAllLocations = this.TrackChestInventoryChanges || this.IsTrackingChestInventoryChanges != this.TrackChestInventoryChanges;
-        if (updateAllLocations)
+        // Toggle every chest watcher only when the event's listener state changes. Normal item stack and
+        // inventory changes push their dirty locations; only custom Stack overrides retain a narrow poll.
+        bool chestTrackingChanged = this.IsTrackingChestInventoryChanges != this.TrackChestInventoryChanges;
+        if (chestTrackingChanged)
         {
             foreach (LocationTracker watcher in this.Locations)
+            {
                 watcher.Update(this.TrackChestInventoryChanges);
+                this.UpdateChestPollingState(watcher);
+            }
         }
         else
         {
             foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
-                watcher.Update(trackChestInventoryChanges: false);
+            {
+                watcher.Update(this.TrackChestInventoryChanges);
+                this.UpdateChestPollingState(watcher);
+            }
         }
         this.IsTrackingChestInventoryChanges = this.TrackChestInventoryChanges;
+
+        if (this.TrackChestInventoryChanges)
+        {
+            foreach (LocationTracker watcher in this.LocationsRequiringChestStackPolling)
+                watcher.UpdatePolledChestStacks();
+        }
 
         // detect added/removed locations. Add every new owner first so transfers between source lists in the
         // same update retain one stable tracker instead of briefly disposing and recreating the full graph.
@@ -213,16 +228,8 @@ internal class WorldLocationsTracker : IWatcher
     {
         this.ResetLocationList();
 
-        if (this.IsTrackingChestInventoryChanges)
-        {
-            foreach (LocationTracker watcher in this.Locations)
-                watcher.Reset();
-        }
-        else
-        {
-            foreach (LocationTracker watcher in this.LocationsWithContentChanges)
-                watcher.Reset();
-        }
+        foreach (LocationTracker watcher in this.LocationsWithContentChanges)
+            watcher.Reset();
         this.LocationsWithContentChanges.Clear();
     }
 
@@ -248,6 +255,7 @@ internal class WorldLocationsTracker : IWatcher
         this.BuildingIndoorsChangedHandlers.Clear();
         this.BuildingsWithChangedIndoors.Clear();
         this.LocationsWithContentChanges.Clear();
+        this.LocationsRequiringChestStackPolling.Clear();
         this.LocationOwnerCounts.Clear();
         this.BuildingOwnerCounts.Clear();
 
@@ -339,7 +347,13 @@ internal class WorldLocationsTracker : IWatcher
 
         // add location
         this.AddedImpl.Add(location);
-        this.LocationDict[location] = new LocationTracker(location, this.OnLocationContentChanged);
+        LocationTracker watcher = new(location, this.OnLocationContentChanged);
+        this.LocationDict[location] = watcher;
+        if (this.IsTrackingChestInventoryChanges)
+        {
+            watcher.Update(trackChestInventoryChanges: true);
+            this.UpdateChestPollingState(watcher);
+        }
 
         // add buildings
         this.Add(location.buildings);
@@ -398,6 +412,7 @@ internal class WorldLocationsTracker : IWatcher
             // remove
             this.LocationDict.Remove(location);
             this.LocationsWithContentChanges.Remove(watcher);
+            this.LocationsRequiringChestStackPolling.Remove(watcher);
             watcher.Dispose();
             this.Remove(location.buildings);
 
@@ -410,5 +425,14 @@ internal class WorldLocationsTracker : IWatcher
     private void OnLocationContentChanged(LocationTracker watcher)
     {
         this.LocationsWithContentChanges.Add(watcher);
+    }
+
+    /// <summary>Update whether a location needs custom item stack polling.</summary>
+    private void UpdateChestPollingState(LocationTracker watcher)
+    {
+        if (watcher.RequiresChestStackPolling)
+            this.LocationsRequiringChestStackPolling.Add(watcher);
+        else
+            this.LocationsRequiringChestStackPolling.Remove(watcher);
     }
 }

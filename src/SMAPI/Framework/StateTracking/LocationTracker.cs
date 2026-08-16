@@ -25,6 +25,12 @@ internal class LocationTracker : IWatcher
     /// <summary>Notify the world tracker when this location first changes after a reset.</summary>
     private readonly Action<LocationTracker>? OnChanged;
 
+    /// <summary>The chest trackers which changed since the last reset.</summary>
+    private readonly HashSet<ChestTracker> ChangedChestWatchersImpl = [];
+
+    /// <summary>Chest trackers with custom item stack implementations which need polling.</summary>
+    private readonly HashSet<ChestTracker> PolledChestWatchers = [];
+
 
     /*********
     ** Accessors
@@ -62,6 +68,12 @@ internal class LocationTracker : IWatcher
 
     /// <summary>Tracks items added or removed to chests.</summary>
     public IDictionary<Vector2, ChestTracker> ChestWatchers { get; } = new Dictionary<Vector2, ChestTracker>();
+
+    /// <summary>The chest trackers which changed since the last reset.</summary>
+    public IReadOnlyCollection<ChestTracker> ChangedChestWatchers => this.ChangedChestWatchersImpl;
+
+    /// <summary>Whether any chest contains a custom item stack implementation which needs polling.</summary>
+    public bool RequiresChestStackPolling => this.PolledChestWatchers.Count > 0;
 
 
     /*********
@@ -112,13 +124,35 @@ internal class LocationTracker : IWatcher
         if (this.ObjectsWatcher.IsChanged)
             this.UpdateChestWatcherList(added: this.ObjectsWatcher.Added, removed: this.ObjectsWatcher.Removed);
 
-        // update chest inventory watchers only while the event is observed, or once when toggling their state
-        if (trackChestInventoryChanges || this.IsTrackingChestInventoryChanges != trackChestInventoryChanges)
+        // Toggle every chest watcher when listener state changes. Otherwise process only chests which
+        // pushed a structural or stack notification since the last reset.
+        if (this.IsTrackingChestInventoryChanges != trackChestInventoryChanges)
         {
             this.IsTrackingChestInventoryChanges = trackChestInventoryChanges;
             foreach (ChestTracker watcher in this.ChestWatchers.Values)
+            {
                 watcher.Update(trackChestInventoryChanges);
+                this.UpdatePollingState(watcher);
+            }
         }
+        else if (trackChestInventoryChanges)
+        {
+            foreach (ChestTracker watcher in this.ChangedChestWatchersImpl)
+            {
+                watcher.Update(trackInventoryChanges: true);
+                this.UpdatePollingState(watcher);
+            }
+        }
+    }
+
+    /// <summary>Poll only custom item stack implementations which can't use the game's stack field events.</summary>
+    public void UpdatePolledChestStacks()
+    {
+        if (!this.IsTrackingChestInventoryChanges)
+            return;
+
+        foreach (ChestTracker watcher in this.PolledChestWatchers)
+            watcher.UpdatePolledStacks();
     }
 
     /// <inheritdoc />
@@ -129,11 +163,9 @@ internal class LocationTracker : IWatcher
         foreach (IWatcher watcher in this.Watchers)
             watcher.Reset();
 
-        if (this.IsTrackingChestInventoryChanges)
-        {
-            foreach (ChestTracker watcher in this.ChestWatchers.Values)
-                watcher.Reset();
-        }
+        foreach (ChestTracker watcher in this.ChangedChestWatchersImpl)
+            watcher.Reset();
+        this.ChangedChestWatchersImpl.Clear();
     }
 
     /// <inheritdoc />
@@ -144,6 +176,8 @@ internal class LocationTracker : IWatcher
 
         foreach (ChestTracker watcher in this.ChestWatchers.Values)
             watcher.Dispose();
+        this.ChangedChestWatchersImpl.Clear();
+        this.PolledChestWatchers.Clear();
     }
 
 
@@ -172,6 +206,8 @@ internal class LocationTracker : IWatcher
             {
                 watcher.Dispose();
                 this.ChestWatchers.Remove(tile);
+                this.ChangedChestWatchersImpl.Remove(watcher);
+                this.PolledChestWatchers.Remove(watcher);
             }
         }
 
@@ -179,7 +215,31 @@ internal class LocationTracker : IWatcher
         foreach ((Vector2 tile, SObject? obj) in added)
         {
             if (obj is Chest chest && !this.ChestWatchers.ContainsKey(tile))
-                this.ChestWatchers.Add(tile, new ChestTracker($"{this.Name}.chest({tile})", chest));
+            {
+                ChestTracker watcher = new($"{this.Name}.chest({tile})", chest, this.OnChestChanged);
+                this.ChestWatchers.Add(tile, watcher);
+                if (this.IsTrackingChestInventoryChanges)
+                {
+                    watcher.Update(trackInventoryChanges: true);
+                    this.UpdatePollingState(watcher);
+                }
+            }
         }
+    }
+
+    /// <summary>Mark a chest as changed and push this location into the world dirty set.</summary>
+    private void OnChestChanged(ChestTracker watcher)
+    {
+        this.ChangedChestWatchersImpl.Add(watcher);
+        this.OnChanged?.Invoke(this);
+    }
+
+    /// <summary>Update whether a chest needs custom-stack polling.</summary>
+    private void UpdatePollingState(ChestTracker watcher)
+    {
+        if (watcher.RequiresStackPolling)
+            this.PolledChestWatchers.Add(watcher);
+        else
+            this.PolledChestWatchers.Remove(watcher);
     }
 }

@@ -70,7 +70,7 @@ internal class LocationSnapshot
         this.ChestItems.Clear();
         if (options.TrackChestInventories)
         {
-            foreach (ChestTracker tracker in watcher.ChestWatchers.Values)
+            foreach (ChestTracker tracker in watcher.ChangedChestWatchers)
             {
                 if (tracker.TryGetInventoryChanges(out SnapshotItemListDiff? changes))
                     this.ChestItems[tracker.Chest] = changes;

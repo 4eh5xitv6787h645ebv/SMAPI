@@ -45,18 +45,32 @@ internal class SnapshotItemListDiff
     /// <param name="added">The added item stacks.</param>
     /// <param name="removed">The removed item stacks.</param>
     /// <param name="stackSizes">The items with their previous stack sizes.</param>
+    /// <param name="stackItemsToCheck">The items which may have stack changes, or <c>null</c> to check every item in <paramref name="stackSizes"/>.</param>
+    /// <param name="additionalStackSizes">Additional changed items and their previous stack sizes, if any.</param>
     /// <param name="changes">The inventory changes, or <c>null</c> if nothing changed.</param>
     /// <returns>Returns whether anything changed.</returns>
-    public static bool TryGetChanges(ISet<Item> added, ISet<Item> removed, IDictionary<Item, int> stackSizes, [NotNullWhen(true)] out SnapshotItemListDiff? changes)
+    public static bool TryGetChanges(ISet<Item> added, ISet<Item> removed, IDictionary<Item, int> stackSizes, IEnumerable<Item>? stackItemsToCheck, IDictionary<Item, int>? additionalStackSizes, [NotNullWhen(true)] out SnapshotItemListDiff? changes)
     {
         // detect item stack size changes
         List<ItemStackSizeChange>? sizesChanges = null;
-        foreach ((Item item, int oldStack) in stackSizes)
+        IEnumerable<Item> itemsToCheck = stackItemsToCheck ?? stackSizes.Keys;
+        foreach (Item item in itemsToCheck)
         {
-            if (item.Stack != oldStack)
+            if (stackSizes.TryGetValue(item, out int oldStack) && item.Stack != oldStack)
             {
                 sizesChanges ??= [];
                 sizesChanges.Add(new ItemStackSizeChange(item, oldStack, item.Stack));
+            }
+        }
+        if (additionalStackSizes != null)
+        {
+            foreach ((Item item, int oldStack) in additionalStackSizes)
+            {
+                if (item.Stack != oldStack)
+                {
+                    sizesChanges ??= [];
+                    sizesChanges.Add(new ItemStackSizeChange(item, oldStack, item.Stack));
+                }
             }
         }
 
