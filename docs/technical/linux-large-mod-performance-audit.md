@@ -258,6 +258,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. The public properties remain `IEnumerable<SButton>` snapshots; empty categories use immutable empty enumerables instead of newly allocated empty lists.
 - **Status:** Fixed. Each category list is now created on its first matching button, while empty categories share the runtime's allocation-free empty representation.
 
+### 26. Camera scrolling materializes unused cursor snapshots
+
+- **Affected code:** `Framework/Input/SInputState.cs` (`TrueUpdate` and `CursorPosition`), `Framework/WatcherCore.cs` (`Update`/`Reset`), and `Framework/SCore.cs` (`OnPlayerInstanceUpdating`).
+- **Scenario:** Focused Linux gameplay while walking scrolls the viewport, particularly when no mod listens for cursor movement or requests cursor coordinates on that tick.
+- **Root cause:** A changed viewport changes the cursor's map-relative coordinates, so SMAPI constructs a new immutable `CursorPosition` every update. The cursor watcher and input-event block both read it unconditionally even when no observable event needs the object.
+- **Impact:** Steady gameplay and garbage collection.
+- **Expected benefit:** Keeping pending coordinates as value fields and materializing the immutable API object on demand removes this per-scroll-tick allocation for mod sets which don't consume cursor positions continuously.
+- **Risk:** Medium. Cursor events need stable old/new objects, polling must still return current coordinates, and enabling a listener needs a fresh baseline rather than a delayed movement event.
+- **Status:** Fixed. Input polling now records the same pre-update coordinate values without constructing an object, cursor-diff tracking is listener-aware with an activation baseline, and button/wheel code requests the snapshot only when it will raise an event. Direct `IInputHelper` polling still materializes and returns the current immutable snapshot on demand.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.

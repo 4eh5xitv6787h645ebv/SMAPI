@@ -19,6 +19,9 @@ internal class WatcherCore
     /// <summary>The underlying watchers for convenience. These are accessible individually as separate properties.</summary>
     private readonly List<IWatcher> Watchers = [];
 
+    /// <summary>Whether cursor changes were tracked during the previous update.</summary>
+    private bool IsTrackingCursorChanges = true;
+
 
     /*********
     ** Accessors
@@ -69,7 +72,6 @@ internal class WatcherCore
         this.LocationsWatcher = new WorldLocationsTracker(gameLocations, MineShaft.activeMines, VolcanoDungeon.activeLevels);
         this.LocaleWatcher = WatcherFactory.ForGenericEquality(nameof(LocalizedContentManager.CurrentLanguageCode), () => LocalizedContentManager.CurrentLanguageCode);
         this.Watchers.AddRange([
-            this.CursorWatcher,
             this.MouseWheelScrollWatcher,
             this.SaveIdWatcher,
             this.WindowSizeWatcher,
@@ -81,9 +83,10 @@ internal class WatcherCore
     }
 
     /// <summary>Update the watchers and adjust for added or removed entities.</summary>
+    /// <param name="trackCursorChanges">Whether to track changes needed for the cursor-moved event.</param>
     /// <param name="trackPlayerInventoryChanges">Whether to track changes needed for the player inventory event.</param>
     /// <param name="trackChestInventoryChanges">Whether to track changes needed for the chest inventory event.</param>
-    public void Update(bool trackPlayerInventoryChanges, bool trackChestInventoryChanges)
+    public void Update(bool trackCursorChanges, bool trackPlayerInventoryChanges, bool trackChestInventoryChanges)
     {
         this.LocationsWatcher.TrackChestInventoryChanges = trackChestInventoryChanges;
 
@@ -108,6 +111,19 @@ internal class WatcherCore
         // update values
         foreach (IWatcher watcher in this.Watchers)
             watcher.Update();
+
+        // Cursor positions are immutable API snapshots, so compare them only while a listener can
+        // observe the result. Establish a fresh baseline whenever tracking is activated.
+        if (trackCursorChanges)
+        {
+            this.CursorWatcher.Update();
+            if (!this.IsTrackingCursorChanges)
+                this.CursorWatcher.Reset();
+        }
+        else if (this.IsTrackingCursorChanges)
+            this.CursorWatcher.Reset();
+        this.IsTrackingCursorChanges = trackCursorChanges;
+
         this.CurrentPlayerTracker?.Update(trackPlayerInventoryChanges);
     }
 
@@ -116,6 +132,8 @@ internal class WatcherCore
     {
         foreach (IWatcher watcher in this.Watchers)
             watcher.Reset();
+        if (this.IsTrackingCursorChanges)
+            this.CursorWatcher.Reset();
         this.CurrentPlayerTracker?.Reset();
     }
 }
