@@ -52,11 +52,11 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 - **Affected code:** `Metadata/CoreAssetPropagator.cs`, particularly `Propagate`, map propagation, texture propagation, NPC dialogue propagation, and NPC schedule propagation.
 - **Scenario:** Day/season/warp transitions invalidating many maps, character assets, and textures in a large world.
-- **Root cause:** Assets are propagated one at a time. Map propagation searches locations per map, NPC propagation searches characters per NPC asset, and texture propagation searches all content managers per texture.
+- **Root cause:** Assets are propagated one at a time. Map propagation searches locations per map, NPC propagation searches characters per NPC asset, schedule resumption sorts every matching schedule key, and texture propagation searches all content managers per texture.
 - **Impact:** Transitions.
 - **Expected benefit:** A single world pass and indexed lookups can substantially reduce repeated traversal during large invalidation batches.
 - **Risk:** High. Propagation has many asset-specific side effects and ordering dependencies.
-- **Status:** Partially fixed. Non-caching namespaced managers are excluded from invalidation, loaded-value, and texture-propagation scans. Multi-asset NPC dialogue/schedule bursts build one exact-name index instead of scanning every NPC for each asset. Multi-map bursts similarly index locations and spouse-room targets in one world pass instead of scanning every location for each map. Single-asset invalidations retain the cheaper direct scans. Texture-manager searches and side-effect batching remain deferred.
+- **Status:** Partially fixed. Non-caching namespaced managers are excluded from invalidation, loaded-value, and texture-propagation scans. Multi-asset NPC dialogue/schedule bursts build one exact-name index instead of scanning every NPC for each asset. Multi-map bursts similarly index locations and spouse-room targets in one world pass instead of scanning every location for each map. Resuming an invalidated NPC schedule now finds the latest applicable entry in one linear, allocation-free pass instead of filtering and sorting every key. Single-asset invalidations retain the cheaper direct scans. Texture-manager searches and side-effect batching remain deferred.
 
 ### 6. File logging flushes synchronously on the game thread
 
