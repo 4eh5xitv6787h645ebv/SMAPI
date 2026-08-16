@@ -88,6 +88,9 @@ internal class ContentCoordinator : IDisposable
     /// <summary>Parse a locale suffix in an asset name.</summary>
     private readonly Func<string, LocalizedContentManager.LanguageCode?> ParseLocale;
 
+    /// <summary>A shared byte-bounded cache of decoded mod image pixels.</summary>
+    private readonly DecodedTextureCache DecodedTextures = new();
+
     /// <summary>The cached asset load/edit operations to apply, indexed by asset name.</summary>
     private readonly TickCacheDictionary<IAssetName, AssetOperationGroup?> AssetOperationsByKey = new();
 
@@ -215,7 +218,8 @@ internal class ContentCoordinator : IDisposable
                 reflection: this.Reflection,
                 jsonHelper: this.JsonHelper,
                 onDisposing: this.OnDisposing,
-                fileLookup: this.GetFileLookup(rootDirectory)
+                fileLookup: this.GetFileLookup(rootDirectory),
+                decodedTextures: this.DecodedTextures
             );
             this.AddContentManager(manager);
             return manager;
@@ -654,6 +658,7 @@ internal class ContentCoordinator : IDisposable
         this.ContentManagers.Clear();
         this.GameContentManagers.Clear();
         this.NamespacedContentManagers.Clear();
+        this.DecodedTextures.Dispose();
         this.MainContentManager = null!; // instance no longer usable
 
         this.ContentManagerLock.Dispose();

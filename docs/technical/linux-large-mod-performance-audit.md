@@ -39,9 +39,9 @@ This is the current jank-first order, combining likely frame-time impact, freque
 27. Finding 4 — no first-class batched exact invalidation — fixed.
 28. Finding 3 — exact invalidation performing cache scans — fixed.
 29. Finding 22 — oversized sparse image-patch transfers — fixed.
-30. Finding 8 — PNG decode and conversion churn — partially fixed.
+30. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
 31. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-32. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+32. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
 33. Finding 9 — linear content-manager routing — fixed.
 34. Finding 10 — repeated asset-name strings — partially fixed.
 35. Finding 14 — retained dead disposable wrappers — fixed.
@@ -139,7 +139,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transitions, memory, and garbage collection.
 - **Expected benefit:** A bounded immutable decoded-pixel cache and selective preload support can move repeat decoding out of transition-critical paths while preserving separately owned textures.
 - **Risk:** High. Graphics-device access is thread-affine, returned assets may be mutable/disposable, and an unbounded cache would worsen memory pressure.
-- **Status:** Partially fixed. Normal PNG decoding converts Skia's native premultiplied RGBA/BGRA span directly into the final XNA array, eliminating both full-image intermediate managed arrays. On Linux's normal RGBA path, matching packed rows are now copied in bulk instead of constructing every pixel individually; padded rows and BGRA data retain channel-correct handling, and unexpected decode formats retain the general fallback. A mutation-safe decoded cache remains deferred until representative runtime data can establish a byte budget, reuse threshold, and file-change policy without increasing large-pack paging risk.
+- **Status:** Fixed with a bounded repeat-decode strategy. Normal PNG decoding converts Skia's native premultiplied RGBA/BGRA span directly into the final XNA array, eliminating both full-image intermediate managed arrays. On Linux's normal RGBA path, matching packed rows are copied in bulk instead of constructing every pixel individually. A process-wide decoded-pixel LRU now admits only an unchanged file's second decode, validates file length and modification time on every hit, skips entries larger than one quarter of its budget, and returns a fresh pixel array so public mutability and Harmony post-processing remain isolated. The adaptive budget is 1/128 of available memory, clamped to 16–128 MiB.
 
 ### 9. Content-manager lookup is linear in the number of mods and packs
 
@@ -269,7 +269,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Memory, garbage collection, and possible paging-related stutter.
 - **Expected benefit:** Byte-aware bounded caches and prompt release of transient decode buffers reduce memory spikes and paging risk.
 - **Risk:** High. GPU allocation size is approximate, asset ownership is split, and aggressive eviction can cause reload thrashing.
-- **Status:** Needs runtime evidence and a concrete ownership model.
+- **Status:** Partially fixed for decoded CPU pixels. The installed target collection contains 46,714 readable PNGs representing about 16.0 GB of decoded RGBA data, which rules out whole-pack caching. The shared cache instead uses a 16–128 MiB adaptive byte budget, second-use admission, per-entry limits, LRU eviction, bounded first-use bookkeeping, and file metadata validation. It retains only repeatedly decoded recent sources and releases everything with the content coordinator. Live GPU textures and privately owned uncached assets still need a separate ownership model before they can be budgeted safely.
 
 ### 22. Sparse image patches transfer transparent columns
 
@@ -570,7 +570,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially cursor-position consumption, live `AssetRequested` frequency, propagation side-effect repetition, and the before/after chest-tracking frame cost.
 2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
 3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
-4. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
+4. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
 5. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
 6. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
 7. Correct source-over alpha composition after representative content-pack visual comparisons.
