@@ -23,24 +23,25 @@ This is the current jank-first order, combining likely frame-time impact, freque
 11. Finding 27 — tick-cache factory and world-helper allocations — fixed.
 12. Finding 6 — synchronous game-thread log flushing — fixed.
 13. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-14. Finding 19 — repeated propagation side effects — deferred.
-15. Finding 4 — no first-class batched exact invalidation — fixed.
-16. Finding 3 — exact invalidation performing cache scans — fixed.
-17. Finding 22 — oversized sparse image-patch transfers — fixed.
-18. Finding 8 — PNG decode and conversion churn — partially fixed.
-19. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-20. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-21. Finding 9 — linear content-manager routing — fixed.
-22. Finding 10 — repeated asset-name strings — partially fixed.
-23. Finding 14 — retained dead disposable wrappers — fixed.
-24. Finding 29 — world trackers lost across reordered transfers — fixed.
-25. Finding 30 — rectangular transformed-tile origin — fixed.
-26. Finding 18 — reversed location event changes — fixed.
-27. Finding 17 — swapped managed-event identifiers — fixed.
-28. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-29. Finding 13 — repeated dependency-list scans — fixed.
-30. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-31. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+14. Finding 32 — per-map warp comparison sets — fixed.
+15. Finding 19 — repeated propagation side effects — deferred.
+16. Finding 4 — no first-class batched exact invalidation — fixed.
+17. Finding 3 — exact invalidation performing cache scans — fixed.
+18. Finding 22 — oversized sparse image-patch transfers — fixed.
+19. Finding 8 — PNG decode and conversion churn — partially fixed.
+20. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+21. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+22. Finding 9 — linear content-manager routing — fixed.
+23. Finding 10 — repeated asset-name strings — partially fixed.
+24. Finding 14 — retained dead disposable wrappers — fixed.
+25. Finding 29 — world trackers lost across reordered transfers — fixed.
+26. Finding 30 — rectangular transformed-tile origin — fixed.
+27. Finding 18 — reversed location event changes — fixed.
+28. Finding 17 — swapped managed-event identifiers — fixed.
+29. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+30. Finding 13 — repeated dependency-list scans — fixed.
+31. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+32. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -354,6 +355,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The highest-priority loader still wins with registration order breaking ties, editor ordering remains stable for equal priorities, recursive-load cleanup still runs through `finally`, and the conflict diagnostics are unchanged.
 - **Status:** Fixed. Recursive-load tracking now accepts explicit state and a cached static callback, the normal exclusive-loader check and winning-loader selection use direct list scans, and editor operations are stably ordered once when their tick-cached operation group is created and enumerated directly thereafter.
 
+### 32. Map propagation allocates two warp sets per reloaded location
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`PropagateMap`).
+- **Scenario:** Linux warps, season changes, and Content Patcher context updates which invalidate a batch of map assets used by many loaded locations.
+- **Root cause:** Before and after reloading every matching location map, SMAPI constructs a fresh hash set of warp and door destinations so it can decide whether to rebuild the global NPC warp-route cache. A multi-map expansion update therefore creates two separate set objects and backing storage per reloaded location.
+- **Impact:** Transitions and garbage collection.
+- **Expected benefit:** Bounds the temporary set allocation for an entire propagation transaction to at most two reusable sets, and stops collecting later warp snapshots once one changed route has already proven that the global cache must be rebuilt.
+- **Risk:** Low. The same case-sensitive destination sets, count check, membership check, map update order, and final cache-rebuild decision are retained.
+- **Status:** Fixed. The map propagation pass now clears and reuses one old/new target-set pair across matching locations, and skips further comparisons after detecting the first route change.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -363,8 +374,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Finding 2 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, and 31 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, and 28 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, and 27 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, and 32 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, and 32 |
 | Synchronous logging and `AutoFlush` stalls | Finding 6 |
 | Per-tile rendering overhead | Findings 7 and 30 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, and 28 |
@@ -375,7 +386,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, and 31 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, and 31 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, and 32 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
