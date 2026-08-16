@@ -57,6 +57,9 @@ internal class WorldLocationsTracker : IWatcher
     /// <summary>The tracked locations.</summary>
     public IReadOnlyCollection<LocationTracker> Locations => this.LocationDict.Values;
 
+    /// <summary>Whether to track changes needed for the chest inventory event.</summary>
+    public bool TrackChestInventoryChanges { get; set; } = true;
+
     /// <summary>The locations added since the last update.</summary>
     public IReadOnlySet<GameLocation> Added => this.AddedImpl;
 
@@ -92,7 +95,7 @@ internal class WorldLocationsTracker : IWatcher
         // update location content watchers
         foreach (LocationTracker watcher in this.Locations)
         {
-            watcher.Update();
+            watcher.Update(this.TrackChestInventoryChanges);
             if (watcher.IsChanged)
                 this.LocationsHaveChanges = true;
         }

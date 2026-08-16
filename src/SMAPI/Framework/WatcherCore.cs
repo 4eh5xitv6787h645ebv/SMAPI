@@ -81,8 +81,11 @@ internal class WatcherCore
     }
 
     /// <summary>Update the watchers and adjust for added or removed entities.</summary>
-    public void Update()
+    /// <param name="trackChestInventoryChanges">Whether to track changes needed for the chest inventory event.</param>
+    public void Update(bool trackChestInventoryChanges)
     {
+        this.LocationsWatcher.TrackChestInventoryChanges = trackChestInventoryChanges;
+
         // reset player
         if (Context.IsWorldReady)
         {

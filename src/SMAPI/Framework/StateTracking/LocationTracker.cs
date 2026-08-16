@@ -92,6 +92,13 @@ internal class LocationTracker : IWatcher
     /// <inheritdoc />
     public void Update()
     {
+        this.Update(trackChestInventoryChanges: true);
+    }
+
+    /// <summary>Update the current values.</summary>
+    /// <param name="trackChestInventoryChanges">Whether to track changes needed for the chest inventory event.</param>
+    public void Update(bool trackChestInventoryChanges)
+    {
         // track changes to location content
         bool changed = false;
         foreach (IWatcher watcher in this.Watchers)
@@ -109,7 +116,7 @@ internal class LocationTracker : IWatcher
 
         // update chest inventory watchers
         foreach (var watcher in this.ChestWatchers)
-            watcher.Value.Update();
+            watcher.Value.Update(trackChestInventoryChanges);
     }
 
     /// <inheritdoc />
