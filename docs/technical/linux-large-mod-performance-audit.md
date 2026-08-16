@@ -50,13 +50,13 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 ### 5. Asset propagation repeats global searches for each invalidated asset
 
-- **Affected code:** `Framework/Metadata/CoreAssetPropagator.cs`, particularly `Propagate`, map propagation, texture propagation, NPC dialogue propagation, and NPC schedule propagation.
+- **Affected code:** `Metadata/CoreAssetPropagator.cs`, particularly `Propagate`, map propagation, texture propagation, NPC dialogue propagation, and NPC schedule propagation.
 - **Scenario:** Day/season/warp transitions invalidating many maps, character assets, and textures in a large world.
 - **Root cause:** Assets are propagated one at a time. Map propagation searches locations per map, NPC propagation searches characters per NPC asset, and texture propagation searches all content managers per texture.
 - **Impact:** Transitions.
 - **Expected benefit:** A single world pass and indexed lookups can substantially reduce repeated traversal during large invalidation batches.
 - **Risk:** High. Propagation has many asset-specific side effects and ordering dependencies.
-- **Status:** Partially fixed. Non-caching namespaced managers are excluded from invalidation, loaded-value, and texture-propagation scans. Multi-asset NPC dialogue/schedule bursts now build one exact-name index instead of scanning every NPC for each asset, while retaining the cheaper direct scan for a single asset. Map searches and side-effect batching remain deferred.
+- **Status:** Partially fixed. Non-caching namespaced managers are excluded from invalidation, loaded-value, and texture-propagation scans. Multi-asset NPC dialogue/schedule bursts build one exact-name index instead of scanning every NPC for each asset. Multi-map bursts similarly index locations and spouse-room targets in one world pass instead of scanning every location for each map. Single-asset invalidations retain the cheaper direct scans. Texture-manager searches and side-effect batching remain deferred.
 
 ### 6. File logging flushes synchronously on the game thread
 
@@ -190,7 +190,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 ### 19. Repeated propagation side effects are not coalesced
 
-- **Affected code:** `Framework/Metadata/CoreAssetPropagator.cs` asset-specific propagation methods.
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` asset-specific propagation methods.
 - **Scenario:** A single context change invalidates multiple assets which each request the same registry reset or global cache rebuild.
 - **Root cause:** Side effects are applied immediately per asset instead of being accumulated and executed once at the end of the invalidation transaction.
 - **Impact:** Transitions.
