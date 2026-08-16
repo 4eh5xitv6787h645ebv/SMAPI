@@ -18,14 +18,14 @@ This is the current jank-first order, combining likely frame-time impact, freque
 6. Finding 40 — repeated current-screen dictionary lookups — fixed.
 7. Finding 24 — pressed-key polling allocation while walking — fixed.
 8. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
-9. Finding 47 — eager cursor coordinate derivation while walking — needs runtime evidence.
+9. Finding 47 — eager cursor coordinate derivation while walking — deprioritized for the target pack.
 10. Finding 25 — held-input event snapshot allocations — fixed.
 11. Finding 7 — normal-tile rendering overhead — fixed.
 12. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
 13. Finding 37 — redundant invalidation-batch cloning — fixed.
 14. Finding 36 — per-parse locale delegate allocation — fixed.
 15. Finding 34 — layer work repeated for every patched map tile — fixed.
-16. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+16. Finding 15 — one-tick asset-operation cache lifetime — rejected without a provider contract.
 17. Finding 31 — intercepted asset-operation dispatch churn — fixed.
 18. Finding 33 — asset-loader adapter closures — fixed.
 19. Finding 27 — tick-cache factory and world-helper allocations — fixed.
@@ -35,7 +35,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 23. Finding 41 — incomplete and duplicate world-location topology — fixed.
 24. Finding 43 — per-asset propagation key normalization allocations — fixed.
 25. Finding 32 — per-map warp comparison sets — fixed.
-26. Finding 19 — repeated propagation side effects — deferred.
+26. Finding 19 — repeated propagation side effects — partially fixed.
 27. Finding 4 — no first-class batched exact invalidation — fixed.
 28. Finding 3 — exact invalidation performing cache scans — fixed.
 29. Finding 22 — oversized sparse image-patch transfers — fixed.
@@ -209,7 +209,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transitions and steady gameplay for mods which request uncached assets frequently.
 - **Expected benefit:** Generation-based caching or keyed subscriptions can avoid dispatching unrelated providers repeatedly.
 - **Risk:** High. Mods can add/remove handlers or change context dynamically, so stale negative or operation caches would break content behavior.
-- **Status:** Needs runtime evidence.
+- **Status:** Rejected as a registration-generation cache without a new provider contract. The installed target collection contains 106 assemblies which participate in `AssetRequested`, but handlers can change whether and how they handle an asset based on arbitrary game/mod state without adding or removing the handler. A handler-registration generation therefore can't prove that a prior positive or negative result is still valid. The one-tick cache remains the longest safe lifetime under the current API; request-frequency tracing can still justify a future keyed provider API.
 
 ### 16. Event dispatch performs per-handler context operations and lazy callback allocations
 
@@ -249,7 +249,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transitions.
 - **Expected benefit:** Fewer repeated registry resets, warp-cache rebuilds, and global refresh calls.
 - **Risk:** High. Some invalidations may require ordering or intermediate state visible to later propagation.
-- **Status:** Confirmed; deferred as part of batched propagation.
+- **Status:** Partially fixed. Adjacent item-data routes now assign all of their new data sources and reset the shared `ItemRegistry` once at the end of that run instead of once per asset. A non-item route flushes the pending reset first, preserving the exact point at which any other propagation can observe registry state. Other unrelated global side effects remain separate until their ordering contracts are proven.
 
 ### 20. The runtime is out of support and performance features are disabled
 
@@ -529,7 +529,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Possible steady walking CPU overhead in packs where cursor state is rarely consumed.
 - **Expected benefit:** Defer the coordinate/radius/grab calculations until the snapshot is actually requested.
 - **Risk:** Medium. The getter must reproduce the pre-game-update snapshot, so it must capture viewport, zoom, mouse, player position/tile/facing, and any other inputs instead of reading later live state.
-- **Status:** Needs runtime evidence. Trace request frequency and calculation cost before adding a larger tick-snapshot structure.
+- **Status:** Deprioritized for the installed target pack. Of 283 compiled mod assemblies, only three contain actual cursor API calls or `CursorMoved` subscriptions, but Context-Sensitive Gift Cursor subscribes to `CursorMoved` globally. That listener makes SMAPI materialize the cursor snapshot on walking ticks anyway, so deferring the coordinate fields would not remove this work while that mod is enabled. The change may still benefit other mod sets, but it isn't a target-pack priority.
 
 ### 48. Observed chest inventories scan every chest and item stack each tick
 

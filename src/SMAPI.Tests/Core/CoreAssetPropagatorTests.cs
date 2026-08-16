@@ -91,6 +91,58 @@ internal class CoreAssetPropagatorTests
         CoreAssetPropagator.GetOtherAssetRoute("Characters/Dialogue/Abigail").Should().Be(OtherAssetRoute.None);
     }
 
+    [TestCase(OtherAssetRoute.BigCraftables, true)]
+    [TestCase(OtherAssetRoute.Boots, true)]
+    [TestCase(OtherAssetRoute.Furniture, true)]
+    [TestCase(OtherAssetRoute.Hats, true)]
+    [TestCase(OtherAssetRoute.Objects, true)]
+    [TestCase(OtherAssetRoute.Pants, true)]
+    [TestCase(OtherAssetRoute.Pets, true)]
+    [TestCase(OtherAssetRoute.Shirts, true)]
+    [TestCase(OtherAssetRoute.Tools, true)]
+    [TestCase(OtherAssetRoute.Weapons, true)]
+    [TestCase(OtherAssetRoute.Achievements, false)]
+    [TestCase(OtherAssetRoute.None, false)]
+    public void ResetsItemRegistry_IdentifiesSharedCacheRoutes(OtherAssetRoute route, bool expected)
+    {
+        CoreAssetPropagator.ResetsItemRegistry(route).Should().Be(expected);
+    }
+
+    [Test(Description = "Assert that adjacent item-data propagation routes reset their shared registry only once.")]
+    public void Propagate_AdjacentItemData_CoalescesRegistryReset()
+    {
+        int resets = 0;
+        CoreAssetPropagator propagator = this.CreatePropagator(() => resets++);
+        Dictionary<IAssetName, Type> assets = new()
+        {
+            [AssetName.Parse("Data/Boots", _ => null)] = typeof(object),
+            [AssetName.Parse("Data/Furniture", _ => null)] = typeof(object),
+            [AssetName.Parse("Data/Hats", _ => null)] = typeof(object)
+        };
+
+        propagator.Propagate([], assets, loadedTextureManagers: null, ignoreWorld: true, out Dictionary<IAssetName, bool> propagated, out _);
+
+        resets.Should().Be(1);
+        propagated.Values.Should().OnlyContain(changed => changed);
+    }
+
+    [Test(Description = "Assert that a non-item propagation boundary flushes pending registry state before later item data.")]
+    public void Propagate_SeparatedItemData_PreservesResetBoundary()
+    {
+        int resets = 0;
+        CoreAssetPropagator propagator = this.CreatePropagator(() => resets++);
+        Dictionary<IAssetName, Type> assets = new()
+        {
+            [AssetName.Parse("Data/Boots", _ => null)] = typeof(object),
+            [AssetName.Parse("Mods/Unknown", _ => null)] = typeof(object),
+            [AssetName.Parse("Data/Hats", _ => null)] = typeof(object)
+        };
+
+        propagator.Propagate([], assets, loadedTextureManagers: null, ignoreWorld: true, out _, out _);
+
+        resets.Should().Be(2);
+    }
+
     [Test(Description = "Assert that a multi-map propagation batch indexes world map paths once.")]
     public void Propagate_MultipleMaps_IndexesLocationsOnce()
     {
@@ -170,5 +222,19 @@ internal class CoreAssetPropagatorTests
         unrelatedManager.VerifyNoOtherCalls();
         propagated[assetName].Should().BeFalse();
         changedWarpRoutes.Should().BeFalse();
+    }
+
+    /// <summary>Create a propagator suitable for routes which don't access game content.</summary>
+    private CoreAssetPropagator CreatePropagator(Action resetItemRegistry)
+    {
+        return new CoreAssetPropagator(
+            mainContent: null!,
+            disposableContent: null!,
+            monitor: null!,
+            multiplayer: null!,
+            reflection: null!,
+            parseAssetName: rawName => AssetName.Parse(rawName, _ => null),
+            resetItemRegistry: resetItemRegistry
+        );
     }
 }
