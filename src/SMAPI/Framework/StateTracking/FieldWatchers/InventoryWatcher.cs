@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using StardewModdingAPI.Framework.StateTracking.Comparers;
 using StardewValley;
@@ -14,6 +15,9 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
     *********/
     /// <summary>The inventory being watched.</summary>
     private readonly Inventory Inventory;
+
+    /// <summary>Notify the owner when this watcher first changes after a reset.</summary>
+    private readonly Action? OnChanged;
 
     /// <summary>The pairs added since the last reset.</summary>
     private readonly HashSet<Item> AddedImpl = new(new ObjectReferenceComparer<Item>());
@@ -54,10 +58,12 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="inventory">The inventory to watch.</param>
     /// <param name="isEnabled">Whether to start listening for inventory changes.</param>
-    public InventoryWatcher(string name, Inventory inventory, bool isEnabled = true)
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public InventoryWatcher(string name, Inventory inventory, bool isEnabled = true, Action? onChanged = null)
     {
         this.Name = name;
         this.Inventory = inventory;
+        this.OnChanged = onChanged;
 
         this.SetEnabled(isEnabled);
     }
@@ -122,6 +128,8 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
     /// <param name="newValues">The new list of values.</param>
     private void OnInventoryReplaced(Inventory inventory, IList<Item> oldValues, IList<Item> newValues)
     {
+        bool wasChanged = this.IsChanged;
+
         this.PooledOldSet.Clear();
         this.PooledOldSet.AddRange(oldValues);
 
@@ -139,6 +147,9 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
             if (!this.PooledOldSet.Contains(value))
                 this.Add(value);
         }
+
+        if (!wasChanged && this.IsChanged)
+            this.OnChanged?.Invoke();
     }
 
     /// <summary>A callback invoked when an entry is replaced.</summary>
@@ -148,8 +159,12 @@ internal class InventoryWatcher : BaseDisposableWatcher, ICollectionWatcher<Item
     /// <param name="newValue">The new value.</param>
     private void OnSlotChanged(Inventory inventory, int index, Item? oldValue, Item? newValue)
     {
+        bool wasChanged = this.IsChanged;
         this.Remove(oldValue);
         this.Add(newValue);
+
+        if (!wasChanged && this.IsChanged)
+            this.OnChanged?.Invoke();
     }
 
     /// <summary>Track an added item.</summary>

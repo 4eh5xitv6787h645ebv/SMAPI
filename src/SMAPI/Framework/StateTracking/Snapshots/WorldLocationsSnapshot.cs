@@ -53,20 +53,11 @@ internal class WorldLocationsSnapshot
                 this.LocationsDict.Remove(key);
         }
 
-        // skip location traversal when no corresponding event is subscribed, or no relevant
-        // collection changed (chest stack changes aren't represented by the latter flag)
-        if (
-            !options.TrackLocationContents
-            || (!options.TrackChestInventories && !watcher.HaveLocationContentsChanged)
-        )
+        // skip location traversal when no corresponding event is subscribed or no relevant location changed
+        if (!options.TrackLocationContents || !watcher.HaveLocationContentsChanged)
             return;
 
-        // update all locations only when chest stack changes need polling; collection changes are
-        // event-driven and can use the dirty-location set directly.
-        IReadOnlyCollection<LocationTracker> locationsToUpdate = options.TrackChestInventories
-            ? watcher.Locations
-            : watcher.ChangedLocations;
-        foreach (LocationTracker locationWatcher in locationsToUpdate)
+        foreach (LocationTracker locationWatcher in watcher.ChangedLocations)
         {
             if (!this.LocationsDict.TryGetValue(locationWatcher.Location, out LocationSnapshot? snapshot))
                 this.LocationsDict[locationWatcher.Location] = snapshot = new LocationSnapshot(locationWatcher.Location);

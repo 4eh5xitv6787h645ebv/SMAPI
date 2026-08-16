@@ -3,12 +3,14 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Reflection;
 using FluentAssertions;
+using Microsoft.Xna.Framework;
 using NUnit.Framework;
 using StardewModdingAPI.Framework.StateTracking;
 using StardewModdingAPI.Framework.StateTracking.Snapshots;
 using StardewValley;
 using StardewValley.Buildings;
 using StardewValley.Locations;
+using StardewValley.Objects;
 
 namespace SMAPI.Tests.Core;
 
@@ -243,6 +245,77 @@ internal class WorldLocationsSnapshotTests
         snapshot.Locations.Should().BeEmpty();
     }
 
+    [Test(Description = "Assert that observed chest stack changes snapshot only the location pushed by the changed stack field.")]
+    public void Update_UsesDirtyLocationSetWithChestTracking()
+    {
+        ObservableCollection<GameLocation> locations = [];
+        using WorldLocationsTracker tracker = new(locations, new List<MineShaft>(), new List<VolcanoDungeon>());
+        WorldLocationsSnapshot snapshot = new();
+        WorldSnapshotOptions options = new(
+            TrackLocationList: false,
+            TrackBuildings: false,
+            TrackDebris: false,
+            TrackLargeTerrainFeatures: false,
+            TrackNpcs: false,
+            TrackObjects: false,
+            TrackChestInventories: true,
+            TrackTerrainFeatures: false,
+            TrackFurniture: false
+        );
+        GameLocation changedLocation = new();
+        GameLocation unchangedLocation = new();
+        Chest changedChest = new();
+        Chest unchangedChest = new();
+        Item changedItem = new StardewValley.Object { Stack = 2 };
+        changedChest.Items.Add(changedItem);
+        unchangedChest.Items.Add(new StardewValley.Object { Stack = 2 });
+        changedLocation.Objects.Add(Vector2.Zero, changedChest);
+        unchangedLocation.Objects.Add(Vector2.Zero, unchangedChest);
+        locations.Add(changedLocation);
+        locations.Add(unchangedLocation);
+        tracker.Update();
+        tracker.Reset();
+
+        changedItem.Stack = 5;
+        tracker.Update();
+        snapshot.Update(tracker, options);
+
+        tracker.ChangedLocations.Should().ContainSingle().Which.Location.Should().BeSameAs(changedLocation);
+        var changedSnapshot = snapshot.Locations.Should().ContainSingle().Which;
+        changedSnapshot.Location.Should().BeSameAs(changedLocation);
+        changedSnapshot.ChestItems.Should().ContainSingle().Which.Key.Should().BeSameAs(changedChest);
+
+        tracker.Reset();
+        tracker.Update();
+        snapshot.Update(tracker, options);
+        tracker.ChangedLocations.Should().BeEmpty();
+        snapshot.Locations.Should().BeEmpty();
+    }
+
+    [Test(Description = "Assert that custom Stack overrides remain in the narrow world polling set across resets.")]
+    public void Update_PreservesCustomChestStackPollingAcrossResets()
+    {
+        ObservableCollection<GameLocation> locations = [];
+        using WorldLocationsTracker tracker = new(locations, new List<MineShaft>(), new List<VolcanoDungeon>());
+        GameLocation location = new();
+        Chest chest = new();
+        CustomStackObject item = new() { Stack = 2 };
+        chest.Items.Add(item);
+        location.Objects.Add(Vector2.Zero, chest);
+        locations.Add(location);
+        tracker.Update();
+        tracker.Reset();
+
+        item.Stack = 3;
+        tracker.Update();
+        tracker.ChangedLocations.Should().ContainSingle().Which.Location.Should().BeSameAs(location);
+
+        tracker.Reset();
+        item.Stack = 4;
+        tracker.Update();
+        tracker.ChangedLocations.Should().ContainSingle().Which.Location.Should().BeSameAs(location);
+    }
+
     /// <summary>Create a raw location whose building list doesn't call uninitialized game-global callbacks.</summary>
     private static GameLocation CreateLocationForBuildingTests()
     {
@@ -251,5 +324,17 @@ internal class WorldLocationsSnapshotTests
         collectionType.GetField("OnValueAdded", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(location.buildings, null);
         collectionType.GetField("OnValueRemoved", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(location.buildings, null);
         return location;
+    }
+
+    /// <summary>A representative mod item whose quantity isn't backed by <see cref="Item.stack"/>.</summary>
+    private sealed class CustomStackObject : StardewValley.Object
+    {
+        private int CustomStack;
+
+        public override int Stack
+        {
+            get => this.CustomStack;
+            set => this.CustomStack = value;
+        }
     }
 }

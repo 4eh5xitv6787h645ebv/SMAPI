@@ -10,53 +10,54 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 This is the current jank-first order, combining likely frame-time impact, frequency, confidence, and compatibility risk. Finding numbers link the ranking to the detailed evidence below; fixed entries remain ranked so the expected benefit of this fork is visible.
 
-1. Finding 2 — demand-driven world, chest, and inventory tracking — partially fixed.
-2. Finding 1 — duplicate world-location processing — fixed.
-3. Finding 23 — per-tick core update closures — fixed.
-4. Finding 35 — render-stage reflection and mismatched sprite batches — fixed.
-5. Finding 40 — repeated current-screen dictionary lookups — fixed.
-6. Finding 24 — pressed-key polling allocation while walking — fixed.
-7. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
-8. Finding 47 — eager cursor coordinate derivation while walking — needs runtime evidence.
-9. Finding 25 — held-input event snapshot allocations — fixed.
-10. Finding 7 — normal-tile rendering overhead — fixed.
-11. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-12. Finding 37 — redundant invalidation-batch cloning — fixed.
-13. Finding 36 — per-parse locale delegate allocation — fixed.
-14. Finding 34 — layer work repeated for every patched map tile — fixed.
-15. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
-16. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-17. Finding 33 — asset-loader adapter closures — fixed.
-18. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-19. Finding 6 — synchronous game-thread log flushing — fixed.
-20. Finding 46 — synchronous log formatting on the game thread — fixed.
-21. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-22. Finding 41 — incomplete and duplicate world-location topology — fixed.
-23. Finding 43 — per-asset propagation key normalization allocations — fixed.
-24. Finding 32 — per-map warp comparison sets — fixed.
-25. Finding 19 — repeated propagation side effects — deferred.
-26. Finding 4 — no first-class batched exact invalidation — fixed.
-27. Finding 3 — exact invalidation performing cache scans — fixed.
-28. Finding 22 — oversized sparse image-patch transfers — fixed.
-29. Finding 8 — PNG decode and conversion churn — partially fixed.
-30. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-31. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-32. Finding 9 — linear content-manager routing — fixed.
-33. Finding 10 — repeated asset-name strings — partially fixed.
-34. Finding 14 — retained dead disposable wrappers — fixed.
-35. Finding 29 — world trackers lost across reordered transfers — fixed.
-36. Finding 42 — location trackers lack source ownership — fixed.
-37. Finding 30 — rectangular transformed-tile origin — fixed.
-38. Finding 18 — reversed location event changes — fixed.
-39. Finding 17 — swapped managed-event identifiers — fixed.
-40. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-41. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-42. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-43. Finding 13 — repeated dependency-list scans — fixed.
-44. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
-45. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-46. Finding 45 — incorrect overlay alpha composition — queued.
-47. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+1. Finding 48 — event-driven observed chest inventory tracking — fixed.
+2. Finding 2 — demand-driven world, chest, and inventory tracking — fixed.
+3. Finding 1 — duplicate world-location processing — fixed.
+4. Finding 23 — per-tick core update closures — fixed.
+5. Finding 35 — render-stage reflection and mismatched sprite batches — fixed.
+6. Finding 40 — repeated current-screen dictionary lookups — fixed.
+7. Finding 24 — pressed-key polling allocation while walking — fixed.
+8. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
+9. Finding 47 — eager cursor coordinate derivation while walking — needs runtime evidence.
+10. Finding 25 — held-input event snapshot allocations — fixed.
+11. Finding 7 — normal-tile rendering overhead — fixed.
+12. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
+13. Finding 37 — redundant invalidation-batch cloning — fixed.
+14. Finding 36 — per-parse locale delegate allocation — fixed.
+15. Finding 34 — layer work repeated for every patched map tile — fixed.
+16. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+17. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+18. Finding 33 — asset-loader adapter closures — fixed.
+19. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+20. Finding 6 — synchronous game-thread log flushing — fixed.
+21. Finding 46 — synchronous log formatting on the game thread — fixed.
+22. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+23. Finding 41 — incomplete and duplicate world-location topology — fixed.
+24. Finding 43 — per-asset propagation key normalization allocations — fixed.
+25. Finding 32 — per-map warp comparison sets — fixed.
+26. Finding 19 — repeated propagation side effects — deferred.
+27. Finding 4 — no first-class batched exact invalidation — fixed.
+28. Finding 3 — exact invalidation performing cache scans — fixed.
+29. Finding 22 — oversized sparse image-patch transfers — fixed.
+30. Finding 8 — PNG decode and conversion churn — partially fixed.
+31. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+32. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+33. Finding 9 — linear content-manager routing — fixed.
+34. Finding 10 — repeated asset-name strings — partially fixed.
+35. Finding 14 — retained dead disposable wrappers — fixed.
+36. Finding 29 — world trackers lost across reordered transfers — fixed.
+37. Finding 42 — location trackers lack source ownership — fixed.
+38. Finding 30 — rectangular transformed-tile origin — fixed.
+39. Finding 18 — reversed location event changes — fixed.
+40. Finding 17 — swapped managed-event identifiers — fixed.
+41. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+42. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+43. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+44. Finding 13 — repeated dependency-list scans — fixed.
+45. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
+46. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+47. Finding 45 — incorrect overlay alpha composition — queued.
+48. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -78,7 +79,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Steady gameplay and memory.
 - **Expected benefit:** Lower baseline main-thread work, scaling with world size rather than charging every player the full tracking cost.
 - **Risk:** High. Some tracked state is needed for internal context and newly registered listeners need a correct baseline; activation must be granular rather than disabling the entire watcher graph.
-- **Status:** Partially fixed. The chest-inventory and player-inventory stages disable stack baselines, comparisons, and snapshot construction when their events have no listeners, with a fresh baseline on activation; unobserved chest watchers now also unsubscribe from inventory notifications and skip both their update and reset traversals. Verbose diagnostic logging keeps player inventory tracking active when requested. Location collection watchers push one aggregate dirty notification, and unobserved-chest ticks process and snapshot only the locations in that dirty set instead of traversing the whole world. World snapshots copy only event families which have listeners and retain only locations with relevant changes. Building indoor references use their net-field notifications and a dirty set, replacing the every-tick scan of all buildings with changed-only processing. The underlying collection watchers remain active because SMAPI needs them to discover location topology independently of public event subscriptions.
+- **Status:** Fixed within the safe demand-gating boundary. The chest-inventory and player-inventory stages disable stack baselines, comparisons, and snapshot construction when their events have no listeners, with a fresh baseline on activation; unobserved chest watchers also unsubscribe from inventory notifications and skip their update/reset traversals. Verbose diagnostic logging keeps player inventory tracking active when requested. Location collection watchers push one aggregate dirty notification, so updates and snapshots process only dirty locations. World snapshots copy only event families which have listeners and retain only locations with relevant changes. Building indoor references use net-field notifications and a dirty set instead of an every-tick building scan. The underlying topology collection watchers intentionally remain active because SMAPI must discover live locations independently of public event subscriptions. Observed-chest scaling is addressed separately in finding 48.
 
 ### 3. Exact asset invalidation performs a general cache scan
 
@@ -530,13 +531,23 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium. The getter must reproduce the pre-game-update snapshot, so it must capture viewport, zoom, mouse, player position/tile/facing, and any other inputs instead of reading later live state.
 - **Status:** Needs runtime evidence. Trace request frequency and calculation cost before adding a larger tick-snapshot structure.
 
+### 48. Observed chest inventories scan every chest and item stack each tick
+
+- **Affected code:** `Framework/StateTracking/WorldLocationsTracker.cs`, `LocationTracker.cs`, `ChestTracker.cs`, `FieldWatchers/InventoryWatcher.cs`, and `Snapshots/WorldLocationsSnapshot.cs`.
+- **Scenario:** Normal walking with any mod subscribed to `ChestInventoryChanged`, particularly expansion saves with many placed chests and large automated storage inventories.
+- **Root cause:** Once the event had a listener, SMAPI updated and reset every location and chest each tick. Snapshot comparison then read every tracked item's virtual `Stack` property even when no chest changed. Inventory slot notifications already existed, and normal game item quantities are backed by `NetInt`, but neither signal reached the aggregate dirty-location path.
+- **Impact:** Steady frame time scales with all loaded chests and stored item stacks instead of the number which changed; the scan can amplify walking jank even on idle inventory ticks.
+- **Expected benefit:** Idle ticks with ordinary items perform no location, chest, or item-stack traversal for this event. A changed normal stack pushes exactly its chest and location into the snapshot path, and only changed stack baselines are compared/reset. Work therefore scales with changes rather than world inventory size.
+- **Risk:** Medium. Mods can override the virtual `Item.Stack` implementation without using the game's net field, and inventory add/remove, listener activation, duplicate net callbacks, and multiple changes within a tick must preserve the old snapshot baseline.
+- **Status:** Fixed with a compatibility fallback. Standard inherited `Item.Stack` implementations subscribe to the item's reference-identified net field; inventory slot changes and stack changes push a dirty chest/location once per reset. Location snapshots inspect and reset only changed chests. Runtime item types which override `Stack` remain in a dedicated narrow polling set, so custom mod items retain the previous detection semantics without keeping the global scan.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
 | --- | --- |
-| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, and 42 |
+| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, and 48 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
-| Chest scanning and snapshot comparisons | Finding 2 |
+| Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, and 39 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, and 43 |
@@ -551,12 +562,12 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, and 47 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, and 46 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, and 48 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
 
-1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially chest polling, cursor-position consumption, live `AssetRequested` frequency, and propagation side-effect repetition.
+1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially cursor-position consumption, live `AssetRequested` frequency, propagation side-effect repetition, and the before/after chest-tracking frame cost.
 2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
 3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
 4. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.

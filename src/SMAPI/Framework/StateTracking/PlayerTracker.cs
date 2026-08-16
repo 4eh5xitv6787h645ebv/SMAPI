@@ -165,7 +165,7 @@ internal class PlayerTracker : IDisposable
                 this.PooledAdded.Add(item);
         }
 
-        return SnapshotItemListDiff.TryGetChanges(added: this.PooledAdded, removed: this.PooledRemoved, stackSizes: this.PreviousInventory, out changes);
+        return SnapshotItemListDiff.TryGetChanges(added: this.PooledAdded, removed: this.PooledRemoved, stackSizes: this.PreviousInventory, stackItemsToCheck: null, additionalStackSizes: null, out changes);
     }
 
     /// <summary>Release watchers and resources.</summary>

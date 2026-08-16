@@ -88,9 +88,10 @@ internal static class WatcherFactory
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="inventory">The item inventory.</param>
     /// <param name="isEnabled">Whether to start listening for inventory changes.</param>
-    public static InventoryWatcher ForInventory(string name, Inventory inventory, bool isEnabled = true)
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public static InventoryWatcher ForInventory(string name, Inventory inventory, bool isEnabled = true, Action? onChanged = null)
     {
-        return new InventoryWatcher(name, inventory, isEnabled);
+        return new InventoryWatcher(name, inventory, isEnabled, onChanged);
     }
 
     /// <summary>Get a watcher for a net collection.</summary>
