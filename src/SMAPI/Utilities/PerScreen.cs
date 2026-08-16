@@ -14,10 +14,19 @@ public class PerScreen<T>
     private readonly Func<T> CreateNewState;
 
     /// <summary>The tracked values for each screen.</summary>
-    private readonly IDictionary<int, T> States = new Dictionary<int, T>();
+    private readonly Dictionary<int, T> States = [];
 
     /// <summary>The last <see cref="Context.LastRemovedScreenId"/> value for which this instance was updated.</summary>
     private int LastRemovedScreenId;
+
+    /// <summary>The most recently accessed screen ID.</summary>
+    private int CachedScreenId;
+
+    /// <summary>The value for the <see cref="CachedScreenId"/>.</summary>
+    private T CachedValue = default!;
+
+    /// <summary>Whether <see cref="CachedScreenId"/> and <see cref="CachedValue"/> are set.</summary>
+    private bool HasCachedValue;
 
 
     /*********
@@ -27,7 +36,16 @@ public class PerScreen<T>
     /// <remarks>The value is initialized the first time it's requested for that screen, unless it's set manually first.</remarks>
     public T Value
     {
-        get => this.GetValueForScreen(Context.ScreenId);
+        get
+        {
+            int screenId = Context.ScreenId;
+            return
+                this.HasCachedValue
+                && this.CachedScreenId == screenId
+                && this.LastRemovedScreenId == Context.LastRemovedScreenId
+                    ? this.CachedValue
+                    : this.GetValueForScreen(screenId);
+        }
         set => this.SetValueForScreen(Context.ScreenId, value);
     }
 
@@ -60,10 +78,22 @@ public class PerScreen<T>
     /// <param name="screenId">The screen ID to check.</param>
     public T GetValueForScreen(int screenId)
     {
+        if (
+            this.HasCachedValue
+            && this.CachedScreenId == screenId
+            && this.LastRemovedScreenId == Context.LastRemovedScreenId
+        )
+            return this.CachedValue;
+
         this.RemoveDeadScreens();
-        return this.States.TryGetValue(screenId, out T? state)
-            ? state
+        T state = this.States.TryGetValue(screenId, out T? existingState)
+            ? existingState
             : this.States[screenId] = this.CreateNewState();
+
+        this.CachedScreenId = screenId;
+        this.CachedValue = state;
+        this.HasCachedValue = true;
+        return state;
     }
 
     /// <summary>Set the value for a given screen ID.</summary>
@@ -73,6 +103,9 @@ public class PerScreen<T>
     {
         this.RemoveDeadScreens();
         this.States[screenId] = value;
+        this.CachedScreenId = screenId;
+        this.CachedValue = value;
+        this.HasCachedValue = true;
     }
 
     /// <summary>Remove all active values.</summary>
@@ -108,7 +141,11 @@ public class PerScreen<T>
         foreach (var pair in this.States)
         {
             if (shouldRemove(pair.Key))
+            {
                 this.States.Remove(pair.Key);
+                if (this.HasCachedValue && this.CachedScreenId == pair.Key)
+                    this.HasCachedValue = false;
+            }
         }
     }
 }
