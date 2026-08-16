@@ -19,27 +19,28 @@ This is the current jank-first order, combining likely frame-time impact, freque
 7. Finding 7 — normal-tile rendering overhead — fixed.
 8. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
 9. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
-10. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-11. Finding 6 — synchronous game-thread log flushing — fixed.
-12. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-13. Finding 19 — repeated propagation side effects — deferred.
-14. Finding 4 — no first-class batched exact invalidation — fixed.
-15. Finding 3 — exact invalidation performing cache scans — fixed.
-16. Finding 22 — oversized sparse image-patch transfers — fixed.
-17. Finding 8 — PNG decode and conversion churn — partially fixed.
-18. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-19. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-20. Finding 9 — linear content-manager routing — fixed.
-21. Finding 10 — repeated asset-name strings — partially fixed.
-22. Finding 14 — retained dead disposable wrappers — fixed.
-23. Finding 29 — world trackers lost across reordered transfers — fixed.
-24. Finding 30 — rectangular transformed-tile origin — fixed.
-25. Finding 18 — reversed location event changes — fixed.
-26. Finding 17 — swapped managed-event identifiers — fixed.
-27. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-28. Finding 13 — repeated dependency-list scans — fixed.
-29. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-30. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+10. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+11. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+12. Finding 6 — synchronous game-thread log flushing — fixed.
+13. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+14. Finding 19 — repeated propagation side effects — deferred.
+15. Finding 4 — no first-class batched exact invalidation — fixed.
+16. Finding 3 — exact invalidation performing cache scans — fixed.
+17. Finding 22 — oversized sparse image-patch transfers — fixed.
+18. Finding 8 — PNG decode and conversion churn — partially fixed.
+19. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+20. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+21. Finding 9 — linear content-manager routing — fixed.
+22. Finding 10 — repeated asset-name strings — partially fixed.
+23. Finding 14 — retained dead disposable wrappers — fixed.
+24. Finding 29 — world trackers lost across reordered transfers — fixed.
+25. Finding 30 — rectangular transformed-tile origin — fixed.
+26. Finding 18 — reversed location event changes — fixed.
+27. Finding 17 — swapped managed-event identifiers — fixed.
+28. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+29. Finding 13 — repeated dependency-list scans — fixed.
+30. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+31. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -343,6 +344,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Square tiles are numerically unchanged, normal tiles still use xTile's base fast path, and only the transformed rectangular-tile Y offset changes.
 - **Status:** Fixed. The vertical draw offset now uses `origin.Y`.
 
+### 31. Intercepted asset reloads repeatedly allocate dispatch helpers
+
+- **Affected code:** `Framework/ContentManagers/GameContentManager.cs` (`LoadExact`, `ApplyLoader`, `ApplyEditors`, and `AssertMaxOneRequiredLoader`), `Framework/SCore.cs` (`RequestAssetOperations`), and `Framework/Utilities/ContextHash.cs` (`Track`).
+- **Scenario:** Linux gameplay transitions and context changes which reload many assets intercepted by Content Patcher-scale handler sets.
+- **Root cause:** Every uncached intercepted load created a capturing recursive-load closure. Loader validation built a filtered array even in the normal zero-or-one-exclusive-loader case, selecting the winning loader used a LINQ maximum pass, and every application of a cached editor group rebuilt a stable LINQ ordering pipeline.
+- **Impact:** Transitions and garbage collection, with cost repeated per reloaded asset and content manager.
+- **Expected benefit:** Removes routine helper objects and redundant ordering work around mod loaders/editors, leaving more of the transition frame budget for the actual content edits and texture/map work.
+- **Risk:** Low. The highest-priority loader still wins with registration order breaking ties, editor ordering remains stable for equal priorities, recursive-load cleanup still runs through `finally`, and the conflict diagnostics are unchanged.
+- **Status:** Fixed. Recursive-load tracking now accepts explicit state and a cached static callback, the normal exclusive-loader check and winning-loader selection use direct list scans, and editor operations are stably ordered once when their tick-cached operation group is created and enumerated directly thereafter.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -350,7 +361,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, and 29 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Finding 2 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, and 15 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, and 31 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, and 28 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, and 27 |
@@ -363,8 +374,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Finding 12 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, and 27 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, and 28 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, and 31 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, and 31 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
