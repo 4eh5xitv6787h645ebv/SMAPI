@@ -123,16 +123,22 @@ internal class GameContentManager : BaseContentManager
         }
         else
         {
-            data = this.AssetsBeingLoaded.Track(assetName.Name, () =>
-            {
-                IAssetInfo info = new AssetInfo(assetName.LocaleCode, assetName, typeof(T), this.AssertAndNormalizeAssetName);
-                AssetOperationGroup? operations = this.Coordinator.GetAssetOperations(info);
-                IAssetData asset =
-                    this.ApplyLoader<T>(info, operations?.LoadOperations)
-                    ?? new AssetDataForObject(info, this.RawLoad<T>(assetName, useCache), this.AssertAndNormalizeAssetName, this.Reflection);
-                asset = this.ApplyEditors<T>(info, asset, operations?.EditOperations);
-                return (T)asset.Data;
-            });
+            data = this.AssetsBeingLoaded.Track(
+                assetName.Name,
+                (Manager: this, AssetName: assetName, UseCache: useCache),
+                static state =>
+                {
+                    GameContentManager manager = state.Manager;
+                    IAssetName assetName = state.AssetName;
+                    IAssetInfo info = new AssetInfo(assetName.LocaleCode, assetName, typeof(T), manager.AssertAndNormalizeAssetName);
+                    AssetOperationGroup? operations = manager.Coordinator.GetAssetOperations(info);
+                    IAssetData asset =
+                        manager.ApplyLoader<T>(info, operations?.LoadOperations)
+                        ?? new AssetDataForObject(info, manager.RawLoad<T>(assetName, state.UseCache), manager.AssertAndNormalizeAssetName, manager.Reflection);
+                    asset = manager.ApplyEditors<T>(info, asset, operations?.EditOperations);
+                    return (T)asset.Data;
+                }
+            );
         }
 
         // update cache
@@ -170,7 +176,11 @@ internal class GameContentManager : BaseContentManager
                 return null;
             }
 
-            loader = loadOperations.MaxBy(p => p.Priority);
+            foreach (AssetLoadOperation candidate in loadOperations)
+            {
+                if (loader == null || candidate.Priority > loader.Priority)
+                    loader = candidate;
+            }
         }
         if (loader == null)
             return null;
@@ -228,7 +238,7 @@ internal class GameContentManager : BaseContentManager
         }
 
         // edit asset
-        foreach (AssetEditOperation editor in editOperations.OrderBy(p => p.Priority))
+        foreach (AssetEditOperation editor in editOperations)
         {
             IModMetadata mod = editor.Mod;
 
@@ -274,14 +284,21 @@ internal class GameContentManager : BaseContentManager
     /// <returns>Returns true if only one loader will apply, else false.</returns>
     private bool AssertMaxOneRequiredLoader(IAssetInfo info, List<AssetLoadOperation> loaders, [NotNullWhen(false)] out string? error)
     {
-        AssetLoadOperation[] required = loaders.Where(p => p.Priority == AssetLoadPriority.Exclusive).ToArray();
-        if (required.Length <= 1)
+        int requiredCount = 0;
+        foreach (AssetLoadOperation loader in loaders)
+        {
+            if (loader.Priority == AssetLoadPriority.Exclusive && ++requiredCount > 1)
+                break;
+        }
+
+        if (requiredCount <= 1)
         {
             error = null;
             return true;
         }
 
-        string[] loaderNames = required
+        string[] loaderNames = loaders
+            .Where(p => p.Priority == AssetLoadPriority.Exclusive)
             .Select(p => p.Mod.DisplayName + this.GetOnBehalfOfLabel(p.OnBehalfOf))
             .OrderBy(p => p)
             .Distinct()
