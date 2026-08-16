@@ -25,16 +25,27 @@ internal class SDisplayDevice : XnaDisplayDevice
     /// <inheritdoc />
     protected override void DrawImpl(Tile tile, Location location, float layerDepth, Texture2D tileSheetTexture)
     {
-        // use xTile's simpler draw path for the overwhelming majority of tiles
-        if (!tile.Properties.ContainsKey("@Flip") && !tile.Properties.ContainsKey("@Rotation"))
+        // Use xTile's simpler draw path for the overwhelming majority of tiles. Most tiles have no
+        // custom properties at all, so avoid hashing both transform keys in that common case.
+        IPropertyCollection properties = tile.Properties;
+        if (properties.Count == 0)
+        {
+            base.DrawImpl(tile, location, layerDepth, tileSheetTexture);
+            return;
+        }
+
+        // Look up each property once and reuse the values below if this tile is transformed.
+        bool hasFlip = properties.TryGetValue("@Flip", out PropertyValue? flipValue);
+        bool hasRotation = properties.TryGetValue("@Rotation", out PropertyValue? rotationValue);
+        if (!hasFlip && !hasRotation)
         {
             base.DrawImpl(tile, location, layerDepth, tileSheetTexture);
             return;
         }
 
         // get rotation and effects
-        float rotation = this.GetRotation(tile);
-        SpriteEffects effects = this.GetSpriteEffects(tile);
+        float rotation = this.GetRotation(rotationValue);
+        SpriteEffects effects = this.GetSpriteEffects(flipValue);
         var sourceRect = this.m_sourceRectangle;
         var origin = new Vector2(sourceRect.Width / 2f, sourceRect.Height / 2f);
         this.m_tilePosition.X += origin.X * Layer.zoom;
@@ -45,19 +56,19 @@ internal class SDisplayDevice : XnaDisplayDevice
     }
 
     /// <summary>Get the sprite effects to apply for a tile.</summary>
-    /// <param name="tile">The tile being drawn.</param>
-    private SpriteEffects GetSpriteEffects(Tile tile)
+    /// <param name="propertyValue">The raw flip property value, or <c>null</c> if none was set.</param>
+    private SpriteEffects GetSpriteEffects(PropertyValue? propertyValue)
     {
-        return tile.Properties.TryGetValue("@Flip", out PropertyValue? propertyValue) && int.TryParse(propertyValue, out int value)
+        return propertyValue is not null && int.TryParse(propertyValue, out int value)
             ? (SpriteEffects)value
             : SpriteEffects.None;
     }
 
     /// <summary>Get the draw rotation to apply for a tile.</summary>
-    /// <param name="tile">The tile being drawn.</param>
-    private float GetRotation(Tile tile)
+    /// <param name="propertyValue">The raw rotation property value, or <c>null</c> if none was set.</param>
+    private float GetRotation(PropertyValue? propertyValue)
     {
-        if (!tile.Properties.TryGetValue("@Rotation", out PropertyValue? propertyValue) || !int.TryParse(propertyValue, out int value))
+        if (propertyValue is null || !int.TryParse(propertyValue, out int value))
             return 0;
 
         value %= 360;

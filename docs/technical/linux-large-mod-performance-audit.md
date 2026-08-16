@@ -72,11 +72,11 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 - **Affected code:** `Framework/Rendering/SDisplayDevice.cs` (`DrawImpl`).
 - **Scenario:** Rendering large, multilayer custom maps where almost all tiles have no SMAPI flip or rotation metadata.
-- **Root cause:** Each tile performs property dictionary lookups and potential integer parsing before using the transform-capable draw path.
+- **Root cause:** Each tile performs property dictionary lookups and potential integer parsing before using the transform-capable draw path. The transform-capable path also looked up the same properties a second time.
 - **Impact:** Steady gameplay.
 - **Expected benefit:** A normal-tile fast path avoids SMAPI-specific transform overhead for the common case.
 - **Risk:** Low to medium. Animated tiles and maps edited at runtime must still observe changed transform properties.
-- **Status:** Fixed. Tiles without SMAPI flip or rotation properties now delegate to xTile's simpler base draw path; transformed tiles retain the existing rendering logic.
+- **Status:** Fixed. Tiles without SMAPI flip or rotation properties now delegate to xTile's simpler base draw path. Property-free tiles avoid hashing either transform key, while transformed tiles reuse the first lookup results instead of reading the property dictionary twice; transformed rendering behavior is unchanged.
 
 ### 8. Mod PNG loads repeat synchronous decode and pixel conversion
 
