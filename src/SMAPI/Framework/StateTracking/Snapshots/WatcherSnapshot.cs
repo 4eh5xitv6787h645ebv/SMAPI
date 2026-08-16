@@ -43,7 +43,8 @@ internal class WatcherSnapshot
     *********/
     /// <summary>Update the tracked values.</summary>
     /// <param name="watchers">The watchers to snapshot.</param>
-    public void Update(WatcherCore watchers)
+    /// <param name="worldOptions">Which world changes need to be copied into the snapshot.</param>
+    public void Update(WatcherCore watchers, WorldSnapshotOptions worldOptions)
     {
         // update player instance
         if (watchers.CurrentPlayerTracker == null)
@@ -57,7 +58,7 @@ internal class WatcherSnapshot
         this.CurrentPlayer?.Update(watchers.CurrentPlayerTracker!);
         this.Time.Update(watchers.TimeWatcher);
         this.SaveId.Update(watchers.SaveIdWatcher);
-        this.Locations.Update(watchers.LocationsWatcher);
+        this.Locations.Update(watchers.LocationsWatcher, worldOptions);
         this.ActiveMenu.Update(watchers.ActiveMenuWatcher);
         this.Cursor.Update(watchers.CursorWatcher);
         this.MouseWheelScroll.Update(watchers.MouseWheelScrollWatcher);
