@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -52,6 +53,12 @@ internal class AssemblyLoader : IDisposable
     /// <summary>Whether to include more technical details about broken mods in the TRACE logs. This is mainly useful for creating compatibility rewriters.</summary>
     private readonly bool LogTechnicalDetailsForBrokenMods;
 
+    /// <summary>The simple names of assemblies currently loaded in the application domain.</summary>
+    private readonly ConcurrentDictionary<string, byte> LoadedAssemblyNames;
+
+    /// <summary>Compare canonical assembly file paths for the current platform.</summary>
+    private readonly StringComparer AssemblyPathComparer;
+
 
     /*********
     ** Public methods
@@ -68,6 +75,10 @@ internal class AssemblyLoader : IDisposable
         this.RewriteMods = rewriteMods;
         this.LogTechnicalDetailsForBrokenMods = logTechnicalDetailsForBrokenMods;
         this.AssemblyMap = this.TrackForDisposal(Constants.GetAssemblyMap(targetPlatform));
+        this.LoadedAssemblyNames = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+        this.AssemblyPathComparer = targetPlatform == Platform.Windows
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
 
         // init resolver
         this.AssemblyDefinitionResolver = this.TrackForDisposal(new AssemblyDefinitionResolver());
@@ -101,6 +112,12 @@ internal class AssemblyLoader : IDisposable
             timer!.Stop();
             monitor.Log($"[SMAPI] Initialized rewriters in {timer.ElapsedMilliseconds}ms");
         }
+
+        // Keep a live loaded-name index so each mod doesn't need to rescan and reflect every AppDomain assembly.
+        // Subscribe before taking the initial snapshot so assemblies loaded concurrently can't fall through a gap.
+        AppDomain.CurrentDomain.AssemblyLoad += this.OnAssemblyLoaded;
+        foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            this.TrackLoadedAssembly(assembly);
     }
 
     /// <summary>Preprocess and load an assembly.</summary>
@@ -114,15 +131,9 @@ internal class AssemblyLoader : IDisposable
         // get referenced local assemblies
         AssemblyParseResult[] assemblies;
         {
-            // don't try loading assemblies that are already loaded
-            HashSet<string> visitedAssemblyNames = [];
-            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                string? name = assembly.GetName().Name;
-                if (name != null)
-                    visitedAssemblyNames.Add(name);
-            }
-            assemblies = this.GetReferencedLocalAssemblies(assemblyFile, visitedAssemblyNames, this.AssemblyDefinitionResolver).ToArray();
+            HashSet<string> visitedAssemblyNames = new(StringComparer.Ordinal);
+            HashSet<string> visitedAssemblyPaths = new(this.AssemblyPathComparer);
+            assemblies = this.GetReferencedLocalAssemblies(assemblyFile, visitedAssemblyNames, visitedAssemblyPaths, this.AssemblyDefinitionResolver, expectedAssemblyName: null).ToArray();
         }
 
         // validate load
@@ -227,6 +238,8 @@ internal class AssemblyLoader : IDisposable
     /// <summary>Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.</summary>
     public void Dispose()
     {
+        AppDomain.CurrentDomain.AssemblyLoad -= this.OnAssemblyLoaded;
+
         foreach (IDisposable instance in this.Disposables)
             instance.Dispose();
     }
@@ -245,21 +258,57 @@ internal class AssemblyLoader : IDisposable
         return instance;
     }
 
+    /// <summary>Track an assembly loaded after this loader was created.</summary>
+    private void OnAssemblyLoaded(object? sender, AssemblyLoadEventArgs e)
+    {
+        this.TrackLoadedAssembly(e.LoadedAssembly);
+    }
+
+    /// <summary>Add a loaded assembly's simple name to the live index.</summary>
+    private void TrackLoadedAssembly(Assembly assembly)
+    {
+        string? name = assembly.GetName().Name;
+        if (name != null)
+            this.LoadedAssemblyNames.TryAdd(name, 0);
+    }
+
     /****
     ** Assembly parsing
     ****/
     /// <summary>Get a list of referenced local assemblies starting from the mod assembly, ordered from leaf to root.</summary>
     /// <param name="file">The assembly file to load.</param>
-    /// <param name="visitedAssemblyNames">The assembly names that should be skipped.</param>
+    /// <param name="visitedAssemblyNames">The local assembly identities visited in the current dependency graph.</param>
+    /// <param name="visitedAssemblyPaths">The canonical local assembly paths visited in the current dependency graph.</param>
     /// <param name="assemblyResolver">A resolver which resolves references to known assemblies.</param>
+    /// <param name="expectedAssemblyName">The simple assembly name from the parent reference, if this is a dependency.</param>
     /// <returns>Returns the rewrite metadata for the preprocessed assembly.</returns>
-    private IEnumerable<AssemblyParseResult> GetReferencedLocalAssemblies(FileInfo file, HashSet<string> visitedAssemblyNames, IAssemblyResolver assemblyResolver)
+    private IEnumerable<AssemblyParseResult> GetReferencedLocalAssemblies(FileInfo file, HashSet<string> visitedAssemblyNames, HashSet<string> visitedAssemblyPaths, IAssemblyResolver assemblyResolver, string? expectedAssemblyName)
     {
         // validate
         if (file.Directory == null)
             throw new InvalidOperationException($"Could not get directory from file path '{file.FullName}'.");
         if (!file.Exists)
             yield break; // not a local assembly
+
+        // Skip cycles, repeated local references, and dependencies already loaded by an earlier mod before doing
+        // any file I/O, symbol probing, or Cecil parsing. Root assemblies are checked by their parsed identity below
+        // so duplicate mods keep the existing diagnostic even when their filename doesn't match the assembly name.
+        if (!visitedAssemblyPaths.Add(file.FullName))
+        {
+            yield return new AssemblyParseResult(file, null, AssemblyLoadStatus.AlreadyLoaded);
+            yield break;
+        }
+        if (
+            expectedAssemblyName != null
+            && (
+                this.LoadedAssemblyNames.ContainsKey(expectedAssemblyName)
+                || !visitedAssemblyNames.Add(expectedAssemblyName)
+            )
+        )
+        {
+            yield return new AssemblyParseResult(file, null, AssemblyLoadStatus.AlreadyLoaded);
+            yield break;
+        }
 
         // add the assembly's directory temporarily if needed
         // this is needed by F# mods which bundle FSharp.Core.dll, for example
@@ -297,8 +346,13 @@ internal class AssemblyLoader : IDisposable
                 this.AssemblyDefinitionResolver.RemoveSearchDirectory(temporarySearchDir);
         }
 
-        // skip if already visited
-        if (!visitedAssemblyNames.Add(assembly.Name.Name))
+        // skip if already loaded or visited under a different filename/reference
+        string assemblyName = assembly.Name.Name;
+        bool expectedNameWasReserved = expectedAssemblyName != null && string.Equals(expectedAssemblyName, assemblyName, StringComparison.Ordinal);
+        if (
+            this.LoadedAssemblyNames.ContainsKey(assemblyName)
+            || (!expectedNameWasReserved && !visitedAssemblyNames.Add(assemblyName))
+        )
         {
             yield return new AssemblyParseResult(file, null, AssemblyLoadStatus.AlreadyLoaded);
             yield break;
@@ -308,7 +362,7 @@ internal class AssemblyLoader : IDisposable
         foreach (AssemblyNameReference dependency in assembly.MainModule.AssemblyReferences)
         {
             FileInfo dependencyFile = new(Path.Combine(file.Directory.FullName, $"{dependency.Name}.dll"));
-            foreach (AssemblyParseResult result in this.GetReferencedLocalAssemblies(dependencyFile, visitedAssemblyNames, assemblyResolver))
+            foreach (AssemblyParseResult result in this.GetReferencedLocalAssemblies(dependencyFile, visitedAssemblyNames, visitedAssemblyPaths, assemblyResolver, dependency.Name))
                 yield return result;
         }
 

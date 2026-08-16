@@ -53,7 +53,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 41. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
 42. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
 43. Finding 13 — repeated dependency-list scans — fixed.
-44. Finding 44 — repeated loaded-assembly scans and dependency parsing — queued.
+44. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
 45. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
 46. Finding 45 — incorrect overlay alpha composition — queued.
 47. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
@@ -498,7 +498,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Startup disk I/O, allocations, and Cecil parsing time, especially for dependency-heavy packs.
 - **Expected benefit:** Maintain loaded-name state across the launch and skip already-visited canonical local files before reading/parsing them.
 - **Risk:** Medium. Assembly identity, duplicate-copy diagnostics, resolver search paths, and mods that load assemblies dynamically must remain correct.
-- **Status:** Queued. Separate per-load dependency-cycle tracking from launch-wide loaded identities and canonical-file parsing state.
+- **Status:** Fixed. `AssemblyLoader` now builds one live concurrent simple-name index, updates it through `AppDomain.AssemblyLoad`, and maintains separate per-root identity and platform-aware canonical-path sets. Existing local dependencies and cycles are rejected before byte reads, PDB probing, stream allocation, or Cecil parsing; root assemblies are still parsed before duplicate-mod diagnostics so filename mismatches retain the old behavior.
 
 ### 45. Image overlay composition calculates the wrong output alpha
 
@@ -557,13 +557,12 @@ This is the current jank-first order, combining likely frame-time impact, freque
 ## Remaining implementation priority
 
 1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially chest polling, cursor-position consumption, log formatting, live `AssetRequested` frequency, and propagation side-effect repetition.
-2. Cache launch-wide loaded assembly identities and canonical parsed local files without weakening duplicate-mod diagnostics.
-3. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
-4. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
-5. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
-6. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-7. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
-8. Correct source-over alpha composition after representative content-pack visual comparisons.
-9. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
+3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
+4. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
+5. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
+6. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
+7. Correct source-over alpha composition after representative content-pack visual comparisons.
+8. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.
