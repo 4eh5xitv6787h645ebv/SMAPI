@@ -96,7 +96,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Transitions, startup, and contention.
 - **Expected benefit:** An ID-indexed dictionary makes manager resolution constant-time and enables game and namespaced managers to be traversed separately.
 - **Risk:** Low to medium. Registration, disposal, and duplicate IDs must update the list and index atomically.
-- **Status:** Confirmed.
+- **Status:** Fixed. Namespaced managers are indexed by managed asset prefix under the existing coordinator lock, while duplicate-name registration and disposal preserve the previous first-match behavior.
 
 ### 10. Asset-name normalization creates repeated transient strings
 
