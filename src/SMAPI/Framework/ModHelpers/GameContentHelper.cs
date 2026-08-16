@@ -106,7 +106,7 @@ internal class GameContentHelper : BaseHelper, IGameContentHelper
     public bool InvalidateCache(IAssetName assetName)
     {
         this.Monitor.Log($"Requested cache invalidation for '{assetName}'.");
-        return this.ContentCore.InvalidateCache(asset => asset.Name.IsEquivalentTo(assetName)).Count > 0;
+        return this.ContentCore.InvalidateCache(assetName).Count > 0;
     }
 
     /// <inheritdoc />

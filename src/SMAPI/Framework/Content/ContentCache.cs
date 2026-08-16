@@ -54,6 +54,14 @@ internal class ContentCache
         return this.Cache.ContainsKey(key);
     }
 
+    /// <summary>Get an asset from the cache if it's loaded.</summary>
+    /// <param name="key">The cache key.</param>
+    /// <param name="asset">The cached asset, if found.</param>
+    public bool TryGetValue(string key, [NotNullWhen(true)] out object? asset)
+    {
+        return this.Cache.TryGetValue(key, out asset);
+    }
+
 
     /****
     ** Normalize

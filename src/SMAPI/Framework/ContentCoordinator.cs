@@ -63,6 +63,9 @@ internal class ContentCoordinator : IDisposable
     /// <summary>The loaded content managers (including the <see cref="MainContentManager"/>).</summary>
     private readonly List<IContentManager> ContentManagers = [];
 
+    /// <summary>The loaded game content managers which can cache intercepted game assets.</summary>
+    private readonly List<IContentManager> GameContentManagers = [];
+
     /// <summary>The first registered namespaced content manager for each managed asset prefix.</summary>
     private readonly Dictionary<string, IContentManager> NamespacedContentManagers = new(StringComparer.Ordinal);
 
@@ -366,6 +369,54 @@ internal class ContentCoordinator : IDisposable
         return contentManager.LoadExact<T>(relativePath, useCache: false);
     }
 
+    /// <summary>Purge an exact asset name from the cache.</summary>
+    /// <param name="assetName">The asset name to invalidate.</param>
+    /// <param name="dispose">Whether to dispose invalidated assets. This should only be <c>true</c> when they're being invalidated as part of a dispose, to avoid crashing the game.</param>
+    /// <returns>Returns the invalidated asset names.</returns>
+    public ICollection<IAssetName> InvalidateCache(IAssetName assetName, bool dispose = false)
+    {
+        AssetName normalizedName = this.ParseAssetName(assetName.Name, allowLocales: true);
+        IDictionary<IAssetName, Type> invalidatedAssets = new Dictionary<IAssetName, Type>();
+
+        this.ContentManagerLock.InReadLock(() =>
+        {
+            // Directly check the exact cache key in game content managers. Namespaced content managers don't cache assets.
+            foreach (IContentManager contentManager in this.GameContentManagers)
+            {
+                if (!contentManager.TryGetCachedAsset(normalizedName, out object? asset))
+                    continue;
+
+                if (asset is not Texture2D) // will edit in place
+                    contentManager.InvalidateCache(normalizedName, dispose);
+
+                if (!invalidatedAssets.ContainsKey(normalizedName))
+                    invalidatedAssets[normalizedName] = asset.GetType();
+            }
+
+            this.ForgetLocalizedAssetNames(invalidatedAssets.Keys);
+
+            // Special case: maps may be loaded through a temporary content manager that's removed while the map is still in use.
+            // This notably affects the town and farmhouse maps.
+            if (!invalidatedAssets.ContainsKey(normalizedName) && Game1.locations != null)
+            {
+                foreach (GameLocation location in Game1.locations)
+                {
+                    if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
+                        continue;
+
+                    AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
+                    if (mapPath.IsEquivalentTo(normalizedName))
+                    {
+                        invalidatedAssets[mapPath] = typeof(Map);
+                        break;
+                    }
+                }
+            }
+        });
+
+        return this.ProcessInvalidatedAssets(invalidatedAssets);
+    }
+
     /// <summary>Purge matched assets from the cache.</summary>
     /// <param name="predicate">Matches the asset keys to invalidate.</param>
     /// <param name="dispose">Whether to dispose invalidated assets. This should only be <c>true</c> when they're being invalidated as part of a dispose, to avoid crashing the game.</param>
@@ -413,16 +464,7 @@ internal class ContentCoordinator : IDisposable
             // A mod might provide a localized variant of a normally non-localized asset (like
             // `Maps/MovieTheater.fr-FR`). When the asset is invalidated, we need to recheck
             // whether the asset is localized in case it stops providing it.
-            {
-                Dictionary<string, string> localizedAssetNames = this.LocalizedAssetNames.Value;
-                foreach (IAssetName assetName in invalidatedAssets.Keys)
-                {
-                    localizedAssetNames.Remove(assetName.Name);
-
-                    if (localizedAssetNames.TryGetValue(assetName.BaseName, out string? targetForBaseKey) && targetForBaseKey == assetName.Name)
-                        localizedAssetNames.Remove(assetName.BaseName);
-                }
-            }
+            this.ForgetLocalizedAssetNames(invalidatedAssets.Keys);
 
             // special case: maps may be loaded through a temporary content manager that's removed while the map is still in use.
             // This notably affects the town and farmhouse maps.
@@ -441,7 +483,14 @@ internal class ContentCoordinator : IDisposable
             }
         });
 
-        // handle invalidation
+        return this.ProcessInvalidatedAssets(invalidatedAssets);
+    }
+
+    /// <summary>Apply the common event, propagation, and logging steps for invalidated assets.</summary>
+    /// <param name="invalidatedAssets">The invalidated asset names and their data types.</param>
+    /// <returns>Returns the invalidated asset names.</returns>
+    private ICollection<IAssetName> ProcessInvalidatedAssets(IDictionary<IAssetName, Type> invalidatedAssets)
+    {
         if (invalidatedAssets.Count > 0)
         {
             // clear cached editor checks
@@ -552,6 +601,7 @@ internal class ContentCoordinator : IDisposable
         foreach (IContentManager contentManager in this.ContentManagers)
             contentManager.Dispose();
         this.ContentManagers.Clear();
+        this.GameContentManagers.Clear();
         this.NamespacedContentManagers.Clear();
         this.MainContentManager = null!; // instance no longer usable
 
@@ -562,6 +612,23 @@ internal class ContentCoordinator : IDisposable
     /*********
     ** Private methods
     *********/
+    /// <summary>Forget cached localized-name mappings for invalidated assets.</summary>
+    /// <param name="assetNames">The invalidated asset names.</param>
+    private void ForgetLocalizedAssetNames(IEnumerable<IAssetName> assetNames)
+    {
+        // A mod might provide a localized variant of a normally non-localized asset (like
+        // `Maps/MovieTheater.fr-FR`). When the asset is invalidated, we need to recheck
+        // whether the asset is localized in case it stops providing it.
+        Dictionary<string, string> localizedAssetNames = this.LocalizedAssetNames.Value;
+        foreach (IAssetName assetName in assetNames)
+        {
+            localizedAssetNames.Remove(assetName.Name);
+
+            if (localizedAssetNames.TryGetValue(assetName.BaseName, out string? targetForBaseKey) && targetForBaseKey == assetName.Name)
+                localizedAssetNames.Remove(assetName.BaseName);
+        }
+    }
+
     /// <summary>Register a content manager.</summary>
     /// <remarks>The caller must hold a write lock if the coordinator is already available to other threads.</remarks>
     private void AddContentManager(IContentManager contentManager)
@@ -571,6 +638,8 @@ internal class ContentCoordinator : IDisposable
         // Preserve the existing first-match behavior if multiple managers use the same name.
         if (contentManager.IsNamespaced)
             this.NamespacedContentManagers.TryAdd(contentManager.Name, contentManager);
+        else
+            this.GameContentManagers.Add(contentManager);
     }
 
     /// <summary>A callback invoked when a content manager is disposed.</summary>
@@ -584,7 +653,9 @@ internal class ContentCoordinator : IDisposable
         {
             this.ContentManagers.Remove(contentManager);
 
-            if (contentManager.IsNamespaced && this.NamespacedContentManagers.GetValueOrDefault(contentManager.Name) == contentManager)
+            if (!contentManager.IsNamespaced)
+                this.GameContentManagers.Remove(contentManager);
+            else if (this.NamespacedContentManagers.GetValueOrDefault(contentManager.Name) == contentManager)
             {
                 this.NamespacedContentManagers.Remove(contentManager.Name);
 
