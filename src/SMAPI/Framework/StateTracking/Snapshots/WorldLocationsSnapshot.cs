@@ -61,8 +61,12 @@ internal class WorldLocationsSnapshot
         )
             return;
 
-        // update locations
-        foreach (LocationTracker locationWatcher in watcher.Locations)
+        // update all locations only when chest stack changes need polling; collection changes are
+        // event-driven and can use the dirty-location set directly.
+        IReadOnlyCollection<LocationTracker> locationsToUpdate = options.TrackChestInventories
+            ? watcher.Locations
+            : watcher.ChangedLocations;
+        foreach (LocationTracker locationWatcher in locationsToUpdate)
         {
             if (!this.LocationsDict.TryGetValue(locationWatcher.Location, out LocationSnapshot? snapshot))
                 this.LocationsDict[locationWatcher.Location] = snapshot = new LocationSnapshot(locationWatcher.Location);
