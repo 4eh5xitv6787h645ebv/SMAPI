@@ -188,6 +188,19 @@ internal class PathUtilitiesTests
         normalized.Should().Be(path.NormalizedOnUnix); // MonoGame uses the Linux format
     }
 
+    [Test(Description = $"Assert that {nameof(PathUtilities.NormalizeAssetName)} doesn't copy an asset name which is already canonical.")]
+    public void NormalizeAssetName_ReusesCanonicalString()
+    {
+        // arrange
+        string original = new(['D', 'a', 't', 'a', '/', 'O', 'b', 'j', 'e', 'c', 't', 's']);
+
+        // act
+        string normalized = PathUtilities.NormalizeAssetName(original);
+
+        // assert
+        normalized.Should().BeSameAs(original);
+    }
+
     /****
     ** NormalizePath
     ****/
