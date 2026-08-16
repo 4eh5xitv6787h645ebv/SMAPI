@@ -56,7 +56,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Transitions.
 - **Expected benefit:** A single world pass and indexed lookups can substantially reduce repeated traversal during large invalidation batches.
 - **Risk:** High. Propagation has many asset-specific side effects and ordering dependencies.
-- **Status:** Confirmed; batch/index redesign deferred.
+- **Status:** Confirmed; the first stage is fixed by excluding non-caching namespaced managers from invalidation, loaded-value, and texture-propagation scans. Cross-asset world searches and side-effect batching remain deferred.
 
 ### 6. File logging flushes synchronously on the game thread
 

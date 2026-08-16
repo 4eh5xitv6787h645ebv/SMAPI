@@ -463,7 +463,7 @@ internal class ContentCoordinator : IDisposable
         this.ContentManagerLock.InReadLock(() =>
         {
             // cached assets
-            foreach (IContentManager contentManager in this.ContentManagers)
+            foreach (IContentManager contentManager in this.GameContentManagers)
             {
                 foreach ((string key, object asset) in contentManager.GetCachedAssets())
                 {
@@ -522,7 +522,7 @@ internal class ContentCoordinator : IDisposable
 
             // propagate changes to the game
             this.CoreAssets.Propagate(
-                contentManagers: this.ContentManagers,
+                contentManagers: this.GameContentManagers,
                 assets: invalidatedAssets.ToDictionary(p => p.Key, p => p.Value),
                 ignoreWorld: Context.IsWorldFullyUnloaded,
                 out Dictionary<IAssetName, bool> propagated,
@@ -571,9 +571,9 @@ internal class ContentCoordinator : IDisposable
         return this.ContentManagerLock.InReadLock(() =>
         {
             List<object> values = [];
-            foreach (IContentManager content in this.ContentManagers)
+            foreach (IContentManager content in this.GameContentManagers)
             {
-                if (content.IsNamespaced || !content.IsLoaded(assetName))
+                if (!content.IsLoaded(assetName))
                     continue;
 
                 object value = content.LoadExact<object>(assetName, useCache: true);
