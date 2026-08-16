@@ -57,7 +57,9 @@ This is the current jank-first order, combining likely frame-time impact, freque
 45. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
 46. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
 47. Finding 45 — incorrect overlay alpha composition — queued.
-48. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+48. Finding 49 — mod messages serialize even when no remote peer will receive them — trace-gated.
+49. Finding 50 — public reflection cache hits still allocate lookup machinery — trace-gated.
+50. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -541,6 +543,26 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium. Mods can override the virtual `Item.Stack` implementation without using the game's net field, and inventory add/remove, listener activation, duplicate net callbacks, and multiple changes within a tick must preserve the old snapshot baseline.
 - **Status:** Fixed with a compatibility fallback. Standard inherited `Item.Stack` implementations subscribe to the item's reference-identified net field; inventory slot changes and stack changes push a dirty chest/location once per reset. Location snapshots inspect and reset only changed chests. Runtime item types which override `Stack` remain in a dedicated narrow polling set, so custom mod items retain the previous detection semantics without keeping the global scan.
 
+### 49. Mod messages serialize even when no remote peer will receive them
+
+- **Affected code:** `Framework/SMultiplayer.cs` (`BroadcastModMessage`).
+- **Scenario:** A mod sends frequent messages in single-player, or targets only the local player while network-traffic logging is disabled.
+- **Root cause:** After recipient filtering, SMAPI still creates the remote-player array, converts the payload to a `JToken`, and serializes the full message to JSON before delivering the already constructed model locally. The serialized string is only needed for remote transmission or network logging.
+- **Impact:** Avoidable JSON traversal, string allocation, and GC pressure on the calling thread. Whether this contributes to walking jank depends entirely on the installed mods' message rate and payload sizes.
+- **Expected benefit:** Build the model for local delivery, but defer JSON serialization until at least one remote peer needs it or network logging will consume it.
+- **Risk:** Low to medium. Local delivery must retain the same payload conversion, error timing, recipient metadata, and logging behavior.
+- **Status:** Trace-gated. Measure `BroadcastModMessage` call frequency, recipient distribution, payload size, and serialization time in the target pack before changing a compatibility-sensitive multiplayer path.
+
+### 50. Public reflection cache hits still allocate lookup machinery
+
+- **Affected code:** `Framework/Reflection/Reflector.cs` (`GetFieldFromHierarchy`, `GetPropertyFromHierarchy`, `GetMethodFromHierarchy`, and `GetCached`).
+- **Scenario:** Mods repeatedly use SMAPI's reflection API from update or draw callbacks.
+- **Root cause:** A metadata-cache hit still formats a string key, constructs a capturing fetch delegate, and creates a new reflected field/property/method wrapper. Finding 35 removed this work from SMAPI's confirmed render-stage hot path, but the public API retains it for mod callers.
+- **Impact:** Potential per-frame allocations and dictionary churn proportional to hot-loop reflection calls.
+- **Expected benefit:** Use a structured cache key and a reusable metadata entry, with an optional fast wrapper/accessor path where object identity and type safety permit it.
+- **Risk:** Medium to high. Wrapper instances bind target objects, cache intervals intentionally expire stale lookups, and broad changes affect a public compatibility API.
+- **Status:** Trace-gated. Instrument public reflection call sites and allocation rates first; optimize individual confirmed hot members before redesigning the general cache.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -562,18 +584,21 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, and 47 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, and 48 |
+| Multiplayer message delivery | Finding 49 |
+| Reflection API overhead | Findings 35 and 50 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, and 50 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
 
 1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially cursor-position consumption, live `AssetRequested` frequency, propagation side-effect repetition, and the before/after chest-tracking frame cost.
-2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
-3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
-4. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
-5. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-6. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
-7. Correct source-over alpha composition after representative content-pack visual comparisons.
-8. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+2. Measure mod-message frequency and hot-loop public reflection use before changing those compatibility-sensitive paths.
+3. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
+4. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
+5. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
+6. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
+7. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
+8. Correct source-over alpha composition after representative content-pack visual comparisons.
+9. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.
