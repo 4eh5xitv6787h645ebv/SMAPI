@@ -46,6 +46,9 @@ internal sealed class ModContentManager : BaseContentManager
     /// <summary>A lookup for files within the <see cref="ContentManager.RootDirectory"/>.</summary>
     private readonly IFileLookup FileLookup;
 
+    /// <summary>A shared byte-bounded cache of decoded image pixels.</summary>
+    private readonly DecodedTextureCache DecodedTextures;
+
     /// <summary>If a map tilesheet's image source has no file extensions, the file extensions to check for in the local mod folder.</summary>
     private static readonly string[] LocalTilesheetExtensions = [".png", ".xnb"];
 
@@ -66,13 +69,15 @@ internal sealed class ModContentManager : BaseContentManager
     /// <param name="jsonHelper">Encapsulates SMAPI's JSON file parsing.</param>
     /// <param name="onDisposing">A callback to invoke when the content manager is being disposed.</param>
     /// <param name="fileLookup">A lookup for files within the <paramref name="rootDirectory"/>.</param>
-    public ModContentManager(string name, IContentManager gameContentManager, IServiceProvider serviceProvider, string modName, string rootDirectory, CultureInfo currentCulture, ContentCoordinator coordinator, IMonitor monitor, Reflector reflection, JsonHelper jsonHelper, Action<BaseContentManager> onDisposing, IFileLookup fileLookup)
+    /// <param name="decodedTextures">A shared byte-bounded cache of decoded image pixels.</param>
+    public ModContentManager(string name, IContentManager gameContentManager, IServiceProvider serviceProvider, string modName, string rootDirectory, CultureInfo currentCulture, ContentCoordinator coordinator, IMonitor monitor, Reflector reflection, JsonHelper jsonHelper, Action<BaseContentManager> onDisposing, IFileLookup fileLookup, DecodedTextureCache decodedTextures)
         : base(name, serviceProvider, rootDirectory, currentCulture, coordinator, monitor, reflection, onDisposing, isNamespaced: true)
     {
         this.GameContentManager = gameContentManager;
         this.FileLookup = fileLookup;
         this.JsonHelper = jsonHelper;
         this.ModName = modName;
+        this.DecodedTextures = decodedTextures;
 
         this.TryLocalizeKeys = false;
     }
@@ -228,6 +233,9 @@ internal sealed class ModContentManager : BaseContentManager
     [SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "The 'forRawData' parameter is only added for mods which may intercept this method.")]
     private IRawTextureData LoadRawImageData(FileInfo file, bool forRawData)
     {
+        if (this.DecodedTextures.TryGetCopy(file, out RawTextureData? cached))
+            return cached;
+
         // load raw data
         using FileStream stream = File.OpenRead(file.FullName);
         using SKBitmap bitmap = SKBitmap.Decode(stream);
@@ -235,7 +243,9 @@ internal sealed class ModContentManager : BaseContentManager
         if (bitmap is null)
             throw new InvalidDataException($"Failed to load {file.FullName}. This doesn't seem to be a valid PNG image.");
 
-        return new RawTextureData(bitmap.Width, bitmap.Height, ModContentManager.ConvertPixels(bitmap));
+        var data = new RawTextureData(bitmap.Width, bitmap.Height, ModContentManager.ConvertPixels(bitmap));
+        this.DecodedTextures.Track(file, data);
+        return data;
     }
 
     /// <summary>Convert Skia pixels to the premultiplied XNA pixel format.</summary>
