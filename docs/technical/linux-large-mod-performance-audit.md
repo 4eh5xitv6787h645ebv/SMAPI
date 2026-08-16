@@ -32,7 +32,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 20. Finding 46 — synchronous log formatting on the game thread — needs runtime evidence.
 21. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
 22. Finding 41 — incomplete and duplicate world-location topology — queued.
-23. Finding 43 — per-asset propagation key normalization allocations — queued.
+23. Finding 43 — per-asset propagation key normalization allocations — fixed.
 24. Finding 32 — per-map warp comparison sets — fixed.
 25. Finding 19 — repeated propagation side effects — deferred.
 26. Finding 4 — no first-class batched exact invalidation — fixed.
@@ -488,7 +488,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transition CPU and GC pressure proportional to invalidated asset count.
 - **Expected benefit:** Allocation-free ordinal-ignore-case dispatch over the already normalized asset name.
 - **Risk:** Low to medium. A replacement dispatch table must preserve every alias and the exact precedence of current cases.
-- **Status:** Queued. Introduce a static ordinal-ignore-case route lookup and verify all current switch labels before removing the normalization strings.
+- **Status:** Fixed. Static ordinal-ignore-case route tables now dispatch all five texture keys and 37 non-texture keys without transforming the requested name. Focused coverage locks every legacy switch label, alias, case-insensitive comparison, normalized separator, and dynamic fallback route.
 
 ### 44. Assembly loading repeats global scans and reparses visited local dependencies
 
@@ -559,14 +559,13 @@ This is the current jank-first order, combining likely frame-time impact, freque
 1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially chest polling, cursor-position consumption, log formatting, live `AssetRequested` frequency, and propagation side-effect repetition.
 2. Centralize a deterministic recursive, reference-deduplicated world topology shared by tracking, live-map invalidation, and propagation.
 3. Add source ownership to world-location trackers so overlapping roots and cross-tick transfers cannot drop a live tracker.
-4. Replace per-asset propagation key lowercasing with verified ordinal-ignore-case route lookup.
-5. Cache launch-wide loaded assembly identities and canonical parsed local files without weakening duplicate-mod diagnostics.
-6. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
-7. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
-8. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
-9. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-10. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
-11. Correct source-over alpha composition after representative content-pack visual comparisons.
-12. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+4. Cache launch-wide loaded assembly identities and canonical parsed local files without weakening duplicate-mod diagnostics.
+5. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
+6. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
+7. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
+8. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
+9. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
+10. Correct source-over alpha composition after representative content-pack visual comparisons.
+11. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.

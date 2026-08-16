@@ -48,6 +48,58 @@ internal class CoreAssetPropagator
     /// <summary>A cache of world data fetched for the current tick.</summary>
     private readonly TickCacheDictionary<string> WorldCache = new();
 
+    /// <summary>The propagation route for each exact texture asset name.</summary>
+    private static readonly Dictionary<string, TextureAssetRoute> TextureAssetRoutes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Characters/Farmer/farmer_base"] = TextureAssetRoute.PlayerSprites,
+        ["Characters/Farmer/farmer_base_bald"] = TextureAssetRoute.PlayerSprites,
+        ["Characters/Farmer/farmer_girl_base"] = TextureAssetRoute.PlayerSprites,
+        ["Characters/Farmer/farmer_girl_base_bald"] = TextureAssetRoute.PlayerSprites,
+        ["TileSheets/tools"] = TextureAssetRoute.Tools
+    };
+
+    /// <summary>The propagation route for each exact non-map, non-texture base asset name.</summary>
+    private static readonly Dictionary<string, OtherAssetRoute> OtherAssetRoutes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Data/Achievements"] = OtherAssetRoute.Achievements,
+        ["Data/AudioChanges"] = OtherAssetRoute.AudioChanges,
+        ["Data/BigCraftables"] = OtherAssetRoute.BigCraftables,
+        ["Data/Boots"] = OtherAssetRoute.Boots,
+        ["Data/Buildings"] = OtherAssetRoute.Buildings,
+        ["Data/ChairTiles"] = OtherAssetRoute.ChairTiles,
+        ["Data/Characters"] = OtherAssetRoute.Characters,
+        ["Data/Concessions"] = OtherAssetRoute.Concessions,
+        ["Data/ConcessionTastes"] = OtherAssetRoute.ConcessionTastes,
+        ["Data/CookingRecipes"] = OtherAssetRoute.CookingRecipes,
+        ["Data/CraftingRecipes"] = OtherAssetRoute.CraftingRecipes,
+        ["Data/Crops"] = OtherAssetRoute.Crops,
+        ["Data/FarmAnimals"] = OtherAssetRoute.FarmAnimals,
+        ["Data/FloorsAndPaths"] = OtherAssetRoute.FloorsAndPaths,
+        ["Data/Furniture"] = OtherAssetRoute.Furniture,
+        ["Data/FruitTrees"] = OtherAssetRoute.FruitTrees,
+        ["Data/HairData"] = OtherAssetRoute.HairData,
+        ["Data/Hats"] = OtherAssetRoute.Hats,
+        ["Data/JukeboxTracks"] = OtherAssetRoute.JukeboxTracks,
+        ["Data/Locations"] = OtherAssetRoute.Locations,
+        ["Data/LocationContexts"] = OtherAssetRoute.LocationContexts,
+        ["Data/Movies"] = OtherAssetRoute.Movies,
+        ["Data/MoviesReactions"] = OtherAssetRoute.Movies,
+        ["Data/NPCGiftTastes"] = OtherAssetRoute.NpcGiftTastes,
+        ["Data/Objects"] = OtherAssetRoute.Objects,
+        ["Data/Pants"] = OtherAssetRoute.Pants,
+        ["Data/Pets"] = OtherAssetRoute.Pets,
+        ["Data/Shirts"] = OtherAssetRoute.Shirts,
+        ["Data/Tools"] = OtherAssetRoute.Tools,
+        ["Data/TriggerActions"] = OtherAssetRoute.TriggerActions,
+        ["Data/Weapons"] = OtherAssetRoute.Weapons,
+        ["Data/WildTrees"] = OtherAssetRoute.WildTrees,
+        ["Data/WorldMap"] = OtherAssetRoute.WorldMap,
+        ["Fonts/SpriteFont1"] = OtherAssetRoute.SpriteFont1,
+        ["Fonts/SmallFont"] = OtherAssetRoute.SmallFont,
+        ["Fonts/TinyFont"] = OtherAssetRoute.TinyFont,
+        ["Strings/StringsFromCSFiles"] = OtherAssetRoute.StringsFromCsFiles
+    };
+
 
     /*********
     ** Public methods
@@ -67,6 +119,24 @@ internal class CoreAssetPropagator
         this.Multiplayer = multiplayer;
         this.Reflection = reflection;
         this.ParseAssetName = parseAssetName;
+    }
+
+    /// <summary>Get the propagation route for an exact normalized texture asset name.</summary>
+    /// <param name="assetName">The normalized asset name.</param>
+    internal static TextureAssetRoute GetTextureAssetRoute(string assetName)
+    {
+        return CoreAssetPropagator.TextureAssetRoutes.TryGetValue(assetName, out TextureAssetRoute route)
+            ? route
+            : TextureAssetRoute.None;
+    }
+
+    /// <summary>Get the propagation route for an exact normalized non-map, non-texture base asset name.</summary>
+    /// <param name="baseName">The normalized base asset name.</param>
+    internal static OtherAssetRoute GetOtherAssetRoute(string baseName)
+    {
+        return CoreAssetPropagator.OtherAssetRoutes.TryGetValue(baseName, out OtherAssetRoute route)
+            ? route
+            : OtherAssetRoute.None;
     }
 
     /// <summary>Reload one of the game's core assets (if applicable).</summary>
@@ -338,26 +408,18 @@ internal class CoreAssetPropagator
         // update game state if needed
         if (changed)
         {
-            switch (assetName.Name.ToLower().Replace("\\", "/")) // normalized key so we can compare statically
+            TextureAssetRoute route = CoreAssetPropagator.GetTextureAssetRoute(assetName.Name);
+            switch (route)
             {
-                /****
-                ** Content\Characters\Farmer
-                ****/
-                case "characters/farmer/farmer_base": // Farmer
-                case "characters/farmer/farmer_base_bald":
-                case "characters/farmer/farmer_girl_base":
-                case "characters/farmer/farmer_girl_base_bald":
+                case TextureAssetRoute.PlayerSprites:
                     this.UpdatePlayerSprites(assetName);
                     break;
 
-                /****
-                ** Content\TileSheets
-                ****/
-                case "tilesheets/tools": // Game1.ResetToolSpriteSheet
+                case TextureAssetRoute.Tools:
                     Game1.ResetToolSpriteSheet();
                     break;
 
-                default:
+                case TextureAssetRoute.None:
                     if (!ignoreWorld)
                     {
                         if (assetName.IsDirectlyUnderPath("Buildings") && assetName.BaseName.EndsWith("_PaintMask", StringComparison.OrdinalIgnoreCase))
@@ -365,6 +427,9 @@ internal class CoreAssetPropagator
                     }
 
                     break;
+
+                default:
+                    throw new InvalidOperationException($"Unknown texture asset propagation route '{route}'.");
             }
         }
 
@@ -381,30 +446,31 @@ internal class CoreAssetPropagator
     {
         var content = this.MainContentManager;
         string baseName = assetName.BaseName;
+        OtherAssetRoute route = CoreAssetPropagator.GetOtherAssetRoute(baseName);
 
-        switch (baseName.ToLower().Replace("\\", "/")) // normalized key so we can compare statically
+        switch (route)
         {
             /****
             ** Content/Data
             ****/
-            case "data/achievements": // Game1.LoadContent
+            case OtherAssetRoute.Achievements: // Game1.LoadContent
                 Game1.achievements = DataLoader.Achievements(content);
                 return true;
 
-            case "data/audiochanges":
+            case OtherAssetRoute.AudioChanges:
                 Game1.CueModification.OnStartup(); // reload file and reapply changes
                 return true;
 
-            case "data/bigcraftables": // Game1.LoadContent
+            case OtherAssetRoute.BigCraftables: // Game1.LoadContent
                 Game1.bigCraftableData = DataLoader.BigCraftables(content);
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/boots": // BootsDataDefinition
+            case OtherAssetRoute.Boots: // BootsDataDefinition
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/buildings": // Game1.LoadContent
+            case OtherAssetRoute.Buildings: // Game1.LoadContent
                 Game1.buildingData = DataLoader.Buildings(content);
                 if (!ignoreWorld)
                 {
@@ -416,7 +482,7 @@ internal class CoreAssetPropagator
                 }
                 return true;
 
-            case "data/chairtiles": // GameLocation.loadMap
+            case OtherAssetRoute.ChairTiles: // GameLocation.loadMap
                 if (!ignoreWorld)
                 {
                     Utility.ForEachLocation(location =>
@@ -429,145 +495,144 @@ internal class CoreAssetPropagator
                 }
                 return true;
 
-            case "data/characters": // Game1.LoadContent
+            case OtherAssetRoute.Characters: // Game1.LoadContent
                 Game1.characterData = DataLoader.Characters(content);
                 if (!ignoreWorld)
                     this.UpdateCharacterData();
                 return true;
 
-            case "data/concessions": // MovieTheater.GetConcessions
+            case OtherAssetRoute.Concessions: // MovieTheater.GetConcessions
                 MovieTheater.ClearCachedLocalizedData();
                 return true;
 
-            case "data/concessiontastes": // MovieTheater.GetConcessionTasteForCharacter
+            case OtherAssetRoute.ConcessionTastes: // MovieTheater.GetConcessionTasteForCharacter
                 MovieTheater.ClearCachedConcessionTastes();
                 return true;
 
-            case "data/cookingrecipes": // CraftingRecipe.InitShared
+            case OtherAssetRoute.CookingRecipes: // CraftingRecipe.InitShared
                 CraftingRecipe.cookingRecipes = DataLoader.CookingRecipes(content);
                 return true;
 
-            case "data/craftingrecipes": // CraftingRecipe.InitShared
+            case OtherAssetRoute.CraftingRecipes: // CraftingRecipe.InitShared
                 CraftingRecipe.craftingRecipes = DataLoader.CraftingRecipes(content);
                 return true;
 
-            case "data/crops": // Game1.LoadContent
+            case OtherAssetRoute.Crops: // Game1.LoadContent
                 Game1.cropData = DataLoader.Crops(content);
                 return true;
 
-            case "data/farmanimals": // FarmAnimal constructor
+            case OtherAssetRoute.FarmAnimals: // FarmAnimal constructor
                 Game1.farmAnimalData = DataLoader.FarmAnimals(content);
                 if (!ignoreWorld)
                     this.UpdateFarmAnimalData();
                 return true;
 
-            case "data/floorsandpaths": // Game1.LoadContent
+            case OtherAssetRoute.FloorsAndPaths: // Game1.LoadContent
                 Game1.floorPathData = DataLoader.FloorsAndPaths(content);
                 return true;
 
-            case "data/furniture": // FurnitureDataDefinition
+            case OtherAssetRoute.Furniture: // FurnitureDataDefinition
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/fruittrees": // Game1.LoadContent
+            case OtherAssetRoute.FruitTrees: // Game1.LoadContent
                 Game1.fruitTreeData = DataLoader.FruitTrees(content);
                 return true;
 
-            case "data/hairdata": // Farmer.GetHairStyleMetadataFile
+            case OtherAssetRoute.HairData: // Farmer.GetHairStyleMetadataFile
                 return this.UpdateHairData();
 
-            case "data/hats": // HatDataDefinition
+            case OtherAssetRoute.Hats: // HatDataDefinition
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/jukeboxtracks": // Game1.LoadContent
+            case OtherAssetRoute.JukeboxTracks: // Game1.LoadContent
                 Game1.jukeboxTrackData = DataLoader.JukeboxTracks(content);
                 return true;
 
-            case "data/locations": // Game1.LoadContent
+            case OtherAssetRoute.Locations: // Game1.LoadContent
                 Game1.locationData = DataLoader.Locations(content);
                 return true;
 
-            case "data/locationcontexts": // Game1.LoadContent
+            case OtherAssetRoute.LocationContexts: // Game1.LoadContent
                 Game1.locationContextData = DataLoader.LocationContexts(content);
                 return true;
 
-            case "data/movies": // MovieTheater.GetMovieData
-            case "data/moviesreactions": // MovieTheater.GetMovieReactions
+            case OtherAssetRoute.Movies: // MovieTheater.GetMovieData / GetMovieReactions
                 MovieTheater.ClearCachedLocalizedData();
                 return true;
 
-            case "data/npcgifttastes": // Game1.LoadContent
+            case OtherAssetRoute.NpcGiftTastes: // Game1.LoadContent
                 Game1.NPCGiftTastes = DataLoader.NpcGiftTastes(content);
                 return true;
 
-            case "data/objects": // Game1.LoadContent
+            case OtherAssetRoute.Objects: // Game1.LoadContent
                 Game1.objectData = DataLoader.Objects(content);
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/pants": // Game1.LoadContent
+            case OtherAssetRoute.Pants: // Game1.LoadContent
                 Game1.pantsData = DataLoader.Pants(content);
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/pets": // Game1.LoadContent
+            case OtherAssetRoute.Pets: // Game1.LoadContent
                 Game1.petData = DataLoader.Pets(content);
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/shirts": // Game1.LoadContent
+            case OtherAssetRoute.Shirts: // Game1.LoadContent
                 Game1.shirtData = DataLoader.Shirts(content);
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/tools": // Game1.LoadContent
+            case OtherAssetRoute.Tools: // Game1.LoadContent
                 Game1.toolData = DataLoader.Tools(content);
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/triggeractions":
+            case OtherAssetRoute.TriggerActions:
                 TriggerActionManager.ResetDataCache();
                 return true;
 
-            case "data/weapons": // Game1.LoadContent
+            case OtherAssetRoute.Weapons: // Game1.LoadContent
                 Game1.weaponData = DataLoader.Weapons(content);
                 ItemRegistry.ResetCache();
                 return true;
 
-            case "data/wildtrees": // Tree
+            case OtherAssetRoute.WildTrees: // Tree
                 Tree.ClearCache();
                 return true;
 
-            case "data/worldmap": // WorldMapManager
+            case OtherAssetRoute.WorldMap: // WorldMapManager
                 WorldMapManager.ReloadData();
                 return true;
 
             /****
             ** Content/Fonts
             ****/
-            case "fonts/spritefont1": // Game1.LoadContent
+            case OtherAssetRoute.SpriteFont1: // Game1.LoadContent
                 Game1.dialogueFont = content.Load<SpriteFont>(baseName);
                 return true;
 
-            case "fonts/smallfont": // Game1.LoadContent
+            case OtherAssetRoute.SmallFont: // Game1.LoadContent
                 Game1.smallFont = content.Load<SpriteFont>(baseName);
                 return true;
 
-            case "fonts/tinyfont": // Game1.LoadContent
+            case OtherAssetRoute.TinyFont: // Game1.LoadContent
                 Game1.tinyFont = content.Load<SpriteFont>(baseName);
                 return true;
 
             /****
             ** Content/Strings
             ****/
-            case "strings/stringsfromcsfiles":
+            case OtherAssetRoute.StringsFromCsFiles:
                 return this.UpdateStringsFromCsFiles(content);
 
             /****
             ** Dynamic keys
             ****/
-            default:
+            case OtherAssetRoute.None:
                 if (!ignoreWorld)
                 {
                     if (assetName.IsDirectlyUnderPath("Characters/Dialogue"))
@@ -578,6 +643,9 @@ internal class CoreAssetPropagator
                 }
 
                 return false;
+
+            default:
+                throw new InvalidOperationException($"Unknown core asset propagation route '{route}'.");
         }
     }
 
@@ -1083,6 +1151,56 @@ internal class CoreAssetPropagator
             return null;
 
         return this.ParseAssetName(path);
+    }
+
+    /// <summary>A propagation route for an exact texture asset name.</summary>
+    internal enum TextureAssetRoute
+    {
+        None,
+        PlayerSprites,
+        Tools
+    }
+
+    /// <summary>A propagation route for an exact non-map, non-texture base asset name.</summary>
+    internal enum OtherAssetRoute
+    {
+        None,
+        Achievements,
+        AudioChanges,
+        BigCraftables,
+        Boots,
+        Buildings,
+        ChairTiles,
+        Characters,
+        Concessions,
+        ConcessionTastes,
+        CookingRecipes,
+        CraftingRecipes,
+        Crops,
+        FarmAnimals,
+        FloorsAndPaths,
+        Furniture,
+        FruitTrees,
+        HairData,
+        Hats,
+        JukeboxTracks,
+        Locations,
+        LocationContexts,
+        Movies,
+        NpcGiftTastes,
+        Objects,
+        Pants,
+        Pets,
+        Shirts,
+        Tools,
+        TriggerActions,
+        Weapons,
+        WildTrees,
+        WorldMap,
+        SpriteFont1,
+        SmallFont,
+        TinyFont,
+        StringsFromCsFiles
     }
 
     /// <summary>Metadata about a location used in asset propagation.</summary>
