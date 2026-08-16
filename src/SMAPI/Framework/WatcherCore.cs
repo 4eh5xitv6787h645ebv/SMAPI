@@ -105,7 +105,6 @@ internal class WatcherCore
         foreach (IWatcher watcher in this.Watchers)
             watcher.Update();
         this.CurrentPlayerTracker?.Update();
-        this.LocationsWatcher.Update();
     }
 
     /// <summary>Reset the current values as the baseline.</summary>
@@ -114,6 +113,5 @@ internal class WatcherCore
         foreach (IWatcher watcher in this.Watchers)
             watcher.Reset();
         this.CurrentPlayerTracker?.Reset();
-        this.LocationsWatcher.Reset();
     }
 }
