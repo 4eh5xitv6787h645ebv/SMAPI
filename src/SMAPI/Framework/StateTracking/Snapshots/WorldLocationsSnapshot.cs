@@ -42,7 +42,7 @@ internal class WorldLocationsSnapshot
 
         // update location list
         if (options.TrackLocationList)
-            this.LocationList.Update(watcher.IsLocationListChanged, watcher.Added, watcher.Removed);
+            this.LocationList.Update(watcher.IsLocationListChanged, removed: watcher.Removed, added: watcher.Added);
         else
             this.LocationList.Update(isChanged: false, removed: null, added: null);
 

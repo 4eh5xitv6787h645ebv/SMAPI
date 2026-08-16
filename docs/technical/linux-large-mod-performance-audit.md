@@ -178,7 +178,17 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. The public event fields and argument types remain unchanged; only the internal name is corrected.
 - **Status:** Fixed. Each managed event now uses the textual identifier matching its public world event.
 
-### 18. Repeated propagation side effects are not coalesced
+### 18. Added and removed locations are reversed in event snapshots
+
+- **Affected code:** `Framework/StateTracking/Snapshots/WorldLocationsSnapshot.cs` (`Update`).
+- **Scenario:** Mods handling `LocationListChanged` as temporary mine levels, building interiors, or modded locations enter or leave the world on Linux or other platforms.
+- **Root cause:** `WorldLocationsTracker.Added` is passed to the `removed` parameter of `SnapshotListDiff.Update`, and `Removed` is passed to `added`.
+- **Impact:** Correctness during transitions.
+- **Expected benefit:** Mods receive newly tracked locations in `Added` and departed locations in `Removed`, matching the public event contract.
+- **Risk:** Low. The fix only corrects argument direction at the snapshot boundary.
+- **Status:** Fixed. The call now uses named arguments to make the direction explicit, with add/remove coverage at the world snapshot boundary.
+
+### 19. Repeated propagation side effects are not coalesced
 
 - **Affected code:** `Framework/Metadata/CoreAssetPropagator.cs` asset-specific propagation methods.
 - **Scenario:** A single context change invalidates multiple assets which each request the same registry reset or global cache rebuild.
@@ -188,7 +198,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** High. Some invalidations may require ordering or intermediate state visible to later propagation.
 - **Status:** Confirmed; deferred as part of batched propagation.
 
-### 19. The runtime is out of support and performance features are disabled
+### 20. The runtime is out of support and performance features are disabled
 
 - **Affected code:** `SMAPI.csproj` (`TargetFramework` and tiered compilation properties) and `SMAPI.Installer/assets/runtimeconfig.json`.
 - **Scenario:** All Linux launches and gameplay.
@@ -198,7 +208,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Very high. Game integration, bundled runtime, Harmony patching, mod binary compatibility, installer packaging, and all supported platforms are affected.
 - **Status:** Deferred until algorithmic fixes and Harmony compatibility are stable.
 
-### 20. Texture and decoded-content memory pressure is not centrally budgeted
+### 21. Texture and decoded-content memory pressure is not centrally budgeted
 
 - **Affected code:** `Framework/ContentManagers/BaseContentManager.cs`, `GameContentManager.cs`, and `ModContentManager.cs` asset ownership/cache paths.
 - **Scenario:** Long Linux sessions with many high-resolution content-pack textures and repeated invalidation/reload cycles.
