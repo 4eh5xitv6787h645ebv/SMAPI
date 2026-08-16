@@ -130,13 +130,13 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 ### 13. Mod dependency resolution repeatedly scans the mod list
 
-- **Affected code:** `Framework/ModLoading/ModResolver.cs` (`FindMod` and dependency resolution).
+- **Affected code:** `Framework/ModLoading/ModResolver.cs` (`ProcessDependencies`, `GetDependenciesFrom`, and local `FindMod`).
 - **Scenario:** Startup with hundreds of manifests and dependency edges.
 - **Root cause:** Dependency lookup uses repeated linear searches by unique ID rather than a prebuilt ID dictionary.
 - **Impact:** Startup.
 - **Expected benefit:** Constant-time dependency lookup removes avoidable quadratic scaling.
 - **Risk:** Low. Duplicate-ID and ignored-mod diagnostics must preserve their current selection behavior.
-- **Status:** Confirmed.
+- **Status:** Fixed. Dependency sorting now builds one trimmed, case-insensitive unique-ID index and resolves every dependency edge through it, while preserving the prior first-match behavior for duplicate IDs.
 
 ### 14. Uncached disposable tracking retains dead weak-reference wrappers
 

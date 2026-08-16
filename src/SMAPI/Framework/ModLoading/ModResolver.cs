@@ -223,6 +223,17 @@ internal class ModResolver
         // initialize metadata
         var sortedMods = new Stack<IModMetadata>();
         var states = mods.ToDictionary(mod => mod, _ => ModDependencyStatus.Queued);
+        var modsById = new Lazy<IReadOnlyDictionary<string, IModMetadata>>(() =>
+        {
+            var index = new Dictionary<string, IModMetadata>(StringComparer.OrdinalIgnoreCase);
+            foreach (IModMetadata mod in mods)
+            {
+                string? id = mod.Manifest?.UniqueID;
+                if (!string.IsNullOrWhiteSpace(id))
+                    index.TryAdd(id.Trim(), mod); // preserve the previous first-match behavior for duplicate IDs
+            }
+            return index;
+        });
 
         // handle failed mods
         foreach (IModMetadata mod in mods)
@@ -236,7 +247,7 @@ internal class ModResolver
 
         // sort mods
         foreach (IModMetadata mod in mods)
-            this.ProcessDependencies(mods, modDatabase, mod, states, sortedMods, new List<IModMetadata>());
+            this.ProcessDependencies(modsById, modDatabase, mod, states, sortedMods, new List<IModMetadata>());
 
         return sortedMods.Reverse();
     }
@@ -246,14 +257,14 @@ internal class ModResolver
     ** Private methods
     *********/
     /// <summary>Sort a mod's dependencies by the order they should be loaded, and remove any mods that can't be loaded due to missing or conflicting dependencies.</summary>
-    /// <param name="mods">The full list of mods being validated.</param>
+    /// <param name="modsById">The installed mods indexed by unique ID.</param>
     /// <param name="modDatabase">Handles access to SMAPI's internal mod metadata list.</param>
     /// <param name="mod">The mod whose dependencies to process.</param>
     /// <param name="states">The dependency state for each mod.</param>
     /// <param name="sortedMods">The list in which to save mods sorted by dependency order.</param>
     /// <param name="currentChain">The current change of mod dependencies.</param>
     /// <returns>Returns the mod dependency status.</returns>
-    private ModDependencyStatus ProcessDependencies(IReadOnlyList<IModMetadata> mods, ModDatabase modDatabase, IModMetadata mod, IDictionary<IModMetadata, ModDependencyStatus> states, Stack<IModMetadata> sortedMods, ICollection<IModMetadata> currentChain)
+    private ModDependencyStatus ProcessDependencies(Lazy<IReadOnlyDictionary<string, IModMetadata>> modsById, ModDatabase modDatabase, IModMetadata mod, IDictionary<IModMetadata, ModDependencyStatus> states, Stack<IModMetadata> sortedMods, ICollection<IModMetadata> currentChain)
     {
         // check if already visited
         switch (states[mod])
@@ -280,7 +291,7 @@ internal class ModResolver
         }
 
         // collect dependencies
-        IReadOnlyList<ModDependency> dependencies = this.GetDependenciesFrom(mod.Manifest, mods);
+        IReadOnlyList<ModDependency> dependencies = this.GetDependenciesFrom(mod.Manifest, modsById);
 
         // mark sorted if no dependencies
         if (dependencies.Count == 0)
@@ -371,7 +382,7 @@ internal class ModResolver
                 }
 
                 // recursively process each dependency
-                var subStatus = this.ProcessDependencies(mods, modDatabase, requiredMod, states, sortedMods, subchain);
+                var subStatus = this.ProcessDependencies(modsById, modDatabase, requiredMod, states, sortedMods, subchain);
                 switch (subStatus)
                 {
                     // sorted successfully
@@ -405,8 +416,8 @@ internal class ModResolver
 
     /// <summary>Get the dependencies declared in a manifest.</summary>
     /// <param name="manifest">The mod manifest.</param>
-    /// <param name="loadedMods">The loaded mods.</param>
-    private IReadOnlyList<ModDependency> GetDependenciesFrom(IManifest manifest, IReadOnlyList<IModMetadata> loadedMods)
+    /// <param name="modsById">The installed mods indexed by unique ID.</param>
+    private IReadOnlyList<ModDependency> GetDependenciesFrom(IManifest manifest, Lazy<IReadOnlyDictionary<string, IModMetadata>> modsById)
     {
         List<ModDependency>? dependencies = null;
 
@@ -430,7 +441,9 @@ internal class ModResolver
 
         IModMetadata? FindMod(string id)
         {
-            return loadedMods.FirstOrDefault(m => m.HasId(id));
+            return modsById.Value.TryGetValue(id.Trim(), out IModMetadata? mod)
+                ? mod
+                : null;
         }
     }
 
