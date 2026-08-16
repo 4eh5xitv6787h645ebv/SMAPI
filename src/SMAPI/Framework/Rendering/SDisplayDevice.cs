@@ -25,6 +25,13 @@ internal class SDisplayDevice : XnaDisplayDevice
     /// <inheritdoc />
     protected override void DrawImpl(Tile tile, Location location, float layerDepth, Texture2D tileSheetTexture)
     {
+        // use xTile's simpler draw path for the overwhelming majority of tiles
+        if (!tile.Properties.ContainsKey("@Flip") && !tile.Properties.ContainsKey("@Rotation"))
+        {
+            base.DrawImpl(tile, location, layerDepth, tileSheetTexture);
+            return;
+        }
+
         // get rotation and effects
         float rotation = this.GetRotation(tile);
         SpriteEffects effects = this.GetSpriteEffects(tile);
