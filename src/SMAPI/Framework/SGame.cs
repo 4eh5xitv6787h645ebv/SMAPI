@@ -47,7 +47,10 @@ internal class SGame : Game1
     private SMultiplayer? InitialMultiplayer;
 
     /// <summary>Raised when the instance is updating its state (roughly 60 times per second).</summary>
-    private readonly Action<SGame, GameTime, Action> OnUpdating;
+    private readonly Action<SGame, GameTime, Action<GameTime>> OnUpdating;
+
+    /// <summary>Invoke the base update loop without allocating a capturing callback each tick.</summary>
+    private readonly Action<GameTime> RunBaseUpdate;
 
     /// <summary>Raised after the instance finishes loading its initial content.</summary>
     private readonly Action OnContentLoaded;
@@ -110,7 +113,7 @@ internal class SGame : Game1
     /// <param name="onContentLoaded">Raised after the game finishes loading its initial content.</param>
     /// <param name="onLoadStageChanged">Raised invoke when the load stage changes through a method like <see cref="Game1.CleanupReturningToTitle"/>.</param>
     /// <param name="onRendered">Raised after the instance finishes a draw loop.</param>
-    public SGame(PlayerIndex playerIndex, int instanceIndex, Monitor monitor, Reflector reflection, SInputState input, SModHooks modHooks, IGameLogger gameLogger, SMultiplayer multiplayer, Action<string> exitGameImmediately, Action<SGame, GameTime, Action> onUpdating, Action onContentLoaded, Action<LoadStage> onLoadStageChanged, Action<RenderTarget2D> onRendered)
+    public SGame(PlayerIndex playerIndex, int instanceIndex, Monitor monitor, Reflector reflection, SInputState input, SModHooks modHooks, IGameLogger gameLogger, SMultiplayer multiplayer, Action<string> exitGameImmediately, Action<SGame, GameTime, Action<GameTime>> onUpdating, Action onContentLoaded, Action<LoadStage> onLoadStageChanged, Action<RenderTarget2D> onRendered)
         : base(playerIndex, instanceIndex)
     {
         // init XNA
@@ -131,6 +134,7 @@ internal class SGame : Game1
         this.OnContentLoaded = onContentLoaded;
         this.OnLoadStageChanged = onLoadStageChanged;
         this.OnRendered = onRendered;
+        this.RunBaseUpdate = this.RunBaseUpdateImpl;
     }
 
     /// <summary>Get the current input state for a button.</summary>
@@ -230,13 +234,20 @@ internal class SGame : Game1
         // update
         try
         {
-            this.OnUpdating(this, gameTime, () => base.Update(gameTime));
+            this.OnUpdating(this, gameTime, this.RunBaseUpdate);
             this.PlayerId = Game1.player?.UniqueMultiplayerID;
         }
         finally
         {
             this.IsFirstTick = false;
         }
+    }
+
+    /// <summary>Run the underlying game update.</summary>
+    /// <param name="gameTime">A snapshot of the game timing state.</param>
+    private void RunBaseUpdateImpl(GameTime gameTime)
+    {
+        base.Update(gameTime);
     }
 
     /// <summary>The method called to draw everything to the screen.</summary>
