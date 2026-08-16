@@ -16,7 +16,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Steady gameplay and correctness.
 - **Expected benefit:** Removes a complete duplicate traversal and preserves temporary-location change notifications.
 - **Risk:** Low. The fix must retain one update and reset in the same tick phase.
-- **Status:** Confirmed.
+- **Status:** Fixed. `WatcherCore` now processes `LocationsWatcher` once through its general watcher collection, preserving change flags for the snapshot and avoiding the duplicate traversal.
 
 ### 2. World and chest tracking runs even when no related event has listeners
 
