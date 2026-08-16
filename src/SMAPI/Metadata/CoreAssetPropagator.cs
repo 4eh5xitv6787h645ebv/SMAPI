@@ -695,7 +695,17 @@ internal class CoreAssetPropagator
             // switch to new schedule if needed
             if (npc.Schedule != null)
             {
-                int lastScheduleTime = npc.Schedule.Keys.Where(p => p <= Game1.timeOfDay).OrderByDescending(p => p).FirstOrDefault();
+                int lastScheduleTime = 0;
+                bool foundScheduleTime = false;
+                foreach (int scheduleTime in npc.Schedule.Keys)
+                {
+                    if (scheduleTime <= Game1.timeOfDay && (!foundScheduleTime || scheduleTime > lastScheduleTime))
+                    {
+                        lastScheduleTime = scheduleTime;
+                        foundScheduleTime = true;
+                    }
+                }
+
                 if (lastScheduleTime != 0)
                 {
                     npc.queuedSchedulePaths.Clear();
