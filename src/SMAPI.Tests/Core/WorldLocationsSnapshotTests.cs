@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Reflection;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Framework.StateTracking;
@@ -95,6 +97,46 @@ internal class WorldLocationsSnapshotTests
         // assert: transient changes are coalesced to the final reference
         tracker.Added.Should().BeEmpty();
         tracker.Removed.Should().BeEmpty();
+    }
+
+    [Test(Description = "Assert that add-before-remove transfers keep building interiors tracked.")]
+    public void Update_TracksBuildingMovedDestinationFirst()
+    {
+        // arrange
+        ObservableCollection<GameLocation> locations = [];
+        using WorldLocationsTracker tracker = new(locations, new List<MineShaft>(), new List<VolcanoDungeon>());
+        GameLocation source = new() { name = { Value = "Source" } };
+        GameLocation destination = new() { name = { Value = "Destination" } };
+        GameLocation indoors = new();
+        Building building = new();
+
+        // Raw test locations don't have Game1's global state. Remove the game's building cache
+        // callbacks before SMAPI attaches its collection watchers below.
+        foreach (GameLocation location in new[] { source, destination })
+        {
+            Type collectionType = location.buildings.GetType();
+            collectionType.GetField("OnValueAdded", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(location.buildings, null);
+            collectionType.GetField("OnValueRemoved", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(location.buildings, null);
+        }
+        source.buildings.Add(building);
+        locations.Add(source);
+        locations.Add(destination);
+        tracker.Update();
+        tracker.Reset();
+
+        // act: destination notification is queued before the source notification
+        destination.buildings.Add(building);
+        source.buildings.Remove(building);
+        tracker.Update();
+
+        // Change the indoor reference after the transfer. If the destination add was lost, its
+        // notification handler was removed with the source and this location won't be discovered.
+        tracker.Reset();
+        building.indoors.Value = indoors;
+        tracker.Update();
+
+        // assert
+        tracker.HasLocationTracker(indoors).Should().BeTrue();
     }
 
     [Test(Description = "Assert that unobserved-chest updates and snapshots process only locations with collection changes.")]
