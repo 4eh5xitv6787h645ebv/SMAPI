@@ -76,7 +76,7 @@ internal class CoreAssetPropagator
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
     /// <param name="propagatedAssets">A lookup of asset names to whether they've been propagated.</param>
     /// <param name="changedWarpRoutes">Whether the NPC pathfinding warp route cache was reloaded.</param>
-    public void Propagate(IList<IContentManager> contentManagers, IDictionary<IAssetName, Type> assets, IReadOnlyDictionary<IAssetName, List<IContentManager>>? loadedTextureManagers, bool ignoreWorld, out Dictionary<IAssetName, bool> propagatedAssets, out bool changedWarpRoutes)
+    public void Propagate(IList<IContentManager> contentManagers, IReadOnlyDictionary<IAssetName, Type> assets, IReadOnlyDictionary<IAssetName, List<IContentManager>>? loadedTextureManagers, bool ignoreWorld, out Dictionary<IAssetName, bool> propagatedAssets, out bool changedWarpRoutes)
     {
         propagatedAssets = new Dictionary<IAssetName, bool>(assets.Count);
 
@@ -360,7 +360,7 @@ internal class CoreAssetPropagator
                 default:
                     if (!ignoreWorld)
                     {
-                        if (assetName.IsDirectlyUnderPath("Buildings") && assetName.BaseName.EndsWith("_PaintMask"))
+                        if (assetName.IsDirectlyUnderPath("Buildings") && assetName.BaseName.EndsWith("_PaintMask", StringComparison.OrdinalIgnoreCase))
                             return this.UpdateBuildingPaintMask(assetName);
                     }
 

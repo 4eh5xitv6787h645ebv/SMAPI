@@ -19,33 +19,35 @@ This is the current jank-first order, combining likely frame-time impact, freque
 7. Finding 25 — held-input event snapshot allocations — fixed.
 8. Finding 7 — normal-tile rendering overhead — fixed.
 9. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-10. Finding 36 — per-parse locale delegate allocation — fixed.
-11. Finding 34 — layer work repeated for every patched map tile — fixed.
-12. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
-13. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-14. Finding 33 — asset-loader adapter closures — fixed.
-15. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-16. Finding 6 — synchronous game-thread log flushing — fixed.
-17. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-18. Finding 32 — per-map warp comparison sets — fixed.
-19. Finding 19 — repeated propagation side effects — deferred.
-20. Finding 4 — no first-class batched exact invalidation — fixed.
-21. Finding 3 — exact invalidation performing cache scans — fixed.
-22. Finding 22 — oversized sparse image-patch transfers — fixed.
-23. Finding 8 — PNG decode and conversion churn — partially fixed.
-24. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-25. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-26. Finding 9 — linear content-manager routing — fixed.
-27. Finding 10 — repeated asset-name strings — partially fixed.
-28. Finding 14 — retained dead disposable wrappers — fixed.
-29. Finding 29 — world trackers lost across reordered transfers — fixed.
-30. Finding 30 — rectangular transformed-tile origin — fixed.
-31. Finding 18 — reversed location event changes — fixed.
-32. Finding 17 — swapped managed-event identifiers — fixed.
-33. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-34. Finding 13 — repeated dependency-list scans — fixed.
-35. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-36. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+10. Finding 37 — redundant invalidation-batch cloning — fixed.
+11. Finding 36 — per-parse locale delegate allocation — fixed.
+12. Finding 34 — layer work repeated for every patched map tile — fixed.
+13. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+14. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+15. Finding 33 — asset-loader adapter closures — fixed.
+16. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+17. Finding 6 — synchronous game-thread log flushing — fixed.
+18. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+19. Finding 32 — per-map warp comparison sets — fixed.
+20. Finding 19 — repeated propagation side effects — deferred.
+21. Finding 4 — no first-class batched exact invalidation — fixed.
+22. Finding 3 — exact invalidation performing cache scans — fixed.
+23. Finding 22 — oversized sparse image-patch transfers — fixed.
+24. Finding 8 — PNG decode and conversion churn — partially fixed.
+25. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+26. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+27. Finding 9 — linear content-manager routing — fixed.
+28. Finding 10 — repeated asset-name strings — partially fixed.
+29. Finding 14 — retained dead disposable wrappers — fixed.
+30. Finding 29 — world trackers lost across reordered transfers — fixed.
+31. Finding 30 — rectangular transformed-tile origin — fixed.
+32. Finding 18 — reversed location event changes — fixed.
+33. Finding 17 — swapped managed-event identifiers — fixed.
+34. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+35. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+36. Finding 13 — repeated dependency-list scans — fixed.
+37. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+38. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -409,6 +411,26 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Locale lookup and lazy locale-table behavior are unchanged.
 - **Status:** Fixed. `ContentCoordinator` now caches one typed locale parser and reuses it for all localized asset-name parses.
 
+### 37. Invalidation propagation clones the entire batch immediately before reading it
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`ProcessInvalidatedAssets`) and `Metadata/CoreAssetPropagator.cs` (`Propagate`).
+- **Scenario:** Large Content Patcher invalidation batches during day changes, warps, token changes, and other context updates.
+- **Root cause:** The coordinator owns a fresh invalidated-assets dictionary, but copies every entry into another dictionary immediately before passing it to propagation, which only reads the collection.
+- **Impact:** Transition CPU, temporary memory, and GC pressure proportional to invalidation-batch size.
+- **Expected benefit:** Removes one full dictionary allocation, entry copy, rehash, and subsequent collection from every nonempty invalidation transaction.
+- **Risk:** Low. The propagator now expresses its existing read-only contract; iteration and asset identity are unchanged.
+- **Status:** Fixed. The coordinator passes its existing batch directly through an `IReadOnlyDictionary` contract.
+
+### 38. Linux paint-mask propagation uses a case-sensitive suffix check
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`PropagateTexture`).
+- **Scenario:** A mod supplies or invalidates a building paint mask whose `_PaintMask` suffix differs only in casing on Linux.
+- **Root cause:** The directory check uses SMAPI's case-insensitive asset-name semantics, but the final raw string suffix check uses the platform-neutral case-sensitive overload.
+- **Impact:** Linux correctness and stale visual state; the changed texture can be reloaded while live buildings keep the old painted texture.
+- **Expected benefit:** Ensures valid building paint-mask invalidations propagate consistently regardless of filename casing.
+- **Risk:** Low. This aligns the suffix test with SMAPI's documented case-insensitive asset-name comparisons.
+- **Status:** Fixed. The paint-mask suffix uses `StringComparison.OrdinalIgnoreCase`.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -416,21 +438,21 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, and 29 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Finding 2 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, and 33 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, and 38 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, and 34 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, and 34 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, and 37 |
 | Synchronous logging and `AutoFlush` stalls | Finding 6 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, and 28 |
 | Content-manager lookup scaling | Finding 9 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
-| Linux case-insensitive file lookup | Finding 11 |
+| Linux case-insensitive file lookup | Findings 11 and 38 |
 | Assembly loading and rewrite caching | Finding 12 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, and 35 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, and 36 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, and 37 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
