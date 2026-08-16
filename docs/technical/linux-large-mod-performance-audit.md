@@ -248,6 +248,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. MonoGame exposes the key count and a buffer-filling overload; SMAPI must process only the populated prefix because a reused buffer can retain older values past that count.
 - **Status:** Fixed. Keyboard polling now grows one per-player buffer only when the simultaneous key-count high-water mark exceeds its capacity, fills it through MonoGame's nonallocating overload, and reads exactly the reported number of keys.
 
+### 25. ButtonsChanged constructs three lists on every held-input tick
+
+- **Affected code:** `Events/ButtonsChangedEventArgs.cs` (constructor).
+- **Scenario:** Focused Linux gameplay while a mod listens to `ButtonsChanged` and the player holds a movement key or controller direction.
+- **Root cause:** Every event snapshot eagerly creates separate pressed, held, and released lists even when a category is empty; an ordinary walking tick normally populates only the held list.
+- **Impact:** Steady gameplay and garbage collection when the event has listeners.
+- **Expected benefit:** Lazy category allocation removes the two empty list objects from the normal held-input event and avoids all three list objects if an unusual active-state snapshot contains no categorized buttons.
+- **Risk:** Low. The public properties remain `IEnumerable<SButton>` snapshots; empty categories use immutable empty enumerables instead of newly allocated empty lists.
+- **Status:** Fixed. Each category list is now created on its first matching button, while empty categories share the runtime's allocation-free empty representation.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.
