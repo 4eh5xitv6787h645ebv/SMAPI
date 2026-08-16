@@ -278,7 +278,7 @@ internal class SGame : Game1
             // recover draw state
             try
             {
-                if (Game1.spriteBatch.IsOpen(this.Reflection))
+                if (Game1.spriteBatch.IsOpen())
                 {
                     this.Monitor.Log("Recovering sprite batch from error...");
                     Game1.spriteBatch.End();

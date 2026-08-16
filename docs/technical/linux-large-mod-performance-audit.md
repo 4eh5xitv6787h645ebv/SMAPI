@@ -13,37 +13,38 @@ This is the current jank-first order, combining likely frame-time impact, freque
 1. Finding 2 — demand-driven world, chest, and inventory tracking — partially fixed.
 2. Finding 1 — duplicate world-location processing — fixed.
 3. Finding 23 — per-tick core update closures — fixed.
-4. Finding 24 — pressed-key polling allocation while walking — fixed.
-5. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
-6. Finding 25 — held-input event snapshot allocations — fixed.
-7. Finding 7 — normal-tile rendering overhead — fixed.
-8. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-9. Finding 34 — layer work repeated for every patched map tile — fixed.
-10. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
-11. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-12. Finding 33 — asset-loader adapter closures — fixed.
-13. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-14. Finding 6 — synchronous game-thread log flushing — fixed.
-15. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-16. Finding 32 — per-map warp comparison sets — fixed.
-17. Finding 19 — repeated propagation side effects — deferred.
-18. Finding 4 — no first-class batched exact invalidation — fixed.
-19. Finding 3 — exact invalidation performing cache scans — fixed.
-20. Finding 22 — oversized sparse image-patch transfers — fixed.
-21. Finding 8 — PNG decode and conversion churn — partially fixed.
-22. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-23. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-24. Finding 9 — linear content-manager routing — fixed.
-25. Finding 10 — repeated asset-name strings — partially fixed.
-26. Finding 14 — retained dead disposable wrappers — fixed.
-27. Finding 29 — world trackers lost across reordered transfers — fixed.
-28. Finding 30 — rectangular transformed-tile origin — fixed.
-29. Finding 18 — reversed location event changes — fixed.
-30. Finding 17 — swapped managed-event identifiers — fixed.
-31. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-32. Finding 13 — repeated dependency-list scans — fixed.
-33. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-34. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+4. Finding 35 — render-stage reflection and mismatched sprite batches — fixed.
+5. Finding 24 — pressed-key polling allocation while walking — fixed.
+6. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
+7. Finding 25 — held-input event snapshot allocations — fixed.
+8. Finding 7 — normal-tile rendering overhead — fixed.
+9. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
+10. Finding 34 — layer work repeated for every patched map tile — fixed.
+11. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+12. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+13. Finding 33 — asset-loader adapter closures — fixed.
+14. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+15. Finding 6 — synchronous game-thread log flushing — fixed.
+16. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+17. Finding 32 — per-map warp comparison sets — fixed.
+18. Finding 19 — repeated propagation side effects — deferred.
+19. Finding 4 — no first-class batched exact invalidation — fixed.
+20. Finding 3 — exact invalidation performing cache scans — fixed.
+21. Finding 22 — oversized sparse image-patch transfers — fixed.
+22. Finding 8 — PNG decode and conversion churn — partially fixed.
+23. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+24. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+25. Finding 9 — linear content-manager routing — fixed.
+26. Finding 10 — repeated asset-name strings — partially fixed.
+27. Finding 14 — retained dead disposable wrappers — fixed.
+28. Finding 29 — world trackers lost across reordered transfers — fixed.
+29. Finding 30 — rectangular transformed-tile origin — fixed.
+30. Finding 18 — reversed location event changes — fixed.
+31. Finding 17 — swapped managed-event identifiers — fixed.
+32. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+33. Finding 13 — repeated dependency-list scans — fixed.
+34. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+35. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -387,6 +388,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Source/target layer pairing, missing-layer creation, property results, tile order, patch-mode behavior, and target-only layer clearing are retained. Zero-sized patches explicitly keep their previous behavior of making no layer changes.
 - **Status:** Fixed. Source and target layers are paired once before tile traversal, missing layers and properties are handled once per source layer, and the tile loop iterates those stable pairs directly. Target-only layer tracking is allocated only for full `Replace` mode.
 
+### 35. Render events reflect private sprite-batch state several times per frame
+
+- **Affected code:** `Framework/Extensions/SpriteBatchExtensions.cs` (`IsOpen`) and `Framework/SCore.cs` (`RaiseRenderEvent`).
+- **Scenario:** Every Linux draw with mods subscribed to generic or stage-specific rendering events; the check can repeat for world, menu, HUD, step, and final rendered events.
+- **Root cause:** Each event checks MonoGame's private `_beginCalled` field through the general `Reflector`, which formats a cache key, constructs a capturing lookup delegate, allocates a reflected-field wrapper, invokes `FieldInfo.GetValue`, and boxes the Boolean result even when the metadata is cached. The temporary-open path also begins `Game1.spriteBatch` but ends the method's passed `spriteBatch`, which can corrupt batch state if they differ.
+- **Impact:** Steady frame pacing, garbage collection, and render correctness.
+- **Expected benefit:** Makes the repeated open-state check a direct typed delegate call with no per-check framework allocation or Boolean boxing.
+- **Risk:** Low to medium. The accessor relies on MonoGame's private field name, as the old reflection path already did; initialization validates that the field still exists with the expected Boolean type.
+- **Status:** Fixed. SMAPI creates one visibility-skipping typed field accessor at initialization and reuses it for every render-stage check and draw-error recovery check. Temporary rendering now begins and ends the same passed sprite batch.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -399,7 +410,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, and 34 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, and 34 |
 | Synchronous logging and `AutoFlush` stalls | Finding 6 |
-| Per-tile rendering overhead | Findings 7 and 30 |
+| Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, and 28 |
 | Content-manager lookup scaling | Finding 9 |
 | Asset-name parsing and normalization | Finding 10 |
@@ -407,8 +418,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Finding 12 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, and 33 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, and 34 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, and 35 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, and 35 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
