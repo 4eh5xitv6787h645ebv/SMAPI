@@ -375,29 +375,52 @@ internal class ContentCoordinator : IDisposable
     /// <returns>Returns the invalidated asset names.</returns>
     public ICollection<IAssetName> InvalidateCache(IAssetName assetName, bool dispose = false)
     {
-        AssetName normalizedName = this.ParseAssetName(assetName.Name, allowLocales: true);
+        return this.InvalidateCache([assetName], dispose);
+    }
+
+    /// <summary>Purge exact asset names from the cache in one transaction.</summary>
+    /// <param name="assetNames">The asset names to invalidate.</param>
+    /// <param name="dispose">Whether to dispose invalidated assets. This should only be <c>true</c> when they're being invalidated as part of a dispose, to avoid crashing the game.</param>
+    /// <returns>Returns the invalidated asset names.</returns>
+    public ICollection<IAssetName> InvalidateCache(IEnumerable<IAssetName> assetNames, bool dispose = false)
+    {
+        if (assetNames == null)
+            throw new ArgumentNullException(nameof(assetNames));
+
+        HashSet<IAssetName> normalizedNames = [];
+        foreach (IAssetName assetName in assetNames)
+        {
+            if (assetName == null)
+                throw new ArgumentException("The asset name list can't contain null values.", nameof(assetNames));
+
+            normalizedNames.Add(this.ParseAssetName(assetName.Name, allowLocales: true));
+        }
+
         IDictionary<IAssetName, Type> invalidatedAssets = new Dictionary<IAssetName, Type>();
 
         this.ContentManagerLock.InReadLock(() =>
         {
-            // Directly check the exact cache key in game content managers. Namespaced content managers don't cache assets.
+            // Directly check the exact cache keys in game content managers. Namespaced content managers don't cache assets.
             foreach (IContentManager contentManager in this.GameContentManagers)
             {
-                if (!contentManager.TryGetCachedAsset(normalizedName, out object? asset))
-                    continue;
+                foreach (IAssetName normalizedName in normalizedNames)
+                {
+                    if (!contentManager.TryGetCachedAsset(normalizedName, out object? asset))
+                        continue;
 
-                if (asset is not Texture2D) // will edit in place
-                    contentManager.InvalidateCache(normalizedName, dispose);
+                    if (asset is not Texture2D) // will edit in place
+                        contentManager.InvalidateCache(normalizedName, dispose);
 
-                if (!invalidatedAssets.ContainsKey(normalizedName))
-                    invalidatedAssets[normalizedName] = asset.GetType();
+                    if (!invalidatedAssets.ContainsKey(normalizedName))
+                        invalidatedAssets[normalizedName] = asset.GetType();
+                }
             }
 
             this.ForgetLocalizedAssetNames(invalidatedAssets.Keys);
 
             // Special case: maps may be loaded through a temporary content manager that's removed while the map is still in use.
             // This notably affects the town and farmhouse maps.
-            if (!invalidatedAssets.ContainsKey(normalizedName) && Game1.locations != null)
+            if (Game1.locations != null)
             {
                 foreach (GameLocation location in Game1.locations)
                 {
@@ -405,11 +428,8 @@ internal class ContentCoordinator : IDisposable
                         continue;
 
                     AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
-                    if (mapPath.IsEquivalentTo(normalizedName))
-                    {
+                    if (!invalidatedAssets.ContainsKey(mapPath) && normalizedNames.Contains(mapPath))
                         invalidatedAssets[mapPath] = typeof(Map);
-                        break;
-                    }
                 }
             }
         });

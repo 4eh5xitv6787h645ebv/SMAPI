@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using StardewModdingAPI.Framework.Content;
 using StardewModdingAPI.Framework.ContentManagers;
 using StardewModdingAPI.Framework.Exceptions;
@@ -107,6 +108,13 @@ internal class GameContentHelper : BaseHelper, IGameContentHelper
     {
         this.Monitor.Log($"Requested cache invalidation for '{assetName}'.");
         return this.ContentCore.InvalidateCache(assetName).Count > 0;
+    }
+
+    /// <inheritdoc />
+    public bool InvalidateCache(IEnumerable<IAssetName> assetNames)
+    {
+        this.Monitor.Log("Requested cache invalidation for a set of exact asset names.");
+        return this.ContentCore.InvalidateCache(assetNames).Count > 0;
     }
 
     /// <inheritdoc />

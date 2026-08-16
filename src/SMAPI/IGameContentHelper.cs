@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Microsoft.Xna.Framework.Content;
 using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI.Events;
@@ -61,6 +62,23 @@ public interface IGameContentHelper : IModLinked
     /// <exception cref="ArgumentException">The <paramref name="assetName"/> is empty or contains invalid characters.</exception>
     /// <returns>Returns whether the given asset key was cached.</returns>
     bool InvalidateCache(IAssetName assetName);
+
+    /// <summary>Remove exact asset names from the content cache in one transaction so they're reloaded on the next request. This will reload core game assets if needed, but references to the former assets will still show the previous content.</summary>
+    /// <param name="assetNames">The asset keys to invalidate in the content folder.</param>
+    /// <returns>Returns whether any of the given asset keys were cached.</returns>
+    bool InvalidateCache(IEnumerable<IAssetName> assetNames)
+    {
+        if (assetNames == null)
+            throw new ArgumentNullException(nameof(assetNames));
+
+        bool anyInvalidated = false;
+        foreach (IAssetName assetName in assetNames)
+        {
+            if (this.InvalidateCache(assetName))
+                anyInvalidated = true;
+        }
+        return anyInvalidated;
+    }
 
     /// <summary>Remove all assets of the given type from the cache so they're reloaded on the next request. <b>This can be a very expensive operation and should only be used in very specific cases.</b> This will reload core game assets if needed, but references to the former assets will still show the previous content.</summary>
     /// <typeparam name="T">The asset type to remove from the cache.</typeparam>
