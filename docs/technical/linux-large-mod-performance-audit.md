@@ -60,13 +60,13 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 ### 6. File logging flushes synchronously on the game thread
 
-- **Affected code:** `Framework/Logging/LogFileManager.cs` (constructor) and `Framework/Monitor.cs` (`LogImpl`).
+- **Affected code:** `Framework/Logging/LogFileManager.cs` (constructor, `WriteLine`, `Flush`, and `Dispose`) and `Framework/Logging/LogManager.cs` (`WriteCrashLog`).
 - **Scenario:** Large content changes producing thousands of trace messages while loading or editing assets on Linux filesystems.
-- **Root cause:** The log `StreamWriter` uses `AutoFlush`, and formatting/writes occur synchronously in the caller, normally the game thread.
+- **Root cause:** The log `StreamWriter` uses `AutoFlush`, so every message writes and flushes synchronously in the caller, normally the game thread. Background mod logs can also reach the same non-thread-safe writer concurrently.
 - **Impact:** Transitions and occasional steady-gameplay frame spikes.
-- **Expected benefit:** A bounded ordered background writer with periodic batch flushes removes most filesystem latency from gameplay calls.
+- **Expected benefit:** Moving ordered file writes and batch flushes off the game thread removes routine filesystem latency from gameplay calls, while serializing concurrent producers prevents writer corruption.
 - **Risk:** High. Crash-tail durability, ordering, shutdown, queue saturation, and recursive logging failures must be handled explicitly.
-- **Status:** Confirmed; asynchronous design deferred.
+- **Status:** Fixed. File messages now enter a bounded, lossless queue drained by one ordered background writer, with periodic and size-bounded flushes, backpressure instead of dropped messages at saturation, explicit flush barriers before crash-log copies, writer failures surfaced without logging from the writer thread, and a full drain on shutdown.
 
 ### 7. Every rendered tile checks and parses transform properties
 
