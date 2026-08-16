@@ -88,6 +88,8 @@ internal class CoreAssetPropagator
             Dictionary<FarmHouse, string?>? spouseRoomMapPathCache = null; // constructed later if needed
             Dictionary<IAssetName, List<LocationInfo>>? locationsByMapName = null;
             Dictionary<string, List<NPC>>? charactersByName = null;
+            HashSet<string>? oldWarpTargets = null;
+            HashSet<string>? newWarpTargets = null;
 
             // Build world indexes only when a batch contains multiple matching assets. A single invalidation is
             // cheaper as a direct scan, while a large content update can otherwise scan the world once per asset.
@@ -128,7 +130,16 @@ internal class CoreAssetPropagator
                     // map
                     else if (assetType == mapType)
                     {
-                        changed = this.PropagateMap(assetName, ref spouseRoomMapPathCache, locationsByMapName, ignoreWorld, out bool curChangedMapRoutes);
+                        changed = this.PropagateMap(
+                            assetName,
+                            ref spouseRoomMapPathCache,
+                            locationsByMapName,
+                            ref oldWarpTargets,
+                            ref newWarpTargets,
+                            checkWarpChanges: !changedWarpRoutes,
+                            ignoreWorld: ignoreWorld,
+                            out bool curChangedMapRoutes
+                        );
                         changedWarpRoutes |= curChangedMapRoutes;
                     }
 
@@ -158,10 +169,13 @@ internal class CoreAssetPropagator
     /// <param name="assetName">The asset name that changed.</param>
     /// <param name="spouseRoomMapPathCache">A cache of spouse room map path lookups by farmhouse or cabin instance. This will be created the first time it's needed.</param>
     /// <param name="locationsByMapName">The locations indexed by map asset name for a multi-map propagation batch, if applicable.</param>
+    /// <param name="oldWarpTargets">A pooled set containing warp targets before a map reload.</param>
+    /// <param name="newWarpTargets">A pooled set containing warp targets after a map reload.</param>
+    /// <param name="checkWarpChanges">Whether to check for changed warp routes. This can be disabled after an earlier map proves the global cache needs to be rebuilt.</param>
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
     /// <param name="changedWarpRoutes">Whether the locations reachable by warps from this location changed as part of this propagation.</param>
     /// <returns>Returns whether any assets were updated.</returns>
-    private bool PropagateMap(IAssetName assetName, ref Dictionary<FarmHouse, string?>? spouseRoomMapPathCache, Dictionary<IAssetName, List<LocationInfo>>? locationsByMapName, bool ignoreWorld, out bool changedWarpRoutes)
+    private bool PropagateMap(IAssetName assetName, ref Dictionary<FarmHouse, string?>? spouseRoomMapPathCache, Dictionary<IAssetName, List<LocationInfo>>? locationsByMapName, ref HashSet<string>? oldWarpTargets, ref HashSet<string>? newWarpTargets, bool checkWarpChanges, bool ignoreWorld, out bool changedWarpRoutes)
     {
         bool changed = false;
         changedWarpRoutes = false;
@@ -197,35 +211,43 @@ internal class CoreAssetPropagator
 
                 if (shouldUpdateMap)
                 {
-                    static ISet<string> GetWarpSet(GameLocation location)
+                    static void FillWarpSet(GameLocation location, HashSet<string> targetNames)
                     {
-                        HashSet<string> targetNames = [];
-
                         foreach (Warp warp in location.warps)
                             targetNames.Add(warp.TargetName);
 
-                        if (location.doors?.Count() > 0)
+                        if (location.doors is not null)
                         {
                             foreach (string targetName in location.doors.Values)
                                 targetNames.Add(targetName);
                         }
-
-                        return targetNames;
                     }
 
-                    var oldWarps = GetWarpSet(location);
-                    this.UpdateMap(info);
-                    var newWarps = GetWarpSet(location);
-
-                    changedWarpRoutes = changedWarpRoutes || oldWarps.Count != newWarps.Count;
-                    if (!changedWarpRoutes)
+                    if (checkWarpChanges && !changedWarpRoutes)
                     {
-                        foreach (string oldWarp in oldWarps)
+                        oldWarpTargets ??= [];
+                        oldWarpTargets.Clear();
+                        FillWarpSet(location, oldWarpTargets);
+                    }
+
+                    this.UpdateMap(info);
+
+                    if (checkWarpChanges && !changedWarpRoutes)
+                    {
+                        newWarpTargets ??= [];
+                        newWarpTargets.Clear();
+                        FillWarpSet(location, newWarpTargets);
+
+                        changedWarpRoutes = oldWarpTargets!.Count != newWarpTargets.Count;
+                        if (!changedWarpRoutes)
                         {
-                            if (!newWarps.Contains(oldWarp))
+                            foreach (string oldWarp in oldWarpTargets)
                             {
-                                changedWarpRoutes = true;
-                                break;
+                                if (!newWarpTargets.Contains(oldWarp))
+                                {
+                                    changedWarpRoutes = true;
+                                    break;
+                                }
                             }
                         }
                     }
