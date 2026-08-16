@@ -82,11 +82,11 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 - **Affected code:** `Framework/ContentManagers/ModContentManager.cs` (`LoadRawImageData` and texture loading).
 - **Scenario:** First access or reload of many pack textures during warps and seasonal/context changes.
-- **Root cause:** Each uncached PNG load decodes through Skia, materializes intermediate pixel arrays, converts pixels, creates a texture, and uploads it synchronously.
+- **Root cause:** Each uncached PNG load decodes through Skia, materializes an unpremultiplied pixel array and a second full-image premultiplied array, converts pixels again, creates a texture, and uploads it synchronously.
 - **Impact:** Transitions, memory, and garbage collection.
 - **Expected benefit:** A bounded immutable decoded-pixel cache and selective preload support can move repeat decoding out of transition-critical paths while preserving separately owned textures.
 - **Risk:** High. Graphics-device access is thread-affine, returned assets may be mutable/disposable, and an unbounded cache would worsen memory pressure.
-- **Status:** Confirmed; cache policy needs runtime evidence before implementation.
+- **Status:** Partially fixed. Normal PNG decoding now converts Skia's native premultiplied RGBA/BGRA span directly into the final XNA array, eliminating both full-image intermediate managed arrays while preserving the existing pixel values; unexpected decode formats retain the general fallback. A mutation-safe decoded cache remains deferred until representative runtime data can establish a byte budget, reuse threshold, and file-change policy without increasing large-pack paging risk.
 
 ### 9. Content-manager lookup is linear in the number of mods and packs
 

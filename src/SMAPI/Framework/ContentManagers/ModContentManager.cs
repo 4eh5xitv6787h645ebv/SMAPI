@@ -224,32 +224,67 @@ internal sealed class ModContentManager : BaseContentManager
     private IRawTextureData LoadRawImageData(FileInfo file, bool forRawData)
     {
         // load raw data
-        int width;
-        int height;
-        SKPMColor[] rawPixels;
+        using FileStream stream = File.OpenRead(file.FullName);
+        using SKBitmap bitmap = SKBitmap.Decode(stream);
+
+        if (bitmap is null)
+            throw new InvalidDataException($"Failed to load {file.FullName}. This doesn't seem to be a valid PNG image.");
+
+        return new RawTextureData(bitmap.Width, bitmap.Height, ModContentManager.ConvertPixels(bitmap));
+    }
+
+    /// <summary>Convert Skia pixels to the premultiplied XNA pixel format.</summary>
+    /// <param name="bitmap">The Skia bitmap to convert.</param>
+    /// <returns>The converted XNA pixels.</returns>
+    private static Color[] ConvertPixels(SKBitmap bitmap)
+    {
+        // PNGs normally decode to premultiplied RGBA/BGRA pixels. Read that native buffer directly
+        // so Skia doesn't allocate an unpremultiplied array which SMAPI would immediately convert back.
+        if (
+            bitmap.AlphaType is SKAlphaType.Premul or SKAlphaType.Opaque
+            && bitmap.ColorType is SKColorType.Rgba8888 or SKColorType.Bgra8888
+        )
         {
-            using FileStream stream = File.OpenRead(file.FullName);
-            using SKBitmap bitmap = SKBitmap.Decode(stream);
+            bool isBgra = bitmap.ColorType == SKColorType.Bgra8888;
+            int redOffset = isBgra ? 2 : 0;
+            int blueOffset = isBgra ? 0 : 2;
+            ReadOnlySpan<byte> rawPixels = bitmap.GetPixelSpan();
+            var pixels = GC.AllocateUninitializedArray<Color>(bitmap.Width * bitmap.Height);
 
-            if (bitmap is null)
-                throw new InvalidDataException($"Failed to load {file.FullName}. This doesn't seem to be a valid PNG image.");
+            int outputIndex = 0;
+            for (int y = 0; y < bitmap.Height; y++)
+            {
+                int inputIndex = y * bitmap.RowBytes;
+                int inputEnd = inputIndex + bitmap.Width * 4;
+                for (; inputIndex < inputEnd; inputIndex += 4)
+                {
+                    byte alpha = rawPixels[inputIndex + 3];
+                    pixels[outputIndex++] = alpha == 0
+                        ? Color.Transparent
+                        : new Color(
+                            r: rawPixels[inputIndex + redOffset],
+                            g: rawPixels[inputIndex + 1],
+                            b: rawPixels[inputIndex + blueOffset],
+                            alpha: alpha
+                        );
+                }
+            }
 
-            rawPixels = SKPMColor.PreMultiply(bitmap.Pixels);
-            width = bitmap.Width;
-            height = bitmap.Height;
+            return pixels;
         }
 
-        // convert to XNA pixel format
-        var pixels = GC.AllocateUninitializedArray<Color>(rawPixels.Length);
-        for (int i = 0; i < pixels.Length; i++)
+        // Retain the prior general conversion for an unexpected decode format.
+        SKPMColor[] rawPixelsFallback = SKPMColor.PreMultiply(bitmap.Pixels);
+        var pixelsFallback = GC.AllocateUninitializedArray<Color>(rawPixelsFallback.Length);
+        for (int i = 0; i < pixelsFallback.Length; i++)
         {
-            SKPMColor pixel = rawPixels[i];
-            pixels[i] = pixel.Alpha == 0
+            SKPMColor pixel = rawPixelsFallback[i];
+            pixelsFallback[i] = pixel.Alpha == 0
                 ? Color.Transparent
                 : new Color(r: pixel.Red, g: pixel.Green, b: pixel.Blue, alpha: pixel.Alpha);
         }
 
-        return new RawTextureData(width, height, pixels);
+        return pixelsFallback;
     }
 
     /// <summary>Load an unpacked image file (<c>.tbin</c> or <c>.tmx</c>).</summary>
