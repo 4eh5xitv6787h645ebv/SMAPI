@@ -849,6 +849,7 @@ internal class SCore : IDisposable
             );
 
             instance.Watchers.Update(
+                trackCursorChanges: events.CursorMoved.HasListeners,
                 trackPlayerInventoryChanges: events.InventoryChanged.HasListeners || verbose,
                 trackChestInventoryChanges: worldSnapshotOptions.TrackChestInventories
             );
@@ -940,11 +941,13 @@ internal class SCore : IDisposable
                     bool isChatInput = Game1.IsChatting || (Context.IsMultiplayer && Context.IsWorldReady && Game1.activeClickableMenu == null && Game1.currentMinigame == null && inputState.IsAnyDown(Game1.options.chatButton));
                     if (!isChatInput)
                     {
-                        ICursorPosition cursor = instance.Input.CursorPosition;
+                        ICursorPosition? cursor = state.Cursor.IsChanged
+                            ? state.Cursor.New
+                            : null;
 
                         // raise cursor moved event
                         if (state.Cursor.IsChanged && events.CursorMoved.HasListeners)
-                            events.CursorMoved.Raise(new CursorMovedEventArgs(state.Cursor.Old!, state.Cursor.New!));
+                            events.CursorMoved.Raise(new CursorMovedEventArgs(state.Cursor.Old!, cursor!));
 
                         // raise mouse wheel scrolled
                         if (state.MouseWheelScroll.IsChanged)
@@ -953,7 +956,7 @@ internal class SCore : IDisposable
                                 this.Monitor.Log($"Events: mouse wheel scrolled to {state.MouseWheelScroll.New}.");
 
                             if (events.MouseWheelScrolled.HasListeners)
-                                events.MouseWheelScrolled.Raise(new MouseWheelScrolledEventArgs(cursor, state.MouseWheelScroll.Old, state.MouseWheelScroll.New));
+                                events.MouseWheelScrolled.Raise(new MouseWheelScrolledEventArgs(cursor ??= inputState.CursorPosition, state.MouseWheelScroll.Old, state.MouseWheelScroll.New));
                         }
 
                         // raise input button events
@@ -961,7 +964,7 @@ internal class SCore : IDisposable
                         if (buttonStates.Count > 0)
                         {
                             if (events.ButtonsChanged.HasListeners)
-                                events.ButtonsChanged.Raise(new ButtonsChangedEventArgs(cursor, inputState));
+                                events.ButtonsChanged.Raise(new ButtonsChangedEventArgs(cursor ??= inputState.CursorPosition, inputState));
 
                             bool raisePressed = events.ButtonPressed.HasListeners;
                             bool raiseReleased = events.ButtonReleased.HasListeners;
@@ -978,7 +981,7 @@ internal class SCore : IDisposable
                                                 this.Monitor.Log($"Events: button {button} pressed.", Monitor.ContextLogLevel);
 
                                             if (raisePressed)
-                                                events.ButtonPressed.Raise(new ButtonPressedEventArgs(button, cursor, inputState));
+                                                events.ButtonPressed.Raise(new ButtonPressedEventArgs(button, cursor ??= inputState.CursorPosition, inputState));
                                             break;
 
                                         case SButtonState.Released:
@@ -986,7 +989,7 @@ internal class SCore : IDisposable
                                                 this.Monitor.Log($"Events: button {button} released.", Monitor.ContextLogLevel);
 
                                             if (raiseReleased)
-                                                events.ButtonReleased.Raise(new ButtonReleasedEventArgs(button, cursor, inputState));
+                                                events.ButtonReleased.Raise(new ButtonReleasedEventArgs(button, cursor ??= inputState.CursorPosition, inputState));
                                             break;
                                     }
                                 }

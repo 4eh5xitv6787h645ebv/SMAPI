@@ -16,6 +16,21 @@ internal sealed class SInputState : InputState
     /// <summary>The cursor position on the screen adjusted for the zoom level.</summary>
     private CursorPosition CursorPositionImpl = new(Vector2.Zero, Vector2.Zero, Vector2.Zero, Vector2.Zero);
 
+    /// <summary>Whether pending cursor values need to be materialized into an immutable API snapshot.</summary>
+    private bool IsCursorPositionDirty;
+
+    /// <summary>The pending absolute cursor position.</summary>
+    private Vector2 PendingCursorAbsolutePixels;
+
+    /// <summary>The pending screen-relative cursor position.</summary>
+    private Vector2 PendingCursorScreenPixels;
+
+    /// <summary>The pending cursor tile.</summary>
+    private Vector2 PendingCursorTile;
+
+    /// <summary>The pending game grab tile.</summary>
+    private Vector2 PendingCursorGrabTile;
+
     /// <summary>The player's last known tile position.</summary>
     private Vector2? LastPlayerTile;
 
@@ -58,7 +73,24 @@ internal sealed class SInputState : InputState
     public MouseState MouseState { get; private set; }
 
     /// <summary>The cursor position on the screen adjusted for the zoom level.</summary>
-    public ICursorPosition CursorPosition => this.CursorPositionImpl;
+    public ICursorPosition CursorPosition
+    {
+        get
+        {
+            if (this.IsCursorPositionDirty)
+            {
+                this.CursorPositionImpl = new CursorPosition(
+                    this.PendingCursorAbsolutePixels,
+                    this.PendingCursorScreenPixels,
+                    this.PendingCursorTile,
+                    this.PendingCursorGrabTile
+                );
+                this.IsCursorPositionDirty = false;
+            }
+
+            return this.CursorPositionImpl;
+        }
+    }
 
 
     /*********
@@ -119,10 +151,13 @@ internal sealed class SInputState : InputState
             this.ControllerState = controller.GetState();
             this.KeyboardState = keyboard.GetState();
             this.MouseState = mouse.GetState();
-            if (cursorAbsolutePos != this.CursorPositionImpl.AbsolutePixels || playerTilePos != this.LastPlayerTile)
+            Vector2 latestCursorAbsolutePos = this.IsCursorPositionDirty
+                ? this.PendingCursorAbsolutePixels
+                : this.CursorPositionImpl.AbsolutePixels;
+            if (cursorAbsolutePos != latestCursorAbsolutePos || playerTilePos != this.LastPlayerTile)
             {
                 this.LastPlayerTile = playerTilePos;
-                this.CursorPositionImpl = this.GetCursorPosition(this.MouseState, cursorAbsolutePos, zoomMultiplier);
+                this.UpdateCursorPosition(this.MouseState, cursorAbsolutePos, zoomMultiplier);
             }
             SInputState.UpdateActiveStates(this.ButtonStates, pressedButtons);
         }
@@ -230,18 +265,22 @@ internal sealed class SInputState : InputState
     /*********
     ** Private methods
     *********/
-    /// <summary>Get the current cursor position.</summary>
+    /// <summary>Update the cursor data without materializing an API snapshot until it's requested.</summary>
     /// <param name="mouseState">The current mouse state.</param>
     /// <param name="absolutePixels">The absolute pixel position relative to the map, adjusted for pixel zoom.</param>
     /// <param name="zoomMultiplier">The multiplier applied to pixel coordinates to adjust them for pixel zoom.</param>
-    private CursorPosition GetCursorPosition(MouseState mouseState, Vector2 absolutePixels, float zoomMultiplier)
+    private void UpdateCursorPosition(MouseState mouseState, Vector2 absolutePixels, float zoomMultiplier)
     {
         Vector2 screenPixels = new(mouseState.X * zoomMultiplier, mouseState.Y * zoomMultiplier);
         Vector2 tile = new((int)((Game1.viewport.X + screenPixels.X) / Game1.tileSize), (int)((Game1.viewport.Y + screenPixels.Y) / Game1.tileSize));
         Vector2 grabTile = (Game1.mouseCursorTransparency > 0 && Utility.tileWithinRadiusOfPlayer((int)tile.X, (int)tile.Y, 1, Game1.player)) // derived from Game1.pressActionButton
             ? tile
             : Game1.player.GetGrabTile();
-        return new CursorPosition(absolutePixels, screenPixels, tile, grabTile);
+        this.PendingCursorAbsolutePixels = absolutePixels;
+        this.PendingCursorScreenPixels = screenPixels;
+        this.PendingCursorTile = tile;
+        this.PendingCursorGrabTile = grabTile;
+        this.IsCursorPositionDirty = true;
     }
 
     /// <summary>Apply input overrides to the given states.</summary>
