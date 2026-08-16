@@ -18,6 +18,7 @@ using StardewValley.TerrainFeatures;
 using StardewValley.Triggers;
 using StardewValley.WorldMaps;
 using xTile;
+using LocationInfo = StardewModdingAPI.Framework.Utilities.WorldLocationUtilities.WorldLocationInfo;
 
 namespace StardewModdingAPI.Metadata;
 
@@ -872,6 +873,11 @@ internal class CoreAssetPropagator
         location.updateWarps();
         location.updateDoors();
         locationInfo.ParentBuilding?.updateInteriorWarps();
+        if (locationInfo.AdditionalParentBuildings != null)
+        {
+            foreach (Building building in locationInfo.AdditionalParentBuildings)
+                building.updateInteriorWarps();
+        }
 
         // reapply map changes
         // This must happen after updating warps (since some map modifications like the community shortcuts add warps)
@@ -1021,37 +1027,8 @@ internal class CoreAssetPropagator
                 ? nameof(this.GetLocationsWithInfo) + "_True"
                 : nameof(this.GetLocationsWithInfo) + "_False",
             buildingInteriors,
-            static includeBuildingInteriors =>
-            {
-                List<LocationInfo> locations = [];
-
-                // get root locations
-                foreach (GameLocation location in Game1.locations)
-                    locations.Add(new LocationInfo(location, null));
-                if (SaveGame.loaded?.locations != null)
-                {
-                    foreach (GameLocation location in SaveGame.loaded.locations)
-                        locations.Add(new LocationInfo(location, null));
-                }
-
-                // get child locations
-                if (includeBuildingInteriors)
-                {
-                    int rootLocationCount = locations.Count;
-                    for (int i = 0; i < rootLocationCount; i++)
-                    {
-                        LocationInfo location = locations[i];
-                        foreach (Building building in location.Location.buildings)
-                        {
-                            GameLocation indoors = building.indoors.Value;
-                            if (indoors is not null)
-                                locations.Add(new LocationInfo(indoors, building));
-                        }
-                    }
-                }
-
-                return locations;
-            });
+            static includeBuildingInteriors => WorldLocationUtilities.GetLocations(includeBuildingInteriors)
+        );
     }
 
     /// <summary>Get all locations in the game, indexed by the map assets which can update them.</summary>
@@ -1089,7 +1066,7 @@ internal class CoreAssetPropagator
 
         // A farmhouse can reference the same asset as both its main map and spouse-room map. The direct scan
         // updates that location only once for an asset, so preserve that behavior in the index.
-        if (locations.Count == 0 || !ReferenceEquals(locations[^1], location))
+        if (locations.Count == 0 || !ReferenceEquals(locations[^1].Location, location.Location))
             locations.Add(location);
     }
 
@@ -1203,8 +1180,4 @@ internal class CoreAssetPropagator
         StringsFromCsFiles
     }
 
-    /// <summary>Metadata about a location used in asset propagation.</summary>
-    /// <param name="Location">The location instance.</param>
-    /// <param name="ParentBuilding">The building which contains the location, if any.</param>
-    private record LocationInfo(GameLocation Location, Building? ParentBuilding);
 }

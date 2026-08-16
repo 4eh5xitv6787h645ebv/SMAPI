@@ -436,17 +436,15 @@ internal class ContentCoordinator : IDisposable
 
             // Special case: maps may be loaded through a temporary content manager that's removed while the map is still in use.
             // This notably affects the town and farmhouse maps.
-            if (Game1.locations != null)
+            foreach (WorldLocationUtilities.WorldLocationInfo info in WorldLocationUtilities.GetLocations())
             {
-                foreach (GameLocation location in Game1.locations)
-                {
-                    if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
-                        continue;
+                GameLocation location = info.Location;
+                if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
+                    continue;
 
-                    AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
-                    if (!invalidatedAssets.ContainsKey(mapPath) && normalizedNames.Contains(mapPath))
-                        invalidatedAssets[mapPath] = typeof(Map);
-                }
+                AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
+                if (!invalidatedAssets.ContainsKey(mapPath) && normalizedNames.Contains(mapPath))
+                    invalidatedAssets[mapPath] = typeof(Map);
             }
         });
 
@@ -507,18 +505,16 @@ internal class ContentCoordinator : IDisposable
 
             // special case: maps may be loaded through a temporary content manager that's removed while the map is still in use.
             // This notably affects the town and farmhouse maps.
-            if (Game1.locations != null)
+            foreach (WorldLocationUtilities.WorldLocationInfo info in WorldLocationUtilities.GetLocations())
             {
-                foreach (GameLocation location in Game1.locations)
-                {
-                    if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
-                        continue;
+                GameLocation location = info.Location;
+                if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
+                    continue;
 
-                    // get map path
-                    AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
-                    if (!invalidatedAssets.ContainsKey(mapPath) && predicate(this.MainContentManager, mapPath.Name, typeof(Map)))
-                        invalidatedAssets[mapPath] = typeof(Map);
-                }
+                // get map path
+                AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
+                if (!invalidatedAssets.ContainsKey(mapPath) && predicate(this.MainContentManager, mapPath.Name, typeof(Map)))
+                    invalidatedAssets[mapPath] = typeof(Map);
             }
         });
 
