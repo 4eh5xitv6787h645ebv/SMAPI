@@ -31,31 +31,56 @@ public class ButtonsChangedEventArgs : EventArgs
     /// <param name="inputState">The game's current input state.</param>
     internal ButtonsChangedEventArgs(ICursorPosition cursor, SInputState inputState)
     {
-        List<SButton>? pressed = null;
-        List<SButton>? held = null;
-        List<SButton>? released = null;
+        Dictionary<SButton, SButtonState> buttonStates = inputState.GetActiveButtonStates();
+        int pressedCount = 0;
+        int heldCount = 0;
+        int releasedCount = 0;
 
-        foreach ((SButton button, SButtonState state) in inputState.GetActiveButtonStates())
+        foreach (SButtonState state in buttonStates.Values)
         {
             switch (state)
             {
                 case SButtonState.Pressed:
-                    (pressed ??= []).Add(button);
+                    pressedCount++;
                     break;
 
                 case SButtonState.Held:
-                    (held ??= []).Add(button);
+                    heldCount++;
                     break;
 
                 case SButtonState.Released:
-                    (released ??= []).Add(button);
+                    releasedCount++;
+                    break;
+            }
+        }
+
+        SButton[] pressed = pressedCount > 0 ? new SButton[pressedCount] : Array.Empty<SButton>();
+        SButton[] held = heldCount > 0 ? new SButton[heldCount] : Array.Empty<SButton>();
+        SButton[] released = releasedCount > 0 ? new SButton[releasedCount] : Array.Empty<SButton>();
+        pressedCount = 0;
+        heldCount = 0;
+        releasedCount = 0;
+        foreach ((SButton button, SButtonState state) in buttonStates)
+        {
+            switch (state)
+            {
+                case SButtonState.Pressed:
+                    pressed[pressedCount++] = button;
+                    break;
+
+                case SButtonState.Held:
+                    held[heldCount++] = button;
+                    break;
+
+                case SButtonState.Released:
+                    released[releasedCount++] = button;
                     break;
             }
         }
 
         this.Cursor = cursor;
-        this.Pressed = pressed is not null ? pressed : Array.Empty<SButton>();
-        this.Held = held is not null ? held : Array.Empty<SButton>();
-        this.Released = released is not null ? released : Array.Empty<SButton>();
+        this.Pressed = pressed;
+        this.Held = held;
+        this.Released = released;
     }
 }

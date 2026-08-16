@@ -960,7 +960,7 @@ internal class SCore : IDisposable
                         }
 
                         // raise input button events
-                        IReadOnlyDictionary<SButton, SButtonState> buttonStates = inputState.GetActiveButtonStates();
+                        Dictionary<SButton, SButtonState> buttonStates = inputState.GetActiveButtonStates();
                         if (buttonStates.Count > 0)
                         {
                             if (events.ButtonsChanged.HasListeners)
