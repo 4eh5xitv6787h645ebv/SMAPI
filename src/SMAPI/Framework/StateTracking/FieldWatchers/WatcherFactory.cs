@@ -97,10 +97,11 @@ internal static class WatcherFactory
     /// <typeparam name="T">The value type.</typeparam>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="collection">The net collection.</param>
-    public static ICollectionWatcher<T> ForNetCollection<T>(string name, NetCollection<T> collection)
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public static ICollectionWatcher<T> ForNetCollection<T>(string name, NetCollection<T> collection, Action? onChanged = null)
         where T : class, INetObject<INetSerializable>
     {
-        return new NetCollectionWatcher<T>(name, collection);
+        return new NetCollectionWatcher<T>(name, collection, onChanged);
     }
 
     /// <summary>Get a watcher for a net dictionary.</summary>
@@ -111,12 +112,13 @@ internal static class WatcherFactory
     /// <typeparam name="TSerialDict">The serializable dictionary type that can store the keys and values.</typeparam>
     /// <typeparam name="TSelf">The net field instance type.</typeparam>
     /// <param name="field">The net field.</param>
-    public static NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf> ForNetDictionary<TKey, TValue, TField, TSerialDict, TSelf>(string name, NetDictionary<TKey, TValue, TField, TSerialDict, TSelf> field)
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public static NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf> ForNetDictionary<TKey, TValue, TField, TSerialDict, TSelf>(string name, NetDictionary<TKey, TValue, TField, TSerialDict, TSelf> field, Action? onChanged = null)
         where TKey : notnull
         where TField : class, INetObject<INetSerializable>, new()
         where TSerialDict : IDictionary<TKey, TValue>, new()
         where TSelf : NetDictionary<TKey, TValue, TField, TSerialDict, TSelf>
     {
-        return new NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf>(name, field);
+        return new NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf>(name, field, onChanged);
     }
 }

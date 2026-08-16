@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Netcode;
 
@@ -27,6 +28,9 @@ internal class NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf> : 
     /// <summary>The field being watched.</summary>
     private readonly NetDictionary<TKey, TValue, TField, TSerialDict, TSelf> Field;
 
+    /// <summary>Notify the owner when this watcher first changes after a reset.</summary>
+    private readonly Action? OnChanged;
+
 
     /*********
     ** Accessors
@@ -50,10 +54,12 @@ internal class NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf> : 
     /// <summary>Construct an instance.</summary>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="field">The field to watch.</param>
-    public NetDictionaryWatcher(string name, NetDictionary<TKey, TValue, TField, TSerialDict, TSelf> field)
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public NetDictionaryWatcher(string name, NetDictionary<TKey, TValue, TField, TSerialDict, TSelf> field, Action? onChanged = null)
     {
         this.Name = name;
         this.Field = field;
+        this.OnChanged = onChanged;
 
         field.OnValueAdded += this.OnValueAdded;
         field.OnValueRemoved += this.OnValueRemoved;
@@ -96,7 +102,7 @@ internal class NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf> : 
     private void OnValueAdded(TKey key, TValue value)
     {
         this.PairsAdded[key] = value;
-        this.IsChanged = true;
+        this.MarkChanged();
     }
 
     /// <summary>A callback invoked when an entry is removed from the dictionary.</summary>
@@ -105,6 +111,16 @@ internal class NetDictionaryWatcher<TKey, TValue, TField, TSerialDict, TSelf> : 
     private void OnValueRemoved(TKey key, TValue value)
     {
         this.PairsRemoved.TryAdd(key, value);
-        this.IsChanged = true;
+        this.MarkChanged();
+    }
+
+    /// <summary>Mark the watcher changed and notify its owner once per reset.</summary>
+    private void MarkChanged()
+    {
+        if (!this.IsChanged)
+        {
+            this.IsChanged = true;
+            this.OnChanged?.Invoke();
+        }
     }
 }

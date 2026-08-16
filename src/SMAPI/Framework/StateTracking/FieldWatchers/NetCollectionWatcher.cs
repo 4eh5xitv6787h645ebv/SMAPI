@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Netcode;
 
@@ -13,6 +14,9 @@ internal class NetCollectionWatcher<TValue> : BaseDisposableWatcher, ICollection
     *********/
     /// <summary>The field being watched.</summary>
     private readonly NetCollection<TValue> Field;
+
+    /// <summary>Notify the owner when this watcher first changes after a reset.</summary>
+    private readonly Action? OnChanged;
 
     /// <summary>The pairs added since the last reset.</summary>
     private readonly List<TValue> AddedImpl = [];
@@ -43,10 +47,12 @@ internal class NetCollectionWatcher<TValue> : BaseDisposableWatcher, ICollection
     /// <summary>Construct an instance.</summary>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="field">The field to watch.</param>
-    public NetCollectionWatcher(string name, NetCollection<TValue> field)
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public NetCollectionWatcher(string name, NetCollection<TValue> field, Action? onChanged = null)
     {
         this.Name = name;
         this.Field = field;
+        this.OnChanged = onChanged;
         field.OnValueAdded += this.OnValueAdded;
         field.OnValueRemoved += this.OnValueRemoved;
     }
@@ -88,7 +94,7 @@ internal class NetCollectionWatcher<TValue> : BaseDisposableWatcher, ICollection
     private void OnValueAdded(TValue value)
     {
         this.AddedImpl.Add(value);
-        this.IsChanged = true;
+        this.MarkChanged();
     }
 
     /// <summary>A callback invoked when an entry is removed from the collection.</summary>
@@ -96,6 +102,16 @@ internal class NetCollectionWatcher<TValue> : BaseDisposableWatcher, ICollection
     private void OnValueRemoved(TValue value)
     {
         this.RemovedImpl.Add(value);
-        this.IsChanged = true;
+        this.MarkChanged();
+    }
+
+    /// <summary>Mark the watcher changed and notify its owner once per reset.</summary>
+    private void MarkChanged()
+    {
+        if (!this.IsChanged)
+        {
+            this.IsChanged = true;
+            this.OnChanged?.Invoke();
+        }
     }
 }
