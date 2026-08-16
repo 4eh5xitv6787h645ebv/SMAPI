@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Xna.Framework.Content;
 using StardewModdingAPI.Framework.Exceptions;
 using StardewValley;
@@ -64,6 +65,11 @@ internal interface IContentManager : IDisposable
     /// <summary>Get whether the content manager has already loaded and cached the given asset.</summary>
     /// <param name="assetName">The asset path relative to the loader root directory, not including the <c>.xnb</c> extension.</param>
     bool IsLoaded(IAssetName assetName);
+
+    /// <summary>Get an asset from the cache if it's loaded.</summary>
+    /// <param name="assetName">The normalized asset name.</param>
+    /// <param name="asset">The cached asset, if found.</param>
+    bool TryGetCachedAsset(IAssetName assetName, [NotNullWhen(true)] out object? asset);
 
     /// <summary>Get all assets in the cache.</summary>
     IEnumerable<KeyValuePair<string, object>> GetCachedAssets();

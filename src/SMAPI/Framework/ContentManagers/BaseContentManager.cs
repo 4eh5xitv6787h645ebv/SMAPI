@@ -230,6 +230,12 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
         return this.Cache.ContainsKey(assetName.Name);
     }
 
+    /// <inheritdoc />
+    public bool TryGetCachedAsset(IAssetName assetName, [NotNullWhen(true)] out object? asset)
+    {
+        return this.Cache.TryGetValue(assetName.Name, out asset);
+    }
+
 
     /****
     ** Cache invalidation

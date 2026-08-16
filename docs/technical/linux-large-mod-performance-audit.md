@@ -36,7 +36,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Transitions and garbage-collection pressure.
 - **Expected benefit:** Direct key lookup avoids whole-cache work when the caller already knows the affected asset.
 - **Risk:** Medium. Exact matching must preserve locale, separator, and case-insensitive equivalence semantics.
-- **Status:** Confirmed.
+- **Status:** Fixed. The exact-name helper now uses direct cache-key lookup across only game content managers, with the same localization cleanup, temporary-map handling, propagation, events, and reporting as predicate invalidation.
 
 ### 4. Invalidation lacks a first-class multi-key transaction
 
