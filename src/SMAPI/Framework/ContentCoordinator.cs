@@ -397,6 +397,7 @@ internal class ContentCoordinator : IDisposable
         }
 
         IDictionary<IAssetName, Type> invalidatedAssets = new Dictionary<IAssetName, Type>();
+        Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers = null;
 
         this.ContentManagerLock.InReadLock(() =>
         {
@@ -408,7 +409,9 @@ internal class ContentCoordinator : IDisposable
                     if (!contentManager.TryGetCachedAsset(normalizedName, out object? asset))
                         continue;
 
-                    if (asset is not Texture2D) // will edit in place
+                    if (asset is Texture2D) // will edit in place
+                        ContentCoordinator.TrackLoadedTextureManager(ref loadedTextureManagers, normalizedName, contentManager);
+                    else
                         contentManager.InvalidateCache(normalizedName, dispose);
 
                     if (!invalidatedAssets.ContainsKey(normalizedName))
@@ -434,7 +437,7 @@ internal class ContentCoordinator : IDisposable
             }
         });
 
-        return this.ProcessInvalidatedAssets(invalidatedAssets);
+        return this.ProcessInvalidatedAssets(invalidatedAssets, loadedTextureManagers);
     }
 
     /// <summary>Purge matched assets from the cache.</summary>
@@ -460,6 +463,7 @@ internal class ContentCoordinator : IDisposable
     {
         // invalidate cache & track removed assets
         IDictionary<IAssetName, Type> invalidatedAssets = new Dictionary<IAssetName, Type>();
+        Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers = null;
         this.ContentManagerLock.InReadLock(() =>
         {
             // cached assets
@@ -472,7 +476,9 @@ internal class ContentCoordinator : IDisposable
 
                     AssetName assetName = this.ParseAssetName(key, allowLocales: true);
 
-                    if (asset is not Texture2D) // will edit in place
+                    if (asset is Texture2D) // will edit in place
+                        ContentCoordinator.TrackLoadedTextureManager(ref loadedTextureManagers, assetName, contentManager);
+                    else
                         contentManager.InvalidateCache(assetName, dispose);
 
                     if (!invalidatedAssets.ContainsKey(assetName))
@@ -503,13 +509,27 @@ internal class ContentCoordinator : IDisposable
             }
         });
 
-        return this.ProcessInvalidatedAssets(invalidatedAssets);
+        return this.ProcessInvalidatedAssets(invalidatedAssets, loadedTextureManagers);
+    }
+
+    /// <summary>Record a content manager which has a given texture loaded.</summary>
+    /// <param name="loadedTextureManagers">The loaded-manager lookup to update.</param>
+    /// <param name="assetName">The loaded texture name.</param>
+    /// <param name="contentManager">The content manager which has the texture loaded.</param>
+    private static void TrackLoadedTextureManager(ref Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers, IAssetName assetName, IContentManager contentManager)
+    {
+        loadedTextureManagers ??= [];
+        if (!loadedTextureManagers.TryGetValue(assetName, out List<IContentManager>? managers))
+            loadedTextureManagers[assetName] = managers = [];
+
+        managers.Add(contentManager);
     }
 
     /// <summary>Apply the common event, propagation, and logging steps for invalidated assets.</summary>
     /// <param name="invalidatedAssets">The invalidated asset names and their data types.</param>
+    /// <param name="loadedTextureManagers">The content managers which were found to have each invalidated texture loaded.</param>
     /// <returns>Returns the invalidated asset names.</returns>
-    private ICollection<IAssetName> ProcessInvalidatedAssets(IDictionary<IAssetName, Type> invalidatedAssets)
+    private ICollection<IAssetName> ProcessInvalidatedAssets(IDictionary<IAssetName, Type> invalidatedAssets, IReadOnlyDictionary<IAssetName, List<IContentManager>>? loadedTextureManagers)
     {
         if (invalidatedAssets.Count > 0)
         {
@@ -524,6 +544,7 @@ internal class ContentCoordinator : IDisposable
             this.CoreAssets.Propagate(
                 contentManagers: this.GameContentManagers,
                 assets: invalidatedAssets.ToDictionary(p => p.Key, p => p.Value),
+                loadedTextureManagers: loadedTextureManagers,
                 ignoreWorld: Context.IsWorldFullyUnloaded,
                 out Dictionary<IAssetName, bool> propagated,
                 out bool updatedWarpRoutes

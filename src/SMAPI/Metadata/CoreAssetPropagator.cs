@@ -72,10 +72,11 @@ internal class CoreAssetPropagator
     /// <summary>Reload one of the game's core assets (if applicable).</summary>
     /// <param name="contentManagers">The content managers whose assets to update.</param>
     /// <param name="assets">The asset keys and types to reload.</param>
+    /// <param name="loadedTextureManagers">The content managers which were found to have each invalidated texture loaded.</param>
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
     /// <param name="propagatedAssets">A lookup of asset names to whether they've been propagated.</param>
     /// <param name="changedWarpRoutes">Whether the NPC pathfinding warp route cache was reloaded.</param>
-    public void Propagate(IList<IContentManager> contentManagers, IDictionary<IAssetName, Type> assets, bool ignoreWorld, out Dictionary<IAssetName, bool> propagatedAssets, out bool changedWarpRoutes)
+    public void Propagate(IList<IContentManager> contentManagers, IDictionary<IAssetName, Type> assets, IReadOnlyDictionary<IAssetName, List<IContentManager>>? loadedTextureManagers, bool ignoreWorld, out Dictionary<IAssetName, bool> propagatedAssets, out bool changedWarpRoutes)
     {
         propagatedAssets = new Dictionary<IAssetName, bool>(assets.Count);
 
@@ -122,7 +123,7 @@ internal class CoreAssetPropagator
                 {
                     // image
                     if (imageType.IsAssignableFrom(assetType))
-                        changed = this.PropagateTexture(assetName, contentManagers, ignoreWorld);
+                        changed = this.PropagateTexture(assetName, contentManagers, loadedTextureManagers, ignoreWorld);
 
                     // map
                     else if (assetType == mapType)
@@ -238,10 +239,11 @@ internal class CoreAssetPropagator
 
     /// <summary>Propagate changes to a cached texture asset.</summary>
     /// <param name="assetName">The asset name that changed.</param>
-    /// <param name="contentManagers">The content managers whose assets to update.</param>
+    /// <param name="allContentManagers">All content managers whose assets may need to be updated.</param>
+    /// <param name="loadedTextureManagers">The content managers which were found to have each invalidated texture loaded.</param>
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
     /// <returns>Returns whether any assets were updated.</returns>
-    private bool PropagateTexture(IAssetName assetName, IList<IContentManager> contentManagers, bool ignoreWorld)
+    private bool PropagateTexture(IAssetName assetName, IList<IContentManager> allContentManagers, IReadOnlyDictionary<IAssetName, List<IContentManager>>? loadedTextureManagers, bool ignoreWorld)
     {
         bool changed = false;
 
@@ -279,7 +281,12 @@ internal class CoreAssetPropagator
                 return null;
             });
 
-            // apply to content managers
+            // Apply only to the content managers found during invalidation. If this is the base-name half of a
+            // localized invalidation, it may not have been part of that exact cache lookup; retain the full scan
+            // for that uncommon compatibility case.
+            IEnumerable<IContentManager> contentManagers = loadedTextureManagers?.TryGetValue(name, out List<IContentManager>? knownManagers) is true
+                ? knownManagers
+                : allContentManagers;
             foreach (IContentManager contentManager in contentManagers)
             {
                 if (contentManager.IsLoaded(name))

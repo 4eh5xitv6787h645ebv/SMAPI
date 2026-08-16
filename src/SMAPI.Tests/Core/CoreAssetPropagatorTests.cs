@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using FluentAssertions;
+using Moq;
 using NUnit.Framework;
 using StardewModdingAPI;
 using StardewModdingAPI.Framework.Content;
+using StardewModdingAPI.Framework.ContentManagers;
 using StardewModdingAPI.Metadata;
 using StardewValley;
 
@@ -52,7 +54,7 @@ internal class CoreAssetPropagatorTests
             };
 
             // act
-            propagator.Propagate([], assets, ignoreWorld: false, out Dictionary<IAssetName, bool> propagated, out bool changedWarpRoutes);
+            propagator.Propagate([], assets, loadedTextureManagers: null, ignoreWorld: false, out Dictionary<IAssetName, bool> propagated, out bool changedWarpRoutes);
 
             // assert
             parsedMapPaths.Should().Be(2, "each loaded location should be indexed once for the whole map batch");
@@ -63,5 +65,36 @@ internal class CoreAssetPropagatorTests
         {
             Game1.game1 = previousGameInstance;
         }
+    }
+
+    [Test(Description = "Assert that texture propagation reuses the content-manager targets found during invalidation.")]
+    public void Propagate_Texture_UsesKnownManagers()
+    {
+        // arrange
+        IAssetName assetName = AssetName.Parse("Maps/Target", _ => null);
+        Type textureType = Type.GetType("Microsoft.Xna.Framework.Graphics.Texture2D, MonoGame.Framework", throwOnError: true)!;
+        Mock<IContentManager> targetManager = new(MockBehavior.Strict);
+        targetManager.Setup(manager => manager.IsLoaded(It.Is<IAssetName>(name => name.Equals(assetName)))).Returns(false);
+        Mock<IContentManager> unrelatedManager = new(MockBehavior.Strict);
+
+        CoreAssetPropagator propagator = new(
+            mainContent: null!,
+            disposableContent: null!,
+            monitor: null!,
+            multiplayer: null!,
+            reflection: null!,
+            parseAssetName: rawName => AssetName.Parse(rawName, _ => null)
+        );
+        Dictionary<IAssetName, Type> assets = new() { [assetName] = textureType };
+        Dictionary<IAssetName, List<IContentManager>> loadedTextureManagers = new() { [assetName] = [targetManager.Object] };
+
+        // act
+        propagator.Propagate([unrelatedManager.Object, targetManager.Object], assets, loadedTextureManagers, ignoreWorld: true, out Dictionary<IAssetName, bool> propagated, out bool changedWarpRoutes);
+
+        // assert
+        targetManager.Verify(manager => manager.IsLoaded(It.Is<IAssetName>(name => name.Equals(assetName))), Times.Once);
+        unrelatedManager.VerifyNoOtherCalls();
+        propagated[assetName].Should().BeFalse();
+        changedWarpRoutes.Should().BeFalse();
     }
 }
