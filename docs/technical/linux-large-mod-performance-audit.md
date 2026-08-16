@@ -46,7 +46,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Transitions.
 - **Expected benefit:** Less repeated locking, cache enumeration, event dispatch, propagation setup, and log construction during invalidation bursts.
 - **Risk:** Medium to high. Event ordering and the meaning of `AssetsInvalidated` must remain compatible.
-- **Status:** Confirmed; API design deferred until the exact-key implementation is complete.
+- **Status:** Fixed. `IGameContentHelper` now accepts a sequence of exact asset names and handles them through one normalized, deduplicated lookup, live-map scan, invalidation event, propagation pass, and report.
 
 ### 5. Asset propagation repeats global searches for each invalidated asset
 
