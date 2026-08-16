@@ -848,7 +848,10 @@ internal class SCore : IDisposable
                 TrackFurniture: events.FurnitureListChanged.HasListeners
             );
 
-            instance.Watchers.Update(worldSnapshotOptions.TrackChestInventories);
+            instance.Watchers.Update(
+                trackPlayerInventoryChanges: events.InventoryChanged.HasListeners || verbose,
+                trackChestInventoryChanges: worldSnapshotOptions.TrackChestInventories
+            );
             instance.WatcherSnapshot.Update(instance.Watchers, worldSnapshotOptions);
             instance.Watchers.Reset();
             WatcherSnapshot state = instance.WatcherSnapshot;

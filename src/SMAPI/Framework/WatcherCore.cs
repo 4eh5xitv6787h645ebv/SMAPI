@@ -81,8 +81,9 @@ internal class WatcherCore
     }
 
     /// <summary>Update the watchers and adjust for added or removed entities.</summary>
+    /// <param name="trackPlayerInventoryChanges">Whether to track changes needed for the player inventory event.</param>
     /// <param name="trackChestInventoryChanges">Whether to track changes needed for the chest inventory event.</param>
-    public void Update(bool trackChestInventoryChanges)
+    public void Update(bool trackPlayerInventoryChanges, bool trackChestInventoryChanges)
     {
         this.LocationsWatcher.TrackChestInventoryChanges = trackChestInventoryChanges;
 
@@ -107,7 +108,7 @@ internal class WatcherCore
         // update values
         foreach (IWatcher watcher in this.Watchers)
             watcher.Update();
-        this.CurrentPlayerTracker?.Update();
+        this.CurrentPlayerTracker?.Update(trackPlayerInventoryChanges);
     }
 
     /// <summary>Reset the current values as the baseline.</summary>

@@ -15,10 +15,13 @@ internal class PlayerTracker : IDisposable
     ** Fields
     *********/
     /// <summary>The player's inventory as of the last reset.</summary>
-    private readonly Dictionary<Item, int> PreviousInventory;
+    private readonly Dictionary<Item, int> PreviousInventory = [];
 
     /// <summary>The player's inventory change as of the last update.</summary>
     private readonly Dictionary<Item, int> CurrentInventory = [];
+
+    /// <summary>Whether inventory changes are currently being tracked.</summary>
+    private bool IsTrackingInventoryChanges;
 
     /// <summary>A pooled set used to track the added items when detecting changes.</summary>
     private readonly HashSet<Item> PooledAdded;
@@ -55,8 +58,6 @@ internal class PlayerTracker : IDisposable
     {
         // init player data
         this.Player = player;
-        this.SaveInventoryTo(this.CurrentInventory);
-        this.PreviousInventory = new Dictionary<Item, int>(this.CurrentInventory);
 
         // init trackers
         this.LocationWatcher = WatcherFactory.ForReference($"player.{nameof(player.currentLocation)}", this.GetCurrentLocation);
@@ -81,7 +82,8 @@ internal class PlayerTracker : IDisposable
     }
 
     /// <summary>Update the current values if needed.</summary>
-    public void Update()
+    /// <param name="trackInventoryChanges">Whether to track changes needed for the player inventory event.</param>
+    public void Update(bool trackInventoryChanges)
     {
         // update valid location
         this.LastValidLocation = this.GetCurrentLocation();
@@ -90,7 +92,26 @@ internal class PlayerTracker : IDisposable
         foreach (IWatcher watcher in this.Watchers)
             watcher.Update();
 
-        // update inventory
+        // activate/deactivate with a fresh baseline, so changes from while tracking was disabled aren't reported
+        if (this.IsTrackingInventoryChanges != trackInventoryChanges)
+        {
+            this.IsTrackingInventoryChanges = trackInventoryChanges;
+            this.PreviousInventory.Clear();
+            this.CurrentInventory.Clear();
+
+            if (trackInventoryChanges)
+            {
+                this.SaveInventoryTo(this.CurrentInventory);
+                foreach ((Item item, int stack) in this.CurrentInventory)
+                    this.PreviousInventory.Add(item, stack);
+            }
+            return;
+        }
+
+        // update inventory only when a mod can observe the result
+        if (!trackInventoryChanges)
+            return;
+
         this.CurrentInventory.Clear();
         this.SaveInventoryTo(this.CurrentInventory);
     }
@@ -102,7 +123,10 @@ internal class PlayerTracker : IDisposable
         foreach (IWatcher watcher in this.Watchers)
             watcher.Reset();
 
-        // reset PreviousInventory to match current
+        // reset PreviousInventory to match current when inventory tracking is active
+        if (!this.IsTrackingInventoryChanges)
+            return;
+
         this.PreviousInventory.Clear();
         foreach ((Item item, int stack) in this.CurrentInventory)
             this.PreviousInventory.Add(item, stack);
@@ -120,6 +144,12 @@ internal class PlayerTracker : IDisposable
     /// <returns>Returns whether anything changed.</returns>
     public bool TryGetInventoryChanges([NotNullWhen(true)] out SnapshotItemListDiff? changes)
     {
+        if (!this.IsTrackingInventoryChanges)
+        {
+            changes = null;
+            return false;
+        }
+
         this.PooledAdded.Clear();
         this.PooledRemoved.Clear();
 
