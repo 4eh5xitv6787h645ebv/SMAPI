@@ -110,15 +110,19 @@ internal sealed class ModContentManager : BaseContentManager
                 this.ThrowLoadError(assetName, ContentLoadErrorType.AssetDoesNotExist, "the specified path doesn't exist.");
 
             // load content
-            asset = file.Extension.ToLower() switch
-            {
-                ".fnt" => this.LoadFont<T>(assetName, file),
-                ".json" => this.LoadDataFile<T>(assetName, file),
-                ".png" => this.LoadImageFile<T>(assetName, file),
-                ".tbin" or ".tmx" => this.LoadMapFile<T>(assetName, file),
-                ".xnb" => this.LoadXnbFile<T>(assetName),
-                _ => (T)this.HandleUnknownFileType(assetName, file, typeof(T))
-            };
+            string extension = file.Extension;
+            if (extension.Equals(".fnt", StringComparison.OrdinalIgnoreCase))
+                asset = this.LoadFont<T>(assetName, file);
+            else if (extension.Equals(".json", StringComparison.OrdinalIgnoreCase))
+                asset = this.LoadDataFile<T>(assetName, file);
+            else if (extension.Equals(".png", StringComparison.OrdinalIgnoreCase))
+                asset = this.LoadImageFile<T>(assetName, file);
+            else if (extension.Equals(".tbin", StringComparison.OrdinalIgnoreCase) || extension.Equals(".tmx", StringComparison.OrdinalIgnoreCase))
+                asset = this.LoadMapFile<T>(assetName, file);
+            else if (extension.Equals(".xnb", StringComparison.OrdinalIgnoreCase))
+                asset = this.LoadXnbFile<T>(assetName);
+            else
+                asset = (T)this.HandleUnknownFileType(assetName, file, typeof(T));
         }
         catch (Exception ex)
         {
@@ -433,6 +437,9 @@ internal sealed class ModContentManager : BaseContentManager
         // get map info
         relativeMapPath = this.AssertAndNormalizeAssetName(relativeMapPath); // Mono's Path.GetDirectoryName doesn't handle Windows dir separators
         string relativeMapFolder = Path.GetDirectoryName(relativeMapPath) ?? ""; // folder path containing the map, relative to the mod folder
+        string? eagerPathPrefix = fixEagerPathPrefixes && relativeMapFolder.Length > 0
+            ? relativeMapFolder + Path.DirectorySeparatorChar
+            : null;
 
         // fix tilesheets
         this.Monitor.VerboseLog($"Fixing tilesheet paths for map '{relativeMapPath}' from mod '{this.ModName}'...");
@@ -441,8 +448,8 @@ internal sealed class ModContentManager : BaseContentManager
             // get image path
             tilesheet.ImageSource = this.NormalizePathSeparators(tilesheet.ImageSource);
             string imageSource = tilesheet.ImageSource;
-            if (fixEagerPathPrefixes && relativeMapFolder.Length > 0 && imageSource?.StartsWith(relativeMapFolder) is true)
-                imageSource = imageSource[(relativeMapFolder.Length + 1)..];
+            if (eagerPathPrefix != null && imageSource?.StartsWith(eagerPathPrefix, StringComparison.OrdinalIgnoreCase) is true)
+                imageSource = imageSource[eagerPathPrefix.Length..];
 
             // ensure path isn't empty
             if (string.IsNullOrWhiteSpace(imageSource))

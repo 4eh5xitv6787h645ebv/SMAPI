@@ -44,10 +44,11 @@ This is the current jank-first order, combining likely frame-time impact, freque
 32. Finding 18 — reversed location event changes — fixed.
 33. Finding 17 — swapped managed-event identifiers — fixed.
 34. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-35. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-36. Finding 13 — repeated dependency-list scans — fixed.
-37. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-38. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+35. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+36. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+37. Finding 13 — repeated dependency-list scans — fixed.
+38. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+39. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -431,6 +432,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. This aligns the suffix test with SMAPI's documented case-insensitive asset-name comparisons.
 - **Status:** Fixed. The paint-mask suffix uses `StringComparison.OrdinalIgnoreCase`.
 
+### 39. Linux content paths use culture-sensitive allocation and ambiguous prefix matching
+
+- **Affected code:** `Framework/ContentManagers/BaseContentManager.cs` (`PrenormalizeRawAssetName`) and `Framework/ContentManagers/ModContentManager.cs` (`LoadExact`, `FixTilesheetPaths`).
+- **Scenario:** Loading mod files and XNB maps with mixed-case extensions or tilesheet paths on Linux.
+- **Root cause:** File dispatch lowercases every extension using the current culture; legacy `.xnb` stripping is case-sensitive; and eager tilesheet-prefix removal uses the default `StartsWith` overload without requiring a directory boundary, so a `Maps` prefix can incorrectly match `Maps2`.
+- **Impact:** Mod-content load CPU/allocations and Linux path correctness. Ambiguous prefix removal can rewrite a valid tilesheet path or slice past a path that only shares the same leading characters.
+- **Expected benefit:** Removes one string allocation from every mod-file dispatch and makes extension/path handling deterministic, case-insensitive, and segment-aware.
+- **Risk:** Low. Comparisons now use explicit ordinal asset-path semantics, and prefix removal only applies to a complete directory prefix.
+- **Status:** Fixed. Extension dispatch uses allocation-free ordinal-ignore-case comparisons, `.xnb` pre-normalization accepts any casing, and eager map prefixes include the normalized directory separator.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -438,7 +449,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, and 29 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Finding 2 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, and 38 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, and 39 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, and 34 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, and 37 |
@@ -447,12 +458,12 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, and 28 |
 | Content-manager lookup scaling | Finding 9 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
-| Linux case-insensitive file lookup | Findings 11 and 38 |
+| Linux case-insensitive file lookup | Findings 11, 38, and 39 |
 | Assembly loading and rewrite caching | Finding 12 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, and 35 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, and 37 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, and 39 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
