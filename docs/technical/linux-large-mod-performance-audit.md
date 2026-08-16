@@ -238,6 +238,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. The callback must receive the exact `GameTime` for its invocation and remain synchronous.
 - **Status:** Fixed. The wrapper delegates now accept `GameTime` directly and each game object reuses one cached base-update callback, preserving the existing synchronous control flow without per-tick closures.
 
+### 24. Keyboard polling allocates an array while walking
+
+- **Affected code:** `Framework/Input/KeyboardStateBuilder.cs` (`Reset`).
+- **Scenario:** Every focused Linux update while one or more keyboard keys are held, including ordinary WASD walking.
+- **Root cause:** SMAPI calls MonoGame's parameterless `KeyboardState.GetPressedKeys`, which constructs a new exact-sized array whenever at least one key is pressed, then immediately copies those keys into SMAPI's reusable set.
+- **Impact:** Steady gameplay and garbage collection.
+- **Expected benefit:** A caller-owned key buffer removes the continuous pressed-key array allocation during keyboard movement and other held input.
+- **Risk:** Low. MonoGame exposes the key count and a buffer-filling overload; SMAPI must process only the populated prefix because a reused buffer can retain older values past that count.
+- **Status:** Fixed. Keyboard polling now grows one per-player buffer only when the simultaneous key-count high-water mark exceeds its capacity, fills it through MonoGame's nonallocating overload, and reads exactly the reported number of keys.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.

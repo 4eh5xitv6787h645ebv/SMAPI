@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Xna.Framework.Input;
@@ -17,6 +18,9 @@ internal class KeyboardStateBuilder : IInputStateBuilder<KeyboardStateBuilder, K
     /// <summary>The pressed buttons.</summary>
     private readonly HashSet<Keys> PressedButtons = [];
 
+    /// <summary>A reusable buffer for reading the pressed keys from MonoGame.</summary>
+    private Keys[] PressedKeyBuffer = new Keys[8];
+
 
     /*********
     ** Public methods
@@ -28,8 +32,16 @@ internal class KeyboardStateBuilder : IInputStateBuilder<KeyboardStateBuilder, K
 
         // reset tracked values
         this.PressedButtons.Clear();
-        foreach (Keys button in state.GetPressedKeys())
-            this.PressedButtons.Add(button);
+        int pressedKeyCount = state.GetPressedKeyCount();
+        if (pressedKeyCount > 0)
+        {
+            if (pressedKeyCount > this.PressedKeyBuffer.Length)
+                Array.Resize(ref this.PressedKeyBuffer, Math.Max(pressedKeyCount, this.PressedKeyBuffer.Length * 2));
+
+            state.GetPressedKeys(this.PressedKeyBuffer);
+            for (int i = 0; i < pressedKeyCount; i++)
+                this.PressedButtons.Add(this.PressedKeyBuffer[i]);
+        }
     }
 
     /// <summary>Override the state for a key.</summary>
