@@ -10,13 +10,6 @@ namespace StardewModdingAPI.Framework.Content;
 internal class AssetName : IAssetName
 {
     /*********
-    ** Fields
-    *********/
-    /// <summary>A lowercase version of <see cref="Name"/> used for consistent hash codes and equality checks.</summary>
-    private readonly string ComparableName;
-
-
-    /*********
     ** Accessors
     *********/
     /// <inheritdoc />
@@ -56,7 +49,6 @@ internal class AssetName : IAssetName
         this.Name = localeCode != null
             ? string.Concat(this.BaseName, '.', this.LocaleCode)
             : this.BaseName;
-        this.ComparableName = this.Name.ToLowerInvariant();
     }
 
     /// <summary>Parse a raw asset name into an instance.</summary>
@@ -125,7 +117,7 @@ internal class AssetName : IAssetName
             return this.BaseName.Equals(assetName?.BaseName, StringComparison.OrdinalIgnoreCase);
 
         if (assetName is AssetName impl)
-            return this.ComparableName == impl.ComparableName;
+            return StringComparer.OrdinalIgnoreCase.Equals(this.Name, impl.Name);
 
         return this.Name.Equals(assetName?.Name, StringComparison.OrdinalIgnoreCase);
     }
@@ -231,7 +223,7 @@ internal class AssetName : IAssetName
         return other switch
         {
             null => false,
-            AssetName otherImpl => this.ComparableName == otherImpl.ComparableName,
+            AssetName otherImpl => StringComparer.OrdinalIgnoreCase.Equals(this.Name, otherImpl.Name),
             _ => StringComparer.OrdinalIgnoreCase.Equals(this.Name, other.Name)
         };
     }
@@ -239,7 +231,7 @@ internal class AssetName : IAssetName
     /// <inheritdoc />
     public override int GetHashCode()
     {
-        return this.ComparableName.GetHashCode();
+        return StringComparer.OrdinalIgnoreCase.GetHashCode(this.Name);
     }
 
     /// <inheritdoc />
