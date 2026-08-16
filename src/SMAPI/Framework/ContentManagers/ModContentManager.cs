@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using BmFont;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Content;
@@ -245,10 +246,17 @@ internal sealed class ModContentManager : BaseContentManager
             && bitmap.ColorType is SKColorType.Rgba8888 or SKColorType.Bgra8888
         )
         {
+            ReadOnlySpan<byte> rawPixels = bitmap.GetPixelSpan();
+            if (
+                bitmap.ColorType == SKColorType.Rgba8888
+                && BitConverter.IsLittleEndian
+                && Unsafe.SizeOf<Color>() == 4
+            )
+                return ModContentManager.CopyRgbaPixels(rawPixels, bitmap.RowBytes, bitmap.Width, bitmap.Height);
+
             bool isBgra = bitmap.ColorType == SKColorType.Bgra8888;
             int redOffset = isBgra ? 2 : 0;
             int blueOffset = isBgra ? 0 : 2;
-            ReadOnlySpan<byte> rawPixels = bitmap.GetPixelSpan();
             var pixels = GC.AllocateUninitializedArray<Color>(bitmap.Width * bitmap.Height);
 
             int outputIndex = 0;
@@ -285,6 +293,26 @@ internal sealed class ModContentManager : BaseContentManager
         }
 
         return pixelsFallback;
+    }
+
+    /// <summary>Copy premultiplied RGBA bytes into XNA's matching packed color layout.</summary>
+    /// <param name="rawPixels">The source RGBA pixel buffer.</param>
+    /// <param name="rowBytes">The number of source bytes per row, including padding.</param>
+    /// <param name="width">The image width in pixels.</param>
+    /// <param name="height">The image height in pixels.</param>
+    /// <returns>The copied XNA pixels.</returns>
+    private static Color[] CopyRgbaPixels(ReadOnlySpan<byte> rawPixels, int rowBytes, int width, int height)
+    {
+        const int bytesPerPixel = 4;
+        if (Unsafe.SizeOf<Color>() != bytesPerPixel)
+            throw new InvalidOperationException($"Can't copy RGBA pixels into a {Unsafe.SizeOf<Color>()}-byte {nameof(Color)} value.");
+
+        int outputRowBytes = checked(width * bytesPerPixel);
+        var pixels = GC.AllocateUninitializedArray<Color>(checked(width * height));
+        Span<byte> output = MemoryMarshal.AsBytes(pixels.AsSpan());
+
+        PixelBufferUtility.CopyRows(rawPixels, rowBytes, output, outputRowBytes, height);
+        return pixels;
     }
 
     /// <summary>Load an unpacked image file (<c>.tbin</c> or <c>.tmx</c>).</summary>
