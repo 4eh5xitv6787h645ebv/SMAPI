@@ -156,6 +156,7 @@ internal class LogManager : IDisposable
     {
         if (showMessage)
             this.Monitor.Log("Game has ended. Press any key to exit.");
+        this.LogFile.Flush();
         Thread.Sleep(100);
         Console.ReadKey();
         Environment.Exit(0);
@@ -169,12 +170,22 @@ internal class LogManager : IDisposable
     {
         try
         {
+            this.LogFile.Flush();
             File.WriteAllText(Constants.FatalCrashMarker, string.Empty);
             File.Copy(this.LogFile.Path, Constants.FatalCrashLog, overwrite: true);
         }
         catch (Exception ex)
         {
-            this.Monitor.Log($"SMAPI failed trying to track the crash details: {ex.GetLogSummary()}", LogLevel.Error);
+            string message = $"SMAPI failed trying to track the crash details: {ex.GetLogSummary()}";
+            try
+            {
+                this.Monitor.Log(message, LogLevel.Error);
+            }
+            catch
+            {
+                // the crash-log operation may have failed because the log writer itself failed
+                Console.Error.WriteLine(message);
+            }
         }
     }
 
