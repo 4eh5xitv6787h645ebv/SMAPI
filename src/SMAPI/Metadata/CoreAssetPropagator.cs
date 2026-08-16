@@ -46,6 +46,9 @@ internal class CoreAssetPropagator
     /// <summary>Parse a raw asset name.</summary>
     private readonly Func<string, IAssetName> ParseAssetName;
 
+    /// <summary>Reset the game's item registry cache.</summary>
+    private readonly Action ResetItemRegistry;
+
     /// <summary>A cache of world data fetched for the current tick.</summary>
     private readonly TickCacheDictionary<string> WorldCache = new();
 
@@ -112,7 +115,8 @@ internal class CoreAssetPropagator
     /// <param name="multiplayer">The multiplayer instance whose map cache to update.</param>
     /// <param name="reflection">Simplifies access to private code.</param>
     /// <param name="parseAssetName">Parse a raw asset name.</param>
-    public CoreAssetPropagator(LocalizedContentManager mainContent, GameContentManagerForAssetPropagation disposableContent, IMonitor monitor, Multiplayer multiplayer, Reflector reflection, Func<string, IAssetName> parseAssetName)
+    /// <param name="resetItemRegistry">Reset the game's item registry cache.</param>
+    public CoreAssetPropagator(LocalizedContentManager mainContent, GameContentManagerForAssetPropagation disposableContent, IMonitor monitor, Multiplayer multiplayer, Reflector reflection, Func<string, IAssetName> parseAssetName, Action? resetItemRegistry = null)
     {
         this.MainContentManager = mainContent;
         this.DisposableContentManager = disposableContent;
@@ -120,6 +124,7 @@ internal class CoreAssetPropagator
         this.Multiplayer = multiplayer;
         this.Reflection = reflection;
         this.ParseAssetName = parseAssetName;
+        this.ResetItemRegistry = resetItemRegistry ?? ItemRegistry.ResetCache;
     }
 
     /// <summary>Get the propagation route for an exact normalized texture asset name.</summary>
@@ -138,6 +143,22 @@ internal class CoreAssetPropagator
         return CoreAssetPropagator.OtherAssetRoutes.TryGetValue(baseName, out OtherAssetRoute route)
             ? route
             : OtherAssetRoute.None;
+    }
+
+    /// <summary>Get whether a propagation route resets the shared item registry after updating its data source.</summary>
+    internal static bool ResetsItemRegistry(OtherAssetRoute route)
+    {
+        return route is
+            OtherAssetRoute.BigCraftables
+            or OtherAssetRoute.Boots
+            or OtherAssetRoute.Furniture
+            or OtherAssetRoute.Hats
+            or OtherAssetRoute.Objects
+            or OtherAssetRoute.Pants
+            or OtherAssetRoute.Pets
+            or OtherAssetRoute.Shirts
+            or OtherAssetRoute.Tools
+            or OtherAssetRoute.Weapons;
     }
 
     /// <summary>Reload one of the game's core assets (if applicable).</summary>
@@ -161,6 +182,7 @@ internal class CoreAssetPropagator
             Dictionary<string, List<NPC>>? charactersByName = null;
             HashSet<string>? oldWarpTargets = null;
             HashSet<string>? newWarpTargets = null;
+            bool itemRegistryResetPending = false;
 
             // Build world indexes only when a batch contains multiple matching assets. A single invalidation is
             // cheaper as a direct scan, while a large content update can otherwise scan the world once per asset.
@@ -194,12 +216,27 @@ internal class CoreAssetPropagator
 
                 try
                 {
+                    bool isImage = imageType.IsAssignableFrom(assetType);
+                    bool isMap = assetType == mapType;
+                    OtherAssetRoute otherRoute = !isImage && !isMap
+                        ? CoreAssetPropagator.GetOtherAssetRoute(assetName.BaseName)
+                        : OtherAssetRoute.None;
+                    bool resetsItemRegistry = !isImage && !isMap && CoreAssetPropagator.ResetsItemRegistry(otherRoute);
+
+                    // Item-data routes only assign a new data source and then clear the same shared cache. Coalesce
+                    // adjacent routes, but flush before any other propagation so its observable ordering is unchanged.
+                    if (itemRegistryResetPending && !resetsItemRegistry)
+                    {
+                        this.ResetItemRegistry();
+                        itemRegistryResetPending = false;
+                    }
+
                     // image
-                    if (imageType.IsAssignableFrom(assetType))
+                    if (isImage)
                         changed = this.PropagateTexture(assetName, contentManagers, loadedTextureManagers, ignoreWorld);
 
                     // map
-                    else if (assetType == mapType)
+                    else if (isMap)
                     {
                         changed = this.PropagateMap(
                             assetName,
@@ -216,7 +253,10 @@ internal class CoreAssetPropagator
 
                     // any other type
                     else
-                        changed = this.PropagateOther(assetName, ignoreWorld, charactersByName);
+                    {
+                        changed = this.PropagateOther(assetName, otherRoute, ignoreWorld, charactersByName);
+                        itemRegistryResetPending |= changed && resetsItemRegistry;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -225,6 +265,9 @@ internal class CoreAssetPropagator
 
                 propagatedAssets[assetName] = changed;
             }
+
+            if (itemRegistryResetPending)
+                this.ResetItemRegistry();
         }
 
         // reload NPC pathfinding cache if any map routes changed
@@ -439,16 +482,15 @@ internal class CoreAssetPropagator
 
     /// <summary>Propagate changes to an asset which isn't a map (handled by <see cref="PropagateMap"/>) or texture (handled by <see cref="PropagateTexture"/>).</summary>
     /// <param name="assetName">The asset name that changed.</param>
+    /// <param name="route">The propagation route for the asset.</param>
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
     /// <param name="charactersByName">The NPCs indexed by exact name for a multi-asset propagation batch, if applicable.</param>
     /// <returns>Returns whether any assets were updated.</returns>
     [SuppressMessage("ReSharper", "StringLiteralTypo", Justification = "These deliberately match the asset names.")]
-    private bool PropagateOther(IAssetName assetName, bool ignoreWorld, Dictionary<string, List<NPC>>? charactersByName)
+    private bool PropagateOther(IAssetName assetName, OtherAssetRoute route, bool ignoreWorld, Dictionary<string, List<NPC>>? charactersByName)
     {
         var content = this.MainContentManager;
         string baseName = assetName.BaseName;
-        OtherAssetRoute route = CoreAssetPropagator.GetOtherAssetRoute(baseName);
-
         switch (route)
         {
             /****
@@ -464,11 +506,9 @@ internal class CoreAssetPropagator
 
             case OtherAssetRoute.BigCraftables: // Game1.LoadContent
                 Game1.bigCraftableData = DataLoader.BigCraftables(content);
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.Boots: // BootsDataDefinition
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.Buildings: // Game1.LoadContent
@@ -533,7 +573,6 @@ internal class CoreAssetPropagator
                 return true;
 
             case OtherAssetRoute.Furniture: // FurnitureDataDefinition
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.FruitTrees: // Game1.LoadContent
@@ -544,7 +583,6 @@ internal class CoreAssetPropagator
                 return this.UpdateHairData();
 
             case OtherAssetRoute.Hats: // HatDataDefinition
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.JukeboxTracks: // Game1.LoadContent
@@ -569,27 +607,22 @@ internal class CoreAssetPropagator
 
             case OtherAssetRoute.Objects: // Game1.LoadContent
                 Game1.objectData = DataLoader.Objects(content);
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.Pants: // Game1.LoadContent
                 Game1.pantsData = DataLoader.Pants(content);
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.Pets: // Game1.LoadContent
                 Game1.petData = DataLoader.Pets(content);
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.Shirts: // Game1.LoadContent
                 Game1.shirtData = DataLoader.Shirts(content);
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.Tools: // Game1.LoadContent
                 Game1.toolData = DataLoader.Tools(content);
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.TriggerActions:
@@ -598,7 +631,6 @@ internal class CoreAssetPropagator
 
             case OtherAssetRoute.Weapons: // Game1.LoadContent
                 Game1.weaponData = DataLoader.Weapons(content);
-                ItemRegistry.ResetCache();
                 return true;
 
             case OtherAssetRoute.WildTrees: // Tree
