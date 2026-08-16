@@ -97,20 +97,34 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
             tilesheetMap[sourceSheet] = targetSheet;
         }
 
-        // get target layers
-        Dictionary<Layer, Layer> sourceToTargetLayers =
-            (
-                from sourceLayer in source.Layers
-                let targetLayer = target.GetLayer(sourceLayer.Id)
-                where targetLayer != null
-                select (sourceLayer, targetLayer)
-            )
-            .ToDictionary(p => p.sourceLayer, p => p.targetLayer);
-        HashSet<Layer> orphanedTargetLayers = new(target.Layers.Except(sourceToTargetLayers.Values));
+        // A zero-sized patch previously skipped all layer changes because the tile loop didn't run.
+        if (sourceArea.Value.Width == 0 || sourceArea.Value.Height == 0)
+            return;
 
-        // apply tiles
+        // Pair layers once before traversing tiles. Layer properties apply to the whole layer, so
+        // copying them inside the tile loop repeats the same work width * height times.
         bool replaceAll = patchMode == PatchMapMode.Replace;
         bool replaceByLayer = patchMode == PatchMapMode.ReplaceByLayer;
+        HashSet<Layer>? orphanedTargetLayers = replaceAll
+            ? new HashSet<Layer>(target.Layers)
+            : null;
+        (Layer Source, Layer Target)[] layerPairs = new (Layer, Layer)[source.Layers.Count];
+        int layerIndex = 0;
+        foreach (Layer sourceLayer in source.Layers)
+        {
+            Layer? targetLayer = target.GetLayer(sourceLayer.Id);
+            if (targetLayer is null)
+            {
+                target.AddLayer(new Layer(sourceLayer.Id, target, target.Layers[0].LayerSize, Layer.m_tileSize));
+                targetLayer = target.GetLayer(sourceLayer.Id);
+            }
+
+            targetLayer.Properties.CopyFrom(sourceLayer.Properties);
+            layerPairs[layerIndex++] = (sourceLayer, targetLayer);
+            orphanedTargetLayers?.Remove(targetLayer);
+        }
+
+        // apply tiles
         for (int x = 0; x < sourceArea.Value.Width; x++)
         {
             for (int y = 0; y < sourceArea.Value.Height; y++)
@@ -122,23 +136,13 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
                 // replace tiles on target-only layers
                 if (replaceAll)
                 {
-                    foreach (Layer targetLayer in orphanedTargetLayers)
+                    foreach (Layer targetLayer in orphanedTargetLayers!)
                         targetLayer.Tiles[targetPos.X, targetPos.Y] = null;
                 }
 
                 // merge layers
-                foreach (Layer sourceLayer in source.Layers)
+                foreach ((Layer sourceLayer, Layer targetLayer) in layerPairs)
                 {
-                    // get layer
-                    if (!sourceToTargetLayers.TryGetValue(sourceLayer, out Layer? targetLayer))
-                    {
-                        target.AddLayer(targetLayer = new Layer(sourceLayer.Id, target, target.Layers[0].LayerSize, Layer.m_tileSize));
-                        sourceToTargetLayers[sourceLayer] = target.GetLayer(sourceLayer.Id);
-                    }
-
-                    // copy layer properties
-                    targetLayer.Properties.CopyFrom(sourceLayer.Properties);
-
                     // create new tile
                     Tile? sourceTile = sourceLayer.Tiles[sourcePos.X, sourcePos.Y];
                     Tile? newTile = null;
