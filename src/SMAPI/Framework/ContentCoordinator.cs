@@ -409,7 +409,7 @@ internal class ContentCoordinator : IDisposable
             normalizedNames.Add(this.ParseAssetName(assetName.Name, allowLocales: true));
         }
 
-        IDictionary<IAssetName, Type> invalidatedAssets = new Dictionary<IAssetName, Type>();
+        Dictionary<IAssetName, Type> invalidatedAssets = new();
         Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers = null;
 
         this.ContentManagerLock.InReadLock(() =>
@@ -475,7 +475,7 @@ internal class ContentCoordinator : IDisposable
     public ICollection<IAssetName> InvalidateCache(Func<IContentManager, string, Type, bool> predicate, bool dispose = false)
     {
         // invalidate cache & track removed assets
-        IDictionary<IAssetName, Type> invalidatedAssets = new Dictionary<IAssetName, Type>();
+        Dictionary<IAssetName, Type> invalidatedAssets = new();
         Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers = null;
         this.ContentManagerLock.InReadLock(() =>
         {
@@ -542,7 +542,7 @@ internal class ContentCoordinator : IDisposable
     /// <param name="invalidatedAssets">The invalidated asset names and their data types.</param>
     /// <param name="loadedTextureManagers">The content managers which were found to have each invalidated texture loaded.</param>
     /// <returns>Returns the invalidated asset names.</returns>
-    private ICollection<IAssetName> ProcessInvalidatedAssets(IDictionary<IAssetName, Type> invalidatedAssets, IReadOnlyDictionary<IAssetName, List<IContentManager>>? loadedTextureManagers)
+    private ICollection<IAssetName> ProcessInvalidatedAssets(Dictionary<IAssetName, Type> invalidatedAssets, IReadOnlyDictionary<IAssetName, List<IContentManager>>? loadedTextureManagers)
     {
         if (invalidatedAssets.Count > 0)
         {
@@ -556,7 +556,7 @@ internal class ContentCoordinator : IDisposable
             // propagate changes to the game
             this.CoreAssets.Propagate(
                 contentManagers: this.GameContentManagers,
-                assets: invalidatedAssets.ToDictionary(p => p.Key, p => p.Value),
+                assets: invalidatedAssets,
                 loadedTextureManagers: loadedTextureManagers,
                 ignoreWorld: Context.IsWorldFullyUnloaded,
                 out Dictionary<IAssetName, bool> propagated,
