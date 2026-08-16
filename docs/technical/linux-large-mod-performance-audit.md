@@ -158,15 +158,15 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** High. Mods can add/remove handlers or change context dynamically, so stale negative or operation caches would break content behavior.
 - **Status:** Needs runtime evidence.
 
-### 16. Event dispatch performs per-handler context stack operations
+### 16. Event dispatch performs per-handler context operations and lazy callback allocations
 
-- **Affected code:** `Framework/Events/ManagedEvent.cs` (`Raise`).
-- **Scenario:** High-frequency update/input events with many subscribers.
-- **Root cause:** Each handler invocation pushes and pops the current mod context and enters exception-handling logic, even when there is no nested dispatch.
-- **Impact:** Steady gameplay.
-- **Expected benefit:** A correctly scoped non-nested fast path could reduce framework overhead, although mod handler time will usually dominate.
+- **Affected code:** `Framework/Events/ManagedEvent.cs` (`Raise`) and `Framework/Events/ManagedEventHandler.cs`.
+- **Scenario:** High-frequency update/input events with many subscribers, and repeated live asset requests while walking or transitioning.
+- **Root cause:** Each handler invocation pushes and pops the current mod context and enters exception-handling logic. The lazy dispatch overload also creates a new callback delegate for every handler on every raise.
+- **Impact:** Steady gameplay, transitions, and garbage collection.
+- **Expected benefit:** Caching lazy callbacks removes repeat dispatch allocations; a correctly scoped context fast path could further reduce framework overhead, although mod handler time will usually dominate.
 - **Risk:** High. Current-mod attribution and exception isolation are correctness features and must not be weakened.
-- **Status:** Needs runtime evidence.
+- **Status:** Partially fixed. Each registered handler now owns one cached lazy-dispatch callback instead of allocating one on every asset request or filtered message dispatch. Context stack operations and exception boundaries remain unchanged pending runtime evidence.
 
 ### 17. World event manager identifiers for locations and buildings are swapped
 
