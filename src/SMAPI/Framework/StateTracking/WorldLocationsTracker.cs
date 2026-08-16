@@ -51,6 +51,9 @@ internal class WorldLocationsTracker : IWatcher
     /// <summary>Whether locations were added or removed since the last reset.</summary>
     public bool IsLocationListChanged { get; private set; }
 
+    /// <summary>Whether any tracked location has collection changes since the last reset.</summary>
+    public bool HaveLocationContentsChanged => this.LocationsHaveChanges;
+
     /// <inheritdoc />
     public bool IsChanged => this.IsLocationListChanged || this.LocationsHaveChanges;
 

@@ -16,6 +16,9 @@ internal class WorldLocationsSnapshot
     /// <summary>The pooled list instance for <see cref="GetMissingLocations"/>.</summary>
     private static readonly List<GameLocation> PooledMissingLocations = [];
 
+    /// <summary>The locations with changes captured in the current snapshot.</summary>
+    private readonly List<LocationSnapshot> ChangedLocations = [];
+
 
     /*********
     ** Accessors
@@ -23,8 +26,8 @@ internal class WorldLocationsSnapshot
     /// <summary>Tracks changes to the location list.</summary>
     public SnapshotListDiff<GameLocation> LocationList { get; } = new();
 
-    /// <summary>The tracked locations.</summary>
-    public IReadOnlyCollection<LocationSnapshot> Locations => this.LocationsDict.Values;
+    /// <summary>The locations with changes captured in the current snapshot.</summary>
+    public IReadOnlyCollection<LocationSnapshot> Locations => this.ChangedLocations;
 
 
     /*********
@@ -32,14 +35,31 @@ internal class WorldLocationsSnapshot
     *********/
     /// <summary>Update the tracked values.</summary>
     /// <param name="watcher">The watcher to snapshot.</param>
-    public void Update(WorldLocationsTracker watcher)
+    /// <param name="options">Which world changes need to be copied into the snapshot.</param>
+    public void Update(WorldLocationsTracker watcher, WorldSnapshotOptions options)
     {
-        // update location list
-        this.LocationList.Update(watcher.IsLocationListChanged, watcher.Added, watcher.Removed);
+        this.ChangedLocations.Clear();
 
-        // remove missing locations
-        foreach (var key in this.GetMissingLocations(watcher))
-            this.LocationsDict.Remove(key);
+        // update location list
+        if (options.TrackLocationList)
+            this.LocationList.Update(watcher.IsLocationListChanged, watcher.Added, watcher.Removed);
+        else
+            this.LocationList.Update(isChanged: false, removed: null, added: null);
+
+        // remove missing cached snapshots when the tracked topology changes
+        if (watcher.IsLocationListChanged && this.LocationsDict.Count > 0)
+        {
+            foreach (GameLocation key in this.GetMissingLocations(watcher))
+                this.LocationsDict.Remove(key);
+        }
+
+        // skip location traversal when no corresponding event is subscribed, or no relevant
+        // collection changed (chest stack changes aren't represented by the latter flag)
+        if (
+            !options.TrackLocationContents
+            || (!options.TrackChestInventories && !watcher.HaveLocationContentsChanged)
+        )
+            return;
 
         // update locations
         foreach (LocationTracker locationWatcher in watcher.Locations)
@@ -47,7 +67,8 @@ internal class WorldLocationsSnapshot
             if (!this.LocationsDict.TryGetValue(locationWatcher.Location, out LocationSnapshot? snapshot))
                 this.LocationsDict[locationWatcher.Location] = snapshot = new LocationSnapshot(locationWatcher.Location);
 
-            snapshot.Update(locationWatcher, watcher.TrackChestInventoryChanges);
+            if (snapshot.Update(locationWatcher, options))
+                this.ChangedLocations.Add(snapshot);
         }
     }
 

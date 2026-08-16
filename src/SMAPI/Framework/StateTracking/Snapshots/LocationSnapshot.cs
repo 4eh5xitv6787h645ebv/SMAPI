@@ -53,21 +53,22 @@ internal class LocationSnapshot
 
     /// <summary>Update the tracked values.</summary>
     /// <param name="watcher">The watcher to snapshot.</param>
-    /// <param name="trackChestInventoryChanges">Whether to snapshot changes needed for the chest inventory event.</param>
-    public void Update(LocationTracker watcher, bool trackChestInventoryChanges)
+    /// <param name="options">Which world changes need to be copied into the snapshot.</param>
+    /// <returns>Returns whether the snapshot contains any changes.</returns>
+    public bool Update(LocationTracker watcher, WorldSnapshotOptions options)
     {
         // main lists
-        this.Buildings.Update(watcher.BuildingsWatcher);
-        this.Debris.Update(watcher.DebrisWatcher);
-        this.LargeTerrainFeatures.Update(watcher.LargeTerrainFeaturesWatcher);
-        this.Npcs.Update(watcher.NpcsWatcher);
-        this.Objects.Update(watcher.ObjectsWatcher);
-        this.TerrainFeatures.Update(watcher.TerrainFeaturesWatcher);
-        this.Furniture.Update(watcher.FurnitureWatcher);
+        this.Update(this.Buildings, watcher.BuildingsWatcher, options.TrackBuildings);
+        this.Update(this.Debris, watcher.DebrisWatcher, options.TrackDebris);
+        this.Update(this.LargeTerrainFeatures, watcher.LargeTerrainFeaturesWatcher, options.TrackLargeTerrainFeatures);
+        this.Update(this.Npcs, watcher.NpcsWatcher, options.TrackNpcs);
+        this.Update(this.Objects, watcher.ObjectsWatcher, options.TrackObjects);
+        this.Update(this.TerrainFeatures, watcher.TerrainFeaturesWatcher, options.TrackTerrainFeatures);
+        this.Update(this.Furniture, watcher.FurnitureWatcher, options.TrackFurniture);
 
         // chest inventories
         this.ChestItems.Clear();
-        if (trackChestInventoryChanges)
+        if (options.TrackChestInventories)
         {
             foreach (ChestTracker tracker in watcher.ChestWatchers.Values)
             {
@@ -75,5 +76,32 @@ internal class LocationSnapshot
                     this.ChestItems[tracker.Chest] = changes;
             }
         }
+
+        return
+            this.Buildings.IsChanged
+            || this.Debris.IsChanged
+            || this.LargeTerrainFeatures.IsChanged
+            || this.Npcs.IsChanged
+            || this.Objects.IsChanged
+            || this.ChestItems.Count > 0
+            || this.TerrainFeatures.IsChanged
+            || this.Furniture.IsChanged;
+    }
+
+
+    /*********
+    ** Private methods
+    *********/
+    /// <summary>Update a collection snapshot if needed for the current tick.</summary>
+    /// <typeparam name="T">The collection value type.</typeparam>
+    /// <param name="snapshot">The snapshot to update.</param>
+    /// <param name="watcher">The underlying collection watcher.</param>
+    /// <param name="trackChanges">Whether the corresponding event has listeners.</param>
+    private void Update<T>(SnapshotListDiff<T> snapshot, ICollectionWatcher<T> watcher, bool trackChanges)
+    {
+        if (trackChanges)
+            snapshot.Update(watcher);
+        else
+            snapshot.Update(isChanged: false, removed: null, added: null);
     }
 }

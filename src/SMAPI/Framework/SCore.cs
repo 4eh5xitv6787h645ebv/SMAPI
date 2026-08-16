@@ -836,8 +836,20 @@ internal class SCore : IDisposable
             ** Update watchers
             **   (Watchers need to be updated, checked, and reset in one go so we can detect any changes mods make in event handlers.)
             *********/
-            instance.Watchers.Update(events.ChestInventoryChanged.HasListeners);
-            instance.WatcherSnapshot.Update(instance.Watchers);
+            WorldSnapshotOptions worldSnapshotOptions = new(
+                TrackLocationList: events.LocationListChanged.HasListeners || verbose,
+                TrackBuildings: events.BuildingListChanged.HasListeners,
+                TrackDebris: events.DebrisListChanged.HasListeners,
+                TrackLargeTerrainFeatures: events.LargeTerrainFeatureListChanged.HasListeners,
+                TrackNpcs: events.NpcListChanged.HasListeners,
+                TrackObjects: events.ObjectListChanged.HasListeners,
+                TrackChestInventories: events.ChestInventoryChanged.HasListeners,
+                TrackTerrainFeatures: events.TerrainFeatureListChanged.HasListeners,
+                TrackFurniture: events.FurnitureListChanged.HasListeners
+            );
+
+            instance.Watchers.Update(worldSnapshotOptions.TrackChestInventories);
+            instance.WatcherSnapshot.Update(instance.Watchers, worldSnapshotOptions);
             instance.Watchers.Reset();
             WatcherSnapshot state = instance.WatcherSnapshot;
 
