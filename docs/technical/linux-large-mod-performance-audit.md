@@ -18,31 +18,32 @@ This is the current jank-first order, combining likely frame-time impact, freque
 6. Finding 25 — held-input event snapshot allocations — fixed.
 7. Finding 7 — normal-tile rendering overhead — fixed.
 8. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-9. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
-10. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-11. Finding 33 — asset-loader adapter closures — fixed.
-12. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-13. Finding 6 — synchronous game-thread log flushing — fixed.
-14. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-15. Finding 32 — per-map warp comparison sets — fixed.
-16. Finding 19 — repeated propagation side effects — deferred.
-17. Finding 4 — no first-class batched exact invalidation — fixed.
-18. Finding 3 — exact invalidation performing cache scans — fixed.
-19. Finding 22 — oversized sparse image-patch transfers — fixed.
-20. Finding 8 — PNG decode and conversion churn — partially fixed.
-21. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-22. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
-23. Finding 9 — linear content-manager routing — fixed.
-24. Finding 10 — repeated asset-name strings — partially fixed.
-25. Finding 14 — retained dead disposable wrappers — fixed.
-26. Finding 29 — world trackers lost across reordered transfers — fixed.
-27. Finding 30 — rectangular transformed-tile origin — fixed.
-28. Finding 18 — reversed location event changes — fixed.
-29. Finding 17 — swapped managed-event identifiers — fixed.
-30. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-31. Finding 13 — repeated dependency-list scans — fixed.
-32. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
-33. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+9. Finding 34 — layer work repeated for every patched map tile — fixed.
+10. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+11. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+12. Finding 33 — asset-loader adapter closures — fixed.
+13. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+14. Finding 6 — synchronous game-thread log flushing — fixed.
+15. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+16. Finding 32 — per-map warp comparison sets — fixed.
+17. Finding 19 — repeated propagation side effects — deferred.
+18. Finding 4 — no first-class batched exact invalidation — fixed.
+19. Finding 3 — exact invalidation performing cache scans — fixed.
+20. Finding 22 — oversized sparse image-patch transfers — fixed.
+21. Finding 8 — PNG decode and conversion churn — partially fixed.
+22. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+23. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+24. Finding 9 — linear content-manager routing — fixed.
+25. Finding 10 — repeated asset-name strings — partially fixed.
+26. Finding 14 — retained dead disposable wrappers — fixed.
+27. Finding 29 — world trackers lost across reordered transfers — fixed.
+28. Finding 30 — rectangular transformed-tile origin — fixed.
+29. Finding 18 — reversed location event changes — fixed.
+30. Finding 17 — swapped managed-event identifiers — fixed.
+31. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+32. Finding 13 — repeated dependency-list scans — fixed.
+33. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+34. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -376,6 +377,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The public callbacks, exception boundary, priority selection, mod attribution, file API, and invocation timing remain unchanged; only the internal representation differs.
 - **Status:** Fixed. Delegate-backed operations now retain the caller's `Func<object>` directly, while a generic mod-file operation stores its mod and path in fields and invokes `ModContent.Load<TAsset>` without a captured adapter. Release IL no longer contains the two `AssetRequestedEventArgs` display classes.
 
+### 34. Map patching repeats layer-wide work for every tile
+
+- **Affected code:** `Framework/Content/AssetDataForMap.cs` (`PatchMap`).
+- **Scenario:** Linux map loads and context changes where large content packs overlay or replace substantial map regions with multiple layers.
+- **Root cause:** Inside the nested width-by-height tile loop, SMAPI iterates source layers, hashes each source layer through a dictionary lookup, and copies the layer's entire property collection. Layer creation can only be needed once and layer properties apply to the whole layer, so both operations are invariant across every tile in the patch.
+- **Impact:** Transitions and warp-time stalls, scaling with patch area, layer count, and layer-property count.
+- **Expected benefit:** Reduces layer-property copies from `width × height × layers` to `layers` and removes the source-to-target dictionary lookup from the innermost tile loop. For example, a 100×100 five-layer patch performs five property copies instead of 50,000.
+- **Risk:** Low. Source/target layer pairing, missing-layer creation, property results, tile order, patch-mode behavior, and target-only layer clearing are retained. Zero-sized patches explicitly keep their previous behavior of making no layer changes.
+- **Status:** Fixed. Source and target layers are paired once before tile traversal, missing layers and properties are handled once per source layer, and the tile loop iterates those stable pairs directly. Target-only layer tracking is allocated only for full `Replace` mode.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -385,8 +396,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Finding 2 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, and 33 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, and 32 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, and 32 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, and 34 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, and 34 |
 | Synchronous logging and `AutoFlush` stalls | Finding 6 |
 | Per-tile rendering overhead | Findings 7 and 30 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, and 28 |
@@ -397,7 +408,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, and 33 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, and 33 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, and 34 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
