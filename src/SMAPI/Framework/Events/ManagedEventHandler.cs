@@ -13,6 +13,9 @@ internal class ManagedEventHandler<TEventArgs> : IComparable
     /// <summary>The event handler method.</summary>
     public EventHandler<TEventArgs> Handler { get; }
 
+    /// <summary>An allocation-free callback wrapper for lazy event dispatch.</summary>
+    public Action<TEventArgs> Callback { get; }
+
     /// <summary>The order in which the event handler was registered, relative to other handlers for this event.</summary>
     public int RegistrationOrder { get; }
 
@@ -34,6 +37,7 @@ internal class ManagedEventHandler<TEventArgs> : IComparable
     public ManagedEventHandler(EventHandler<TEventArgs> handler, int registrationOrder, EventPriority priority, IModMetadata sourceMod)
     {
         this.Handler = handler;
+        this.Callback = this.Invoke;
         this.RegistrationOrder = registrationOrder;
         this.Priority = priority;
         this.SourceMod = sourceMod;
@@ -49,5 +53,12 @@ internal class ManagedEventHandler<TEventArgs> : IComparable
         return priorityCompare != 0
             ? priorityCompare
             : this.RegistrationOrder.CompareTo(other.RegistrationOrder);
+    }
+
+    /// <summary>Invoke the underlying event handler.</summary>
+    /// <param name="args">The event arguments.</param>
+    private void Invoke(TEventArgs args)
+    {
+        this.Handler(null, args);
     }
 }

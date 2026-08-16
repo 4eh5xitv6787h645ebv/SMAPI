@@ -134,7 +134,7 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
 
             try
             {
-                invoke(handler.SourceMod, args => handler.Handler(null, args));
+                invoke(handler.SourceMod, handler.Callback);
             }
             catch (Exception ex)
             {
