@@ -252,11 +252,11 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 - **Affected code:** `Events/ButtonsChangedEventArgs.cs` (constructor).
 - **Scenario:** Focused Linux gameplay while a mod listens to `ButtonsChanged` and the player holds a movement key or controller direction.
-- **Root cause:** Every event snapshot eagerly creates separate pressed, held, and released lists even when a category is empty; an ordinary walking tick normally populates only the held list.
+- **Root cause:** Every event snapshot originally created separate pressed, held, and released lists even when a category was empty; after making categories lazy, each populated category still allocated both a `List<SButton>` object and its minimum four-element backing array. An ordinary walking tick normally populates only the held category with one movement key.
 - **Impact:** Steady gameplay and garbage collection when the event has listeners.
 - **Expected benefit:** Lazy category allocation removes the two empty list objects from the normal held-input event and avoids all three list objects if an unusual active-state snapshot contains no categorized buttons.
 - **Risk:** Low. The public properties remain `IEnumerable<SButton>` snapshots; empty categories use immutable empty enumerables instead of newly allocated empty lists.
-- **Status:** Fixed. Each category list is now created on its first matching button, while empty categories share the runtime's allocation-free empty representation.
+- **Status:** Fixed. Empty categories share the runtime's allocation-free empty representation, while populated categories are now exact arrays. The normal one-key held-input snapshot therefore retains the required stable public snapshot with one allocation instead of a list object plus an over-capacity backing array; concrete dictionary enumeration avoids adding boxed enumerators for the count and fill passes.
 
 ### 26. Camera scrolling materializes unused cursor snapshots
 

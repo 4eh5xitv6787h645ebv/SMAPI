@@ -187,7 +187,7 @@ internal sealed class SInputState : InputState
 
     /// <summary>Get the buttons which were active (pressed, held, or newly released) as of the last update.</summary>
     /// <remarks>A released button is considered inactive if it's been released for two consecutive ticks, at which point it's no longer in this dictionary.</remarks>
-    public IReadOnlyDictionary<SButton, SButtonState> GetActiveButtonStates()
+    public Dictionary<SButton, SButtonState> GetActiveButtonStates()
     {
         return this.ButtonStates;
     }
