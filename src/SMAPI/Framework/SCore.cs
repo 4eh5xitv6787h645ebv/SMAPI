@@ -1378,7 +1378,7 @@ internal class SCore : IDisposable
         if (!@event.HasListeners)
             return;
 
-        bool wasOpen = spriteBatch.IsOpen(this.Reflection);
+        bool wasOpen = spriteBatch.IsOpen();
         bool hadRenderTarget = Game1.graphics.GraphicsDevice.RenderTargetCount > 0;
 
         if (!hadRenderTarget && !Game1.IsOnMainThread())
@@ -1387,7 +1387,7 @@ internal class SCore : IDisposable
         try
         {
             if (!wasOpen)
-                Game1.spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp);
+                spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp);
 
             if (!hadRenderTarget)
             {
