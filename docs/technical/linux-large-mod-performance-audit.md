@@ -45,7 +45,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 33. Finding 10 — repeated asset-name strings — partially fixed.
 34. Finding 14 — retained dead disposable wrappers — fixed.
 35. Finding 29 — world trackers lost across reordered transfers — fixed.
-36. Finding 42 — location trackers lack source ownership — queued.
+36. Finding 42 — location trackers lack source ownership — fixed.
 37. Finding 30 — rectangular transformed-tile origin — fixed.
 38. Finding 18 — reversed location event changes — fixed.
 39. Finding 17 — swapped managed-event identifiers — fixed.
@@ -478,7 +478,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Walking-time change detection correctness and avoidable tracker churn; live locations can stop reporting content changes.
 - **Expected benefit:** Stable one-tracker-per-location ownership across transfers and overlapping roots, with less disposal/recreation work.
 - **Risk:** Medium to high. Source identities and same-tick transfer behavior need an explicit contract to prevent leaks or delayed removals.
-- **Status:** Queued. Replace unconditional remove/re-add with source membership or reference-counted ownership.
+- **Status:** Fixed. Reference-identity owner counts now cover both locations and buildings. Same-update additions are applied before removals, so transfers and overlapping root/parent sources retain one tracker, one nested tracker graph, and one building net-field handler until the last owner disappears.
 
 ### 43. Core propagation allocates normalized key strings per asset
 
@@ -557,14 +557,13 @@ This is the current jank-first order, combining likely frame-time impact, freque
 ## Remaining implementation priority
 
 1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially chest polling, cursor-position consumption, log formatting, live `AssetRequested` frequency, and propagation side-effect repetition.
-2. Add source ownership to world-location trackers so overlapping roots and cross-tick transfers cannot drop a live tracker.
-3. Cache launch-wide loaded assembly identities and canonical parsed local files without weakening duplicate-mod diagnostics.
-4. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
-5. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
-6. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
-7. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-8. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
-9. Correct source-over alpha composition after representative content-pack visual comparisons.
-10. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+2. Cache launch-wide loaded assembly identities and canonical parsed local files without weakening duplicate-mod diagnostics.
+3. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
+4. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
+5. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
+6. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
+7. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
+8. Correct source-over alpha composition after representative content-pack visual comparisons.
+9. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.

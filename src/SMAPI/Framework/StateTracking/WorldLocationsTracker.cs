@@ -27,6 +27,9 @@ internal class WorldLocationsTracker : IWatcher
     /// <summary>A lookup of the tracked locations.</summary>
     private Dictionary<GameLocation, LocationTracker> LocationDict { get; } = new(new ObjectReferenceComparer<GameLocation>());
 
+    /// <summary>The number of live topology sources which contain each location.</summary>
+    private readonly Dictionary<GameLocation, int> LocationOwnerCounts = new(new ObjectReferenceComparer<GameLocation>());
+
     /// <summary>The locations whose content changed since the last reset.</summary>
     private readonly HashSet<LocationTracker> LocationsWithContentChanges = new(new ObjectReferenceComparer<LocationTracker>());
 
@@ -35,6 +38,9 @@ internal class WorldLocationsTracker : IWatcher
 
     /// <summary>A lookup of registered buildings and their indoor location.</summary>
     private readonly Dictionary<Building, GameLocation?> BuildingIndoors = new(new ObjectReferenceComparer<Building>());
+
+    /// <summary>The number of tracked location collections which contain each building.</summary>
+    private readonly Dictionary<Building, int> BuildingOwnerCounts = new(new ObjectReferenceComparer<Building>());
 
     /// <summary>The field-change handlers registered for each building's indoor location.</summary>
     private readonly Dictionary<Building, FieldChange<NetRef<GameLocation>, GameLocation>> BuildingIndoorsChangedHandlers = new(new ObjectReferenceComparer<Building>());
@@ -128,9 +134,14 @@ internal class WorldLocationsTracker : IWatcher
         }
         this.IsTrackingChestInventoryChanges = this.TrackChestInventoryChanges;
 
-        // detect added/removed locations
-        // Process every removal before any addition so moving a location between source lists in
-        // add-then-remove order can't leave the newly added destination untracked.
+        // detect added/removed locations. Add every new owner first so transfers between source lists in the
+        // same update retain one stable tracker instead of briefly disposing and recreating the full graph.
+        if (this.LocationListWatcher.IsChanged)
+            this.Add(this.LocationListWatcher.Added);
+        if (this.MineLocationListWatcher.IsChanged)
+            this.Add(this.MineLocationListWatcher.Added);
+        if (this.VolcanoLocationListWatcher.IsChanged)
+            this.Add(this.VolcanoLocationListWatcher.Added);
         if (this.LocationListWatcher.IsChanged)
             this.Remove(this.LocationListWatcher.Removed);
         if (this.MineLocationListWatcher.IsChanged)
@@ -138,27 +149,9 @@ internal class WorldLocationsTracker : IWatcher
         if (this.VolcanoLocationListWatcher.IsChanged)
             this.Remove(this.VolcanoLocationListWatcher.Removed);
 
-        if (this.LocationListWatcher.IsChanged)
-            this.Add(this.LocationListWatcher.Added);
-        if (this.MineLocationListWatcher.IsChanged)
-            this.Add(this.MineLocationListWatcher.Added);
-        if (this.VolcanoLocationListWatcher.IsChanged)
-            this.Add(this.VolcanoLocationListWatcher.Added);
-
         // detect building changes
-        // As with top-level locations, remove across every parent before adding to any parent. A
-        // building may be inserted into its destination before its source collection is updated.
-        foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
-        {
-            if (
-                !watcher.BuildingsWatcher.IsChanged
-                || !this.LocationDict.TryGetValue(watcher.Location, out LocationTracker? currentWatcher)
-                || !object.ReferenceEquals(watcher, currentWatcher)
-            )
-                continue;
-
-            this.Remove(watcher.BuildingsWatcher.Removed);
-        }
+        // As with top-level locations, add every new owner first so transfers keep their indoor trackers and
+        // net-field handlers alive throughout the update.
         foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
         {
             if (
@@ -169,6 +162,17 @@ internal class WorldLocationsTracker : IWatcher
                 continue;
 
             this.Add(watcher.BuildingsWatcher.Added);
+        }
+        foreach (LocationTracker watcher in this.LocationsWithContentChangesBuffer)
+        {
+            if (
+                !watcher.BuildingsWatcher.IsChanged
+                || !this.LocationDict.TryGetValue(watcher.Location, out LocationTracker? currentWatcher)
+                || !object.ReferenceEquals(watcher, currentWatcher)
+            )
+                continue;
+
+            this.Remove(watcher.BuildingsWatcher.Removed);
         }
 
         // detect building interiors changed (e.g. construction completed)
@@ -244,9 +248,12 @@ internal class WorldLocationsTracker : IWatcher
         this.BuildingIndoorsChangedHandlers.Clear();
         this.BuildingsWithChangedIndoors.Clear();
         this.LocationsWithContentChanges.Clear();
+        this.LocationOwnerCounts.Clear();
+        this.BuildingOwnerCounts.Clear();
 
         foreach (LocationTracker watcher in this.Locations)
             watcher.Dispose();
+        this.LocationDict.Clear();
     }
 
 
@@ -295,8 +302,15 @@ internal class WorldLocationsTracker : IWatcher
     /// <param name="building">The building to add.</param>
     public void Add(Building? building)
     {
-        if (building == null || this.BuildingIndoors.ContainsKey(building))
+        if (building == null)
             return;
+
+        if (this.BuildingOwnerCounts.TryGetValue(building, out int ownerCount))
+        {
+            this.BuildingOwnerCounts[building] = ownerCount + 1;
+            return;
+        }
+        this.BuildingOwnerCounts.Add(building, 1);
 
         GameLocation? indoors = building.indoors.Value;
         this.BuildingIndoors[building] = indoors;
@@ -316,8 +330,12 @@ internal class WorldLocationsTracker : IWatcher
         if (location == null)
             return;
 
-        // remove old location if needed
-        this.Remove(location);
+        if (this.LocationOwnerCounts.TryGetValue(location, out int ownerCount))
+        {
+            this.LocationOwnerCounts[location] = ownerCount + 1;
+            return;
+        }
+        this.LocationOwnerCounts.Add(location, 1);
 
         // add location
         this.AddedImpl.Add(location);
@@ -336,6 +354,15 @@ internal class WorldLocationsTracker : IWatcher
         if (building == null)
             return;
 
+        if (!this.BuildingOwnerCounts.TryGetValue(building, out int ownerCount))
+            return;
+        if (ownerCount > 1)
+        {
+            this.BuildingOwnerCounts[building] = ownerCount - 1;
+            return;
+        }
+        this.BuildingOwnerCounts.Remove(building);
+
         if (this.BuildingIndoorsChangedHandlers.Remove(building, out FieldChange<NetRef<GameLocation>, GameLocation>? handler))
         {
             building.indoors.fieldChangeEvent -= handler;
@@ -353,6 +380,15 @@ internal class WorldLocationsTracker : IWatcher
     {
         if (location == null)
             return;
+
+        if (!this.LocationOwnerCounts.TryGetValue(location, out int ownerCount))
+            return;
+        if (ownerCount > 1)
+        {
+            this.LocationOwnerCounts[location] = ownerCount - 1;
+            return;
+        }
+        this.LocationOwnerCounts.Remove(location);
 
         if (this.LocationDict.TryGetValue(location, out LocationTracker? watcher))
         {

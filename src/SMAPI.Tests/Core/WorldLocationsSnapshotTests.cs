@@ -137,6 +137,63 @@ internal class WorldLocationsSnapshotTests
 
         // assert
         tracker.HasLocationTracker(indoors).Should().BeTrue();
+        tracker.Added.Should().ContainSingle().Which.Should().BeSameAs(indoors);
+        tracker.Removed.Should().BeEmpty();
+    }
+
+    [Test(Description = "Assert that a location with two topology owners remains tracked until its last owner is removed.")]
+    public void Update_RetainsLocationsWithAnotherOwner()
+    {
+        ObservableCollection<GameLocation> locations = [];
+        using WorldLocationsTracker tracker = new(locations, new List<MineShaft>(), new List<VolcanoDungeon>());
+        GameLocation shared = new();
+
+        tracker.Add(shared);
+        tracker.Add(shared);
+        tracker.Reset();
+
+        tracker.Remove(shared);
+
+        tracker.HasLocationTracker(shared).Should().BeTrue();
+        tracker.Added.Should().BeEmpty();
+        tracker.Removed.Should().BeEmpty();
+        tracker.IsLocationListChanged.Should().BeFalse();
+
+        tracker.Reset();
+        tracker.Remove(shared);
+
+        tracker.HasLocationTracker(shared).Should().BeFalse();
+        tracker.Removed.Should().ContainSingle().Which.Should().BeSameAs(shared);
+    }
+
+    [Test(Description = "Assert that a building shared by two locations retains its handler and interior until its last owner is removed.")]
+    public void Update_RetainsBuildingsWithAnotherLocationOwner()
+    {
+        ObservableCollection<GameLocation> locations = [];
+        using WorldLocationsTracker tracker = new(locations, new List<MineShaft>(), new List<VolcanoDungeon>());
+        GameLocation first = CreateLocationForBuildingTests();
+        GameLocation second = CreateLocationForBuildingTests();
+        GameLocation indoors = new();
+        Building building = new() { indoors = { Value = indoors } };
+        first.buildings.Add(building);
+        second.buildings.Add(building);
+        locations.Add(first);
+        locations.Add(second);
+        tracker.Update();
+        tracker.Reset();
+
+        first.buildings.Remove(building);
+        tracker.Update();
+
+        tracker.HasLocationTracker(indoors).Should().BeTrue();
+        tracker.Removed.Should().BeEmpty();
+
+        tracker.Reset();
+        second.buildings.Remove(building);
+        tracker.Update();
+
+        tracker.HasLocationTracker(indoors).Should().BeFalse();
+        tracker.Removed.Should().ContainSingle().Which.Should().BeSameAs(indoors);
     }
 
     [Test(Description = "Assert that unobserved-chest updates and snapshots process only locations with collection changes.")]
@@ -184,5 +241,15 @@ internal class WorldLocationsSnapshotTests
         // assert: the idle tick doesn't traverse any location snapshots
         tracker.ChangedLocations.Should().BeEmpty();
         snapshot.Locations.Should().BeEmpty();
+    }
+
+    /// <summary>Create a raw location whose building list doesn't call uninitialized game-global callbacks.</summary>
+    private static GameLocation CreateLocationForBuildingTests()
+    {
+        GameLocation location = new();
+        Type collectionType = location.buildings.GetType();
+        collectionType.GetField("OnValueAdded", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(location.buildings, null);
+        collectionType.GetField("OnValueRemoved", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(location.buildings, null);
+        return location;
     }
 }
