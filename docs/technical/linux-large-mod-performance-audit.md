@@ -218,6 +218,16 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** High. GPU allocation size is approximate, asset ownership is split, and aggressive eviction can cause reload thrashing.
 - **Status:** Needs runtime evidence and a concrete ownership model.
 
+### 22. Sparse image patches transfer transparent columns
+
+- **Affected code:** `Framework/Content/AssetDataForImage.cs` (`PatchImageImpl`).
+- **Scenario:** Content Patcher-scale overlay and mask edits which place a small sprite inside a much wider transparent source area during warps or context changes.
+- **Root cause:** SMAPI trims fully transparent leading and trailing rows, but keeps the original patch width. It therefore reads back, blends, and uploads transparent columns on both sides of the actual changed pixels.
+- **Impact:** Transitions and temporary memory pressure.
+- **Expected benefit:** Bounding the operation on all four sides reduces GPU readback/upload bytes, the rented merge buffer, and pixels visited by the blend loop for sparse patches.
+- **Risk:** Medium. Source arrays can represent a packed subarea or a row window into a larger raw image, so source-to-target coordinate mapping must remain exact for overlay and mask modes.
+- **Status:** Fixed. Overlay and mask patches now retain the existing fast endpoint checks, scan horizontal alpha bounds only when needed, and transfer/blend the exact nontransparent rectangle.
+
 ## Implementation order
 
 1. Correct duplicate location processing and validate temporary-location events.

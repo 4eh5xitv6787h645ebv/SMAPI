@@ -8,6 +8,24 @@ namespace SMAPI.Tests.Core;
 [TestFixture]
 internal class PixelBufferUtilityTests
 {
+    [Test(Description = "Assert that horizontal alpha bounds include every nontransparent column across rows.")]
+    public void GetHorizontalBounds_FindsOpaqueColumns()
+    {
+        // arrange: opaque pixels at row 0/x2, row 1/x1, and row 1/x3
+        uint[] pixels =
+        [
+            0, 0, 0x05000000, 0,
+            0, 0xFF000000, 0, 0x06000000
+        ];
+
+        // act
+        PixelBufferUtility.GetHorizontalBounds(pixels, startIndex: 2, endIndex: 7, rowWidth: 4, minOpacity: 5, out int left, out int right);
+
+        // assert
+        left.Should().Be(1);
+        right.Should().Be(3);
+    }
+
     [Test(Description = "Assert that contiguous RGBA pixel data is bulk-copied unchanged.")]
     public void CopyRows_CopiesContiguousData()
     {

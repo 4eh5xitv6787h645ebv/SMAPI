@@ -1,6 +1,8 @@
 using System;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI.Framework.Extensions;
@@ -187,16 +189,43 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
         if (endIndex == -1)
             return; // ???
 
-        // update target rectangle
-        int sourceOffset;
+        // Find the exact nontransparent bounds. The first/last scans above already give us the vertical bounds;
+        // only scan the middle for horizontal bounds if those endpoints don't prove the full width is used.
+        int relativeStartIndex = startIndex - firstPixel;
+        int relativeEndIndex = endIndex - firstPixel;
+        int topOffset = relativeStartIndex / sourceArea.Width;
+        int bottomOffset = relativeEndIndex / sourceArea.Width;
+        int leftOffset = relativeStartIndex % sourceArea.Width;
+        int rightOffset = relativeEndIndex % sourceArea.Width;
+        if (
+            (leftOffset != 0 || rightOffset != sourceArea.Width - 1)
+            && Unsafe.SizeOf<Color>() == sizeof(uint)
+        )
         {
-            int topOffset = startIndex / sourceArea.Width;
-            int bottomOffset = endIndex / sourceArea.Width;
-
-            targetArea = new(targetArea.X, targetArea.Y + topOffset - startRow, targetArea.Width, bottomOffset - topOffset + 1);
-            pixelCount = targetArea.Width * targetArea.Height;
-            sourceOffset = topOffset * sourceArea.Width;
+            PixelBufferUtility.GetHorizontalBounds(
+                MemoryMarshal.Cast<Color, uint>(sourceData.AsSpan()),
+                startIndex,
+                endIndex,
+                sourceArea.Width,
+                AssetDataForImage.MinOpacity,
+                out leftOffset,
+                out rightOffset
+            );
         }
+        else if (Unsafe.SizeOf<Color>() != sizeof(uint))
+        {
+            // Preserve the old full-width behavior if MonoGame ever changes Color's packed layout.
+            leftOffset = 0;
+            rightOffset = sourceArea.Width - 1;
+        }
+
+        targetArea = new(
+            targetArea.X + leftOffset,
+            targetArea.Y + topOffset,
+            rightOffset - leftOffset + 1,
+            bottomOffset - topOffset + 1
+        );
+        pixelCount = targetArea.Width * targetArea.Height;
 
         // apply
         Color[] mergedData = ArrayPool<Color>.Shared.Rent(pixelCount);
@@ -204,54 +233,59 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
         {
             target.GetData(0, targetArea, mergedData, 0, pixelCount);
 
-            for (int i = startIndex; i <= endIndex; i++)
+            for (int sourceY = topOffset; sourceY <= bottomOffset; sourceY++)
             {
-                // get source pixel
-                Color above = sourceData[i];
-                if (above.A < AssetDataForImage.MinOpacity)
-                    continue;
-
-                // get target pixel
-                int targetIndex = i - sourceOffset;
-                Color below = mergedData[targetIndex];
-
-                // apply
-                if (patchMode == PatchMode.Overlay)
+                int sourceRowOffset = firstPixel + sourceY * sourceArea.Width;
+                int targetRowOffset = (sourceY - topOffset) * targetArea.Width;
+                for (int sourceX = leftOffset; sourceX <= rightOffset; sourceX++)
                 {
-                    // merge pixels
-                    if (below.A < AssetDataForImage.MinOpacity || above.A == byte.MaxValue)
-                        mergedData[targetIndex] = above;
-                    else
+                    // get source pixel
+                    Color above = sourceData[sourceRowOffset + sourceX];
+                    if (above.A < AssetDataForImage.MinOpacity)
+                        continue;
+
+                    // get target pixel
+                    int targetIndex = targetRowOffset + sourceX - leftOffset;
+                    Color below = mergedData[targetIndex];
+
+                    // apply
+                    if (patchMode == PatchMode.Overlay)
                     {
-                        // This performs a conventional alpha blend for the pixels, which are already
-                        // premultiplied by the content pipeline. The formula is derived from
-                        // https://blogs.msdn.microsoft.com/shawnhar/2009/11/06/premultiplied-alpha/.
-                        float alphaBelow = 1 - (above.A / 255f);
-                        mergedData[targetIndex] = new Color(
-                            r: (int)(above.R + (below.R * alphaBelow)),
-                            g: (int)(above.G + (below.G * alphaBelow)),
-                            b: (int)(above.B + (below.B * alphaBelow)),
-                            alpha: Math.Max(above.A, below.A)
-                        );
+                        // merge pixels
+                        if (below.A < AssetDataForImage.MinOpacity || above.A == byte.MaxValue)
+                            mergedData[targetIndex] = above;
+                        else
+                        {
+                            // This performs a conventional alpha blend for the pixels, which are already
+                            // premultiplied by the content pipeline. The formula is derived from
+                            // https://blogs.msdn.microsoft.com/shawnhar/2009/11/06/premultiplied-alpha/.
+                            float alphaBelow = 1 - (above.A / 255f);
+                            mergedData[targetIndex] = new Color(
+                                r: (int)(above.R + (below.R * alphaBelow)),
+                                g: (int)(above.G + (below.G * alphaBelow)),
+                                b: (int)(above.B + (below.B * alphaBelow)),
+                                alpha: Math.Max(above.A, below.A)
+                            );
+                        }
                     }
-                }
-                else
-                {
-                    // subtract mask alpha
-                    int newAlpha = below.A - above.A;
-                    if (newAlpha <= 0)
-                        mergedData[targetIndex] = Color.Transparent;
                     else
                     {
-                        // Since the pixels are already premultiplied by the pipeline based on the
-                        // alpha, rescale the RGB channels too to match the new alpha.
-                        float scale = (float)newAlpha / below.A;
-                        mergedData[targetIndex] = new Color(
-                            r: (int)Math.Clamp(Math.Round(below.R * scale), 0, 255),
-                            g: (int)Math.Clamp(Math.Round(below.G * scale), 0, 255),
-                            b: (int)Math.Clamp(Math.Round(below.B * scale), 0, 255),
-                            alpha: newAlpha
-                        );
+                        // subtract mask alpha
+                        int newAlpha = below.A - above.A;
+                        if (newAlpha <= 0)
+                            mergedData[targetIndex] = Color.Transparent;
+                        else
+                        {
+                            // Since the pixels are already premultiplied by the pipeline based on the
+                            // alpha, rescale the RGB channels too to match the new alpha.
+                            float scale = (float)newAlpha / below.A;
+                            mergedData[targetIndex] = new Color(
+                                r: (int)Math.Clamp(Math.Round(below.R * scale), 0, 255),
+                                g: (int)Math.Clamp(Math.Round(below.G * scale), 0, 255),
+                                b: (int)Math.Clamp(Math.Round(below.B * scale), 0, 255),
+                                alpha: newAlpha
+                            );
+                        }
                     }
                 }
             }
