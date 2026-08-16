@@ -10,6 +10,8 @@ using StardewModdingAPI.Framework.Content;
 using StardewModdingAPI.Framework.ContentManagers;
 using StardewModdingAPI.Metadata;
 using StardewValley;
+using OtherAssetRoute = StardewModdingAPI.Metadata.CoreAssetPropagator.OtherAssetRoute;
+using TextureAssetRoute = StardewModdingAPI.Metadata.CoreAssetPropagator.TextureAssetRoute;
 
 namespace SMAPI.Tests.Core;
 
@@ -17,6 +19,78 @@ namespace SMAPI.Tests.Core;
 [TestFixture]
 internal class CoreAssetPropagatorTests
 {
+    /// <summary>The exact texture routes expected from the legacy propagation switch.</summary>
+    private static readonly TestCaseData[] TextureAssetRoutes =
+    [
+        new("Characters/Farmer/farmer_base", TextureAssetRoute.PlayerSprites),
+        new("Characters/Farmer/farmer_base_bald", TextureAssetRoute.PlayerSprites),
+        new("Characters/Farmer/farmer_girl_base", TextureAssetRoute.PlayerSprites),
+        new("Characters/Farmer/farmer_girl_base_bald", TextureAssetRoute.PlayerSprites),
+        new("TileSheets/tools", TextureAssetRoute.Tools)
+    ];
+
+    /// <summary>The exact non-texture routes expected from the legacy propagation switch.</summary>
+    private static readonly TestCaseData[] OtherAssetRoutes =
+    [
+        new("Data/Achievements", OtherAssetRoute.Achievements),
+        new("Data/AudioChanges", OtherAssetRoute.AudioChanges),
+        new("Data/BigCraftables", OtherAssetRoute.BigCraftables),
+        new("Data/Boots", OtherAssetRoute.Boots),
+        new("Data/Buildings", OtherAssetRoute.Buildings),
+        new("Data/ChairTiles", OtherAssetRoute.ChairTiles),
+        new("Data/Characters", OtherAssetRoute.Characters),
+        new("Data/Concessions", OtherAssetRoute.Concessions),
+        new("Data/ConcessionTastes", OtherAssetRoute.ConcessionTastes),
+        new("Data/CookingRecipes", OtherAssetRoute.CookingRecipes),
+        new("Data/CraftingRecipes", OtherAssetRoute.CraftingRecipes),
+        new("Data/Crops", OtherAssetRoute.Crops),
+        new("Data/FarmAnimals", OtherAssetRoute.FarmAnimals),
+        new("Data/FloorsAndPaths", OtherAssetRoute.FloorsAndPaths),
+        new("Data/Furniture", OtherAssetRoute.Furniture),
+        new("Data/FruitTrees", OtherAssetRoute.FruitTrees),
+        new("Data/HairData", OtherAssetRoute.HairData),
+        new("Data/Hats", OtherAssetRoute.Hats),
+        new("Data/JukeboxTracks", OtherAssetRoute.JukeboxTracks),
+        new("Data/Locations", OtherAssetRoute.Locations),
+        new("Data/LocationContexts", OtherAssetRoute.LocationContexts),
+        new("Data/Movies", OtherAssetRoute.Movies),
+        new("Data/MoviesReactions", OtherAssetRoute.Movies),
+        new("Data/NPCGiftTastes", OtherAssetRoute.NpcGiftTastes),
+        new("Data/Objects", OtherAssetRoute.Objects),
+        new("Data/Pants", OtherAssetRoute.Pants),
+        new("Data/Pets", OtherAssetRoute.Pets),
+        new("Data/Shirts", OtherAssetRoute.Shirts),
+        new("Data/Tools", OtherAssetRoute.Tools),
+        new("Data/TriggerActions", OtherAssetRoute.TriggerActions),
+        new("Data/Weapons", OtherAssetRoute.Weapons),
+        new("Data/WildTrees", OtherAssetRoute.WildTrees),
+        new("Data/WorldMap", OtherAssetRoute.WorldMap),
+        new("Fonts/SpriteFont1", OtherAssetRoute.SpriteFont1),
+        new("Fonts/SmallFont", OtherAssetRoute.SmallFont),
+        new("Fonts/TinyFont", OtherAssetRoute.TinyFont),
+        new("Strings/StringsFromCSFiles", OtherAssetRoute.StringsFromCsFiles)
+    ];
+
+    [TestCaseSource(nameof(TextureAssetRoutes))]
+    public void GetTextureAssetRoute_MapsLegacyRoutes(string assetName, TextureAssetRoute expected)
+    {
+        CoreAssetPropagator.GetTextureAssetRoute(assetName.ToUpperInvariant()).Should().Be(expected);
+    }
+
+    [TestCaseSource(nameof(OtherAssetRoutes))]
+    public void GetOtherAssetRoute_MapsLegacyRoutes(string assetName, OtherAssetRoute expected)
+    {
+        string normalizedName = AssetName.Parse(assetName.Replace('/', '\\'), _ => null).BaseName;
+        CoreAssetPropagator.GetOtherAssetRoute(normalizedName.ToUpperInvariant()).Should().Be(expected);
+    }
+
+    [Test]
+    public void GetAssetRoutes_ReturnNoneForDynamicNames()
+    {
+        CoreAssetPropagator.GetTextureAssetRoute("Buildings/Barn_PaintMask").Should().Be(TextureAssetRoute.None);
+        CoreAssetPropagator.GetOtherAssetRoute("Characters/Dialogue/Abigail").Should().Be(OtherAssetRoute.None);
+    }
+
     [Test(Description = "Assert that a multi-map propagation batch indexes world map paths once.")]
     public void Propagate_MultipleMaps_IndexesLocationsOnce()
     {
