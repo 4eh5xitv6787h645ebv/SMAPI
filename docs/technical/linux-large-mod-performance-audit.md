@@ -106,7 +106,7 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Impact:** Transitions, memory, and garbage collection.
 - **Expected benefit:** Reused canonical asset-name instances, comparer-based hashing, and allocation-light separator normalization reduce transient allocations.
 - **Risk:** Medium. Asset equivalence is public behavior and must remain identical for mixed separators, case, locale, and relative segments.
-- **Status:** Partially fixed. `AssetName` no longer allocates and retains a lowercase copy for every parsed name; ordinal case-insensitive equality and hashing now operate directly on the canonical name. Allocation-light path normalization and reusable parsed-name instances remain deferred.
+- **Status:** Partially fixed. `AssetName` no longer allocates and retains a lowercase copy for every parsed name; ordinal case-insensitive equality and hashing operate directly on the canonical name. Runtime asset normalization now returns already-canonical strings unchanged and writes noncanonical paths directly into one result string instead of splitting into an array and per-segment strings. Reusable parsed-name instances remain deferred.
 
 ### 11. Linux case-insensitive compatibility indexes each mod tree independently
 

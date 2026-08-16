@@ -55,11 +55,92 @@ public static class PathUtilities
 #endif
     public static string? NormalizeAssetName(string? assetName)
     {
+#if NET6_0_OR_GREATER
+        if (assetName is null)
+            return null;
+
+        // trim outer whitespace without allocating
+        int startIndex = 0;
+        int endIndex = assetName.Length - 1;
+        while (startIndex <= endIndex && char.IsWhiteSpace(assetName[startIndex]))
+            startIndex++;
+        while (endIndex >= startIndex && char.IsWhiteSpace(assetName[endIndex]))
+            endIndex--;
+
+        if (startIndex > endIndex)
+            return string.Empty;
+
+        // calculate the normalized length and detect the common already-canonical case
+        int segmentCount = 0;
+        int segmentCharacterCount = 0;
+        bool isInSegment = false;
+        bool hasNonPreferredSeparator = false;
+        for (int i = startIndex; i <= endIndex; i++)
+        {
+            char character = assetName[i];
+            if (PathUtilities.IsAssetSeparator(character))
+            {
+                hasNonPreferredSeparator |= character != PathUtilities.PreferredAssetSeparator;
+                if (isInSegment)
+                {
+                    segmentCount++;
+                    isInSegment = false;
+                }
+            }
+            else
+            {
+                segmentCharacterCount++;
+                isInSegment = true;
+            }
+        }
+        if (isInSegment)
+            segmentCount++;
+
+        if (segmentCount == 0)
+            return string.Empty;
+
+        int normalizedLength = segmentCharacterCount + segmentCount - 1;
+        int trimmedLength = endIndex - startIndex + 1;
+        if (normalizedLength == trimmedLength && !hasNonPreferredSeparator)
+        {
+            return trimmedLength == assetName.Length
+                ? assetName
+                : assetName.Substring(startIndex, trimmedLength);
+        }
+
+        // write directly into the result string instead of allocating an array and string for every segment
+        return string.Create(
+            normalizedLength,
+            (AssetName: assetName, StartIndex: startIndex, EndIndex: endIndex),
+            static (output, state) =>
+            {
+                int outputIndex = 0;
+                bool startOfSegment = true;
+
+                for (int i = state.StartIndex; i <= state.EndIndex; i++)
+                {
+                    char character = state.AssetName[i];
+                    if (PathUtilities.IsAssetSeparator(character))
+                    {
+                        startOfSegment = true;
+                        continue;
+                    }
+
+                    if (startOfSegment && outputIndex > 0)
+                        output[outputIndex++] = PathUtilities.PreferredAssetSeparator;
+
+                    output[outputIndex++] = character;
+                    startOfSegment = false;
+                }
+            }
+        );
+#else
         assetName = assetName?.Trim();
         if (string.IsNullOrEmpty(assetName))
             return assetName;
 
         return string.Join(PathUtilities.PreferredAssetSeparator.ToString(), PathUtilities.GetSegments(assetName)); // based on MonoGame's ContentManager.Load<T> logic
+#endif
     }
 
     /// <summary>Normalize separators in a file path for the current platform.</summary>
@@ -97,6 +178,12 @@ public static class PathUtilities
             newPath += PathUtilities.PreferredPathSeparator;
 
         return newPath;
+    }
+
+    /// <summary>Get whether a character is a separator recognized in an asset name.</summary>
+    private static bool IsAssetSeparator(char character)
+    {
+        return character is '/' or '\\';
     }
 
     /// <summary>Get a path with the home directory path replaced with <c>~</c> (like <c>C:\Users\Admin\Game</c> to <c>~\Game</c>), if applicable.</summary>
