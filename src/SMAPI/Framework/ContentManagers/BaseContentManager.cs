@@ -309,7 +309,7 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
 
         // For legacy reasons, mods can pass .xnb file extensions to the content pipeline which
         // are then stripped. This will be re-added as needed when reading from raw files.
-        if (assetName?.EndsWith(".xnb") == true)
+        if (assetName?.EndsWith(".xnb", StringComparison.OrdinalIgnoreCase) == true)
             assetName = assetName[..^".xnb".Length];
 
         return assetName;
