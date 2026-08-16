@@ -6,7 +6,42 @@ The rankings prioritize gameplay frame pacing, then transition stalls, memory pr
 
 Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, and **needs runtime evidence**.
 
-## Ranked findings
+## Current priority ranking
+
+This is the current jank-first order, combining likely frame-time impact, frequency, confidence, and compatibility risk. Finding numbers link the ranking to the detailed evidence below; fixed entries remain ranked so the expected benefit of this fork is visible.
+
+1. Finding 2 — demand-driven world, chest, and inventory tracking — partially fixed.
+2. Finding 1 — duplicate world-location processing — fixed.
+3. Finding 23 — per-tick core update closures — fixed.
+4. Finding 24 — pressed-key polling allocation while walking — fixed.
+5. Finding 26 — unused cursor snapshots while the camera scrolls — fixed.
+6. Finding 25 — held-input event snapshot allocations — fixed.
+7. Finding 7 — normal-tile rendering overhead — fixed.
+8. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
+9. Finding 15 — one-tick asset-operation cache lifetime — needs runtime evidence.
+10. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+11. Finding 6 — synchronous game-thread log flushing — fixed.
+12. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+13. Finding 19 — repeated propagation side effects — deferred.
+14. Finding 4 — no first-class batched exact invalidation — fixed.
+15. Finding 3 — exact invalidation performing cache scans — fixed.
+16. Finding 22 — oversized sparse image-patch transfers — fixed.
+17. Finding 8 — PNG decode and conversion churn — partially fixed.
+18. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+19. Finding 21 — unbudgeted texture and decoded-content memory — needs runtime evidence.
+20. Finding 9 — linear content-manager routing — fixed.
+21. Finding 10 — repeated asset-name strings — partially fixed.
+22. Finding 14 — retained dead disposable wrappers — fixed.
+23. Finding 29 — world trackers lost across reordered transfers — fixed.
+24. Finding 30 — rectangular transformed-tile origin — fixed.
+25. Finding 18 — reversed location event changes — fixed.
+26. Finding 17 — swapped managed-event identifiers — fixed.
+27. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+28. Finding 13 — repeated dependency-list scans — fixed.
+29. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+30. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+
+## Detailed findings
 
 ### 1. World locations are updated and reset twice per tick
 
@@ -308,18 +343,38 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 - **Risk:** Low. Square tiles are numerically unchanged, normal tiles still use xTile's base fast path, and only the transformed rectangular-tile Y offset changes.
 - **Status:** Fixed. The vertical draw offset now uses `origin.Y`.
 
-## Implementation order
+## Requested audit coverage
 
-1. Correct duplicate location processing and validate temporary-location events.
-2. Correct the swapped event identifiers.
-3. Add indexed content-manager lookup and prune dead disposable references.
-4. Add exact-key invalidation, followed by a compatible batch API.
-5. Add the normal-tile rendering fast path.
-6. Make world/chest tracking listener-aware without losing internal baselines.
-7. Batch propagation and coalesce global side effects.
-8. Move logging to a bounded, crash-safe background writer.
-9. Reduce asset-name allocations and share Linux path indexes.
-10. Add bounded decode and assembly-rewrite caches.
-11. Consider .NET 10 after Harmony and packaging compatibility are proven.
+| Requested area | Detailed evidence |
+| --- | --- |
+| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, and 29 |
+| Duplicate `LocationsWatcher` update/reset | Finding 1 |
+| Chest scanning and snapshot comparisons | Finding 2 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, and 15 |
+| Exact and batched invalidation APIs | Findings 3 and 4 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, and 28 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, and 27 |
+| Synchronous logging and `AutoFlush` stalls | Finding 6 |
+| Per-tile rendering overhead | Findings 7 and 30 |
+| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, and 28 |
+| Content-manager lookup scaling | Finding 9 |
+| Asset-name parsing and normalization | Finding 10 |
+| Linux case-insensitive file lookup | Finding 11 |
+| Assembly loading and rewrite caching | Finding 12 |
+| Dependency resolution | Finding 13 |
+| Disposable and weak-reference retention | Findings 14, 21, and 28 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, and 27 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, and 28 |
+| .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
+
+## Remaining implementation priority
+
+1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially live `AssetRequested` frequency and propagation side-effect repetition.
+2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
+3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
+4. Establish a measured CPU/GPU byte budget, reuse threshold, and file-change policy before adding decoded texture caching or preloading.
+5. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
+6. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
+7. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.
