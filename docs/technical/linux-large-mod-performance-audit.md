@@ -68,6 +68,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 56. Finding 56 — duplicate content-cache hashing during scans and invalidation — fixed.
 57. Finding 57 — managed-asset parsing and lock closures — fixed.
 58. Finding 58 — localized cached loads probe their mapping twice — fixed.
+59. Finding 59 — intercepted operation groups allocate wrapper objects — fixed.
 
 ## Detailed findings
 
@@ -651,6 +652,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Cache misses retain the same localized and `_international` existence checks and early returns; the no-variant branch stores and reuses the same base name.
 - **Status:** Fixed. The first `TryGetValue` retains its mapped raw name, and the miss branch assigns that same local when caching the base-name fallback.
 
+### 59. Every intercepted asset operation group allocates a wrapper object
+
+- **Affected code:** `Framework/Content/AssetOperationGroup.cs`, `Framework/SCore.cs` (`RequestAssetOperations`), `Framework/ContentCoordinator.cs`, and `Framework/ContentManagers/GameContentManager.cs`.
+- **Scenario:** Large Content Patcher reloads request many assets which register at least one loader or editor and retain the resulting operation group in SMAPI's one-tick cache.
+- **Root cause:** The internal immutable operation group was a reference record, so SMAPI allocated a separate heap object per intercepted asset solely to carry two existing list references.
+- **Impact:** Transition allocation and garbage collection proportional to intercepted asset count.
+- **Expected benefit:** Operation groups are stored and returned inline with no wrapper-object allocation; loader and editor list ownership is unchanged.
+- **Risk:** Low. The type is internal, no usage relies on reference identity, nullable group access remains the same, and equality still compares the same two list references.
+- **Status:** Fixed. `AssetOperationGroup` is a readonly record struct, while the existing nullable cache and call sites retain their current null/property patterns.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -671,7 +682,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, and 47 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, and 59 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
 | GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, and 57 |
