@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace StardewModdingAPI.Utilities;
 
@@ -7,6 +8,10 @@ namespace StardewModdingAPI.Utilities;
 /// <typeparam name="T">The state class.</typeparam>
 public class PerScreen<T>
 {
+    /// <summary>The number of direct-mapped cache slots. Stardew Valley supports up to four local screens.</summary>
+    private const int CacheSlotCount = 4;
+
+
     /*********
     ** Fields
     *********/
@@ -16,17 +21,14 @@ public class PerScreen<T>
     /// <summary>The tracked values for each screen.</summary>
     private readonly Dictionary<int, T> States = [];
 
+    /// <summary>Cache entries for the tracked screen values, used to avoid allocating when cache slots collide.</summary>
+    private readonly Dictionary<int, ScreenState> ScreenStates = [];
+
     /// <summary>The last <see cref="Context.LastRemovedScreenId"/> value for which this instance was updated.</summary>
     private int LastRemovedScreenId;
 
-    /// <summary>The most recently accessed screen ID.</summary>
-    private int CachedScreenId;
-
-    /// <summary>The value for the <see cref="CachedScreenId"/>.</summary>
-    private T CachedValue = default!;
-
-    /// <summary>Whether <see cref="CachedScreenId"/> and <see cref="CachedValue"/> are set.</summary>
-    private bool HasCachedValue;
+    /// <summary>Recently accessed screen states, direct-mapped by screen ID.</summary>
+    private readonly ScreenState?[] CachedStates = new ScreenState?[CacheSlotCount];
 
 
     /*********
@@ -39,11 +41,12 @@ public class PerScreen<T>
         get
         {
             int screenId = Context.ScreenId;
+            ScreenState? cachedState = Volatile.Read(ref this.CachedStates[screenId & (CacheSlotCount - 1)]);
             return
-                this.HasCachedValue
-                && this.CachedScreenId == screenId
-                && this.LastRemovedScreenId == Context.LastRemovedScreenId
-                    ? this.CachedValue
+                cachedState is not null
+                && cachedState.ScreenId == screenId
+                && cachedState.LastRemovedScreenId == Context.LastRemovedScreenId
+                    ? cachedState.Value
                     : this.GetValueForScreen(screenId);
         }
         set => this.SetValueForScreen(Context.ScreenId, value);
@@ -78,22 +81,36 @@ public class PerScreen<T>
     /// <param name="screenId">The screen ID to check.</param>
     public T GetValueForScreen(int screenId)
     {
+        ref ScreenState? cacheSlot = ref this.CachedStates[screenId & (CacheSlotCount - 1)];
+        ScreenState? cachedState = Volatile.Read(ref cacheSlot);
         if (
-            this.HasCachedValue
-            && this.CachedScreenId == screenId
-            && this.LastRemovedScreenId == Context.LastRemovedScreenId
+            cachedState is not null
+            && cachedState.ScreenId == screenId
+            && cachedState.LastRemovedScreenId == Context.LastRemovedScreenId
         )
-            return this.CachedValue;
+            return cachedState.Value;
 
         this.RemoveDeadScreens();
-        T state = this.States.TryGetValue(screenId, out T? existingState)
-            ? existingState
-            : this.States[screenId] = this.CreateNewState();
+        int lastRemovedScreenId = Context.LastRemovedScreenId;
+        if (
+            !this.ScreenStates.TryGetValue(screenId, out ScreenState? state)
+            || state.LastRemovedScreenId != lastRemovedScreenId
+        )
+        {
+            T value;
+            if (state is not null)
+                value = state.Value;
+            else
+            {
+                value = this.States.TryGetValue(screenId, out T? existingState)
+                    ? existingState
+                    : this.States[screenId] = this.CreateNewState();
+            }
+            this.ScreenStates[screenId] = state = new ScreenState(screenId, lastRemovedScreenId, value);
+        }
 
-        this.CachedScreenId = screenId;
-        this.CachedValue = state;
-        this.HasCachedValue = true;
-        return state;
+        Volatile.Write(ref cacheSlot, state);
+        return state.Value;
     }
 
     /// <summary>Set the value for a given screen ID.</summary>
@@ -103,9 +120,10 @@ public class PerScreen<T>
     {
         this.RemoveDeadScreens();
         this.States[screenId] = value;
-        this.CachedScreenId = screenId;
-        this.CachedValue = value;
-        this.HasCachedValue = true;
+        ScreenState state = new(screenId, Context.LastRemovedScreenId, value);
+        this.ScreenStates[screenId] = state;
+
+        Volatile.Write(ref this.CachedStates[screenId & (CacheSlotCount - 1)], state);
     }
 
     /// <summary>Remove all active values.</summary>
@@ -143,9 +161,35 @@ public class PerScreen<T>
             if (shouldRemove(pair.Key))
             {
                 this.States.Remove(pair.Key);
-                if (this.HasCachedValue && this.CachedScreenId == pair.Key)
-                    this.HasCachedValue = false;
+                this.ScreenStates.Remove(pair.Key);
+                ref ScreenState? cacheSlot = ref this.CachedStates[pair.Key & (CacheSlotCount - 1)];
+                if (Volatile.Read(ref cacheSlot)?.ScreenId == pair.Key)
+                    Volatile.Write(ref cacheSlot, null);
             }
+        }
+    }
+
+    /// <summary>An immutable cached value for a screen and removal generation.</summary>
+    private sealed class ScreenState
+    {
+        /// <summary>The screen ID.</summary>
+        public int ScreenId { get; }
+
+        /// <summary>The last removed screen ID when this state was created.</summary>
+        public int LastRemovedScreenId { get; }
+
+        /// <summary>The value for the screen.</summary>
+        public T Value { get; }
+
+        /// <summary>Construct an instance.</summary>
+        /// <param name="screenId">The screen ID.</param>
+        /// <param name="lastRemovedScreenId">The last removed screen ID.</param>
+        /// <param name="value">The value for the screen.</param>
+        public ScreenState(int screenId, int lastRemovedScreenId, T value)
+        {
+            this.ScreenId = screenId;
+            this.LastRemovedScreenId = lastRemovedScreenId;
+            this.Value = value;
         }
     }
 }
