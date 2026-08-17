@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 
@@ -16,8 +17,13 @@ internal class CaseInsensitiveFileLookup : IFileLookup
     /// <summary>A case-insensitive lookup of file paths within the <see cref="RootPath"/>. Each path is listed in both file path and asset name format, so it's usable in both contexts without needing to re-parse paths.</summary>
     private readonly Lazy<Dictionary<string, string>> RelativePathCache;
 
-    /// <summary>The case-insensitive file lookups by root path.</summary>
-    private static readonly Dictionary<string, CaseInsensitiveFileLookup> CachedRoots = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The cached file lookups by root path.</summary>
+    /// <remarks>Root identity follows the platform filesystem. Relative paths within each root remain case-insensitive.</remarks>
+    private static readonly ConcurrentDictionary<string, CaseInsensitiveFileLookup> CachedRoots = new(
+        Path.DirectorySeparatorChar == '\\'
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal
+    );
 
 
     /*********
@@ -83,11 +89,7 @@ internal class CaseInsensitiveFileLookup : IFileLookup
     public static CaseInsensitiveFileLookup GetCachedFor(string rootPath)
     {
         rootPath = PathUtilities.NormalizePath(rootPath);
-
-        if (!CaseInsensitiveFileLookup.CachedRoots.TryGetValue(rootPath, out CaseInsensitiveFileLookup? cache))
-            CaseInsensitiveFileLookup.CachedRoots[rootPath] = cache = new CaseInsensitiveFileLookup(rootPath);
-
-        return cache;
+        return CaseInsensitiveFileLookup.CachedRoots.GetOrAdd(rootPath, static path => new CaseInsensitiveFileLookup(path));
     }
 
 
