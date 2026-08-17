@@ -85,6 +85,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 73. Finding 73 — every content manager repeats base-load reflection — fixed.
 74. Finding 74 — every registered asset edit allocates a wrapper object — fixed.
 75. Finding 75 — case variants create duplicate map tilesheets — fixed.
+76. Finding 76 — explicit XNB fallback tilesheets get a double extension — fixed.
 
 ## Detailed findings
 
@@ -838,6 +839,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Only normalized path equality changes to the established asset-name comparer; genuinely different paths still take the existing disambiguation path.
 - **Status:** Fixed. Normalized tilesheet paths use ordinal-ignore-case equality, with focused case/separator/prefix/extension and negative-path coverage.
 
+### 76. Explicit XNB fallback tilesheets get a double extension
+
+- **Affected code:** `Framework/ContentManagers/ModContentManager.cs` (`GetContentKeyForTilesheetImageSource`).
+- **Scenario:** A custom map references a game-content fallback tilesheet with an explicit legacy `.xnb` extension, including parent-relative paths such as `../TileSheets/Furniture.xnb`.
+- **Root cause:** Tilesheet routing removed `.png` from physical image paths before creating a game asset key, but retained `.xnb`; MonoGame then appended its implicit `.xnb` and looked for `file.xnb.xnb`.
+- **Impact:** Failed fallback load, exception handling, and potentially missing custom-map tilesheets rather than broad frame-time cost.
+- **Expected benefit:** Explicit `.xnb` and `.XNB` paths resolve to the same canonical game asset as extensionless paths, avoiding the failed load/retry route.
+- **Risk:** Low. SMAPI's public game-content normalization already treats `.xnb` as a legacy removable extension, and local mod tilesheets still resolve physical `.xnb` files before fallback.
+- **Status:** Fixed. Game-content tilesheet keys strip `.png` or `.xnb` ordinal-ignore-case, with focused lower/upper-case coverage.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -845,7 +856,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, and 70 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, and 76 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, and 75 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, and 68 |

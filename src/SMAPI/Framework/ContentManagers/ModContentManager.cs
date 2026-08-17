@@ -602,8 +602,8 @@ internal sealed class ModContentManager : BaseContentManager
         else if (!ModContentManager.StartsWithPathSegment(key, "Maps", StringComparison.OrdinalIgnoreCase))
             key = Path.Combine("Maps", key);
 
-        // remove file extension from unpacked file
-        if (key.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+        // remove legacy physical file extensions from the game asset key
+        if (key.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || key.EndsWith(".xnb", StringComparison.OrdinalIgnoreCase))
             key = key[..^4];
 
         return key;
