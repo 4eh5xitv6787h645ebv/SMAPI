@@ -94,7 +94,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transitions and garbage-collection pressure.
 - **Expected benefit:** Direct key lookup avoids whole-cache work when the caller already knows the affected asset.
 - **Risk:** Medium. Exact matching must preserve locale, separator, and case-insensitive equivalence semantics.
-- **Status:** Fixed. The exact-name helper now uses direct cache-key lookup across only game content managers, with the same localization cleanup, temporary-map handling, propagation, events, and reporting as predicate invalidation. The long-standing single-name overload also retains a scalar path: it normalizes one key and probes it directly without first allocating an array and a `HashSet` for the batch implementation. True batches still use the deduplicated set path.
+- **Status:** Fixed. The exact-name helper now uses direct cache-key lookup across only game content managers, with the same localization cleanup, temporary-map handling, propagation, events, and reporting as predicate invalidation. The long-standing single-name overload also retains a scalar path: it normalizes one key and probes it directly without first allocating an array and a `HashSet` for the batch implementation. True batches still use the deduplicated set path. Exact invalidations now build and parse the live expansion-location topology only when at least one requested key was absent from every cache and may therefore be a temporary-manager map; when all requested keys were found, that scan cannot add an asset name or type and is skipped entirely.
 
 ### 4. Invalidation lacks a first-class multi-key transaction
 
