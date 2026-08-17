@@ -236,12 +236,53 @@ internal sealed class ModContentManager : BaseContentManager
 
         // load raw data
         using FileStream stream = File.OpenRead(file.FullName);
-        using SKBitmap bitmap = SKBitmap.Decode(stream);
+        using SKCodec codec = SKCodec.Create(stream);
 
-        if (bitmap is null)
+        if (codec is null)
             throw new InvalidDataException($"Failed to load {file.FullName}. This doesn't seem to be a valid PNG image.");
 
-        var data = new RawTextureData(bitmap.Width, bitmap.Height, ModContentManager.ConvertPixels(bitmap));
+        SKImageInfo imageInfo = codec.Info;
+        if (imageInfo.AlphaType == SKAlphaType.Unpremul)
+            imageInfo = imageInfo.WithAlphaType(SKAlphaType.Premul);
+        imageInfo = imageInfo.WithColorSpace(null);
+
+        // Decode directly into XNA's matching byte layout for known formats. Keep Skia's bitmap
+        // conversion as a compatibility fallback for any platform or codec with a different layout.
+        Color[] pixels;
+        if (
+            BitConverter.IsLittleEndian
+            && Unsafe.SizeOf<Color>() == 4
+            && imageInfo.AlphaType is SKAlphaType.Premul or SKAlphaType.Opaque
+            && imageInfo.ColorType is SKColorType.Rgba8888 or SKColorType.Bgra8888 or SKColorType.Gray8
+        )
+        {
+            imageInfo = imageInfo.WithColorType(SKColorType.Rgba8888);
+            pixels = GC.AllocateUninitializedArray<Color>(checked(imageInfo.Width * imageInfo.Height));
+
+            GCHandle pinnedPixels = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+            SKCodecResult result;
+            try
+            {
+                result = codec.GetPixels(imageInfo, pinnedPixels.AddrOfPinnedObject());
+            }
+            finally
+            {
+                pinnedPixels.Free();
+            }
+
+            if (result is not (SKCodecResult.Success or SKCodecResult.IncompleteInput))
+                throw new InvalidDataException($"Failed to load {file.FullName}. This doesn't seem to be a valid PNG image.");
+        }
+        else
+        {
+            using SKBitmap bitmap = SKBitmap.Decode(codec);
+            if (bitmap is null)
+                throw new InvalidDataException($"Failed to load {file.FullName}. This doesn't seem to be a valid PNG image.");
+
+            pixels = ModContentManager.ConvertPixels(bitmap);
+        }
+
+        var data = new RawTextureData(imageInfo.Width, imageInfo.Height, pixels);
         this.DecodedTextures.Track(file, data);
         return data;
     }
