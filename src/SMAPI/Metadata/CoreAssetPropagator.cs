@@ -199,9 +199,8 @@ internal class CoreAssetPropagator
             HashSet<string>? newWarpTargets = null;
             bool previousNoOpItemRegistryResetSucceeded = false;
 
-            // Build world indexes when a batch contains multiple matching assets. Also adapt across separate
-            // transactions in the same tick: large content updates often invalidate maps one at a time while the
-            // game loop is blocked, which would otherwise rescan the expansion-sized world for every call.
+            // Build world indexes only when a batch contains multiple matching assets. A single invalidation is
+            // cheaper as a direct scan, while a large content update can otherwise scan the world once per asset.
             if (!ignoreWorld)
             {
                 int mapAssets = 0;
@@ -220,29 +219,8 @@ internal class CoreAssetPropagator
                         targetedNpcAssets++;
                 }
 
-                if (mapAssets > 0)
-                {
-                    MapPropagationIndexState state = this.WorldCache.GetOrSet(
-                        nameof(MapPropagationIndexState),
-                        static () => new MapPropagationIndexState()
-                    );
-                    state.RequestedAssets += mapAssets;
-
-                    // Two isolated invalidations are still cheaper as direct scans. The third scan costs roughly
-                    // the same traversal as building the index, after which later same-tick lookups are O(1).
-                    if (mapAssets > 1 || state.RequestedAssets >= 3)
-                    {
-                        if (state.LocationsByMapName is null)
-                        {
-                            Dictionary<FarmHouse, string?>? cachedSpouseRooms = state.SpouseRoomMapPaths;
-                            state.LocationsByMapName = this.GetLocationsByMapName(ref cachedSpouseRooms);
-                            state.SpouseRoomMapPaths = cachedSpouseRooms;
-                        }
-
-                        locationsByMapName = state.LocationsByMapName;
-                        spouseRoomMapPathCache = state.SpouseRoomMapPaths;
-                    }
-                }
+                if (mapAssets > 1)
+                    locationsByMapName = this.GetLocationsByMapName(ref spouseRoomMapPathCache);
                 if (targetedNpcAssets > 1)
                     charactersByName = this.GetCharactersByName();
             }
@@ -345,12 +323,12 @@ internal class CoreAssetPropagator
             foreach (LocationInfo info in locations)
             {
                 GameLocation location = info.Location;
+                if (location is MineShaft or VolcanoDungeon)
+                    continue;
 
                 bool shouldUpdateMap =
-                    locationsByMapName is not null
-
                     // edited this map
-                    || this.IsSameBaseName(assetName, location.mapPath.Value)
+                    this.IsSameBaseName(assetName, location.mapPath.Value)
 
                     // edited spouse room for this farmhouse
                     || (
@@ -1217,19 +1195,6 @@ internal class CoreAssetPropagator
             return null;
 
         return this.ParseAssetName(path);
-    }
-
-    /// <summary>Per-tick state used to adapt isolated map propagations into indexed lookups.</summary>
-    private sealed class MapPropagationIndexState
-    {
-        /// <summary>The number of map assets requested across propagation transactions this tick.</summary>
-        public int RequestedAssets;
-
-        /// <summary>The live locations indexed by the map assets which can update them.</summary>
-        public Dictionary<IAssetName, List<LocationInfo>>? LocationsByMapName;
-
-        /// <summary>Cached spouse-room map paths populated while building <see cref="LocationsByMapName"/>.</summary>
-        public Dictionary<FarmHouse, string?>? SpouseRoomMapPaths;
     }
 
     /// <summary>A propagation route for an exact texture asset name.</summary>
