@@ -201,9 +201,24 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                     continue;
 
                 int tileX = (int)sourceObject.X / this.FixedTileSize.Width;
-                int tileWidth = (int)sourceObject.Width / this.FixedTileSize.Height;
-                int tileY = (int)sourceObject.Y / this.FixedTileSize.Width;
+                int tileWidth = (int)sourceObject.Width / this.FixedTileSize.Width;
+                int tileY = (int)sourceObject.Y / this.FixedTileSize.Height;
                 int tileHeight = (int)sourceObject.Height / this.FixedTileSize.Height;
+                if (tileWidth <= 0 || tileHeight <= 0)
+                    continue;
+
+                TMXProperty[] properties = sourceObject.Properties;
+                if (properties is null || properties.Length == 0)
+                    continue;
+
+                PropertyValue firstPropertyValue = GetPropertyValue(properties[0]);
+                PropertyValue[]? remainingPropertyValues = null;
+                if (properties.Length > 1)
+                {
+                    remainingPropertyValues = new PropertyValue[properties.Length - 1];
+                    for (int i = 1; i < properties.Length; i++)
+                        remainingPropertyValues[i - 1] = GetPropertyValue(properties[i]);
+                }
 
                 for (int x = tileX; x < tileX + tileWidth; x++)
                 {
@@ -212,8 +227,9 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                         if (layer.Tiles[x, y] is not Tile tile)
                             continue;
 
-                        foreach (TMXProperty property in sourceObject.Properties)
-                            tile.Properties[property.Name] = GetPropertyValue(property);
+                        tile.Properties[properties[0].Name] = firstPropertyValue;
+                        for (int i = 1; i < properties.Length; i++)
+                            tile.Properties[properties[i].Name] = remainingPropertyValues![i - 1];
                     }
                 }
             }
