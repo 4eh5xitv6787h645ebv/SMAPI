@@ -860,6 +860,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium-low. Initial values follow the existing comparable-list watcher contract by appearing as added until the first reset, then serving as the stable baseline. Focused tests cover initial discovery, removal, replacement, and reset/clear.
 - **Status:** Fixed. Construction seeds the ordered baseline and initial added set before subscribing to changes.
 
+### 78. Predicate invalidation repeats matching for every manager copy
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`InvalidateCache(Func<IAssetInfo, bool>)`).
+- **Scenario:** Content Patcher invalidates assets after a context change or warp in a large mod set, where the same game asset can be cached by the main game and several mod-owned game content managers.
+- **Root cause:** SMAPI parsed and constructed an `IAssetInfo`, then invoked the public predicate once for every cached manager copy. The public callback can't observe the content manager, so equal asset names and data types necessarily produce the same match decision; repeating Content Patcher's dependency checks only adds work.
+- **Impact:** Transition CPU and short-lived asset-info allocation proportional to duplicate cached copies. In the target-pack trace, the farmhouse-to-farm warp spent 289.7 ms in Content Patcher while its predicate invalidation rebuilt six assets, including three propagated textures.
+- **Expected benefit:** Each distinct `(asset name, data type)` evaluates the public predicate once per invalidation transaction. Every matching manager copy is still retained or invalidated exactly as before.
+- **Risk:** Low. Asset-name identity remains ordinal-ignore-case, data types remain distinct, and the internal manager-aware predicate overload is unchanged. Public invalidation predicates receive no manager identity and are contractually match functions rather than per-entry notifications.
+- **Status:** Fixed. Public predicate invalidation caches positive and negative results for the duration of one transaction, with focused coverage for case-equivalent names and distinct data types.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -867,10 +877,10 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, and 76 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, and 78 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, and 75 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, and 68 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, and 78 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, and 65 |

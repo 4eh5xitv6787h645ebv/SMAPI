@@ -567,11 +567,11 @@ internal class ContentCoordinator : IDisposable
     public ICollection<IAssetName> InvalidateCache(Func<IAssetInfo, bool> predicate, bool dispose = false)
     {
         string locale = this.GetLocale();
+        var predicateCache = new AssetInfoPredicateCache(locale, this.MainContentManager.AssetNameNormalizer, predicate);
         return this.InvalidateCache((_, rawName, type) =>
         {
             IAssetName assetName = this.ParseAssetName(rawName, allowLocales: true);
-            IAssetInfo info = new AssetInfo(locale, assetName, type, this.MainContentManager.AssetNameNormalizer);
-            return predicate(info);
+            return predicateCache.Matches(assetName, type);
         }, dispose);
     }
 
@@ -903,3 +903,53 @@ internal class ContentCoordinator : IDisposable
 /// <param name="Name">The requested asset name.</param>
 /// <param name="DataType">The requested data type exposed to asset handlers.</param>
 internal readonly record struct AssetOperationCacheKey(IAssetName Name, Type DataType);
+
+/// <summary>Caches a public invalidation predicate's result for each distinct asset name and data type in one transaction.</summary>
+/// <remarks>The public predicate can't observe the content manager, so equivalent cached copies must have the same result.</remarks>
+internal sealed class AssetInfoPredicateCache
+{
+    /*********
+    ** Fields
+    *********/
+    /// <summary>The locale to expose through the asset info.</summary>
+    private readonly string Locale;
+
+    /// <summary>Normalize an asset name.</summary>
+    private readonly Func<string, string> NormalizeAssetName;
+
+    /// <summary>The predicate whose results to cache.</summary>
+    private readonly Func<IAssetInfo, bool> Predicate;
+
+    /// <summary>The cached predicate results.</summary>
+    private readonly Dictionary<AssetOperationCacheKey, bool> Results = [];
+
+
+    /*********
+    ** Public methods
+    *********/
+    /// <summary>Construct an instance.</summary>
+    /// <param name="locale">The locale to expose through the asset info.</param>
+    /// <param name="normalizeAssetName">Normalize an asset name.</param>
+    /// <param name="predicate">The predicate whose results to cache.</param>
+    public AssetInfoPredicateCache(string locale, Func<string, string> normalizeAssetName, Func<IAssetInfo, bool> predicate)
+    {
+        this.Locale = locale;
+        this.NormalizeAssetName = normalizeAssetName;
+        this.Predicate = predicate;
+    }
+
+    /// <summary>Get whether an asset matches the predicate.</summary>
+    /// <param name="assetName">The normalized asset name.</param>
+    /// <param name="dataType">The asset's data type.</param>
+    public bool Matches(IAssetName assetName, Type dataType)
+    {
+        var key = new AssetOperationCacheKey(assetName, dataType);
+        if (!this.Results.TryGetValue(key, out bool matches))
+        {
+            var info = new AssetInfo(this.Locale, assetName, dataType, this.NormalizeAssetName);
+            this.Results[key] = matches = this.Predicate(info);
+        }
+
+        return matches;
+    }
+}
