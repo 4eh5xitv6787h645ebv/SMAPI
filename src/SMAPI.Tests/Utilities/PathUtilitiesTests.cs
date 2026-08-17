@@ -221,6 +221,32 @@ internal class PathUtilitiesTests
         );
     }
 
+    [Test(Description = $"Assert that {nameof(PathUtilities.NormalizePath)} doesn't copy a path which is already canonical.")]
+    public void NormalizePath_ReusesCanonicalString()
+    {
+        // arrange
+        string original = new(Path.DirectorySeparatorChar == '/'
+            ? "/home/user/Stardew Valley/Mods/Content Pack".ToCharArray()
+            : @"C:\Users\User\Stardew Valley\Mods\Content Pack".ToCharArray());
+
+        // act
+        string normalized = PathUtilities.NormalizePath(original);
+
+        // assert
+        normalized.Should().BeSameAs(original);
+    }
+
+    [TestCase("  folder//nested\\file  ", "folder/nested/file")]
+    [TestCase("///", "/")]
+    [TestCase("folder///", "folder/")]
+    public void NormalizePath_CollapsesSeparatorsAndWhitespaceOnUnix(string original, string expectedOnUnix)
+    {
+        if (Path.DirectorySeparatorChar != '/')
+            Assert.Ignore("This fixture verifies Unix path output.");
+
+        PathUtilities.NormalizePath(original).Should().Be(expectedOnUnix);
+    }
+
     /****
     ** GetRelativePath
     ****/
