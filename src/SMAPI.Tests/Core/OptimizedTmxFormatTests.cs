@@ -74,6 +74,52 @@ internal class OptimizedTmxFormatTests
     }
 
     [Test]
+    public void Load_AppliesTileDataAcrossRectangularTiles()
+    {
+        const string xml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <map version="1.10" tiledversion="1.11.2" orientation="orthogonal" renderorder="right-down" width="4" height="4" tilewidth="16" tileheight="32" infinite="0" nextlayerid="3" nextobjectid="2">
+              <tileset firstgid="1" name="sheet" tilewidth="16" tileheight="32" tilecount="1" columns="1">
+                <image source="sheet.png" width="16" height="32"/>
+              </tileset>
+              <layer id="1" name="Back" width="4" height="4">
+                <data encoding="csv">1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1</data>
+              </layer>
+              <objectgroup id="2" name="Back">
+                <object id="1" name="TileData" x="16" y="32" width="32" height="64">
+                  <properties>
+                    <property name="Number" type="int" value="42"/>
+                    <property name="Flag" type="bool" value="true"/>
+                    <property name="Text" value="value"/>
+                  </properties>
+                </object>
+              </objectgroup>
+            </map>
+            """;
+
+        Map map;
+        using (MemoryStream input = new(Encoding.UTF8.GetBytes(xml)))
+            map = ((IMapFormat)new OptimizedTmxFormat(16, 32, 4, 2)).Load(input);
+
+        Layer layer = map.GetLayer("Back");
+        for (int x = 0; x < layer.LayerWidth; x++)
+        {
+            for (int y = 0; y < layer.LayerHeight; y++)
+            {
+                Tile tile = layer.Tiles[x, y]!;
+                if (x is 1 or 2 && y is 1 or 2)
+                {
+                    ((int)tile.Properties["Number"]).Should().Be(42);
+                    ((bool)tile.Properties["Flag"]).Should().BeTrue();
+                    ((string)tile.Properties["Text"]).Should().Be("value");
+                }
+                else
+                    tile.Properties.Should().NotContainKey("Number");
+            }
+        }
+    }
+
+    [Test]
     public void LoadTile_ReturnsNullForEmptyTile()
     {
         (Layer layer, TMXMap source) = CreateMap();

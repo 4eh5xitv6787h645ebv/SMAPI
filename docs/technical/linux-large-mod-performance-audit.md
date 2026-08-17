@@ -1043,6 +1043,17 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Windows keeps ordinal-ignore-case root identity; Unix may create separate lookup objects only where the filesystem can represent distinct roots. A real temporary-filesystem fixture verifies two case-distinct roots return their own sentinel content through mismatched relative casing.
 - **Status:** Fixed. The root cache is a platform-comparer `ConcurrentDictionary`; relative file matching semantics are unchanged.
 
+### 95. TMX TileData properties are reconverted for every covered tile
+
+- **Affected code:** `Framework/Content/OptimizedTmxFormat.cs` (`LoadObjects`).
+- **Scenario:** Loading expansion maps which use Tiled `TileData` objects to apply actions, collision, or other metadata across rectangular regions of tiles.
+- **Root cause:** The converter selected and boxed each property's typed value inside the innermost tile loop. One immutable xTile `PropertyValue` was therefore allocated again for every covered populated tile, and typed properties repeated their string type dispatch. The coordinate math also divided object width by tile height and object Y by tile width, which selected the wrong region when a TMX map used rectangular tiles.
+- **Measured evidence:** The installed target pack contains 960 TMX maps with 38,577 `TileData` objects, covering 85,527 tile positions and causing about 92,961 property assignments. The 20 heaviest maps account for 32,368 assignments per pass. Across four independent five-pass end-to-end conversion runs, the old path took an aggregate 3,179 ms versus 2,619 ms after preconversion, about 17.6% less time; every individual run was faster (8% to 31%). One representative five-pass run allocated 214.9 MiB versus 214.0 MiB.
+- **Impact:** Main-thread map-load and reload CPU proportional to `TileData` property count multiplied by covered populated tiles, plus short-lived property wrappers.
+- **Expected benefit:** Each object property is converted once, then its immutable value is assigned to every target tile. Single-property objects avoid even a temporary value-array allocation. Rectangular tile maps apply metadata to their intended coordinates.
+- **Risk:** Low. xTile `PropertyValue` exposes no mutation API and already copies only its immutable wrapped value. Property names, types, overwrite order, empty-cell behavior, and layer matching remain unchanged. Focused coverage verifies multiple typed properties across a non-square tile grid and exact affected/unaffected coordinates.
+- **Status:** Fixed. TileData values are preconverted once per source object and width/Y calculations use their corresponding tile dimensions.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -1066,8 +1077,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, 71, and 74 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, 84, 86, 87, 90, 91, 92, and 93 |
-| TMX map parsing and conversion | Findings 86, 87, 88, and 89 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, 84, 86, 87, 90, 91, 92, 93, and 95 |
+| TMX map parsing and conversion | Findings 86, 87, 88, 89, and 95 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
