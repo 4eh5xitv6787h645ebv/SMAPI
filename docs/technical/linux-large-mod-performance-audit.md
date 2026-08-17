@@ -84,6 +84,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 72. Finding 72 — disconnected gamepads scan every control each update — fixed.
 73. Finding 73 — every content manager repeats base-load reflection — fixed.
 74. Finding 74 — every registered asset edit allocates a wrapper object — fixed.
+75. Finding 75 — case variants create duplicate map tilesheets — fixed.
 
 ## Detailed findings
 
@@ -827,6 +828,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Usages copy, sort, and read the immutable fields and never rely on null or reference identity; the extra value copies are four machine-word fields.
 - **Status:** Fixed. `AssetEditOperation` is a readonly record struct, with focused registration coverage asserting value-container semantics and retained callback identity.
 
+### 75. Case variants create duplicate tilesheets during map patches
+
+- **Affected code:** `Framework/Content/AssetDataForMap.cs` (`PatchMap` and tilesheet path normalization).
+- **Scenario:** Content-pack map patches whose same-ID source and target tilesheets use equivalent paths with different casing, separators, `Maps/` prefixes, or `.png` casing; repeated reloads compound the result.
+- **Root cause:** SMAPI normalized separators/prefix/extensions but compared the resulting paths with case-sensitive string inequality despite ordinal-ignore-case asset identity.
+- **Impact:** Incorrectly added `z_<id>`, `z_<id>_2`, and further duplicate tilesheets, causing extra texture loads/retention and transition/render memory growth on Linux.
+- **Expected benefit:** Equivalent same-ID sheets are reused across patches and reloads instead of growing redundant map and texture state.
+- **Risk:** Low. Only normalized path equality changes to the established asset-name comparer; genuinely different paths still take the existing disambiguation path.
+- **Status:** Fixed. Normalized tilesheet paths use ordinal-ignore-case equality, with focused case/separator/prefix/extension and negative-path coverage.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -836,7 +847,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, and 70 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, and 66 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, and 75 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, and 68 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
