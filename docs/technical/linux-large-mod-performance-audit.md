@@ -91,6 +91,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 79. Finding 76 — explicit XNB fallback tilesheets get a double extension — fixed.
 80. Finding 77 — observable watchers start with an empty baseline — fixed.
 81. Finding 91 — explicit XNB map sheets are treated as different identities — fixed.
+82. Finding 94 — case-insensitive lookup conflates case-distinct Linux roots — fixed.
 
 ## Detailed findings
 
@@ -1032,6 +1033,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. Serializer settings, converters, comments, BOM detection, null handling, and public error formatting must remain unchanged. Focused tests cover all of those paths, including repaired and unrecoverable curly quotes.
 - **Status:** Fixed. Valid JSON uses `StreamReader` and `JsonTextReader`; missing files retain the false result, filesystem I/O errors remain unwrapped, and reader syntax failures retain the text compatibility fallback.
 
+### 94. Case-insensitive lookup conflates case-distinct Linux roots
+
+- **Affected code:** `SMAPI.Toolkit/Utilities/PathLookups/CaseInsensitiveFileLookup.cs` (`CachedRoots` and `GetCachedFor`).
+- **Scenario:** Two Linux mod/content roots have absolute paths which differ only by casing, which ext4 and other common case-sensitive filesystems permit.
+- **Root cause:** The global lookup-object cache used `StringComparer.OrdinalIgnoreCase` for root paths. The second root therefore reused the first root's lookup instance, whose immutable `RootPath` remained anchored to the wrong directory. The ordinary dictionary was also unsynchronized despite content helpers supporting concurrent access.
+- **Impact:** Files can resolve from the wrong mod folder or appear missing, potentially causing failed content loads and repeated fallback/error work. This is conditional correctness rather than broad frame-time cost.
+- **Expected benefit:** Unix root identity remains ordinal/case-sensitive while relative lookup within each root remains case-insensitive. Atomic cache creation also removes the global concurrent dictionary race.
+- **Risk:** Low. Windows keeps ordinal-ignore-case root identity; Unix may create separate lookup objects only where the filesystem can represent distinct roots. A real temporary-filesystem fixture verifies two case-distinct roots return their own sentinel content through mismatched relative casing.
+- **Status:** Fixed. The root cache is a platform-comparer `ConcurrentDictionary`; relative file matching semantics are unchanged.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -1048,7 +1059,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, 65, and 83 |
 | Content-manager lookup scaling | Findings 9, 53, 57, 58, and 73 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
-| Linux case-insensitive file lookup | Findings 11, 38, 39, and 92 |
+| Linux case-insensitive file lookup | Findings 11, 38, 39, 92, and 94 |
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
