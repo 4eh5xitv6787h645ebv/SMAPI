@@ -963,6 +963,17 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium-low. A mod directly testing for the presence of TMXTile's internal zero-valued `@Rotation` or `@Flip` key will now see it absent, although the public extension accessors and rendered output are unchanged. Focused tests cover absent identity keys, every non-identity flip/rotation combination, and binary equivalence after removing only the bundled converter's redundant identity entries.
 - **Status:** Fixed. The indexed converter stores transform properties only when their effective value is nonzero.
 
+### 88. TMX conversion writes null into every empty cell of a new layer
+
+- **Affected code:** `Framework/Content/OptimizedTmxFormat.cs` (`LoadLayers`).
+- **Scenario:** Sparse expansion maps whose serialized layer data includes every coordinate, including hundreds of thousands of empty cells.
+- **Root cause:** For each zero GID, TMXTile returned `null` and assigned it through xTile's tile-array indexer even though a newly allocated layer already contains `null` in every slot. The target Ridgeside Village map had roughly 206,000 empty cells among 255,000 serialized coordinates.
+- **Measured evidence:** In an alternating A/B benchmark over the 20 largest installed TMX maps, retaining empty writes took 1,188 ms across two passes versus 844 ms when skipping them, about 29% less conversion time. Allocation was effectively unchanged (214.4 MiB versus 213.7 MiB), confirming this removes indexer/assignment CPU rather than masking allocation differences.
+- **Impact:** Main-thread map-load CPU proportional to total map area rather than populated tile count, especially noticeable for large sparse outdoor maps.
+- **Expected benefit:** Zero GIDs only advance the source coordinate. Nonempty tiles retain the same indexed conversion and target coordinate, while the untouched fresh layer slot has the identical final `null` value.
+- **Risk:** Low. Both normal and chunked layer paths operate on newly constructed layers, and the existing binary-equivalence fixture includes empty cells. No observable tile, property, layer, or serialization state changes.
+- **Status:** Fixed. Normal and chunked TMX layers bypass conversion and xTile assignment for zero GIDs.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -972,7 +983,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, and 84 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, 82, 85, 86, and 87 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, 82, 85, 86, 87, and 88 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, 79, and 85 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
@@ -987,7 +998,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
 | GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, 84, 86, and 87 |
-| TMX map parsing and conversion | Findings 86 and 87 |
+| TMX map parsing and conversion | Findings 86, 87, and 88 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
