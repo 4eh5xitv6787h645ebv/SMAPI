@@ -429,10 +429,19 @@ internal class CoreAssetPropagator
                     if (!triedLoadingNewTexture)
                     {
                         triedLoadingNewTexture = true;
-                        if (this.DisposableContentManager.DoesAssetExist<Texture2D>(name))
+                        try
+                        {
                             newTexture = this.DisposableContentManager.LoadLocalized<Texture2D>(name, currentLanguage, useCache: false);
-                        else
+                        }
+                        catch
+                        {
+                            // Probe only after a failed load so we retain the useful missing-asset warning without
+                            // making every successful replacement perform the same provider/filesystem lookup twice.
+                            if (this.DisposableContentManager.DoesAssetExist<Texture2D>(name))
+                                throw;
+
                             this.Monitor.Log($"Skipped reload for '{name.Name}' because the underlying asset no longer exists.", LogLevel.Warn);
+                        }
                     }
 
                     if (newTexture is null)
