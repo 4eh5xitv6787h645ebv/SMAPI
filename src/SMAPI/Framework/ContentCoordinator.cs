@@ -20,6 +20,7 @@ using StardewModdingAPI.Toolkit.Utilities.PathLookups;
 using StardewModdingAPI.Utilities;
 using StardewValley;
 using StardewValley.GameData;
+using StardewValley.Locations;
 using xTile;
 
 namespace StardewModdingAPI.Framework;
@@ -541,7 +542,11 @@ internal class ContentCoordinator : IDisposable
                 foreach (WorldLocationUtilities.WorldLocationInfo info in WorldLocationUtilities.GetLocations())
                 {
                     GameLocation location = info.Location;
-                    if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
+                    if (
+                        location is MineShaft or VolcanoDungeon
+                        || location.map == null
+                        || string.IsNullOrWhiteSpace(location.mapPath.Value)
+                    )
                         continue;
 
                     AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
@@ -649,7 +654,11 @@ internal class ContentCoordinator : IDisposable
             foreach (WorldLocationUtilities.WorldLocationInfo info in WorldLocationUtilities.GetLocations())
             {
                 GameLocation location = info.Location;
-                if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
+                if (
+                    location is MineShaft or VolcanoDungeon
+                    || location.map == null
+                    || string.IsNullOrWhiteSpace(location.mapPath.Value)
+                )
                     continue;
 
                 // get map path
