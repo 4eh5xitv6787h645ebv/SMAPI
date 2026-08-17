@@ -75,6 +75,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 63. Finding 63 — texture propagation retrieves cached targets twice — fixed.
 64. Finding 64 — custom-map tilesheet routing splits every path repeatedly — fixed.
 65. Finding 65 — successful mod asset loads allocate type arrays — fixed.
+66. Finding 66 — vanilla map inspection probes before loading — fixed.
 
 ## Detailed findings
 
@@ -728,6 +729,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Very low. Fixed one- and two-type overloads retain the same assignability checks and produce the same allowed-type information on the exceptional invalid-type path.
 - **Status:** Fixed. Successful font, image, and map validations use fixed-arity overloads; error strings are still created only when validation fails.
 
+### 66. Vanilla map inspection probes each XNB before loading it
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`TryLoadVanillaAsset` and `GetVanillaTilesheetIds`).
+- **Scenario:** The first replacement of each distinct vanilla map, when SMAPI loads the original map to retain its ordered tilesheet IDs.
+- **Root cause:** The unmodified vanilla content manager first performed an existence/type lookup and then immediately performed the actual load under the same catch-all failure handling.
+- **Impact:** An avoidable content/filesystem lookup on the map replacement transition path.
+- **Expected benefit:** Each inspected map takes one content-pipeline load attempt instead of an existence probe followed by that load.
+- **Risk:** Low. Missing, corrupt, and wrong-type assets still take the same catch path and return no vanilla map; successful assets return the same loaded value.
+- **Status:** Fixed. Vanilla inspection directly loads inside the existing guarded block.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -737,7 +748,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, and 64 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, and 64 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, and 66 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, and 63 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
