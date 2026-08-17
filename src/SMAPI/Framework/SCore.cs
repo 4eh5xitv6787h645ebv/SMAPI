@@ -2221,7 +2221,7 @@ internal class SCore : IDisposable
             catch (Exception ex)
             {
                 errorReasonPhrase = "its DLL couldn't be loaded.";
-                if (ex is BadImageFormatException && !EnvironmentUtility.Is64BitAssembly(assemblyFile!.FullName))
+                if ((ex is BadImageFormatException or FileLoadException) && !EnvironmentUtility.Is64BitAssembly(assemblyFile!.FullName))
                     errorReasonPhrase = "it needs to be updated for 64-bit mode.";
 
                 errorDetails = $"Error: {ex.GetLogSummary()}";
