@@ -36,7 +36,7 @@ internal class GameContentManager : BaseContentManager
     private static readonly ConcurrentDictionary<Type, ApplyEditorsDelegate> ApplyEditorsByType = new();
 
     /// <summary>The assets currently being intercepted by <see cref="AssetLoadOperation"/> instances. This is used to prevent infinite loops when a loader loads a new asset.</summary>
-    private readonly ContextHash<string> AssetsBeingLoaded = [];
+    private readonly ContextHash<string> AssetsBeingLoaded = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Whether the next load is the first for any game content manager.</summary>
     private static bool IsFirstLoad = true;
