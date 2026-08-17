@@ -930,6 +930,17 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Generated suffix order remains `z_id`, `z_id_2`, and onward. Localized comparison now matches the dictionary and `IAssetName` ordinal-ignore-case identity already used by the surrounding cache.
 - **Status:** Fixed. Map suffix probing no longer uses LINQ, and cached localized key routing uses ordinal-ignore-case equality.
 
+### 85. Separate same-tick map invalidations repeatedly search the full world
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`Propagate`, `PropagateMap`, and `GetLocationsByMapName`).
+- **Scenario:** Content packs invalidate many maps through separate single-name API calls while one update tick is blocked, such as a startup or context refresh involving expansion maps.
+- **Root cause:** SMAPI indexed locations only when one invalidation transaction contained multiple maps. Its per-tick topology list was reused across transactions, but every isolated map still linearly compared its name against every live location and spouse-room path.
+- **Measured evidence:** The captured target-pack load emitted 27 separate single-map invalidation transactions from 08:52:50 through 08:52:54 within the same blocked update sequence. Each took the direct full-world search path despite the stable tick-local topology.
+- **Impact:** Main-thread startup/context-transition CPU proportional to isolated map invalidations multiplied by live expansion locations.
+- **Expected benefit:** The first two isolated map invalidations retain allocation-free direct scans. On the third, SMAPI builds one tick-local map index; every later isolated map in that tick becomes a dictionary lookup. The measured 27-call sequence therefore replaces 27 full searches with two searches, one index traversal, and 24 lookups.
+- **Risk:** Low to medium. The index uses the same existing per-tick topology and spouse-room semantics already used for multi-map batches, and expires on the same game-tick boundary. Focused coverage verifies both immediate multi-map indexing and the adaptive sequence across four separate calls.
+- **Status:** Fixed. Map propagation now shares an adaptive per-tick index across invalidation transactions after the direct-scan crossover.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -939,8 +950,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, and 84 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, and 82 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, and 79 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, 82, and 85 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, 79, and 85 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, 65, and 83 |

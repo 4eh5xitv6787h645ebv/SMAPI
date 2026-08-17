@@ -193,6 +193,56 @@ internal class CoreAssetPropagatorTests
         }
     }
 
+    [Test(Description = "Assert that repeated isolated map propagations share an adaptive per-tick location index.")]
+    public void Propagate_RepeatedSingleMaps_IndexesAfterTwoScans()
+    {
+        // arrange
+        Game1? previousGameInstance = Game1.game1;
+        Game1 testGameInstance = (Game1)RuntimeHelpers.GetUninitializedObject(typeof(Game1));
+        List<GameLocation> locations =
+        [
+            new GameLocation { mapPath = { Value = "Maps/First" } },
+            new GameLocation { mapPath = { Value = "Maps/Second" } }
+        ];
+        typeof(Game1).GetField("_locations", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.SetValue(testGameInstance, locations);
+        Game1.game1 = testGameInstance;
+
+        try
+        {
+            int parsedMapPaths = 0;
+            CoreAssetPropagator propagator = new(
+                mainContent: null!,
+                disposableContent: null!,
+                monitor: null!,
+                multiplayer: null!,
+                reflection: null!,
+                parseAssetName: rawName =>
+                {
+                    parsedMapPaths++;
+                    return AssetName.Parse(rawName, _ => null);
+                }
+            );
+            Type mapType = Type.GetType("xTile.Map, xTile", throwOnError: true)!;
+
+            // act
+            for (int i = 1; i <= 4; i++)
+            {
+                Dictionary<IAssetName, Type> assets = new()
+                {
+                    [AssetName.Parse($"Maps/NotLoaded{i}", _ => null)] = mapType
+                };
+                propagator.Propagate([], assets, loadedTextureManagers: null, ignoreWorld: false, out _, out _);
+            }
+
+            // assert
+            parsedMapPaths.Should().Be(6, "two direct scans and one index build should parse each loaded map once");
+        }
+        finally
+        {
+            Game1.game1 = previousGameInstance;
+        }
+    }
+
     [Test(Description = "Assert that texture propagation reuses the content-manager targets found during invalidation.")]
     public void Propagate_Texture_UsesKnownManagers()
     {
