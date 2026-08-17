@@ -146,6 +146,10 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
     /// <inheritdoc />
     public void FillPressedButtons(HashSet<SButton> set)
     {
+        GamePadState state = this.State.GetValueOrDefault();
+        if (!this.ArePressedButtonsInitialized && !state.IsConnected)
+            return;
+
         // buttons
         if (this.ArePressedButtonsInitialized)
         {
@@ -154,7 +158,6 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
         }
         else
         {
-            GamePadState state = this.State.GetValueOrDefault();
             GamePadDPad pad = state.DPad;
             GamePadButtons buttons = state.Buttons;
             AddIfPressed(set, SButton.DPadUp, pad.Up);

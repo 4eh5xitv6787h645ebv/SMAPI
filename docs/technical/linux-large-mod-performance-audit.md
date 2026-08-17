@@ -81,6 +81,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 69. Finding 69 — asset-operation cache ignores the requested data type — fixed.
 70. Finding 70 — existence checks probe irrelevant providers before cache/routing — fixed.
 71. Finding 71 — successful on-behalf-of registration formats failure text — fixed.
+72. Finding 72 — disconnected gamepads scan every control each update — fixed.
 
 ## Detailed findings
 
@@ -794,11 +795,21 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Very low. The identical warning text is now formatted only inside the missing-pack and invalid-owner branches which emit it.
 - **Status:** Fixed. Failure diagnostics are constructed lazily at their two use sites; the successful path returns directly.
 
+### 72. Disconnected gamepads scan every control each focused update
+
+- **Affected code:** `Framework/Input/GamePadStateBuilder.cs` (`FillPressedButtons`).
+- **Scenario:** Every focused update while walking or playing with keyboard and mouse on Linux and no physical controller connected.
+- **Root cause:** The builder still read and tested the D-pad, eleven digital buttons, two triggers, and both thumbsticks even when the immutable gamepad state reported disconnected.
+- **Impact:** Small but unconditional steady update CPU for the common keyboard/mouse configuration.
+- **Expected benefit:** Disconnected unmodified state returns after two field/scalar checks, skipping all controller property reads, comparisons, stick length calculation, and set branches.
+- **Risk:** Low. Overrides initialize the mutable pressed-button set before changing digital or analog state, so virtual controller input still bypasses the early return. Focused tests cover both disconnected/no-override and disconnected digital/trigger/stick overrides.
+- **Status:** Fixed. `FillPressedButtons` exits immediately only for disconnected state with no initialized overrides.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
 | --- | --- |
-| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
+| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, and 70 |
