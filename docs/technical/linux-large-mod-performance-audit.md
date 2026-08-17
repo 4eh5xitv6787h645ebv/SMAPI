@@ -76,6 +76,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 64. Finding 64 — custom-map tilesheet routing splits every path repeatedly — fixed.
 65. Finding 65 — successful mod asset loads allocate type arrays — fixed.
 66. Finding 66 — vanilla map inspection probes before loading — fixed.
+67. Finding 67 — loader-only assets allocate editable wrappers — fixed.
 
 ## Detailed findings
 
@@ -739,6 +740,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Missing, corrupt, and wrong-type assets still take the same catch path and return no vanilla map; successful assets return the same loaded value.
 - **Status:** Fixed. Vanilla inspection directly loads inside the existing guarded block.
 
+### 67. Loader-only assets allocate an unused editable wrapper
+
+- **Affected code:** `Framework/ContentManagers/GameContentManager.cs` (`LoadExact` and loader application).
+- **Scenario:** Custom assets supplied by Content Patcher or another loader with no applicable edit operations, including batches discovered during content-pack reloads.
+- **Root cause:** A successful loader always returned its data inside `AssetDataForObject`; the editor stage immediately returned that wrapper unchanged when the operation group had no editors, and `LoadExact` then read `Data` back out.
+- **Impact:** One short-lived wrapper object per loader-only asset plus needless editor dispatch on the transition path.
+- **Expected benefit:** Loader-only assets return their validated typed value directly with no editable wrapper; wrappers are created only when at least one editor will consume them.
+- **Risk:** Medium. Exclusive-loader conflict handling, loader exceptions, null/type validation, vanilla fallback, map repair, recursive-load tracking, and actual editor paths retain their existing order and behavior.
+- **Status:** Fixed. Loader application uses a typed try pattern, and `LoadExact` creates `AssetDataForObject` only for nonempty edit-operation groups.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -759,10 +770,10 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, and 61 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, and 67 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, and 65 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, and 67 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
