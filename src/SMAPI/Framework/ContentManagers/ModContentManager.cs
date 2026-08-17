@@ -335,8 +335,28 @@ internal sealed class ModContentManager : BaseContentManager
     {
         this.AssertValidType<T>(assetName, file, typeof(Map));
 
-        FormatManager formatManager = FormatManager.Instance;
-        Map map = formatManager.LoadMap(file.FullName);
+        Map map;
+        try
+        {
+            string extension = file.Extension[1..];
+            IMapFormat format = FormatManager.Instance.GetMapFormatByExtension(extension)
+                ?? throw new Exception($"No IMapFormat implementation for files with extension '{extension}'");
+            using FileStream input = new(file.FullName, new FileStreamOptions
+            {
+                Access = FileAccess.Read,
+                Mode = FileMode.Open,
+                Share = FileShare.Read,
+                BufferSize = 64 * 1024,
+                Options = FileOptions.SequentialScan
+            });
+            map = format.Load(input);
+        }
+        catch (Exception ex)
+        {
+            // Match FormatManager.LoadMap's error shape so callers see the same load failure.
+            throw new Exception($"Unable to load map with file path '{file.FullName}'", ex);
+        }
+
         map.assetPath = assetName.Name;
         this.FixTilesheetPaths(map, relativeMapPath: assetName.Name, fixEagerPathPrefixes: false);
         return (T)(object)map;

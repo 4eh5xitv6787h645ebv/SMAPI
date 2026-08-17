@@ -974,6 +974,17 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Both normal and chunked layer paths operate on newly constructed layers, and the existing binary-equivalence fixture includes empty cells. No observable tile, property, layer, or serialization state changes.
 - **Status:** Fixed. Normal and chunked TMX layers bypass conversion and xTile assignment for zero GIDs.
 
+### 89. Unpacked maps use a small generic file buffer without a sequential-read hint
+
+- **Affected code:** `Framework/ContentManagers/ModContentManager.cs` (`LoadMapFile`).
+- **Scenario:** Reading large unpacked TMX or TBIN expansion maps from Linux storage during startup, warps, and content reloads.
+- **Root cause:** xTile's generic path loader opened every map through the basic `FileStream(path, Open, Read)` overload, which uses a small general-purpose buffer and no sequential-access hint despite both map formats consuming the stream from start to finish.
+- **Measured evidence:** Alternating end-to-end parse-and-convert passes over the 20 largest installed TMX maps took 3,609 ms with the default stream and 3,201 ms with a 64 KiB sequential stream, about 11.3% less time. Conversion logic and output were identical between cases.
+- **Impact:** Extra read/syscall and buffering overhead on the main-thread map-load path, independent of the converter CPU improvements in findings 86–88.
+- **Expected benefit:** TMX and TBIN readers receive a 64 KiB buffer plus the platform sequential-scan hint, while still streaming directly from the mod file with no whole-file copy or retained buffer.
+- **Risk:** Low. The same registered `IMapFormat` is selected by extension, receives the same file bytes, and retains xTile's exact outer error message and inner exception behavior. File sharing is explicitly read-only.
+- **Status:** Fixed. Unpacked maps are opened with `FileStreamOptions` tuned for sequential map parsing before dispatch to the registered format.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -981,7 +992,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, and 84 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, 84, and 89 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, 82, 85, 86, 87, and 88 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, 79, and 85 |
@@ -998,7 +1009,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
 | GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, 84, 86, and 87 |
-| TMX map parsing and conversion | Findings 86, 87, and 88 |
+| TMX map parsing and conversion | Findings 86, 87, 88, and 89 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
