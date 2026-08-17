@@ -66,6 +66,7 @@ internal class OptimizedTmxFormatTests
 
         using MemoryStream originalData = new();
         using MemoryStream optimizedData = new();
+        RemoveIdentityTransformProperties(original);
         FormatManager.Instance.BinaryFormat.Store(original, originalData);
         FormatManager.Instance.BinaryFormat.Store(optimized, optimizedData);
 
@@ -78,6 +79,19 @@ internal class OptimizedTmxFormatTests
         (Layer layer, TMXMap source) = CreateMap();
 
         OptimizedTmxFormat.LoadTile(layer, source, 0).Should().BeNull();
+    }
+
+    [Test]
+    public void LoadTile_OmitsIdentityTransformProperties()
+    {
+        (Layer layer, TMXMap source) = CreateMap();
+
+        Tile result = OptimizedTmxFormat.LoadTile(layer, source, 1)!;
+
+        result.Properties.Should().NotContainKey("@Rotation");
+        result.Properties.Should().NotContainKey("@Flip");
+        result.GetRotationValue().Should().Be(0);
+        result.GetFlip().Should().Be(0);
     }
 
     [Test]
@@ -167,5 +181,27 @@ internal class OptimizedTmxFormatTests
         Layer layer = new("Back", target, new Size(1, 1), new Size(16, 16));
         target.AddLayer(layer);
         return (layer, source);
+    }
+
+    /// <summary>Remove explicit identity transforms written by the bundled converter.</summary>
+    private static void RemoveIdentityTransformProperties(Map map)
+    {
+        foreach (Layer layer in map.Layers)
+        {
+            for (int x = 0; x < layer.LayerWidth; x++)
+            {
+                for (int y = 0; y < layer.LayerHeight; y++)
+                {
+                    Tile? tile = layer.Tiles[x, y];
+                    if (tile is null)
+                        continue;
+
+                    if (tile.GetRotationValue() == 0)
+                        tile.Properties.Remove("@Rotation");
+                    if (tile.GetFlip() == 0)
+                        tile.Properties.Remove("@Flip");
+                }
+            }
+        }
     }
 }
