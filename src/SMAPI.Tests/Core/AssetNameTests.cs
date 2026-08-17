@@ -13,6 +13,28 @@ namespace SMAPI.Tests.Core;
 [TestFixture]
 internal class AssetNameTests
 {
+    [Test(Description = "Assert that a localized name reuses one immutable base-name instance without cache-hit allocations.")]
+    public void GetBaseAssetName_CachesLocalizedName()
+    {
+        IAssetName name = new AssetName("Data/Test", "fr-FR", LocalizedContentManager.LanguageCode.fr);
+        IAssetName first = name.GetBaseAssetName();
+        for (int i = 0; i < 1_000; i++)
+            name.GetBaseAssetName();
+
+        const int iterations = 10_000;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        IAssetName? last = null;
+        for (int i = 0; i < iterations; i++)
+            last = name.GetBaseAssetName();
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        GC.KeepAlive(last);
+
+        last.Should().BeSameAs(first);
+        first.Name.Should().Be("Data/Test");
+        first.LocaleCode.Should().BeNull();
+        allocatedBytes.Should().Be(0);
+    }
+
     /*********
     ** Unit tests
     *********/

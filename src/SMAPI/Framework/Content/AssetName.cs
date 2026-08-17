@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using StardewModdingAPI.Toolkit.Utilities;
 using StardewModdingAPI.Utilities.AssetPathUtilities;
 using StardewValley;
@@ -9,6 +10,13 @@ namespace StardewModdingAPI.Framework.Content;
 /// <summary>An asset name that can be loaded through the content pipeline.</summary>
 internal class AssetName : IAssetName
 {
+    /*********
+    ** Fields
+    *********/
+    /// <summary>The cached name without a locale suffix.</summary>
+    private AssetName? BaseAssetName;
+
+
     /*********
     ** Accessors
     *********/
@@ -212,9 +220,15 @@ internal class AssetName : IAssetName
     /// <inheritdoc />
     IAssetName IAssetName.GetBaseAssetName()
     {
-        return this.LocaleCode == null
-            ? this
-            : new AssetName(this.BaseName, null, null);
+        if (this.LocaleCode == null)
+            return this;
+
+        AssetName? baseAssetName = Volatile.Read(ref this.BaseAssetName);
+        if (baseAssetName is not null)
+            return baseAssetName;
+
+        AssetName created = new(this.BaseName, null, null);
+        return Interlocked.CompareExchange(ref this.BaseAssetName, created, null) ?? created;
     }
 
     /// <inheritdoc />

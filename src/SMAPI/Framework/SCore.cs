@@ -1425,7 +1425,7 @@ internal class SCore : IDisposable
     private void OnAssetLoaded(IContentManager contentManager, IAssetName assetName)
     {
         if (this.EventManager.AssetReady.HasListeners)
-            this.EventManager.AssetReady.Raise(new AssetReadyEventArgs(assetName, assetName.GetBaseAssetName()));
+            this.EventManager.AssetReady.Raise(new AssetReadyEventArgs(assetName));
     }
 
     /// <summary>A callback invoked after assets have been invalidated from the content cache.</summary>
