@@ -19,8 +19,8 @@ internal class PlayerTracker : IDisposable
     /// <summary>The player's last valid location.</summary>
     private GameLocation? LastValidLocation;
 
-    /// <summary>The underlying watchers.</summary>
-    private readonly List<IWatcher> Watchers = [];
+    /// <summary>The skills which changed since the last reset, in event dispatch order.</summary>
+    private readonly List<SkillType> ChangedSkillsImpl = [];
 
 
     /*********
@@ -34,6 +34,9 @@ internal class PlayerTracker : IDisposable
 
     /// <summary>Tracks changes to the player's skill levels.</summary>
     public IDictionary<SkillType, IValueWatcher<int>> SkillWatchers { get; }
+
+    /// <summary>The skills which changed since the last reset, in event dispatch order.</summary>
+    public IReadOnlyList<SkillType> ChangedSkills => this.ChangedSkillsImpl;
 
 
     /*********
@@ -51,29 +54,22 @@ internal class PlayerTracker : IDisposable
         this.LocationWatcher = WatcherFactory.ForReference($"player.{nameof(player.currentLocation)}", this.GetCurrentLocation);
         this.SkillWatchers = new Dictionary<SkillType, IValueWatcher<int>>
         {
-            [SkillType.Combat] = WatcherFactory.ForNetValue($"player.{nameof(player.combatLevel)}", player.combatLevel),
-            [SkillType.Farming] = WatcherFactory.ForNetValue($"player.{nameof(player.farmingLevel)}", player.farmingLevel),
-            [SkillType.Fishing] = WatcherFactory.ForNetValue($"player.{nameof(player.fishingLevel)}", player.fishingLevel),
-            [SkillType.Foraging] = WatcherFactory.ForNetValue($"player.{nameof(player.foragingLevel)}", player.foragingLevel),
-            [SkillType.Luck] = WatcherFactory.ForNetValue($"player.{nameof(player.luckLevel)}", player.luckLevel),
-            [SkillType.Mining] = WatcherFactory.ForNetValue($"player.{nameof(player.miningLevel)}", player.miningLevel)
+            [SkillType.Combat] = WatcherFactory.ForNetValue($"player.{nameof(player.combatLevel)}", player.combatLevel, () => this.OnSkillChanged(SkillType.Combat)),
+            [SkillType.Farming] = WatcherFactory.ForNetValue($"player.{nameof(player.farmingLevel)}", player.farmingLevel, () => this.OnSkillChanged(SkillType.Farming)),
+            [SkillType.Fishing] = WatcherFactory.ForNetValue($"player.{nameof(player.fishingLevel)}", player.fishingLevel, () => this.OnSkillChanged(SkillType.Fishing)),
+            [SkillType.Foraging] = WatcherFactory.ForNetValue($"player.{nameof(player.foragingLevel)}", player.foragingLevel, () => this.OnSkillChanged(SkillType.Foraging)),
+            [SkillType.Luck] = WatcherFactory.ForNetValue($"player.{nameof(player.luckLevel)}", player.luckLevel, () => this.OnSkillChanged(SkillType.Luck)),
+            [SkillType.Mining] = WatcherFactory.ForNetValue($"player.{nameof(player.miningLevel)}", player.miningLevel, () => this.OnSkillChanged(SkillType.Mining))
         };
-
-        // track watchers for convenience
-        this.Watchers.Add(this.LocationWatcher);
-        this.Watchers.AddRange(this.SkillWatchers.Values);
     }
 
     /// <summary>Update the current values if needed.</summary>
     /// <param name="trackInventoryChanges">Whether to track changes needed for the player inventory event.</param>
     public void Update(bool trackInventoryChanges)
     {
-        // update valid location
-        this.LastValidLocation = this.GetCurrentLocation();
-
-        // update watchers
-        foreach (IWatcher watcher in this.Watchers)
-            watcher.Update();
+        // Update the polled location once. Skill watchers are pushed by their net fields and don't need polling.
+        this.LocationWatcher.Update();
+        this.LastValidLocation = this.LocationWatcher.CurrentValue;
 
         // Normal items push slot and stack notifications. Retain per-tick polling only for mod items
         // which override Item.Stack and therefore don't use the game's observable stack field.
@@ -85,9 +81,10 @@ internal class PlayerTracker : IDisposable
     /// <summary>Reset all trackers so their current values are the baseline.</summary>
     public void Reset()
     {
-        // reset watchers
-        foreach (IWatcher watcher in this.Watchers)
-            watcher.Reset();
+        this.LocationWatcher.Reset();
+        foreach (SkillType skill in this.ChangedSkillsImpl)
+            this.SkillWatchers[skill].Reset();
+        this.ChangedSkillsImpl.Clear();
 
         this.InventoryTracker.Reset();
     }
@@ -112,7 +109,53 @@ internal class PlayerTracker : IDisposable
     {
         this.InventoryTracker.Dispose();
 
-        foreach (IWatcher watcher in this.Watchers)
+        this.LocationWatcher.Dispose();
+        foreach (IWatcher watcher in this.SkillWatchers.Values)
             watcher.Dispose();
+    }
+
+
+    /*********
+    ** Private methods
+    *********/
+    /// <summary>Mark a skill as changed, preserving the existing public event order.</summary>
+    private void OnSkillChanged(SkillType skill)
+    {
+        PlayerTracker.AddChangedSkill(this.ChangedSkillsImpl, skill);
+    }
+
+    /// <summary>Add a changed skill to a list in public event dispatch order.</summary>
+    /// <param name="skills">The changed skill list.</param>
+    /// <param name="skill">The skill to add.</param>
+    internal static void AddChangedSkill(List<SkillType> skills, SkillType skill)
+    {
+        int order = GetSkillOrder(skill);
+        for (int i = 0; i < skills.Count; i++)
+        {
+            SkillType existing = skills[i];
+            if (existing == skill)
+                return;
+            if (GetSkillOrder(existing) > order)
+            {
+                skills.Insert(i, skill);
+                return;
+            }
+        }
+
+        skills.Add(skill);
+
+        static int GetSkillOrder(SkillType value)
+        {
+            return value switch
+            {
+                SkillType.Farming => 0,
+                SkillType.Fishing => 1,
+                SkillType.Foraging => 2,
+                SkillType.Mining => 3,
+                SkillType.Combat => 4,
+                SkillType.Luck => 5,
+                _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown skill type.")
+            };
+        }
     }
 }
