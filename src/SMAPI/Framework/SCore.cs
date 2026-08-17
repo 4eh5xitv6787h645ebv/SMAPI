@@ -1524,20 +1524,18 @@ internal class SCore : IDisposable
         if (id == null)
             return null;
 
-        string errorPrefix = $"Can't {verb} on behalf of content pack ID '{id}'";
-
         // get target mod
         IModMetadata? onBehalfOf = this.ModRegistry.Get(id);
         if (onBehalfOf == null)
         {
-            mod.LogAsModOnce($"{errorPrefix}: there's no content pack installed with that ID.", LogLevel.Warn);
+            mod.LogAsModOnce($"Can't {verb} on behalf of content pack ID '{id}': there's no content pack installed with that ID.", LogLevel.Warn);
             return null;
         }
 
         // make sure it's a content pack for the requesting mod
         if (!onBehalfOf.IsContentPack || !string.Equals(onBehalfOf.Manifest.ContentPackFor?.UniqueID, mod.Manifest.UniqueID, StringComparison.OrdinalIgnoreCase))
         {
-            mod.LogAsModOnce($"{errorPrefix}: that isn't a content pack for this mod.", LogLevel.Warn);
+            mod.LogAsModOnce($"Can't {verb} on behalf of content pack ID '{id}': that isn't a content pack for this mod.", LogLevel.Warn);
             return null;
         }
 

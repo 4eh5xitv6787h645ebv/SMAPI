@@ -80,6 +80,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 68. Finding 68 — texture replacement probes before every successful load — fixed.
 69. Finding 69 — asset-operation cache ignores the requested data type — fixed.
 70. Finding 70 — existence checks probe irrelevant providers before cache/routing — fixed.
+71. Finding 71 — successful on-behalf-of registration formats failure text — fixed.
 
 ## Detailed findings
 
@@ -777,11 +778,21 @@ This is the current jank-first order, combining likely frame-time impact, freque
 
 - **Affected code:** `Framework/ContentManagers/BaseContentManager.cs`, `GameContentManager.cs`, and `ModContentManager.cs` (`DoesAssetExist`).
 - **Scenario:** Repeated existence checks for already-cached game assets and uncached managed `SMAPI/mod-id/path` assets, including localized and custom-map tilesheet resolution during content-pack transitions.
-- **Root cause:** Base existence logic queried MonoGame's content provider/filesystem before its dictionary cache. Game managers also sent managed mod keys through that guaranteed-useless vanilla probe before routing them, while mod managers hashed a cache which is deliberately always empty.
-- **Impact:** Redundant provider/filesystem traversal and cache hashing on content existence bursts.
+- **Root cause:** Base existence logic queried MonoGame's content provider before its dictionary cache. The Linux game implementation builds a `StringBuilder`, normalizes the full path, appends `.xnb`, materializes a new string, and queries the content manifest. Game managers also sent managed mod keys through that guaranteed-useless vanilla probe before routing them, while mod managers hashed a cache which is deliberately always empty.
+- **Impact:** Redundant allocation, linear path normalization, manifest lookup, and cache hashing on content existence bursts.
 - **Expected benefit:** Cached game assets return after one dictionary probe; managed keys route directly to the owning mod; mod-file checks go directly to path resolution and file metadata.
 - **Risk:** Low to medium. Cached values still report present even if their source was deleted, matching prior behavior. Non-managed cache misses retain vanilla-provider then custom-loader ordering, and mod content remains explicitly non-caching.
 - **Status:** Fixed. Existence checks now separate cache, managed routing, vanilla provider, custom loader, and mod-file paths so only relevant sources are queried.
+
+### 71. Successful content-pack operation registration formats failure text
+
+- **Affected code:** `Framework/SCore.cs` (`GetOnBehalfOfContentPack`).
+- **Scenario:** Every successful `AssetRequested` load or edit operation registered on behalf of a content pack, multiplied across Content Patcher-scale operation discovery.
+- **Root cause:** The helper eagerly interpolated a full error prefix before normal registry and ownership checks, then returned the valid pack without ever using that string.
+- **Impact:** One short-lived failure-message string per successful on-behalf-of operation registration, adding transition GC pressure.
+- **Expected benefit:** Valid content-pack operations perform registry/ownership validation with no diagnostic string allocation.
+- **Risk:** Very low. The identical warning text is now formatted only inside the missing-pack and invalid-owner branches which emit it.
+- **Status:** Fixed. Failure diagnostics are constructed lazily at their two use sites; the successful path returns directly.
 
 ## Requested audit coverage
 
@@ -803,7 +814,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, and 69 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, and 71 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
 | GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, and 67 |
