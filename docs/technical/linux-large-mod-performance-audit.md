@@ -910,6 +910,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium-low. Loader/editor selection, localization, error classification, and physical content-folder fallback checks are unchanged. The cache owner changes to the primary game manager, which is already the manager used by the map display device for these non-managed keys.
 - **Status:** Fixed. Game-content fallback validation now loads through the coordinator's primary `Game1.content` manager; local mod tilesheets retain their existing managed-asset route.
 
+### 83. Opaque image overlays read back and blend the target texture
+
+- **Affected code:** `Framework/Content/AssetDataForImage.cs` (`PatchImageImpl`).
+- **Scenario:** Content Patcher or another editor applies a fully opaque overlay to a texture, including large replacement-like patches expressed using overlay mode.
+- **Root cause:** Only explicit replace mode used the direct GPU upload path. Overlay mode always read the target region back from the GPU, rented a merge buffer, visited every pixel, and uploaded the result even though each opaque source pixel necessarily replaces the destination exactly.
+- **Impact:** Avoidable synchronous GPU readback, pooled-buffer traffic, and per-pixel alpha work on the content-reload/warp path.
+- **Expected benefit:** Fully opaque overlays perform one linear alpha check followed by the same direct upload as replacement, eliminating target readback and blend work. Sparse and translucent overlays exit the check at their first non-opaque pixel and retain the cropped merge path.
+- **Risk:** Low. The fast path applies only when every source alpha is 255, for which the existing overlay branch always assigns the source color regardless of destination. Empty and partially transparent inputs retain existing behavior.
+- **Status:** Fixed. Opaque overlays now take the direct upload path, with focused coverage for opaque, translucent, transparent, and empty spans.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -923,7 +933,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, and 79 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
-| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, and 65 |
+| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, 65, and 83 |
 | Content-manager lookup scaling | Findings 9, 53, 57, 58, and 73 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
@@ -933,7 +943,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, 71, and 74 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, and 82 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, and 83 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority

@@ -164,6 +164,17 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
             return;
         }
 
+        // A fully opaque overlay is pixel-for-pixel equivalent to replacement. Avoid reading the target
+        // texture back from the GPU and blending every pixel before uploading the same source colors.
+        if (
+            patchMode == PatchMode.Overlay
+            && AssetDataForImage.IsFullyOpaque(sourceData.AsSpan(firstPixel, pixelCount))
+        )
+        {
+            target.SetData(0, targetArea, sourceData, firstPixel, pixelCount);
+            return;
+        }
+
         // skip transparent pixels at the start & end (e.g. large spritesheet with a few sprites replaced)
         int startIndex = -1;
         int endIndex = -1;
@@ -296,5 +307,21 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
         {
             ArrayPool<Color>.Shared.Return(mergedData);
         }
+    }
+
+    /// <summary>Get whether a pixel span is nonempty and every pixel is fully opaque.</summary>
+    /// <param name="pixels">The pixels to check.</param>
+    internal static bool IsFullyOpaque(ReadOnlySpan<Color> pixels)
+    {
+        if (pixels.IsEmpty)
+            return false;
+
+        foreach (ref readonly Color pixel in pixels)
+        {
+            if (pixel.A != byte.MaxValue)
+                return false;
+        }
+
+        return true;
     }
 }
