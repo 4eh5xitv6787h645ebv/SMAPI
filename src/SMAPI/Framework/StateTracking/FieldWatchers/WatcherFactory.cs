@@ -63,8 +63,8 @@ internal static class WatcherFactory
     /// <summary>Get a watcher which detects when an object reference in a collection changes.</summary>
     /// <typeparam name="T">The value type.</typeparam>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
-    /// <param name="collection">The observable collection.</param>
-    public static ICollectionWatcher<T> ForReferenceList<T>(string name, ICollection<T> collection)
+    /// <param name="collection">The list to watch.</param>
+    public static ICollectionWatcher<T> ForReferenceList<T>(string name, IList<T> collection)
     {
         return new ComparableListWatcher<T>(name, collection, new ObjectReferenceComparer<T>());
     }

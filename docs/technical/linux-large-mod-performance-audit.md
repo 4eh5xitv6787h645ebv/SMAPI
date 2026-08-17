@@ -21,48 +21,49 @@ This is the current jank-first order, combining likely frame-time impact, freque
 9. Finding 47 — eager cursor coordinate derivation while walking — deprioritized for the target pack.
 10. Finding 25 — held-input event snapshot allocations — fixed.
 11. Finding 7 — normal-tile rendering overhead — fixed.
-12. Finding 53 — duplicate cached-asset probes — fixed.
-13. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-14. Finding 37 — redundant invalidation-batch cloning — fixed.
-15. Finding 36 — per-parse locale delegate allocation — fixed.
-16. Finding 34 — layer work repeated for every patched map tile — fixed.
-17. Finding 15 — one-tick asset-operation cache lifetime — rejected without a provider contract.
-18. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-19. Finding 33 — asset-loader adapter closures — fixed.
-20. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-21. Finding 6 — synchronous game-thread log flushing — fixed.
-22. Finding 46 — synchronous log formatting on the game thread — fixed.
-23. Finding 52 — eager asset-operation trace formatting — fixed.
-24. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-25. Finding 41 — incomplete and duplicate world-location topology — fixed.
-26. Finding 43 — per-asset propagation key normalization allocations — fixed.
-27. Finding 32 — per-map warp comparison sets — fixed.
-28. Finding 19 — repeated propagation side effects — partially fixed.
-29. Finding 4 — no first-class batched exact invalidation — fixed.
-30. Finding 3 — exact invalidation performing cache scans — fixed.
-31. Finding 22 — oversized sparse image-patch transfers — fixed.
-32. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
-33. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
-34. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-35. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
-36. Finding 9 — linear content-manager routing — fixed.
-37. Finding 10 — repeated asset-name strings — fixed.
-38. Finding 14 — retained dead disposable wrappers — fixed.
-39. Finding 29 — world trackers lost across reordered transfers — fixed.
-40. Finding 42 — location trackers lack source ownership — fixed.
-41. Finding 30 — rectangular transformed-tile origin — fixed.
-42. Finding 18 — reversed location event changes — fixed.
-43. Finding 17 — swapped managed-event identifiers — fixed.
-44. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-45. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-46. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-47. Finding 13 — repeated dependency-list scans — fixed.
-48. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
-49. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
-50. Finding 45 — incorrect overlay alpha composition — queued.
-51. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
-52. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
-53. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+12. Finding 54 — unchanged active-level list hashing — fixed.
+13. Finding 53 — duplicate cached-asset probes — fixed.
+14. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
+15. Finding 37 — redundant invalidation-batch cloning — fixed.
+16. Finding 36 — per-parse locale delegate allocation — fixed.
+17. Finding 34 — layer work repeated for every patched map tile — fixed.
+18. Finding 15 — one-tick asset-operation cache lifetime — rejected without a provider contract.
+19. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+20. Finding 33 — asset-loader adapter closures — fixed.
+21. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+22. Finding 6 — synchronous game-thread log flushing — fixed.
+23. Finding 46 — synchronous log formatting on the game thread — fixed.
+24. Finding 52 — eager asset-operation trace formatting — fixed.
+25. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+26. Finding 41 — incomplete and duplicate world-location topology — fixed.
+27. Finding 43 — per-asset propagation key normalization allocations — fixed.
+28. Finding 32 — per-map warp comparison sets — fixed.
+29. Finding 19 — repeated propagation side effects — partially fixed.
+30. Finding 4 — no first-class batched exact invalidation — fixed.
+31. Finding 3 — exact invalidation performing cache scans — fixed.
+32. Finding 22 — oversized sparse image-patch transfers — fixed.
+33. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
+34. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
+35. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+36. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
+37. Finding 9 — linear content-manager routing — fixed.
+38. Finding 10 — repeated asset-name strings — fixed.
+39. Finding 14 — retained dead disposable wrappers — fixed.
+40. Finding 29 — world trackers lost across reordered transfers — fixed.
+41. Finding 42 — location trackers lack source ownership — fixed.
+42. Finding 30 — rectangular transformed-tile origin — fixed.
+43. Finding 18 — reversed location event changes — fixed.
+44. Finding 17 — swapped managed-event identifiers — fixed.
+45. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+46. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+47. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+48. Finding 13 — repeated dependency-list scans — fixed.
+49. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
+50. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
+51. Finding 45 — incorrect overlay alpha composition — queued.
+52. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
+53. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
+54. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -596,11 +597,21 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. A cached value must satisfy the requested generic type; incompatible values still fall through to MonoGame's existing load path so its error behavior is retained.
 - **Status:** Fixed. `GameContentManager` uses `TryGetCachedAsset` and returns type-compatible hits directly, and `GetLoadedValues` adds the object returned by that same single probe without routing back through `LoadExact<object>`.
 
+### 54. Active mine and volcano lists are rehashed every unchanged tick
+
+- **Affected code:** `Framework/StateTracking/FieldWatchers/ComparableListWatcher.cs`, `WatcherFactory.cs`, and `WorldLocationsTracker.cs`.
+- **Scenario:** Every gameplay update while generated mine or volcano levels remain active, including ordinary walking in expansion-heavy or multiplayer saves.
+- **Root cause:** The only polled world-topology lists clear and refill a pooled hash set, scan the previous set for removals, then scan the new set for additions on every tick. The lists normally retain the exact same ordered object references for long runs, so all of that hashing proves an unchanged state repeatedly.
+- **Impact:** Steady update CPU proportional to active generated levels.
+- **Expected benefit:** An unchanged list performs one count check and one direct reference comparison per entry, with no hash-set clear, insertion, or membership passes. Hash diffing runs only after the ordered sequence actually changes.
+- **Risk:** Low. The ordered sequence is only a fast-path hint; public changes remain set-based, so reorder-only and duplicate-count changes keep their previous behavior.
+- **Status:** Fixed. Reference-list watchers retain the prior ordered sequence, bypass hashing when it matches, and refresh that hint after a slow-path comparison. Focused tests cover no-rehash unchanged updates, reorders, real add/remove diffs, and duplicates.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
 | --- | --- |
-| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, and 48 |
+| Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, and 53 |
