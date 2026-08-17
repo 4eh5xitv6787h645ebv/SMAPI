@@ -72,7 +72,7 @@ internal class GameContentManager : BaseContentManager
 
         // custom asset from a loader
         string locale = this.GetLocale();
-        IAssetInfo info = new AssetInfo(locale, assetName, typeof(T), this.AssertAndNormalizeAssetName);
+        IAssetInfo info = new AssetInfo(locale, assetName, typeof(T), this.AssetNameNormalizer);
         AssetOperationGroup? operations = this.Coordinator.GetAssetOperations(info);
         if (operations?.LoadOperations is { Count: > 0 } loadOperations)
         {
@@ -136,11 +136,11 @@ internal class GameContentManager : BaseContentManager
                 {
                     GameContentManager manager = state.Manager;
                     IAssetName assetName = state.AssetName;
-                    IAssetInfo info = new AssetInfo(assetName.LocaleCode, assetName, typeof(T), manager.AssertAndNormalizeAssetName);
+                    IAssetInfo info = new AssetInfo(assetName.LocaleCode, assetName, typeof(T), manager.AssetNameNormalizer);
                     AssetOperationGroup? operations = manager.Coordinator.GetAssetOperations(info);
                     IAssetData asset =
                         manager.ApplyLoader<T>(info, operations?.LoadOperations)
-                        ?? new AssetDataForObject(info, manager.RawLoad<T>(assetName, state.UseCache), manager.AssertAndNormalizeAssetName, manager.Reflection);
+                        ?? new AssetDataForObject(info, manager.RawLoad<T>(assetName, state.UseCache), manager.AssetNameNormalizer, manager.Reflection);
                     asset = manager.ApplyEditors<T>(info, asset, operations?.EditOperations);
                     return (T)asset.Data;
                 }
@@ -215,7 +215,7 @@ internal class GameContentManager : BaseContentManager
 
         // return matched asset
         return this.TryFixAndValidateLoadedAsset(info, data, loader)
-            ? new AssetDataForObject(info, data, this.AssertAndNormalizeAssetName, this.Reflection)
+            ? new AssetDataForObject(info, data, this.AssetNameNormalizer, this.Reflection)
             : null;
     }
 
@@ -229,8 +229,6 @@ internal class GameContentManager : BaseContentManager
     {
         if (editOperations?.Count is not > 0)
             return asset;
-
-        IAssetData GetNewData(object data) => new AssetDataForObject(info, data, this.AssertAndNormalizeAssetName, this.Reflection);
 
         // special case: if the asset was loaded with a more general type like 'object', call editors with the actual type instead.
         {
@@ -276,12 +274,12 @@ internal class GameContentManager : BaseContentManager
             if (asset.Data == null)
             {
                 mod.LogAsMod($"Mod incorrectly set asset '{info.Name}'{this.GetOnBehalfOfLabel(editor.OnBehalfOf)} to a null value; ignoring override.", LogLevel.Warn);
-                asset = GetNewData(prevAsset);
+                asset = new AssetDataForObject(info, prevAsset, this.AssetNameNormalizer, this.Reflection);
             }
             else if (asset.Data is not T)
             {
                 mod.LogAsMod($"Mod incorrectly set asset '{asset.Name}'{this.GetOnBehalfOfLabel(editor.OnBehalfOf)} to incompatible type '{asset.Data.GetType()}', expected '{typeof(T)}'; ignoring override.", LogLevel.Warn);
-                asset = GetNewData(prevAsset);
+                asset = new AssetDataForObject(info, prevAsset, this.AssetNameNormalizer, this.Reflection);
             }
         }
 

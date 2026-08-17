@@ -499,7 +499,7 @@ internal class ContentCoordinator : IDisposable
         return this.InvalidateCache((_, rawName, type) =>
         {
             IAssetName assetName = this.ParseAssetName(rawName, allowLocales: true);
-            IAssetInfo info = new AssetInfo(locale, assetName, type, this.MainContentManager.AssertAndNormalizeAssetName);
+            IAssetInfo info = new AssetInfo(locale, assetName, type, this.MainContentManager.AssetNameNormalizer);
             return predicate(info);
         }, dispose);
     }

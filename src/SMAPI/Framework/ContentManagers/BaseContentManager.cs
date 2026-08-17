@@ -74,6 +74,9 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
     /// <inheritdoc />
     public bool IsNamespaced { get; }
 
+    /// <summary>The cached callback which normalizes an asset key to match this manager's cache.</summary>
+    internal Func<string, string> AssetNameNormalizer { get; }
+
 
     /*********
     ** Public methods
@@ -100,6 +103,7 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
         this.Reflection = reflection;
         this.OnDisposing = onDisposing;
         this.IsNamespaced = isNamespaced;
+        this.AssetNameNormalizer = this.AssertAndNormalizeAssetName;
 
         // get asset data
         this.BaseDisposableReferences = reflection.GetField<List<IDisposable>?>(this, "disposableAssets").GetValue()
