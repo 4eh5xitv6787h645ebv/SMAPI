@@ -835,7 +835,7 @@ internal class ContentCoordinator : IDisposable
                 IContentManager? next = null;
                 foreach (IContentManager candidate in coordinator.ContentManagers)
                 {
-                    if (candidate.IsNamespaced && candidate.Name == contentManager.Name)
+                    if (candidate.IsNamespaced && AreManagedContentManagerNamesEqual(candidate.Name, contentManager.Name))
                     {
                         next = candidate;
                         break;
@@ -845,6 +845,12 @@ internal class ContentCoordinator : IDisposable
                     coordinator.NamespacedContentManagers[contentManager.Name] = next;
             }
         });
+    }
+
+    /// <summary>Get whether two managed content manager names identify the same routing prefix.</summary>
+    internal static bool AreManagedContentManagerNamesEqual(string left, string right)
+    {
+        return StringComparer.OrdinalIgnoreCase.Equals(left, right);
     }
 
     /// <summary>Get a vanilla asset without interception.</summary>
