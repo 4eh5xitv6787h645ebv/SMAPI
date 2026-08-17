@@ -171,7 +171,7 @@ internal sealed class ModContentManager : BaseContentManager
     {
         if (this.Coordinator.TryParseManagedAssetKey(assetName.Name, out string? contentManagerId, out IAssetName? relativePath))
         {
-            if (contentManagerId != this.Name)
+            if (!ContentCoordinator.AreManagedContentManagerNamesEqual(contentManagerId, this.Name))
                 this.ThrowLoadError(assetName, ContentLoadErrorType.AccessDenied, "can't load a different mod's managed asset key through this mod content manager.");
 
             assetName = relativePath;

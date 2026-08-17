@@ -650,7 +650,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transition and managed-asset load CPU, temporary allocation, and Linux path correctness.
 - **Expected benefit:** A managed key now allocates only the manager ID and relative path which downstream APIs retain, while warmed state-passing lock calls allocate nothing. Invalidation avoids its transaction closure, and lifecycle/loaded-value paths reuse cached static callbacks.
 - **Risk:** Low to medium. Parser coverage locks valid slash and backslash forms, malformed/partial prefixes, empty IDs and paths, platform-normalized manager IDs, and case-insensitive routing. Every lock path retains `finally`-based release and existing first-manager precedence.
-- **Status:** Fixed. Managed keys are scanned by separator index without split arrays, exact prefix-segment matching is ordinal-ignore-case, the namespaced index and duplicate-manager promotion both use the same case-insensitive identity, and explicit-state read/write lock overloads replace capturing callbacks. A warmed 20,000-operation read/write regression check allocates zero bytes.
+- **Status:** Fixed. Managed keys are scanned by separator index without split arrays; prefix matching, the namespaced index, duplicate-manager promotion, and the mod-manager access check all use the same ordinal-ignore-case identity. Explicit-state read/write lock overloads replace capturing callbacks. A warmed 20,000-operation read/write regression check allocates zero bytes.
 
 ### 58. Non-English cached loads probe their localized-name mapping twice
 
