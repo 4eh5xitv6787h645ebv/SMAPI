@@ -152,6 +152,127 @@ public static class PathUtilities
 #endif
     public static string? NormalizePath(string? path)
     {
+#if NET6_0_OR_GREATER
+        if (path is null)
+            return null;
+
+        // Exact file probes overwhelmingly pass an already-normalized path. Use vectorized string searches
+        // to return it before the more detailed shape scan below.
+        if (
+            path.Length == 0
+            || (
+                !char.IsWhiteSpace(path[0])
+                && !char.IsWhiteSpace(path[^1])
+                && !PathUtilities.HasNonPreferredPathSeparator(path)
+                && !PathUtilities.HasRepeatedPreferredPathSeparator(path)
+            )
+        )
+            return path;
+
+        // trim outer whitespace without allocating
+        int startIndex = 0;
+        int endIndex = path.Length - 1;
+        while (startIndex <= endIndex && char.IsWhiteSpace(path[startIndex]))
+            startIndex++;
+        while (endIndex >= startIndex && char.IsWhiteSpace(path[endIndex]))
+            endIndex--;
+
+        if (startIndex > endIndex)
+            return string.Empty;
+
+        // calculate the result shape and detect the overwhelmingly common already-canonical case
+        bool hasRoot = PathUtilities.IsPathSeparator(path[startIndex]);
+        bool hasWindowsUncRoot =
+            PathUtilities.PreferredPathSeparator == '\\'
+            && startIndex < endIndex
+            && path[startIndex] == '\\'
+            && path[startIndex + 1] == '\\';
+        bool hasTrailingSeparator = PathUtilities.IsPathSeparator(path[endIndex]);
+        bool hasNonPreferredSeparator = false;
+        int segmentCount = 0;
+        int segmentCharacterCount = 0;
+        bool isInSegment = false;
+        for (int i = startIndex; i <= endIndex; i++)
+        {
+            char character = path[i];
+            if (PathUtilities.IsPathSeparator(character))
+            {
+                hasNonPreferredSeparator |= character != PathUtilities.PreferredPathSeparator;
+                if (isInSegment)
+                {
+                    segmentCount++;
+                    isInSegment = false;
+                }
+            }
+            else
+            {
+                segmentCharacterCount++;
+                isInSegment = true;
+            }
+        }
+        if (isInSegment)
+            segmentCount++;
+
+        int rootLength = hasWindowsUncRoot ? PathUtilities.WindowsUncRoot.Length : hasRoot ? 1 : 0;
+        bool preserveTrailingSeparator = hasTrailingSeparator && (!hasRoot || segmentCount > 0);
+        int normalizedLength = rootLength + segmentCharacterCount + Math.Max(0, segmentCount - 1) + (preserveTrailingSeparator ? 1 : 0);
+        int trimmedLength = endIndex - startIndex + 1;
+        if (normalizedLength == trimmedLength && !hasNonPreferredSeparator)
+        {
+            return trimmedLength == path.Length
+                ? path
+                : path.Substring(startIndex, trimmedLength);
+        }
+
+        // write directly into the result string instead of allocating an array and string for every segment
+        return string.Create(
+            normalizedLength,
+            (
+                Path: path,
+                StartIndex: startIndex,
+                EndIndex: endIndex,
+                HasRoot: hasRoot,
+                HasWindowsUncRoot: hasWindowsUncRoot,
+                PreserveTrailingSeparator: preserveTrailingSeparator
+            ),
+            static (output, state) =>
+            {
+                int outputIndex = 0;
+                if (state.HasWindowsUncRoot)
+                {
+                    output[outputIndex++] = '\\';
+                    output[outputIndex++] = '\\';
+                }
+                else if (state.HasRoot)
+                    output[outputIndex++] = PathUtilities.PreferredPathSeparator;
+
+                bool isInSegment = false;
+                bool wroteSegment = false;
+                for (int i = state.StartIndex; i <= state.EndIndex; i++)
+                {
+                    char character = state.Path[i];
+                    if (PathUtilities.IsPathSeparator(character))
+                    {
+                        isInSegment = false;
+                        continue;
+                    }
+
+                    if (!isInSegment)
+                    {
+                        if (wroteSegment)
+                            output[outputIndex++] = PathUtilities.PreferredPathSeparator;
+                        wroteSegment = true;
+                        isInSegment = true;
+                    }
+
+                    output[outputIndex++] = character;
+                }
+
+                if (state.PreserveTrailingSeparator)
+                    output[outputIndex] = PathUtilities.PreferredPathSeparator;
+            }
+        );
+#else
         path = path?.Trim();
         if (string.IsNullOrEmpty(path))
             return path;
@@ -178,12 +299,45 @@ public static class PathUtilities
             newPath += PathUtilities.PreferredPathSeparator;
 
         return newPath;
+#endif
     }
 
     /// <summary>Get whether a character is a separator recognized in an asset name.</summary>
     private static bool IsAssetSeparator(char character)
     {
+        return PathUtilities.IsPathSeparator(character);
+    }
+
+    /// <summary>Get whether a character is a separator recognized in a file path.</summary>
+    private static bool IsPathSeparator(char character)
+    {
         return character is '/' or '\\';
+    }
+
+    /// <summary>Get whether a path contains a separator which isn't canonical for the current platform.</summary>
+    private static bool HasNonPreferredPathSeparator(string path)
+    {
+        char alternateSeparator = PathUtilities.PreferredPathSeparator == '/' ? '\\' : '/';
+        return path.IndexOf(alternateSeparator) >= 0;
+    }
+
+    /// <summary>Get whether a path contains adjacent preferred separators which normalization would collapse.</summary>
+    private static bool HasRepeatedPreferredPathSeparator(string path)
+    {
+        int startIndex = 0;
+        if (
+            PathUtilities.PreferredPathSeparator == '\\'
+            && path.Length >= PathUtilities.WindowsUncRoot.Length
+            && path.StartsWith(PathUtilities.WindowsUncRoot, StringComparison.Ordinal)
+        )
+        {
+            if (path.Length > PathUtilities.WindowsUncRoot.Length && path[PathUtilities.WindowsUncRoot.Length] == '\\')
+                return true;
+            startIndex = PathUtilities.WindowsUncRoot.Length;
+        }
+
+        string repeatedSeparator = PathUtilities.PreferredPathSeparator == '/' ? "//" : @"\\";
+        return path.IndexOf(repeatedSeparator, startIndex, StringComparison.Ordinal) >= 0;
     }
 
     /// <summary>Get a path with the home directory path replaced with <c>~</c> (like <c>C:\Users\Admin\Game</c> to <c>~\Game</c>), if applicable.</summary>

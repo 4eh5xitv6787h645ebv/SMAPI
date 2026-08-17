@@ -28,67 +28,68 @@ This is the current jank-first order, combining likely frame-time impact, freque
 16. Finding 36 — per-parse locale delegate allocation — fixed.
 17. Finding 34 — layer work repeated for every patched map tile — fixed.
 18. Finding 90 — empty tile-property copies and repeated animation snapshots — fixed.
-19. Finding 15 — one-tick asset-operation cache lifetime — rejected without a provider contract.
-20. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-21. Finding 33 — asset-loader adapter closures — fixed.
-22. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-23. Finding 55 — redundant propagation location-array projection — fixed.
-24. Finding 6 — synchronous game-thread log flushing — fixed.
-25. Finding 46 — synchronous log formatting on the game thread — fixed.
-26. Finding 52 — eager asset-operation trace formatting — fixed.
-27. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-28. Finding 41 — incomplete and duplicate world-location topology — fixed.
-29. Finding 43 — per-asset propagation key normalization allocations — fixed.
-30. Finding 32 — per-map warp comparison sets — fixed.
-31. Finding 19 — repeated propagation side effects — partially fixed.
-32. Finding 4 — no first-class batched exact invalidation — fixed.
-33. Finding 3 — exact invalidation performing cache scans — fixed.
-34. Finding 22 — oversized sparse image-patch transfers — fixed.
-35. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
-36. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
-37. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-38. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
-39. Finding 9 — linear content-manager routing — fixed.
-40. Finding 10 — repeated asset-name strings — fixed.
-41. Finding 14 — retained dead disposable wrappers — fixed.
-42. Finding 29 — world trackers lost across reordered transfers — fixed.
-43. Finding 42 — location trackers lack source ownership — fixed.
-44. Finding 30 — rectangular transformed-tile origin — fixed.
-45. Finding 18 — reversed location event changes — fixed.
-46. Finding 17 — swapped managed-event identifiers — fixed.
-47. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-48. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-49. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-50. Finding 13 — repeated dependency-list scans — fixed.
-51. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
-52. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
-53. Finding 45 — incorrect overlay alpha composition — queued.
-54. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
-55. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
-56. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
-57. Finding 56 — duplicate content-cache hashing during scans and invalidation — fixed.
-58. Finding 57 — managed-asset parsing and lock closures — fixed.
-59. Finding 58 — localized cached loads probe their mapping twice — fixed.
-60. Finding 59 — intercepted operation groups allocate wrapper objects — fixed.
-61. Finding 60 — content routing state is case-sensitive on Linux — fixed.
-62. Finding 61 — no-op asset interception wraps every raw asset — fixed.
-63. Finding 62 — broad cache scans allocate an iterator per manager — fixed.
-64. Finding 63 — texture propagation retrieves cached targets twice — fixed.
-65. Finding 64 — custom-map tilesheet routing splits every path repeatedly — fixed.
-66. Finding 65 — successful mod asset loads allocate type arrays — fixed.
-67. Finding 66 — vanilla map inspection probes before loading — fixed.
-68. Finding 67 — loader-only assets allocate editable wrappers — fixed.
-69. Finding 68 — texture replacement probes before every successful load — fixed.
-70. Finding 69 — asset-operation cache ignores the requested data type — fixed.
-71. Finding 70 — existence checks probe irrelevant providers before cache/routing — fixed.
-72. Finding 71 — successful on-behalf-of registration formats failure text — fixed.
-73. Finding 72 — disconnected gamepads scan every control each update — fixed.
-74. Finding 73 — every content manager repeats base-load reflection — fixed.
-75. Finding 74 — every registered asset edit allocates a wrapper object — fixed.
-76. Finding 75 — case variants create duplicate map tilesheets — fixed.
-77. Finding 76 — explicit XNB fallback tilesheets get a double extension — fixed.
-78. Finding 77 — observable watchers start with an empty baseline — fixed.
-79. Finding 91 — explicit XNB map sheets are treated as different identities — fixed.
+19. Finding 92 — canonical file paths are split and rejoined for every probe — fixed.
+20. Finding 15 — one-tick asset-operation cache lifetime — rejected without a provider contract.
+21. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+22. Finding 33 — asset-loader adapter closures — fixed.
+23. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+24. Finding 55 — redundant propagation location-array projection — fixed.
+25. Finding 6 — synchronous game-thread log flushing — fixed.
+26. Finding 46 — synchronous log formatting on the game thread — fixed.
+27. Finding 52 — eager asset-operation trace formatting — fixed.
+28. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+29. Finding 41 — incomplete and duplicate world-location topology — fixed.
+30. Finding 43 — per-asset propagation key normalization allocations — fixed.
+31. Finding 32 — per-map warp comparison sets — fixed.
+32. Finding 19 — repeated propagation side effects — partially fixed.
+33. Finding 4 — no first-class batched exact invalidation — fixed.
+34. Finding 3 — exact invalidation performing cache scans — fixed.
+35. Finding 22 — oversized sparse image-patch transfers — fixed.
+36. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
+37. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
+38. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+39. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
+40. Finding 9 — linear content-manager routing — fixed.
+41. Finding 10 — repeated asset-name strings — fixed.
+42. Finding 14 — retained dead disposable wrappers — fixed.
+43. Finding 29 — world trackers lost across reordered transfers — fixed.
+44. Finding 42 — location trackers lack source ownership — fixed.
+45. Finding 30 — rectangular transformed-tile origin — fixed.
+46. Finding 18 — reversed location event changes — fixed.
+47. Finding 17 — swapped managed-event identifiers — fixed.
+48. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+49. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+50. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+51. Finding 13 — repeated dependency-list scans — fixed.
+52. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
+53. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
+54. Finding 45 — incorrect overlay alpha composition — queued.
+55. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
+56. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
+57. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+58. Finding 56 — duplicate content-cache hashing during scans and invalidation — fixed.
+59. Finding 57 — managed-asset parsing and lock closures — fixed.
+60. Finding 58 — localized cached loads probe their mapping twice — fixed.
+61. Finding 59 — intercepted operation groups allocate wrapper objects — fixed.
+62. Finding 60 — content routing state is case-sensitive on Linux — fixed.
+63. Finding 61 — no-op asset interception wraps every raw asset — fixed.
+64. Finding 62 — broad cache scans allocate an iterator per manager — fixed.
+65. Finding 63 — texture propagation retrieves cached targets twice — fixed.
+66. Finding 64 — custom-map tilesheet routing splits every path repeatedly — fixed.
+67. Finding 65 — successful mod asset loads allocate type arrays — fixed.
+68. Finding 66 — vanilla map inspection probes before loading — fixed.
+69. Finding 67 — loader-only assets allocate editable wrappers — fixed.
+70. Finding 68 — texture replacement probes before every successful load — fixed.
+71. Finding 69 — asset-operation cache ignores the requested data type — fixed.
+72. Finding 70 — existence checks probe irrelevant providers before cache/routing — fixed.
+73. Finding 71 — successful on-behalf-of registration formats failure text — fixed.
+74. Finding 72 — disconnected gamepads scan every control each update — fixed.
+75. Finding 73 — every content manager repeats base-load reflection — fixed.
+76. Finding 74 — every registered asset edit allocates a wrapper object — fixed.
+77. Finding 75 — case variants create duplicate map tilesheets — fixed.
+78. Finding 76 — explicit XNB fallback tilesheets get a double extension — fixed.
+79. Finding 77 — observable watchers start with an empty baseline — fixed.
+80. Finding 91 — explicit XNB map sheets are treated as different identities — fixed.
 
 ## Detailed findings
 
@@ -1008,6 +1009,17 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Only the legacy image extension is removed for comparison; genuinely different paths still disambiguate. Focused fixtures cover lower/upper-case `.xnb`, prefix/separator differences, and a truly different source.
 - **Status:** Fixed. Map tilesheet comparison now strips `.png` or `.xnb` ordinal-ignore-case.
 
+### 92. Canonical file paths are split and rejoined for every probe
+
+- **Affected code:** `SMAPI.Toolkit/Utilities/PathUtilities.cs` (`NormalizePath`), reached from `CaseInsensitiveFileLookup.GetFile`, `MinimalFileLookup`, content-pack APIs, and data helpers.
+- **Scenario:** Loading PNGs, maps, JSON, fonts, tilesheets, and other files from large Linux content packs where callers already pass canonical `/`-separated paths.
+- **Root cause:** Every `NormalizePath` call trimmed the string, used `string.Split` to allocate a segment array and substring for each component, then joined those segments into another string before the exact filesystem probe. This happened even when normalization could not change a character.
+- **Measured evidence:** Alternating old/new passes over 20,000 real installed mod-file paths took 74 ms and allocated 61.2 MiB through split/join versus 5 ms and effectively zero bytes through the canonical fast path, about 93% less normalization time in the warmed microbenchmark.
+- **Impact:** Startup and content-reload CPU plus short-lived GC pressure proportional to mod file probes; the target installation contains tens of thousands of content files.
+- **Expected benefit:** Canonical paths return the original string after two vectorized separator checks. Noncanonical paths are scanned once and written directly into one result string without segment arrays or substring objects.
+- **Risk:** Low. Existing root and trailing-separator behavior is retained; focused fixtures cover absolute/relative paths, Windows-style input, mixed and repeated separators, surrounding whitespace, root-only values, trailing separators, and canonical reference identity. Windows UNC roots remain preserved on Windows, while Unix now produces the platform-canonical single root expected by the existing fixture.
+- **Status:** Fixed for the .NET 6 runtime path. The netstandard compatibility target retains its prior implementation.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -1015,7 +1027,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, 84, and 89 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, 84, 89, and 92 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, 82, 85, 86, 87, 88, 90, and 91 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, 79, and 85 |
@@ -1024,14 +1036,14 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, 65, and 83 |
 | Content-manager lookup scaling | Findings 9, 53, 57, 58, and 73 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
-| Linux case-insensitive file lookup | Findings 11, 38, and 39 |
+| Linux case-insensitive file lookup | Findings 11, 38, 39, and 92 |
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, 71, and 74 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, 84, 86, 87, 90, and 91 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, 84, 86, 87, 90, 91, and 92 |
 | TMX map parsing and conversion | Findings 86, 87, 88, and 89 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
