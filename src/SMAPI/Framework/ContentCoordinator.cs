@@ -656,8 +656,10 @@ internal class ContentCoordinator : IDisposable
         if (invalidatedAssets.Count > 0)
         {
             // clear cached editor checks
-            foreach (IAssetName name in invalidatedAssets.Keys)
-                this.AssetOperationsByKey.RemoveWhere(name, static (key, invalidatedName) => key.Name.Equals(invalidatedName));
+            this.AssetOperationsByKey.RemoveWhere(
+                invalidatedAssets,
+                static (key, invalidated) => invalidated.ContainsKey(key.Name)
+            );
 
             // raise event
             this.OnAssetsInvalidated(invalidatedAssets.Keys);
