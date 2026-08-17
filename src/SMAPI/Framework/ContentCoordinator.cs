@@ -393,7 +393,11 @@ internal class ContentCoordinator : IDisposable
     /// <returns>Returns the invalidated asset names.</returns>
     public ICollection<IAssetName> InvalidateCache(IAssetName assetName, bool dispose = false)
     {
-        return this.InvalidateCache([assetName], dispose);
+        if (assetName == null)
+            throw new ArgumentException("The asset name list can't contain null values.", "assetNames");
+
+        IAssetName normalizedName = this.ParseAssetName(assetName.Name, allowLocales: true);
+        return this.InvalidateExactCache(normalizedName, normalizedNames: null, dispose: dispose);
     }
 
     /// <summary>Purge exact asset names from the cache in one transaction.</summary>
@@ -414,26 +418,33 @@ internal class ContentCoordinator : IDisposable
             normalizedNames.Add(this.ParseAssetName(assetName.Name, allowLocales: true));
         }
 
-        Dictionary<IAssetName, Type> invalidatedAssets = new();
+        return this.InvalidateExactCache(normalizedName: null, normalizedNames, dispose: dispose);
+    }
+
+    /// <summary>Purge one or more normalized exact asset names from the cache.</summary>
+    /// <param name="normalizedName">The single normalized name to invalidate, if applicable.</param>
+    /// <param name="normalizedNames">The normalized name set to invalidate, if applicable.</param>
+    /// <param name="dispose">Whether to dispose invalidated assets.</param>
+    /// <returns>Returns the invalidated asset names.</returns>
+    private ICollection<IAssetName> InvalidateExactCache(IAssetName? normalizedName, IReadOnlySet<IAssetName>? normalizedNames, bool dispose)
+    {
+        Dictionary<IAssetName, Type> invalidatedAssets = [];
         Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers = null;
 
         this.ContentManagerLock.InReadLock(() =>
         {
             // Directly check the exact cache keys in game content managers. Namespaced content managers don't cache assets.
-            foreach (IContentManager contentManager in this.GameContentManagers)
+            if (normalizedName is not null)
             {
-                foreach (IAssetName normalizedName in normalizedNames)
+                foreach (IContentManager contentManager in this.GameContentManagers)
+                    ContentCoordinator.InvalidateExactCacheEntry(contentManager, normalizedName, dispose, invalidatedAssets, ref loadedTextureManagers);
+            }
+            else
+            {
+                foreach (IContentManager contentManager in this.GameContentManagers)
                 {
-                    if (!contentManager.TryGetCachedAsset(normalizedName, out object? asset))
-                        continue;
-
-                    if (asset is Texture2D) // will edit in place
-                        ContentCoordinator.TrackLoadedTextureManager(ref loadedTextureManagers, normalizedName, contentManager);
-                    else
-                        contentManager.InvalidateCache(normalizedName, dispose);
-
-                    if (!invalidatedAssets.ContainsKey(normalizedName))
-                        invalidatedAssets[normalizedName] = asset.GetType();
+                    foreach (IAssetName name in normalizedNames!)
+                        ContentCoordinator.InvalidateExactCacheEntry(contentManager, name, dispose, invalidatedAssets, ref loadedTextureManagers);
                 }
             }
 
@@ -448,12 +459,34 @@ internal class ContentCoordinator : IDisposable
                     continue;
 
                 AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
-                if (!invalidatedAssets.ContainsKey(mapPath) && normalizedNames.Contains(mapPath))
+                bool matches = normalizedName is not null
+                    ? normalizedName.Equals(mapPath)
+                    : normalizedNames!.Contains(mapPath);
+                if (!invalidatedAssets.ContainsKey(mapPath) && matches)
                     invalidatedAssets[mapPath] = typeof(Map);
             }
         });
 
         return this.ProcessInvalidatedAssets(invalidatedAssets, loadedTextureManagers);
+    }
+
+    /// <summary>Invalidate one normalized exact asset from a content manager if it's loaded.</summary>
+    /// <param name="contentManager">The content manager to check.</param>
+    /// <param name="assetName">The normalized asset name.</param>
+    /// <param name="dispose">Whether to dispose the invalidated asset.</param>
+    /// <param name="invalidatedAssets">The invalidated asset types to update.</param>
+    /// <param name="loadedTextureManagers">The loaded texture managers to update.</param>
+    private static void InvalidateExactCacheEntry(IContentManager contentManager, IAssetName assetName, bool dispose, Dictionary<IAssetName, Type> invalidatedAssets, ref Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers)
+    {
+        if (!contentManager.TryGetCachedAsset(assetName, out object? asset))
+            return;
+
+        if (asset is Texture2D) // will edit in place
+            ContentCoordinator.TrackLoadedTextureManager(ref loadedTextureManagers, assetName, contentManager);
+        else
+            contentManager.InvalidateCache(assetName, dispose);
+
+        invalidatedAssets.TryAdd(assetName, asset.GetType());
     }
 
     /// <summary>Purge matched assets from the cache.</summary>
