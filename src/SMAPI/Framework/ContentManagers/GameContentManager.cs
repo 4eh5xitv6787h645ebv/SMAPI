@@ -74,12 +74,17 @@ internal class GameContentManager : BaseContentManager
     /// <inheritdoc />
     public override bool DoesAssetExist<T>(IAssetName assetName)
     {
-        if (base.DoesAssetExist<T>(assetName))
+        // Cached values remain available even if their source has since disappeared.
+        if (this.Cache.ContainsKey(assetName.Name))
             return true;
 
-        // managed asset
+        // Managed keys belong to their mod provider, so don't probe the vanilla filesystem first.
         if (this.Coordinator.TryParseManagedAssetKey(assetName.Name, out string? contentManagerId, out IAssetName? relativePath))
             return this.Coordinator.DoesManagedAssetExist<T>(contentManagerId, relativePath);
+
+        // vanilla asset
+        if (this.DoesGameAssetExist<T>(assetName))
+            return true;
 
         // custom asset from a loader
         string locale = this.GetLocale();

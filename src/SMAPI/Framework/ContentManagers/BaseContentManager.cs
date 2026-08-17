@@ -125,10 +125,19 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
     public virtual bool DoesAssetExist<T>(IAssetName assetName)
         where T : notnull
     {
-        if (this.CheckGameFolderForAssetExists && base.DoesAssetExist<T>(assetName.Name))
+        if (this.Cache.ContainsKey(assetName.Name))
             return true;
 
-        return this.Cache.ContainsKey(assetName.Name);
+        return this.CheckGameFolderForAssetExists && this.DoesGameAssetExist<T>(assetName);
+    }
+
+    /// <summary>Get whether an asset exists in the underlying game content provider.</summary>
+    /// <typeparam name="T">The expected asset type.</typeparam>
+    /// <param name="assetName">The normalized asset name.</param>
+    protected bool DoesGameAssetExist<T>(IAssetName assetName)
+        where T : notnull
+    {
+        return base.DoesAssetExist<T>(assetName.Name);
     }
 
     /// <inheritdoc />

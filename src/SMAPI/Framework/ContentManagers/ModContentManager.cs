@@ -85,9 +85,7 @@ internal sealed class ModContentManager : BaseContentManager
     /// <inheritdoc />
     public override bool DoesAssetExist<T>(IAssetName assetName)
     {
-        if (base.DoesAssetExist<T>(assetName))
-            return true;
-
+        // Mod content is deliberately never cached, so resolve the real file directly.
         assetName = this.ResolveAssetName(assetName);
         FileInfo file = this.GetModFile<T>(assetName.Name);
         return file.Exists;

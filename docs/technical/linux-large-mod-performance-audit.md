@@ -79,6 +79,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 67. Finding 67 — loader-only assets allocate editable wrappers — fixed.
 68. Finding 68 — texture replacement probes before every successful load — fixed.
 69. Finding 69 — asset-operation cache ignores the requested data type — fixed.
+70. Finding 70 — existence checks probe irrelevant providers before cache/routing — fixed.
 
 ## Detailed findings
 
@@ -772,6 +773,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium. Name invalidation must remove all cached type variants; focused coverage verifies composite-key identity and predicate removal of every matching variant while retaining unrelated entries.
 - **Status:** Fixed. The tick cache uses a value-type name/type key, and invalidation removes every entry whose asset name matches without allocating a captured predicate.
 
+### 70. Existence checks probe irrelevant providers before cache and managed routing
+
+- **Affected code:** `Framework/ContentManagers/BaseContentManager.cs`, `GameContentManager.cs`, and `ModContentManager.cs` (`DoesAssetExist`).
+- **Scenario:** Repeated existence checks for already-cached game assets and uncached managed `SMAPI/mod-id/path` assets, including localized and custom-map tilesheet resolution during content-pack transitions.
+- **Root cause:** Base existence logic queried MonoGame's content provider/filesystem before its dictionary cache. Game managers also sent managed mod keys through that guaranteed-useless vanilla probe before routing them, while mod managers hashed a cache which is deliberately always empty.
+- **Impact:** Redundant provider/filesystem traversal and cache hashing on content existence bursts.
+- **Expected benefit:** Cached game assets return after one dictionary probe; managed keys route directly to the owning mod; mod-file checks go directly to path resolution and file metadata.
+- **Risk:** Low to medium. Cached values still report present even if their source was deleted, matching prior behavior. Non-managed cache misses retain vanilla-provider then custom-loader ordering, and mod content remains explicitly non-caching.
+- **Status:** Fixed. Existence checks now separate cache, managed routing, vanilla provider, custom loader, and mod-file paths so only relevant sources are queried.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -779,7 +790,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, and 69 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, and 70 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, and 66 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, and 68 |
