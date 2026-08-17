@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Framework.Content;
@@ -20,11 +19,36 @@ internal class ContentCacheTests
         ContentCache cache = new(values);
         comparer.HashCalls = 0;
 
-        KeyValuePair<string, object> entry = cache.GetEntries().Single();
+        Dictionary<string, object>.Enumerator enumerator = cache.GetEntries().GetEnumerator();
+        enumerator.MoveNext().Should().BeTrue();
+        KeyValuePair<string, object> entry = enumerator.Current;
 
         entry.Key.Should().Be("asset");
         entry.Value.Should().BeSameAs(value);
+        enumerator.MoveNext().Should().BeFalse();
         comparer.HashCalls.Should().Be(0);
+    }
+
+    [Test(Description = "Assert that warmed cache-entry enumeration doesn't allocate.")]
+    public void GetEntries_DoesNotAllocate()
+    {
+        ContentCache cache = new(new Dictionary<string, object> { ["asset"] = new object() });
+        ContentCache.EntryEnumerable entries = cache.GetEntries();
+        int count = 0;
+
+        foreach (KeyValuePair<string, object> _ in entries)
+            count++;
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++)
+        {
+            foreach (KeyValuePair<string, object> _ in entries)
+                count++;
+        }
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        allocatedBytes.Should().Be(0);
+        count.Should().Be(10_001);
     }
 
     [Test(Description = "Assert that removing a cache entry performs one key lookup and reports whether it existed.")]

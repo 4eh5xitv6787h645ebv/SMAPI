@@ -71,6 +71,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 59. Finding 59 — intercepted operation groups allocate wrapper objects — fixed.
 60. Finding 60 — content routing state is case-sensitive on Linux — fixed.
 61. Finding 61 — no-op asset interception wraps every raw asset — fixed.
+62. Finding 62 — broad cache scans allocate an iterator per manager — fixed.
 
 ## Detailed findings
 
@@ -684,6 +685,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The load remains inside the same recursive-load context, while outer cache tracking, first-load handling, asset-loaded callbacks, exception behavior, and actual loader/editor paths are unchanged.
 - **Status:** Fixed. A null operation group now takes an immediate raw-load fast path; non-null groups retain the existing loader, wrapper, validation, and editor pipeline.
 
+### 62. Predicate cache scans allocate one iterator object per content manager
+
+- **Affected code:** `Framework/Content/ContentCache.cs` (`GetEntries`), `Framework/ContentManagers/IContentManager.cs` and `BaseContentManager.cs` (`GetCachedAssets`), and `Framework/ContentCoordinator.cs` (predicate invalidation).
+- **Scenario:** Broad Content Patcher invalidations scan cached assets across roughly one game content manager per code mod, including the many managers whose cache is empty.
+- **Root cause:** Although entry enumeration no longer re-hashed each key, it still crossed a `yield`/`IEnumerable` boundary which created an iterator state machine for every manager before examining its cache.
+- **Impact:** Transition allocation and garbage collection proportional to game content-manager count.
+- **Expected benefit:** Empty and populated manager scans obtain the dictionary's value-type enumerator directly, with no iterator object or boxed enumerator.
+- **Risk:** Low. The wrapper enumerates the same underlying dictionary in the same order and retains its mutation/version behavior; the API is internal.
+- **Status:** Fixed. Cache enumeration returns a concrete readonly view whose pattern-based `GetEnumerator` exposes the dictionary's struct enumerator. A warmed 10,000-pass regression check allocates zero bytes.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -694,7 +705,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, and 60 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, and 55 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, and 56 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, and 62 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |

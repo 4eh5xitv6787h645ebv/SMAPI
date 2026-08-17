@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Xna.Framework.Content;
+using StardewModdingAPI.Framework.Content;
 using StardewModdingAPI.Framework.Exceptions;
 using StardewValley;
 
@@ -72,7 +73,7 @@ internal interface IContentManager : IDisposable
     bool TryGetCachedAsset(IAssetName assetName, [NotNullWhen(true)] out object? asset);
 
     /// <summary>Get all assets in the cache.</summary>
-    IEnumerable<KeyValuePair<string, object>> GetCachedAssets();
+    ContentCache.EntryEnumerable GetCachedAssets();
 
     /// <summary>Purge matched assets from the cache.</summary>
     /// <param name="assetName">The asset name to dispose.</param>
