@@ -7,17 +7,48 @@ This assumes `find-game-folder.targets` has already been imported and validated.
 
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <_IsLinux>$([MSBuild]::IsOSPlatform('Linux'))</_IsLinux>
+    <_LinuxHostProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', 'SMAPI.Host', 'SMAPI.Host.csproj'))</_LinuxHostProject>
+    <_LinuxHostPublishDir>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', 'SMAPI.Host', 'bin', '$(Configuration)', 'net10.0', 'linux-x64', 'publish'))</_LinuxHostPublishDir>
+    <_LinuxNet6HostProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', 'SMAPI.Host.Net6', 'SMAPI.Host.Net6.csproj'))</_LinuxNet6HostProject>
+    <_LinuxNet6HostPublishDir>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', 'SMAPI.Host.Net6', 'bin', '$(Configuration)', 'net6.0', 'linux-x64', 'publish'))</_LinuxNet6HostPublishDir>
+    <_LinuxInstallerAssetsDir>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', '..', 'src', 'SMAPI.Installer', 'assets'))</_LinuxInstallerAssetsDir>
+    <_LinuxGamePath Condition="'$(GamePath)' != ''">$([MSBuild]::NormalizePath('$(GamePath)'))</_LinuxGamePath>
+  </PropertyGroup>
+
   <Target Name="CopySmapiFiles" AfterTargets="AfterBuild">
     <CallTarget Targets="CopySMAPI;CopyDefaultMods" />
   </Target>
-  <Target Name="CopySMAPI" Condition="'$(MSBuildProjectName)' == 'SMAPI'">
+  <Target Name="PrepareLinuxHosts" Condition="'$(MSBuildProjectName)' == 'SMAPI' AND '$(_IsLinux)' == 'true'">
+    <RemoveDir Directories="$(_LinuxHostPublishDir);$(_LinuxNet6HostPublishDir)" />
+    <Exec Command="dotnet publish &quot;$(_LinuxHostProject)&quot; --configuration &quot;$(Configuration)&quot; --runtime linux-x64 --self-contained false --output &quot;$(_LinuxHostPublishDir)&quot;" />
+    <Exec Command="dotnet publish &quot;$(_LinuxNet6HostProject)&quot; --configuration &quot;$(Configuration)&quot; --runtime linux-x64 --self-contained true --output &quot;$(_LinuxNet6HostPublishDir)&quot;" />
+    <ItemGroup>
+      <_LinuxPrivateRuntimeFile Include="$(_LinuxHostPublishDir)/dotnet/**/*" />
+    </ItemGroup>
+  </Target>
+  <Target Name="CopySMAPI" Condition="'$(MSBuildProjectName)' == 'SMAPI'" DependsOnTargets="PrepareLinuxHosts">
     <!-- SMAPI -->
     <ItemGroup>
       <TranslationFiles Include="$(TargetDir)\i18n\*.json" />
     </ItemGroup>
     <Copy SourceFiles="$(TargetDir)\$(TargetName).dll" DestinationFolder="$(GamePath)" />
+    <Copy SourceFiles="$(TargetDir)\$(TargetName).dll" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI-net6.dll" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(TargetDir)\$(TargetName).dll" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI-net10.dll" Condition="'$(_IsLinux)' == 'true'" />
     <Copy SourceFiles="$(TargetDir)\$(TargetName).exe" DestinationFolder="$(GamePath)" Condition="$(OS) == 'Windows_NT'" />
-    <Copy SourceFiles="$(TargetDir)\$(TargetName)" DestinationFolder="$(GamePath)" Condition="$(OS) != 'Windows_NT'" />
+    <Copy SourceFiles="$(TargetDir)\$(TargetName)" DestinationFolder="$(GamePath)" Condition="$(OS) != 'Windows_NT' AND '$(_IsLinux)' != 'true'" />
+    <Copy SourceFiles="$(_LinuxInstallerAssetsDir)/smapi-runtime-dispatcher.sh" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(_LinuxHostPublishDir)/StardewModdingAPI-net10" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI-net10" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(_LinuxNet6HostPublishDir)/StardewModdingAPI-net6" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI-net6" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(TargetDir)/$(TargetName).deps.json" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI.deps.json" Condition="'$(_IsLinux)' == 'true'" />
+    <Exec Command="grep -F -c '&quot;StardewModdingAPI.dll&quot;: {}' &quot;$(TargetDir)/$(TargetName).deps.json&quot; | grep -q '^1$'" Condition="'$(_IsLinux)' == 'true'" />
+    <Exec Command="sed 's/&quot;StardewModdingAPI.dll&quot;: {}/&quot;StardewModdingAPI-net10.dll&quot;: {}/' &quot;$(TargetDir)/$(TargetName).deps.json&quot; &gt; &quot;$(_LinuxGamePath)/StardewModdingAPI-net10.deps.json&quot;" Condition="'$(_IsLinux)' == 'true'" />
+    <Exec Command="grep -F '&quot;StardewModdingAPI-net10.dll&quot;: {}' &quot;$(_LinuxGamePath)/StardewModdingAPI-net10.deps.json&quot; &gt; /dev/null &amp;&amp; ! grep -F '&quot;StardewModdingAPI.dll&quot;: {}' &quot;$(_LinuxGamePath)/StardewModdingAPI-net10.deps.json&quot; &gt; /dev/null" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(_LinuxInstallerAssetsDir)/runtimeconfig-linux.json" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI.runtimeconfig.json" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(_LinuxInstallerAssetsDir)/runtimeconfig-linux.json" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI-net10.runtimeconfig.json" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(_LinuxGamePath)/Stardew Valley.deps.json" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI-net6.deps.json" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(_LinuxInstallerAssetsDir)/runtimeconfig-linux-net6.json" DestinationFiles="$(_LinuxGamePath)/StardewModdingAPI-net6.runtimeconfig.json" Condition="'$(_IsLinux)' == 'true'" />
     <Copy SourceFiles="$(TargetDir)\$(TargetName).xml" DestinationFolder="$(GamePath)" />
     <Copy SourceFiles="$(TargetDir)\SMAPI.blacklist.json" DestinationFiles="$(GamePath)\smapi-internal\blacklist.json" />
     <Copy SourceFiles="$(TargetDir)\SMAPI.config.json" DestinationFiles="$(GamePath)\smapi-internal\config.json" />
@@ -35,6 +66,7 @@ This assumes `find-game-folder.targets` has already been imported and validated.
     <Copy SourceFiles="$(TargetDir)\Mono.Cecil.dll" DestinationFolder="$(GamePath)\smapi-internal" />
     <Copy SourceFiles="$(TargetDir)\Mono.Cecil.Mdb.dll" DestinationFolder="$(GamePath)\smapi-internal" />
     <Copy SourceFiles="$(TargetDir)\Mono.Cecil.Pdb.dll" DestinationFolder="$(GamePath)\smapi-internal" />
+    <Copy SourceFiles="$(TargetDir)\Mono.Cecil.Rocks.dll" DestinationFolder="$(GamePath)\smapi-internal" Condition="'$(_IsLinux)' == 'true'" />
     <Copy SourceFiles="$(TargetDir)\MonoMod.Backports.dll" DestinationFolder="$(GamePath)\smapi-internal" />
     <Copy SourceFiles="$(TargetDir)\MonoMod.Core.dll" DestinationFolder="$(GamePath)\smapi-internal" />
     <Copy SourceFiles="$(TargetDir)\MonoMod.Iced.dll" DestinationFolder="$(GamePath)\smapi-internal" />
@@ -44,10 +76,27 @@ This assumes `find-game-folder.targets` has already been imported and validated.
     <!-- FluentHttpClient + dependencies -->
     <Copy SourceFiles="$(TargetDir)\Pathoschild.Http.Client.dll" DestinationFolder="$(GamePath)\smapi-internal" />
     <Copy SourceFiles="$(TargetDir)\System.Net.Http.Formatting.dll" DestinationFolder="$(GamePath)\smapi-internal" />
+
+    <!-- generated-deps transitive dependencies -->
+    <Copy SourceFiles="$(TargetDir)\HtmlAgilityPack.dll" DestinationFolder="$(GamePath)\smapi-internal" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="$(TargetDir)\Newtonsoft.Json.Bson.dll" DestinationFolder="$(GamePath)\smapi-internal" Condition="'$(_IsLinux)' == 'true'" />
+
+    <!-- private Linux .NET host/runtime -->
+    <RemoveDir Directories="$(_LinuxGamePath)/smapi-internal/dotnet" Condition="'$(_IsLinux)' == 'true'" />
+    <Copy SourceFiles="@(_LinuxPrivateRuntimeFile)" DestinationFiles="@(_LinuxPrivateRuntimeFile->'$(_LinuxGamePath)/smapi-internal/dotnet/%(RecursiveDir)%(Filename)%(Extension)')" Condition="'$(_IsLinux)' == 'true'" />
+
+    <!-- executable modes aren't guaranteed to survive the copy -->
+    <ItemGroup Condition="'$(_IsLinux)' == 'true'">
+      <_InstalledLinuxCreatedump Include="$(_LinuxGamePath)/smapi-internal/dotnet/**/createdump" />
+      <_InstalledLinuxExecutable Include="$(_LinuxGamePath)/StardewModdingAPI;$(_LinuxGamePath)/StardewModdingAPI-net6;$(_LinuxGamePath)/StardewModdingAPI-net10" />
+      <_InstalledLinuxExecutable Include="@(_InstalledLinuxCreatedump)" />
+    </ItemGroup>
+    <Error Condition="'$(_IsLinux)' == 'true' AND '@(_InstalledLinuxCreatedump)' == ''" Text="The deployed private .NET runtime is missing its createdump executable." />
+    <Exec Command="chmod 755 @(_InstalledLinuxExecutable->'&quot;%(FullPath)&quot;', ' ')" Condition="'$(_IsLinux)' == 'true'" />
   </Target>
 
   <!-- .NET metadata files -->
-  <Target Name="CopyNetMetadata" Condition="'$(MSBuildProjectName)' == 'SMAPI.Installer'" AfterTargets="PostBuildEvent">
+  <Target Name="CopyNetMetadata" Condition="'$(MSBuildProjectName)' == 'SMAPI.Installer' AND '$(_IsLinux)' != 'true'" AfterTargets="PostBuildEvent">
     <Copy SourceFiles="$(TargetDir)\assets\runtimeconfig.json" DestinationFiles="$(GamePath)\StardewModdingAPI.runtimeconfig.json" />
     <Copy SourceFiles="$(TargetDir)\assets\windows-exe-config.xml" DestinationFiles="$(GamePath)\StardewModdingAPI.exe.config" Condition="$(OS) == 'Windows_NT'" />
     <Copy SourceFiles="$(GamePath)\Stardew Valley.deps.json" DestinationFiles="$(GamePath)\StardewModdingAPI.deps.json" Condition="!Exists('$(GamePath)\StardewModdingAPI.deps.json')" />

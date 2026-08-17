@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>StardewModdingAPI-net10</AssemblyName>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <PrivateDotNetRuntimeVersion>10.0.11</PrivateDotNetRuntimeVersion>
+    <RuntimeFrameworkVersion>$(PrivateDotNetRuntimeVersion)</RuntimeFrameworkVersion>
+    <SelfContained>false</SelfContained>
+    <UseAppHost>true</UseAppHost>
+    <AppHostDotNetSearch>AppRelative</AppHostDotNetSearch>
+    <AppHostRelativeDotNet>smapi-internal/dotnet</AppHostRelativeDotNet>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageDownload Include="Microsoft.NETCore.App.Runtime.linux-x64" Version="[$(PrivateDotNetRuntimeVersion)]" />
+  </ItemGroup>
+
+  <Target Name="CleanPrivateDotNetRuntime" BeforeTargets="Publish">
+    <RemoveDir Directories="$(PublishDir)dotnet" />
+  </Target>
+
+  <Target Name="CopyPrivateDotNetRuntime" AfterTargets="Publish">
+    <PropertyGroup>
+      <_PrivateRuntimePackagePath>$(NuGetPackageRoot)microsoft.netcore.app.runtime.linux-x64/$(PrivateDotNetRuntimeVersion)</_PrivateRuntimePackagePath>
+      <_PrivateRuntimeSharedPath>$(PublishDir)dotnet/shared/Microsoft.NETCore.App/$(PrivateDotNetRuntimeVersion)</_PrivateRuntimeSharedPath>
+    </PropertyGroup>
+    <ItemGroup>
+      <_PrivateRuntimeSharedFile Include="$(_PrivateRuntimePackagePath)/runtimes/linux-x64/lib/net10.0/*" />
+      <_PrivateRuntimeSharedFile Include="$(_PrivateRuntimePackagePath)/runtimes/linux-x64/native/*" Exclude="$(_PrivateRuntimePackagePath)/runtimes/linux-x64/native/libhostfxr.so" />
+      <_PrivateRuntimeNotice Include="$(_PrivateRuntimePackagePath)/LICENSE.TXT" />
+      <_PrivateRuntimeNotice Include="$(_PrivateRuntimePackagePath)/THIRD-PARTY-NOTICES.TXT" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(_PrivateRuntimePackagePath)/runtimes/linux-x64/native/libhostfxr.so')" Text="The private .NET runtime package wasn't restored at '$(_PrivateRuntimePackagePath)'." />
+    <Copy SourceFiles="@(_PrivateRuntimeSharedFile)" DestinationFolder="$(_PrivateRuntimeSharedPath)" />
+    <Copy SourceFiles="$(_PrivateRuntimePackagePath)/runtimes/linux-x64/native/libhostfxr.so" DestinationFolder="$(PublishDir)dotnet/host/fxr/$(PrivateDotNetRuntimeVersion)" />
+    <Copy SourceFiles="@(_PrivateRuntimeNotice)" DestinationFolder="$(PublishDir)dotnet" />
+  </Target>
+</Project>

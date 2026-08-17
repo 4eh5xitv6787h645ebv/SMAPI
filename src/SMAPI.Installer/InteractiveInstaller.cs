@@ -49,6 +49,14 @@ internal class InteractiveInstaller
         yield return GetInstallPath("StardewModdingAPI.pdb");      // before 3.18.4 (Windows only)
         yield return GetInstallPath("StardewModdingAPI.runtimeconfig.json");
         yield return GetInstallPath("StardewModdingAPI.xml");
+        yield return GetInstallPath("StardewModdingAPI-net6");     // Linux only
+        yield return GetInstallPath("StardewModdingAPI-net6.deps.json");
+        yield return GetInstallPath("StardewModdingAPI-net6.dll");
+        yield return GetInstallPath("StardewModdingAPI-net6.runtimeconfig.json");
+        yield return GetInstallPath("StardewModdingAPI-net10");    // Linux only
+        yield return GetInstallPath("StardewModdingAPI-net10.deps.json");
+        yield return GetInstallPath("StardewModdingAPI-net10.dll");
+        yield return GetInstallPath("StardewModdingAPI-net10.runtimeconfig.json");
         yield return GetInstallPath("smapi-internal");
         yield return GetInstallPath("steam_appid.txt");
 
@@ -405,25 +413,58 @@ internal class InteractiveInstaller
 
                     // mark files executable
                     // (MSBuild doesn't keep permission flags for files zipped in a build task.)
-                    foreach (string path in new[] { paths.VanillaLaunchScriptPath, paths.UnixSmapiExecutablePath })
+                    List<string> executablePaths = [paths.VanillaLaunchScriptPath, paths.UnixSmapiExecutablePath];
+                    if (context.Platform == Platform.Linux)
                     {
-                        new Process
+                        executablePaths.Add(Path.Combine(paths.GamePath, "StardewModdingAPI-net6"));
+                        executablePaths.Add(Path.Combine(paths.GamePath, "StardewModdingAPI-net10"));
+
+                        string privateRuntimePath = Path.Combine(paths.GamePath, "smapi-internal", "dotnet");
+                        string[] createdumpPaths = Directory.Exists(privateRuntimePath)
+                            ? Directory.EnumerateFiles(privateRuntimePath, "createdump", SearchOption.AllDirectories).ToArray()
+                            : [];
+                        if (createdumpPaths.Length == 0)
+                            throw new InvalidOperationException("The installed private .NET runtime is missing its createdump executable.");
+                        executablePaths.AddRange(createdumpPaths);
+                    }
+
+                    foreach (string path in executablePaths)
+                    {
+                        using Process process = new()
                         {
                             StartInfo = new ProcessStartInfo
                             {
                                 FileName = "chmod",
-                                Arguments = $"755 \"{path}\"",
-                                CreateNoWindow = true
+                                UseShellExecute = false,
+                                CreateNoWindow = true,
+                                RedirectStandardError = true
                             }
-                        }.Start();
+                        };
+                        process.StartInfo.ArgumentList.Add("755");
+                        process.StartInfo.ArgumentList.Add(path);
+                        process.Start();
+                        string error = process.StandardError.ReadToEnd();
+                        process.WaitForExit();
+                        if (process.ExitCode != 0)
+                        {
+                            throw new IOException(
+                                $"Failed setting executable permissions for '{path}' (exit code {process.ExitCode})"
+                                + (string.IsNullOrWhiteSpace(error) ? "." : $": {error.Trim()}")
+                            );
+                        }
                     }
                 }
 
-                // copy the game's deps.json file
+                // copy the game's deps.json file for the host which uses the game's .NET runtime
                 // (This is needed to resolve native DLLs like libSkiaSharp.)
                 File.Copy(
                     sourceFileName: Path.Combine(paths.GamePath, "Stardew Valley.deps.json"),
-                    destFileName: Path.Combine(paths.GamePath, "StardewModdingAPI.deps.json"),
+                    destFileName: Path.Combine(
+                        paths.GamePath,
+                        context.Platform == Platform.Linux
+                            ? "StardewModdingAPI-net6.deps.json"
+                            : "StardewModdingAPI.deps.json"
+                    ),
                     overwrite: true
                 );
 
