@@ -39,25 +39,37 @@ internal class Program
             return;
         }
 
-        // unzip bundle into temp folder
-        DirectoryInfo bundleDir = new(Program.ExtractedBundlePath);
-        Console.WriteLine("Extracting install files...");
-        ZipFile.ExtractToDirectory(zipFile.FullName, bundleDir.FullName);
-
-        // set up assembly resolution
-        AppDomain.CurrentDomain.AssemblyResolve += Program.CurrentDomain_AssemblyResolve;
-
-        // launch installer
-        var installer = new InteractiveInstaller(bundleDir.FullName);
-
+        string? error = null;
         try
         {
-            installer.Run(args);
+            // unzip bundle into temp folder
+            DirectoryInfo bundleDir = new(Program.ExtractedBundlePath);
+            Console.WriteLine("Extracting install files...");
+            ZipFile.ExtractToDirectory(zipFile.FullName, bundleDir.FullName);
+
+            // set up assembly resolution and launch installer
+            AppDomain.CurrentDomain.AssemblyResolve += Program.CurrentDomain_AssemblyResolve;
+            try
+            {
+                var installer = new InteractiveInstaller(bundleDir.FullName);
+                installer.Run(args);
+            }
+            finally
+            {
+                AppDomain.CurrentDomain.AssemblyResolve -= Program.CurrentDomain_AssemblyResolve;
+            }
         }
         catch (Exception ex)
         {
-            Program.PrintErrorAndExit($"The installer failed with an unexpected exception.\nIf you need help fixing this error, see https://smapi.io/help\n\n{ex}");
+            error = $"The installer failed with an unexpected exception.\nIf you need help fixing this error, see https://smapi.io/help\n\n{ex}";
         }
+        finally
+        {
+            Program.TryDeleteExtractedBundle();
+        }
+
+        if (error != null)
+            Program.PrintErrorAndExit(error);
     }
 
     /*********
@@ -82,6 +94,20 @@ internal class Program
         {
             Console.WriteLine($"Error resolving assembly: {ex}");
             return null;
+        }
+    }
+
+    /// <summary>Delete the temporary extracted installer bundle if possible.</summary>
+    private static void TryDeleteExtractedBundle()
+    {
+        try
+        {
+            if (Directory.Exists(Program.ExtractedBundlePath))
+                Directory.Delete(Program.ExtractedBundlePath, recursive: true);
+        }
+        catch
+        {
+            // best-effort cleanup; loaded files may still be locked on some platforms
         }
     }
 
