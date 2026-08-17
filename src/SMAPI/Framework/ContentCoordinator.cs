@@ -862,11 +862,8 @@ internal class ContentCoordinator : IDisposable
     {
         try
         {
-            if (this.VanillaContentManager.DoesAssetExist<T>(assetName))
-            {
-                asset = this.VanillaContentManager.Load<T>(assetName);
-                return true;
-            }
+            asset = this.VanillaContentManager.Load<T>(assetName);
+            return true;
         }
         catch
         {
