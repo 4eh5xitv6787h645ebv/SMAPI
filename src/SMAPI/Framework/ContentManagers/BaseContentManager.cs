@@ -340,10 +340,7 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
         {
             if (!this.BaseLoadProxyCache.TryGetValue(typeof(T), out object? cacheEntry))
             {
-                MethodInfo method = typeof(ContentManager).GetMethod(nameof(ContentManager.Load)) ?? throw new InvalidOperationException($"Can't get required method '{nameof(ContentManager)}.{nameof(ContentManager.Load)}'.");
-                method = method.MakeGenericMethod(typeof(T));
-                IntPtr pointer = method.MethodHandle.GetFunctionPointer();
-                this.BaseLoadProxyCache[typeof(T)] = cacheEntry = Activator.CreateInstance(typeof(Func<string, T>), this, pointer) ?? throw new InvalidOperationException($"Can't proxy required method '{nameof(ContentManager)}.{nameof(ContentManager.Load)}'.");
+                this.BaseLoadProxyCache[typeof(T)] = cacheEntry = Activator.CreateInstance(typeof(Func<string, T>), this, BaseLoadMethod<T>.FunctionPointer) ?? throw new InvalidOperationException($"Can't proxy required method '{nameof(ContentManager)}.{nameof(ContentManager.Load)}'.");
             }
 
             Func<string, T> baseLoad = (Func<string, T>)cacheEntry;
@@ -352,6 +349,21 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
         }
 
         return this.ReadAsset<T>(assetName.Name, this.TrackUncachedDisposable);
+    }
+
+    /// <summary>The nonvirtual base content-load method specialized once per asset type.</summary>
+    /// <typeparam name="T">The asset type.</typeparam>
+    private static class BaseLoadMethod<T>
+    {
+        /// <summary>The callable base-method pointer shared by every content manager.</summary>
+        public static readonly IntPtr FunctionPointer = BaseLoadMethod<T>.GetFunctionPointer();
+
+        /// <summary>Resolve the specialized base method.</summary>
+        private static IntPtr GetFunctionPointer()
+        {
+            MethodInfo method = typeof(ContentManager).GetMethod(nameof(ContentManager.Load)) ?? throw new InvalidOperationException($"Can't get required method '{nameof(ContentManager)}.{nameof(ContentManager.Load)}'.");
+            return method.MakeGenericMethod(typeof(T)).MethodHandle.GetFunctionPointer();
+        }
     }
 
     /// <summary>Track an uncached disposable asset without retaining it, and periodically prune collected assets.</summary>
