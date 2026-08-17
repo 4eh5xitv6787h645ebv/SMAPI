@@ -920,6 +920,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The fast path applies only when every source alpha is 255, for which the existing overlay branch always assigns the source color regardless of destination. Empty and partially transparent inputs retain existing behavior.
 - **Status:** Fixed. Opaque overlays and opaque effective rectangles now take the direct upload path, with focused coverage for opaque, translucent, transparent, empty, offset, and strided spans.
 
+### 84. Residual map and localized routing paths allocate avoidable helpers
+
+- **Affected code:** `Framework/Content/AssetDataForMap.cs` (tilesheet ID disambiguation) and `Framework/ContentManagers/BaseContentManager.cs` (`LoadLocalized`).
+- **Scenario:** Repeated map patches add genuinely different same-ID tilesheets, or a non-English player requests a cached base asset using casing different from the localized-name mapping.
+- **Root cause:** Tilesheet disambiguation created an enumerable iterator and capturing predicate to find the next suffix. Localized loading used case-sensitive string inequality after a case-insensitive dictionary hit, so case-only differences reparsed an already equivalent base key.
+- **Impact:** Small transition allocations and routing work multiplied by conflicting map patches or mixed-case localized loads.
+- **Expected benefit:** Suffix discovery is a direct allocation-free loop, and equivalent localized base keys proceed directly to the cache load without another parsed-name lookup.
+- **Risk:** Low. Generated suffix order remains `z_id`, `z_id_2`, and onward. Localized comparison now matches the dictionary and `IAssetName` ordinal-ignore-case identity already used by the surrounding cache.
+- **Status:** Fixed. Map suffix probing no longer uses LINQ, and cached localized key routing uses ordinal-ignore-case equality.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -927,7 +937,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, and 80 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, and 84 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, and 82 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, and 79 |
@@ -943,7 +953,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, 71, and 74 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, and 83 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, and 84 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
