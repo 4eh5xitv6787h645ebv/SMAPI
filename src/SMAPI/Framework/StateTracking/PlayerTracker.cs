@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using StardewModdingAPI.Enums;
-using StardewModdingAPI.Framework.StateTracking.Comparers;
 using StardewModdingAPI.Framework.StateTracking.FieldWatchers;
 using StardewValley;
 
@@ -14,20 +13,8 @@ internal class PlayerTracker : IDisposable
     /*********
     ** Fields
     *********/
-    /// <summary>The player's inventory as of the last reset.</summary>
-    private readonly Dictionary<Item, int> PreviousInventory = [];
-
-    /// <summary>The player's inventory change as of the last update.</summary>
-    private readonly Dictionary<Item, int> CurrentInventory = [];
-
-    /// <summary>Whether inventory changes are currently being tracked.</summary>
-    private bool IsTrackingInventoryChanges;
-
-    /// <summary>A pooled set used to track the added items when detecting changes.</summary>
-    private readonly HashSet<Item> PooledAdded;
-
-    /// <summary>A pooled set used to track the removed items when detecting changes.</summary>
-    private readonly HashSet<Item> PooledRemoved;
+    /// <summary>Tracks the player's inventory through slot and stack notifications.</summary>
+    private readonly InventoryTracker InventoryTracker;
 
     /// <summary>The player's last valid location.</summary>
     private GameLocation? LastValidLocation;
@@ -58,6 +45,7 @@ internal class PlayerTracker : IDisposable
     {
         // init player data
         this.Player = player;
+        this.InventoryTracker = new InventoryTracker(player.Items, includeRemovedStackChanges: true);
 
         // init trackers
         this.LocationWatcher = WatcherFactory.ForReference($"player.{nameof(player.currentLocation)}", this.GetCurrentLocation);
@@ -74,11 +62,6 @@ internal class PlayerTracker : IDisposable
         // track watchers for convenience
         this.Watchers.Add(this.LocationWatcher);
         this.Watchers.AddRange(this.SkillWatchers.Values);
-
-        // init pooled sets
-        var comparer = new ObjectReferenceComparer<Item>();
-        this.PooledAdded = new HashSet<Item>(comparer);
-        this.PooledRemoved = new HashSet<Item>(comparer);
     }
 
     /// <summary>Update the current values if needed.</summary>
@@ -92,28 +75,11 @@ internal class PlayerTracker : IDisposable
         foreach (IWatcher watcher in this.Watchers)
             watcher.Update();
 
-        // activate/deactivate with a fresh baseline, so changes from while tracking was disabled aren't reported
-        if (this.IsTrackingInventoryChanges != trackInventoryChanges)
-        {
-            this.IsTrackingInventoryChanges = trackInventoryChanges;
-            this.PreviousInventory.Clear();
-            this.CurrentInventory.Clear();
-
-            if (trackInventoryChanges)
-            {
-                this.SaveInventoryTo(this.CurrentInventory);
-                foreach ((Item item, int stack) in this.CurrentInventory)
-                    this.PreviousInventory.Add(item, stack);
-            }
-            return;
-        }
-
-        // update inventory only when a mod can observe the result
-        if (!trackInventoryChanges)
-            return;
-
-        this.CurrentInventory.Clear();
-        this.SaveInventoryTo(this.CurrentInventory);
+        // Normal items push slot and stack notifications. Retain per-tick polling only for mod items
+        // which override Item.Stack and therefore don't use the game's observable stack field.
+        this.InventoryTracker.Update(trackInventoryChanges);
+        if (this.InventoryTracker.RequiresStackPolling)
+            this.InventoryTracker.UpdatePolledStacks();
     }
 
     /// <summary>Reset all trackers so their current values are the baseline.</summary>
@@ -123,13 +89,7 @@ internal class PlayerTracker : IDisposable
         foreach (IWatcher watcher in this.Watchers)
             watcher.Reset();
 
-        // reset PreviousInventory to match current when inventory tracking is active
-        if (!this.IsTrackingInventoryChanges)
-            return;
-
-        this.PreviousInventory.Clear();
-        foreach ((Item item, int stack) in this.CurrentInventory)
-            this.PreviousInventory.Add(item, stack);
+        this.InventoryTracker.Reset();
     }
 
     /// <summary>Get the player's current location, ignoring temporary null values.</summary>
@@ -144,52 +104,15 @@ internal class PlayerTracker : IDisposable
     /// <returns>Returns whether anything changed.</returns>
     public bool TryGetInventoryChanges([NotNullWhen(true)] out SnapshotItemListDiff? changes)
     {
-        if (!this.IsTrackingInventoryChanges)
-        {
-            changes = null;
-            return false;
-        }
-
-        this.PooledAdded.Clear();
-        this.PooledRemoved.Clear();
-
-        foreach (Item item in this.PreviousInventory.Keys)
-        {
-            if (!this.CurrentInventory.ContainsKey(item))
-                this.PooledRemoved.Add(item);
-        }
-
-        foreach (Item item in this.CurrentInventory.Keys)
-        {
-            if (!this.PreviousInventory.ContainsKey(item))
-                this.PooledAdded.Add(item);
-        }
-
-        return SnapshotItemListDiff.TryGetChanges(added: this.PooledAdded, removed: this.PooledRemoved, stackSizes: this.PreviousInventory, stackItemsToCheck: null, additionalStackSizes: null, out changes);
+        return this.InventoryTracker.TryGetChanges(out changes);
     }
 
     /// <summary>Release watchers and resources.</summary>
     public void Dispose()
     {
-        this.PreviousInventory.Clear();
-        this.CurrentInventory.Clear();
+        this.InventoryTracker.Dispose();
 
         foreach (IWatcher watcher in this.Watchers)
             watcher.Dispose();
-    }
-
-
-    /*********
-    ** Private methods
-    *********/
-    /// <summary>Get the player's current inventory.</summary>
-    /// <param name="inventory">The dictionary to fill with the player's inventory.</param>
-    private void SaveInventoryTo(Dictionary<Item, int> inventory)
-    {
-        foreach (Item? item in this.Player.Items)
-        {
-            if (item is not null)
-                inventory[item] = item.Stack;
-        }
     }
 }
