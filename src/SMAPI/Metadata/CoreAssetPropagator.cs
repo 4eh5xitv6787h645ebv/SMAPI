@@ -167,6 +167,15 @@ internal class CoreAssetPropagator
             or OtherAssetRoute.Weapons;
     }
 
+    /// <summary>Get whether a propagation route can share an item registry reset with an adjacent route.</summary>
+    internal static bool CanShareItemRegistryReset(OtherAssetRoute route)
+    {
+        return route is
+            OtherAssetRoute.Boots
+            or OtherAssetRoute.Furniture
+            or OtherAssetRoute.Hats;
+    }
+
     /// <summary>Reload one of the game's core assets (if applicable).</summary>
     /// <param name="contentManagers">The content managers whose assets to update.</param>
     /// <param name="assets">The asset keys and types to reload.</param>
@@ -188,7 +197,7 @@ internal class CoreAssetPropagator
             Dictionary<string, List<NPC>>? charactersByName = null;
             HashSet<string>? oldWarpTargets = null;
             HashSet<string>? newWarpTargets = null;
-            bool itemRegistryResetPending = false;
+            bool previousNoOpItemRegistryResetSucceeded = false;
 
             // Build world indexes when a batch contains multiple matching assets. Also adapt across separate
             // transactions in the same tick: large content updates often invalidate maps one at a time while the
@@ -241,6 +250,8 @@ internal class CoreAssetPropagator
             foreach ((IAssetName assetName, Type assetType) in assets)
             {
                 bool changed = false;
+                bool canSharePreviousItemRegistryReset = previousNoOpItemRegistryResetSucceeded;
+                previousNoOpItemRegistryResetSucceeded = false;
 
                 try
                 {
@@ -250,14 +261,7 @@ internal class CoreAssetPropagator
                         ? CoreAssetPropagator.GetOtherAssetRoute(assetName.BaseName)
                         : OtherAssetRoute.None;
                     bool resetsItemRegistry = !isImage && !isMap && CoreAssetPropagator.ResetsItemRegistry(otherRoute);
-
-                    // Item-data routes only assign a new data source and then clear the same shared cache. Coalesce
-                    // adjacent routes, but flush before any other propagation so its observable ordering is unchanged.
-                    if (itemRegistryResetPending && !resetsItemRegistry)
-                    {
-                        this.ResetItemRegistry();
-                        itemRegistryResetPending = false;
-                    }
+                    bool canShareItemRegistryReset = resetsItemRegistry && CoreAssetPropagator.CanShareItemRegistryReset(otherRoute);
 
                     // image
                     if (isImage)
@@ -282,8 +286,17 @@ internal class CoreAssetPropagator
                     // any other type
                     else
                     {
-                        changed = this.PropagateOther(assetName, otherRoute, ignoreWorld, charactersByName);
-                        itemRegistryResetPending |= changed && resetsItemRegistry;
+                        bool propagated = this.PropagateOther(assetName, otherRoute, ignoreWorld, charactersByName);
+                        if (propagated && resetsItemRegistry)
+                        {
+                            // Boots, furniture, and hats have no propagation work before clearing the same shared
+                            // cache. A successful reset for one therefore also satisfies immediately adjacent routes
+                            // from that set. Every data-loading item route retains its own reset after the load.
+                            if (!canShareItemRegistryReset || !canSharePreviousItemRegistryReset)
+                                this.ResetItemRegistry();
+                            previousNoOpItemRegistryResetSucceeded = canShareItemRegistryReset;
+                        }
+                        changed = propagated;
                     }
                 }
                 catch (Exception ex)
@@ -293,9 +306,6 @@ internal class CoreAssetPropagator
 
                 propagatedAssets[assetName] = changed;
             }
-
-            if (itemRegistryResetPending)
-                this.ResetItemRegistry();
         }
 
         // reload NPC pathfinding cache if any map routes changed
