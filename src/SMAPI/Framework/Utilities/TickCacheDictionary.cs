@@ -57,6 +57,23 @@ internal class TickCacheDictionary<TKey, TValue>
     {
         return this.Cache.Remove(cacheKey);
     }
+
+    /// <summary>Remove entries whose keys match a predicate.</summary>
+    /// <typeparam name="TState">The predicate state type.</typeparam>
+    /// <param name="state">The state to pass to the predicate.</param>
+    /// <param name="shouldRemove">Get whether an entry should be removed.</param>
+    /// <returns>Returns the number of entries removed.</returns>
+    public int RemoveWhere<TState>(TState state, Func<TKey, TState, bool> shouldRemove)
+    {
+        int removed = 0;
+        foreach (TKey key in this.Cache.Keys)
+        {
+            if (shouldRemove(key, state) && this.Cache.Remove(key))
+                removed++;
+        }
+
+        return removed;
+    }
 }
 
 /// <summary>An in-memory dictionary cache that stores data for the duration of a game update tick.</summary>

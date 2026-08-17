@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI;
 using StardewModdingAPI.Framework;
 using StardewModdingAPI.Framework.Content;
+using StardewModdingAPI.Framework.Utilities;
 
 namespace SMAPI.Tests.Core;
 
@@ -52,6 +55,36 @@ internal class ContentCoordinatorTests
     public void AreManagedContentManagerNamesEqual_MatchesRoutingIdentity(string left, string right, bool expected)
     {
         ContentCoordinator.AreManagedContentManagerNamesEqual(left, right).Should().Be(expected);
+    }
+
+    [Test]
+    public void AssetOperationCacheKey_IncludesRequestedDataType()
+    {
+        IAssetName name = new AssetName("Data/Example", localeCode: null, languageCode: null);
+
+        new AssetOperationCacheKey(name, typeof(string)).Should().NotBe(new AssetOperationCacheKey(name, typeof(object)));
+    }
+
+    [Test]
+    public void GetAssetOperations_CachesEachRequestedDataTypeSeparately()
+    {
+        List<Type> requestedTypes = [];
+        ContentCoordinator coordinator = (ContentCoordinator)RuntimeHelpers.GetUninitializedObject(typeof(ContentCoordinator));
+        typeof(ContentCoordinator).GetField("AssetOperationsByKey", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(coordinator, new TickCacheDictionary<AssetOperationCacheKey, AssetOperationGroup?>());
+        typeof(ContentCoordinator).GetField("RequestAssetOperations", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(coordinator, (Func<IAssetInfo, AssetOperationGroup?>)(info =>
+            {
+                requestedTypes.Add(info.DataType);
+                return null;
+            }));
+
+        IAssetName name = new AssetName("Data/Example", localeCode: null, languageCode: null);
+        coordinator.GetAssetOperations(new AssetInfo(null, name, typeof(string), static raw => raw));
+        coordinator.GetAssetOperations(new AssetInfo(null, name, typeof(object), static raw => raw));
+        coordinator.GetAssetOperations(new AssetInfo(null, name, typeof(string), static raw => raw));
+
+        requestedTypes.Should().Equal(typeof(string), typeof(object));
     }
 
     [Test(Description = "Assert that the deferred invalidation report preserves its contents and case-insensitive asset order.")]
