@@ -870,6 +870,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Asset-name identity remains ordinal-ignore-case, data types remain distinct, and the internal manager-aware predicate overload is unchanged. Public invalidation predicates receive no manager identity and are contractually match functions rather than per-entry notifications.
 - **Status:** Fixed. Public predicate invalidation caches positive and negative results for the duration of one transaction, with focused coverage for case-equivalent names and distinct data types.
 
+### 79. Batched invalidation rescans the operation cache for every name
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`ProcessInvalidatedAssets`) and `Framework/Utilities/TickCacheDictionary.cs` (`RemoveWhere`).
+- **Scenario:** A Content Patcher context update invalidates several or hundreds of assets after SMAPI has cached loader/editor discovery results for the current tick.
+- **Root cause:** SMAPI called `RemoveWhere` separately for each invalidated asset name. Each call enumerated the entire operation cache, so clearing `N` names from `K` cached name/type entries cost `O(N × K)` cache-key visits.
+- **Impact:** Main-thread transition CPU which grows multiplicatively with invalidation batch size and the number of asset operations discovered that tick. The measured farmhouse-to-farm warp invalidated six names; large startup/context batches can be much larger.
+- **Expected benefit:** Every cached operation key is visited once, and invalidated-name membership is checked with the transaction's existing dictionary, reducing cleanup to `O(K)` expected time with no new collection.
+- **Risk:** Low. The same ordinal-ignore-case `IAssetName` identity is used, every data-type variant for an invalidated name is removed, and unrelated names remain cached.
+- **Status:** Fixed. Batched operation-cache cleanup now performs one stateful `RemoveWhere` pass over all cached keys.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -877,10 +887,10 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, and 78 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, and 79 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, and 75 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, and 78 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, and 79 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, and 65 |
