@@ -11,7 +11,13 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
     ** Fields
     *********/
     /// <summary>The collection to watch.</summary>
-    private readonly ICollection<TValue> CurrentValues;
+    private readonly IList<TValue> CurrentValues;
+
+    /// <summary>The comparer used to detect value changes.</summary>
+    private readonly IEqualityComparer<TValue> Comparer;
+
+    /// <summary>The ordered value references seen during the previous update.</summary>
+    private readonly List<TValue> LastSequence = [];
 
     /// <summary>The values during the previous update.</summary>
     private HashSet<TValue> LastValues;
@@ -49,10 +55,11 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="values">The collection to watch.</param>
     /// <param name="comparer">The equality comparer which indicates whether two values are the same.</param>
-    public ComparableListWatcher(string name, ICollection<TValue> values, IEqualityComparer<TValue> comparer)
+    public ComparableListWatcher(string name, IList<TValue> values, IEqualityComparer<TValue> comparer)
     {
         this.Name = name;
         this.CurrentValues = values;
+        this.Comparer = comparer;
         this.LastValues = new HashSet<TValue>(comparer);
         this.NewValues = new HashSet<TValue>(comparer);
     }
@@ -63,6 +70,23 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
         this.AssertNotDisposed();
         this.IsChanged = false;
 
+        // Active mine and volcano lists normally retain the same ordered references for long runs. Compare that
+        // sequence directly so unchanged walking ticks avoid clearing, rebuilding, and diffing two hash sets.
+        if (this.CurrentValues.Count == this.LastSequence.Count)
+        {
+            bool sequenceChanged = false;
+            for (int i = 0; i < this.CurrentValues.Count; i++)
+            {
+                if (!this.Comparer.Equals(this.CurrentValues[i], this.LastSequence[i]))
+                {
+                    sequenceChanged = true;
+                    break;
+                }
+            }
+            if (!sequenceChanged)
+                return;
+        }
+
         // optimize for zero items
         if (this.CurrentValues.Count == 0)
         {
@@ -72,6 +96,7 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
                 this.LastValues.Clear();
                 this.IsChanged = true;
             }
+            this.LastSequence.Clear();
             return;
         }
 
@@ -104,6 +129,12 @@ internal class ComparableListWatcher<TValue> : BaseDisposableWatcher, ICollectio
             this.IsChanged = true;
             (this.LastValues, this.NewValues) = (this.NewValues, this.LastValues); // reuse the now-unused previous 'LastValues' set on the next update
         }
+
+        // Retain ordering only as an unchanged fast-path hint. Set-based add/remove behavior remains authoritative,
+        // so reordering and duplicate-count changes don't become public collection changes.
+        this.LastSequence.Clear();
+        for (int i = 0; i < this.CurrentValues.Count; i++)
+            this.LastSequence.Add(this.CurrentValues[i]);
     }
 
     /// <inheritdoc />
