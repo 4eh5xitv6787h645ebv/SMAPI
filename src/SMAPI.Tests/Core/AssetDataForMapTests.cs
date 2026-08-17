@@ -52,6 +52,8 @@ internal class AssetDataForMapTests
 
     [TestCase("Maps/Town/Sheet.png", "maps\\town\\SHEET.PNG")]
     [TestCase("Town/Sheet", "TOWN/SHEET.png")]
+    [TestCase("Maps/Town/Sheet.xnb", "town\\SHEET")]
+    [TestCase("Town/Sheet", "MAPS/TOWN/SHEET.XNB")]
     public void PatchMap_ReusesEquivalentTilesheetPathsIgnoringCase(string targetPath, string sourcePath)
     {
         Map target = CreateMap("Back");
@@ -127,6 +129,38 @@ internal class AssetDataForMapTests
 
         target.GetLayer("Buildings").Tiles[0, 0].Should().NotBeNull();
         target.GetLayer("Buildings").Tiles[0, 0].TileSheet.Should().BeSameAs(targetSheet);
+    }
+
+    [Test]
+    public void PatchMap_CopiesAnimatedFramesOnceAndPreservesTheirTilesheets()
+    {
+        Map target = CreateMap("Back");
+        TileSheet targetFirstSheet = AddTileSheet(target, "first", "Maps/first");
+        TileSheet targetSecondSheet = AddTileSheet(target, "second", "Maps/second");
+
+        Map source = CreateMap("Back");
+        TileSheet sourceFirstSheet = AddTileSheet(source, "first", "maps/FIRST.png");
+        TileSheet sourceSecondSheet = AddTileSheet(source, "second", "maps/SECOND.png");
+        Layer sourceLayer = source.GetLayer("Back");
+        StaticTile[] sourceFrames =
+        [
+            new StaticTile(sourceLayer, sourceFirstSheet, BlendMode.Alpha, 0),
+            new StaticTile(sourceLayer, sourceSecondSheet, BlendMode.Additive, 0)
+        ];
+        sourceFrames[1].Properties["FrameProperty"] = "copied";
+        sourceLayer.Tiles[0, 0] = new AnimatedTile(sourceLayer, sourceFrames, frameInterval: 125);
+
+        CreateAssetData(target).PatchMap(source);
+
+        AnimatedTile copied = target.GetLayer("Back").Tiles[0, 0].Should().BeOfType<AnimatedTile>().Subject;
+        StaticTile[] copiedFrames = copied.TileFrames;
+        copiedFrames.Should().HaveCount(2);
+        copiedFrames[0].TileSheet.Should().BeSameAs(targetFirstSheet);
+        copiedFrames[0].BlendMode.Should().Be(BlendMode.Alpha);
+        copiedFrames[1].TileSheet.Should().BeSameAs(targetSecondSheet);
+        copiedFrames[1].BlendMode.Should().Be(BlendMode.Additive);
+        copiedFrames[1].Properties["FrameProperty"].ToString().Should().Be("copied");
+        copied.FrameInterval.Should().Be(125);
     }
 
     /// <summary>Create a map with the given two-by-two layers.</summary>
