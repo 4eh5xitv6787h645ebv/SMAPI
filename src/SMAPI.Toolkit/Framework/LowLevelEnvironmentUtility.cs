@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Reflection;
 #if SMAPI_FOR_WINDOWS
 #endif
@@ -77,11 +78,68 @@ internal static class LowLevelEnvironmentUtility
         return name;
     }
 
-    /// <summary>Get whether an executable is 64-bit.</summary>
+    /// <summary>Get whether an executable can be loaded in a 64-bit process.</summary>
     /// <param name="path">The absolute path to the assembly file.</param>
     public static bool Is64BitAssembly(string path)
     {
-        return AssemblyName.GetAssemblyName(path).ProcessorArchitecture != ProcessorArchitecture.X86;
+        _ = AssemblyName.GetAssemblyName(path); // validate the metadata
+
+        using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1);
+        using BinaryReader reader = new(stream);
+
+        stream.Position = 0x3c;
+        int peHeaderOffset = reader.ReadInt32();
+        stream.Position = peHeaderOffset;
+        if (reader.ReadUInt32() != 0x00004550) // PE\0\0
+            throw new BadImageFormatException($"The file '{path}' isn't a valid PE assembly.");
+
+        ushort machine = reader.ReadUInt16();
+        ushort sectionCount = reader.ReadUInt16();
+        stream.Position += 12;
+        ushort optionalHeaderSize = reader.ReadUInt16();
+        stream.Position += 2;
+
+        long optionalHeaderOffset = stream.Position;
+        int dataDirectoriesOffset = reader.ReadUInt16() switch
+        {
+            0x10b => 96,  // PE32
+            0x20b => 112, // PE32+
+            _ => throw new BadImageFormatException($"The file '{path}' has an unknown PE format.")
+        };
+
+        // The CLI header is data-directory entry 14. Find the section containing its RVA.
+        stream.Position = optionalHeaderOffset + dataDirectoriesOffset + (14 * 8);
+        uint cliHeaderRva = reader.ReadUInt32();
+        long sectionHeadersOffset = optionalHeaderOffset + optionalHeaderSize;
+        long cliHeaderOffset = -1;
+        for (int i = 0; i < sectionCount; i++)
+        {
+            stream.Position = sectionHeadersOffset + (i * 40) + 8;
+            _ = reader.ReadUInt32(); // virtual size
+            uint virtualAddress = reader.ReadUInt32();
+            uint rawDataSize = reader.ReadUInt32();
+            uint rawDataOffset = reader.ReadUInt32();
+            if (cliHeaderRva >= virtualAddress && cliHeaderRva - virtualAddress < rawDataSize)
+            {
+                cliHeaderOffset = rawDataOffset + (cliHeaderRva - virtualAddress);
+                break;
+            }
+        }
+        if (cliHeaderOffset < 0)
+            throw new BadImageFormatException($"The file '{path}' has no CLI header.");
+
+        stream.Position = cliHeaderOffset + 16;
+        uint flags = reader.ReadUInt32();
+        const uint ilOnly = 0x00000001;
+        const uint requires32Bit = 0x00000002;
+        const uint prefers32Bit = 0x00020000;
+
+        bool is32BitOnly = machine == 0x014c // I386
+            && (
+                (flags & ilOnly) == 0
+                || ((flags & requires32Bit) != 0 && (flags & prefers32Bit) == 0)
+            );
+        return !is32BitOnly;
     }
 
 
