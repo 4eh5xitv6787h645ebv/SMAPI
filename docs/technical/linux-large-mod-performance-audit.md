@@ -900,6 +900,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. Overlay, replace-by-layer, and full-replace final states are unchanged; tile and layer properties still copy once; source tiles still clone into target-owned sheets; and zero-area behavior is retained. Only the private order in which independent layer cells are assigned changes.
 - **Status:** Fixed. The patch loop is layer-first with a per-layer tilesheet fast cache and focused multi-layer coverage for all three patch modes.
 
+### 82. Fallback map tilesheets are uploaded into two content-manager caches
+
+- **Affected code:** `Framework/ContentManagers/ModContentManager.cs` (`TryGetTilesheetAssetName`).
+- **Scenario:** Loading or reloading a custom map whose tilesheet falls back to a game-content asset instead of a file in the mod folder.
+- **Root cause:** Map validation fully loaded and cached the fallback texture through the requesting mod's private game content manager. The map retained only its asset key; the map display device later resolved that key through `Game1.content`, decoded/uploaded another texture instance, and retained it in a different cache.
+- **Impact:** Duplicate content-pipeline work, GPU upload, and texture memory for vanilla or shared tilesheets referenced by custom maps. Expansion packs multiply this across maps and private mod content managers.
+- **Expected benefit:** Validation's first load populates the same cache the map renderer uses, so drawing reuses the already validated texture instead of creating a second GPU resource.
+- **Risk:** Medium-low. Loader/editor selection, localization, error classification, and physical content-folder fallback checks are unchanged. The cache owner changes to the primary game manager, which is already the manager used by the map display device for these non-managed keys.
+- **Status:** Fixed. Game-content fallback validation now loads through the coordinator's primary `Game1.content` manager; local mod tilesheets retain their existing managed-asset route.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -909,7 +919,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, and 80 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, and 81 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, and 82 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, and 79 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
@@ -923,7 +933,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, 71, and 74 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, and 74 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, and 82 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority

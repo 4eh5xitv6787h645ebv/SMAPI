@@ -554,7 +554,11 @@ internal sealed class ModContentManager : BaseContentManager
         AssetName contentKey = this.Coordinator.ParseAssetName(ModContentManager.GetContentKeyForTilesheetImageSource(relativePath), allowLocales: false);
         try
         {
-            this.GameContentManager.LoadLocalized<Texture2D>(contentKey, this.GameContentManager.Language, useCache: true); // no need to bypass cache here, since we're not storing the asset
+            // The map display device resolves game tilesheets through Game1.content. Validate through that same
+            // manager so the texture uploaded here is reused when the map is drawn instead of being cached a
+            // second time in this mod's private game content manager.
+            GameContentManager gameContent = this.Coordinator.MainContentManager;
+            gameContent.LoadLocalized<Texture2D>(contentKey, gameContent.Language, useCache: true);
             assetName = contentKey;
             return true;
         }
