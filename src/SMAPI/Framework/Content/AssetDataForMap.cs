@@ -140,11 +140,12 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
         {
             foreach (Layer targetLayer in orphanedTargetLayers!)
             {
+                Tile?[,] targetTiles = targetLayer.Tiles.Array;
                 for (int x = 0; x < sourceRectangle.Width; x++)
                 {
                     int targetX = targetRectangle.X + x;
                     for (int y = 0; y < sourceRectangle.Height; y++)
-                        targetLayer.Tiles[targetX, targetRectangle.Y + y] = null;
+                        targetTiles[targetX, targetRectangle.Y + y] = null;
                 }
             }
         }
@@ -153,6 +154,7 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
         // neighboring map tiles overwhelmingly use the same sheet, avoiding a dictionary lookup for each tile.
         foreach ((Layer sourceLayer, Layer targetLayer) in layerPairs)
         {
+            Tile?[,] targetTiles = targetLayer.Tiles.Array;
             TileSheet? lastSourceSheet = null;
             TileSheet? lastTargetSheet = null;
             for (int x = 0; x < sourceRectangle.Width; x++)
@@ -180,7 +182,12 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
 
                     // replace tile
                     if (newTile != null || replaceByLayer || replaceAll)
-                        targetLayer.Tiles[targetX, targetRectangle.Y + y] = newTile;
+                    {
+                        int targetY = targetRectangle.Y + y;
+                        targetTiles[targetX, targetY] = newTile;
+                        if (newTile != null)
+                            targetLayer.MarkRowDirty(targetY);
+                    }
                 }
             }
         }
