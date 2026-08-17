@@ -80,9 +80,15 @@ internal class AssemblyLoader : IDisposable
         this.AssemblyPathComparer = targetPlatform == Platform.Windows
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
+        Assembly coreAssembly = typeof(object).Assembly;
         this.RewriteCache = new AssemblyRewriteCache(
-            rootPath: Path.Combine(Constants.DataPath, "Cache", "AssemblyRewrite"),
-            environmentKey: this.GetRewriteCacheEnvironmentKey(targetPlatform, paranoidMode, rewriteMods, logTechnicalDetailsForBrokenMods)
+            rootPath: Path.Combine(
+                Constants.DataPath,
+                "Cache",
+                "AssemblyRewrite",
+                FormattableString.Invariant($"net{coreAssembly.GetName().Version!.Major}")
+            ),
+            environmentKey: this.GetRewriteCacheEnvironmentKey(targetPlatform, paranoidMode, rewriteMods, logTechnicalDetailsForBrokenMods, coreAssembly)
         );
 
         // init resolver
@@ -315,11 +321,13 @@ internal class AssemblyLoader : IDisposable
     }
 
     /// <summary>Get a stable identity for everything outside a mod DLL/PDB which can affect rewrite output or diagnostics.</summary>
-    private string GetRewriteCacheEnvironmentKey(Platform targetPlatform, bool paranoidMode, bool rewriteMods, bool logTechnicalDetailsForBrokenMods)
+    private string GetRewriteCacheEnvironmentKey(Platform targetPlatform, bool paranoidMode, bool rewriteMods, bool logTechnicalDetailsForBrokenMods, Assembly coreAssembly)
     {
         StringBuilder key = new();
         key.Append("assembly-rewrite-v2|")
             .Append(typeof(AssemblyLoader).Module.ModuleVersionId).Append('|')
+            .Append(coreAssembly.FullName).Append('|')
+            .Append(coreAssembly.ManifestModule.ModuleVersionId).Append('|')
             .Append(targetPlatform).Append('|')
             .Append(paranoidMode).Append('|')
             .Append(rewriteMods).Append('|')
