@@ -46,6 +46,30 @@ internal class IntervalMemoryCache<TKey, TValue>
         return value;
     }
 
+    /// <summary>Get a value from the cache, fetching it first if needed without requiring the callback to capture state.</summary>
+    /// <typeparam name="TState">The type of state passed to the callback.</typeparam>
+    /// <param name="cacheKey">The unique key for the cached value.</param>
+    /// <param name="state">The state to pass to the callback if the value isn't cached.</param>
+    /// <param name="get">Get the latest data if it's not in the cache yet.</param>
+    public TValue GetOrSet<TState>(TKey cacheKey, TState state, Func<TState, TValue> get)
+    {
+        // from hot cache
+        if (this.HotCache.TryGetValue(cacheKey, out TValue? value))
+            return value;
+
+        // from stale cache
+        if (this.StaleCache.TryGetValue(cacheKey, out value))
+        {
+            this.HotCache[cacheKey] = value;
+            return value;
+        }
+
+        // new value
+        value = get(state);
+        this.HotCache[cacheKey] = value;
+        return value;
+    }
+
     /// <summary>Start a new cache interval, removing any stale entries.</summary>
     public void StartNewInterval()
     {

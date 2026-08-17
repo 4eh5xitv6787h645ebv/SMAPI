@@ -58,7 +58,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 46. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
 47. Finding 45 — incorrect overlay alpha composition — queued.
 48. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
-49. Finding 50 — public reflection cache hits still allocate lookup machinery — trace-gated.
+49. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
 50. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
@@ -553,15 +553,15 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. Local delivery must retain the same payload conversion, error timing, recipient metadata, and logging behavior.
 - **Status:** Fixed. Local delivery still constructs the same `JToken`-backed model, but SMAPI now serializes its JSON envelope only when a reachable remote peer or enabled network-traffic log will consume it. Remote messages are still serialized before local event delivery, preserving payload ordering and mutation semantics; invalid-recipient and disconnected-host paths avoid serialization too. A static string scan found 50 target-pack assemblies containing `SendMessage` or `IMultiplayerHelper` metadata, but that does not establish call frequency; frame-time impact remains workload-dependent.
 
-### 50. Public reflection cache hits still allocate lookup machinery
+### 50. Public reflection cache hits allocate lookup machinery
 
 - **Affected code:** `Framework/Reflection/Reflector.cs` (`GetFieldFromHierarchy`, `GetPropertyFromHierarchy`, `GetMethodFromHierarchy`, and `GetCached`).
 - **Scenario:** Mods repeatedly use SMAPI's reflection API from update or draw callbacks.
 - **Root cause:** A metadata-cache hit still formats a string key, constructs a capturing fetch delegate, and creates a new reflected field/property/method wrapper. Finding 35 removed this work from SMAPI's confirmed render-stage hot path, but the public API retains it for mod callers.
 - **Impact:** Potential per-frame allocations and dictionary churn proportional to hot-loop reflection calls.
-- **Expected benefit:** Use a structured cache key and a reusable metadata entry, with an optional fast wrapper/accessor path where object identity and type safety permit it.
+- **Expected benefit:** Use a structured cache key, non-capturing lookup, and weak target-bound wrapper cache so repeated calls reach the cached member without allocating or retaining game objects.
 - **Risk:** Medium to high. Wrapper instances bind target objects, cache intervals intentionally expire stale lookups, and broad changes affect a public compatibility API.
-- **Status:** Trace-gated. Instrument public reflection call sites and allocation rates first; optimize individual confirmed hot members before redesigning the general cache.
+- **Status:** Fixed. Metadata uses a structural key containing the actual `Type`, avoiding both formatted key strings and collisions between same-named types from different assemblies. A state-passing cache overload removes capturing fetch delegates, bitwise flag checks avoid enum boxing, and a `ConditionalWeakTable` reuses field/property/method wrappers without keeping target objects alive. Wrapper entries reset at the existing daily reflection-cache interval. After warm-up, a 10,000-call .NET 10 allocation check for a cached instance field fell from 368 bytes per call on the parent commit to zero bytes per call; the result measures the reflection lookup itself, not arbitrary reflected member access or mod handler time.
 
 ## Requested audit coverage
 
@@ -592,12 +592,11 @@ This is the current jank-first order, combining likely frame-time impact, freque
 ## Remaining implementation priority
 
 1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially cursor-position consumption, live `AssetRequested` frequency, propagation side-effect repetition, and the before/after chest-tracking frame cost.
-2. Measure hot-loop public reflection use before redesigning that compatibility-sensitive API.
-3. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
-4. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
-5. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
-6. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-7. Correct source-over alpha composition after representative content-pack visual comparisons.
-8. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+2. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
+3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
+4. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
+5. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
+6. Correct source-over alpha composition after representative content-pack visual comparisons.
+7. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.
