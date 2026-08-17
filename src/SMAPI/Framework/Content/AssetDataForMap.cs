@@ -69,7 +69,7 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
         }
 
         // apply tilesheets
-        IDictionary<TileSheet, TileSheet> tilesheetMap = new Dictionary<TileSheet, TileSheet>();
+        Dictionary<TileSheet, TileSheet> tilesheetMap = [];
         foreach (TileSheet sourceSheet in source.TileSheets)
         {
             // copy tilesheets
@@ -121,8 +121,8 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
             Layer? targetLayer = target.GetLayer(sourceLayer.Id);
             if (targetLayer is null)
             {
-                target.AddLayer(new Layer(sourceLayer.Id, target, target.Layers[0].LayerSize, Layer.m_tileSize));
-                targetLayer = target.GetLayer(sourceLayer.Id);
+                targetLayer = new Layer(sourceLayer.Id, target, target.Layers[0].LayerSize, Layer.m_tileSize);
+                target.AddLayer(targetLayer);
             }
 
             targetLayer.Properties.CopyFrom(sourceLayer.Properties);
@@ -130,37 +130,55 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
             orphanedTargetLayers?.Remove(targetLayer);
         }
 
-        // apply tiles
-        for (int x = 0; x < sourceArea.Value.Width; x++)
+        Rectangle sourceRectangle = sourceArea.Value;
+        Rectangle targetRectangle = targetArea.Value;
+
+        // Full replacement also clears layers which don't exist in the source map. Do that one layer at a time so
+        // the main source-layer loop below doesn't re-enumerate target-only layers for every tile coordinate.
+        if (replaceAll)
         {
-            for (int y = 0; y < sourceArea.Value.Height; y++)
+            foreach (Layer targetLayer in orphanedTargetLayers!)
             {
-                // calculate tile positions
-                Point sourcePos = new(sourceArea.Value.X + x, sourceArea.Value.Y + y);
-                Point targetPos = new(targetArea.Value.X + x, targetArea.Value.Y + y);
-
-                // replace tiles on target-only layers
-                if (replaceAll)
+                for (int x = 0; x < sourceRectangle.Width; x++)
                 {
-                    foreach (Layer targetLayer in orphanedTargetLayers!)
-                        targetLayer.Tiles[targetPos.X, targetPos.Y] = null;
+                    int targetX = targetRectangle.X + x;
+                    for (int y = 0; y < sourceRectangle.Height; y++)
+                        targetLayer.Tiles[targetX, targetRectangle.Y + y] = null;
                 }
+            }
+        }
 
-                // merge layers
-                foreach ((Layer sourceLayer, Layer targetLayer) in layerPairs)
+        // Apply one layer at a time for better tile-array locality. Cache the last tilesheet pair per layer since
+        // neighboring map tiles overwhelmingly use the same sheet, avoiding a dictionary lookup for each tile.
+        foreach ((Layer sourceLayer, Layer targetLayer) in layerPairs)
+        {
+            TileSheet? lastSourceSheet = null;
+            TileSheet? lastTargetSheet = null;
+            for (int x = 0; x < sourceRectangle.Width; x++)
+            {
+                int sourceX = sourceRectangle.X + x;
+                int targetX = targetRectangle.X + x;
+                for (int y = 0; y < sourceRectangle.Height; y++)
                 {
                     // create new tile
-                    Tile? sourceTile = sourceLayer.Tiles[sourcePos.X, sourcePos.Y];
+                    Tile? sourceTile = sourceLayer.Tiles[sourceX, sourceRectangle.Y + y];
                     Tile? newTile = null;
                     if (sourceTile != null)
                     {
-                        newTile = this.CreateTile(sourceTile, targetLayer, tilesheetMap[sourceTile.TileSheet]);
+                        TileSheet sourceSheet = sourceTile.TileSheet;
+                        if (!ReferenceEquals(sourceSheet, lastSourceSheet))
+                        {
+                            lastSourceSheet = sourceSheet;
+                            lastTargetSheet = tilesheetMap[sourceSheet];
+                        }
+
+                        newTile = this.CreateTile(sourceTile, targetLayer, lastTargetSheet!);
                         newTile?.Properties.CopyFrom(sourceTile.Properties);
                     }
 
                     // replace tile
                     if (newTile != null || replaceByLayer || replaceAll)
-                        targetLayer.Tiles[targetPos.X, targetPos.Y] = newTile;
+                        targetLayer.Tiles[targetX, targetRectangle.Y + y] = newTile;
                 }
             }
         }
