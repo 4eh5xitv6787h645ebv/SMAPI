@@ -7,6 +7,7 @@ using StardewModdingAPI.Framework.Reflection;
 using xTile;
 using xTile.Dimensions;
 using xTile.Layers;
+using xTile.Tiles;
 using Rectangle = Microsoft.Xna.Framework.Rectangle;
 
 namespace SMAPI.Tests.Core;
@@ -49,6 +50,34 @@ internal class AssetDataForMapTests
         target.GetLayer("Buildings").Should().BeNull();
     }
 
+    [TestCase("Maps/Town/Sheet.png", "maps\\town\\SHEET.PNG")]
+    [TestCase("Town/Sheet", "TOWN/SHEET.png")]
+    public void PatchMap_ReusesEquivalentTilesheetPathsIgnoringCase(string targetPath, string sourcePath)
+    {
+        Map target = CreateMap("Back");
+        TileSheet original = AddTileSheet(target, "outdoors", targetPath);
+        Map source = CreateMap("Back");
+        AddTileSheet(source, "outdoors", sourcePath);
+
+        CreateAssetData(target).PatchMap(source);
+
+        target.TileSheets.Should().ContainSingle().Which.Should().BeSameAs(original);
+    }
+
+    [Test]
+    public void PatchMap_DisambiguatesGenuinelyDifferentTilesheetPaths()
+    {
+        Map target = CreateMap("Back");
+        AddTileSheet(target, "outdoors", "Maps/Town/Sheet");
+        Map source = CreateMap("Back");
+        AddTileSheet(source, "outdoors", "Maps/Town/Different");
+
+        CreateAssetData(target).PatchMap(source);
+
+        target.TileSheets.Should().HaveCount(2);
+        target.GetTileSheet("z_outdoors").Should().NotBeNull();
+    }
+
     /// <summary>Create a map with the given two-by-two layers.</summary>
     private static Map CreateMap(params string[] layerIds)
     {
@@ -57,6 +86,14 @@ internal class AssetDataForMapTests
             map.AddLayer(new Layer(id, map, new Size(2, 2), new Size(16, 16)));
 
         return map;
+    }
+
+    /// <summary>Add a one-tile tilesheet to a map.</summary>
+    private static TileSheet AddTileSheet(Map map, string id, string imageSource)
+    {
+        TileSheet sheet = new(id, map, imageSource, new Size(1, 1), new Size(16, 16));
+        map.AddTileSheet(sheet);
+        return sheet;
     }
 
     /// <summary>Wrap a map in editable asset metadata.</summary>

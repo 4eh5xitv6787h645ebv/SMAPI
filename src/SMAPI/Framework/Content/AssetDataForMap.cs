@@ -74,7 +74,13 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
         {
             // copy tilesheets
             TileSheet targetSheet = target.GetTileSheet(sourceSheet.Id);
-            if (targetSheet == null || this.NormalizeTilesheetPathForComparison(targetSheet.ImageSource) != this.NormalizeTilesheetPathForComparison(sourceSheet.ImageSource))
+            if (
+                targetSheet == null
+                || !StringComparer.OrdinalIgnoreCase.Equals(
+                    this.NormalizeTilesheetPathForComparison(targetSheet.ImageSource),
+                    this.NormalizeTilesheetPathForComparison(sourceSheet.ImageSource)
+                )
+            )
             {
                 // change ID if needed so new tilesheets are added after vanilla ones (to avoid errors in hardcoded game logic)
                 string id = sourceSheet.Id;
