@@ -22,4 +22,22 @@ internal class AssetDataForImageTests
     {
         AssetDataForImage.IsFullyOpaque([]).Should().BeFalse();
     }
+
+    [Test]
+    public void IsFullyOpaqueRectangle_UsesOffsetsAndRowStride()
+    {
+        Color transparent = Color.Transparent;
+        Color opaque = Color.White;
+        Color[] pixels =
+        [
+            transparent, transparent, transparent, transparent, transparent,
+            transparent, opaque,      opaque,      opaque,      transparent,
+            transparent, opaque,      opaque,      opaque,      transparent,
+            transparent, transparent, transparent, transparent, transparent
+        ];
+
+        AssetDataForImage.IsFullyOpaqueRectangle(pixels, firstPixel: 0, rowWidth: 5, left: 1, top: 1, width: 3, height: 2).Should().BeTrue();
+        AssetDataForImage.IsFullyOpaqueRectangle(pixels, firstPixel: 0, rowWidth: 5, left: 0, top: 1, width: 4, height: 2).Should().BeFalse();
+        AssetDataForImage.IsFullyOpaqueRectangle(pixels, firstPixel: 5, rowWidth: 5, left: 1, top: 0, width: 3, height: 2).Should().BeTrue();
+    }
 }

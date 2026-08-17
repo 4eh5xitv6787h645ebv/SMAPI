@@ -238,6 +238,43 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
         );
         pixelCount = targetArea.Width * targetArea.Height;
 
+        // Transparent margins around a solid rectangle don't affect the target outside the cropped bounds.
+        // Upload that rectangle directly too, copying rows only when the source stride is wider than the crop.
+        if (
+            patchMode == PatchMode.Overlay
+            && AssetDataForImage.IsFullyOpaqueRectangle(
+                sourceData,
+                firstPixel,
+                sourceArea.Width,
+                leftOffset,
+                topOffset,
+                targetArea.Width,
+                targetArea.Height
+            )
+        )
+        {
+            int sourceStart = firstPixel + topOffset * sourceArea.Width + leftOffset;
+            if (targetArea.Width == sourceArea.Width)
+                target.SetData(0, targetArea, sourceData, sourceStart, pixelCount);
+            else
+            {
+                Color[] croppedData = ArrayPool<Color>.Shared.Rent(pixelCount);
+                try
+                {
+                    for (int row = 0; row < targetArea.Height; row++)
+                        Array.Copy(sourceData, sourceStart + row * sourceArea.Width, croppedData, row * targetArea.Width, targetArea.Width);
+
+                    target.SetData(0, targetArea, croppedData, 0, pixelCount);
+                }
+                finally
+                {
+                    ArrayPool<Color>.Shared.Return(croppedData);
+                }
+            }
+
+            return;
+        }
+
         // apply
         Color[] mergedData = ArrayPool<Color>.Shared.Rent(pixelCount);
         try
@@ -319,6 +356,29 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
         foreach (ref readonly Color pixel in pixels)
         {
             if (pixel.A != byte.MaxValue)
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Get whether every pixel in a rectangular region is fully opaque.</summary>
+    /// <param name="pixels">The source pixel buffer.</param>
+    /// <param name="firstPixel">The index at which the source area begins.</param>
+    /// <param name="rowWidth">The number of pixels in each source row.</param>
+    /// <param name="left">The region's horizontal offset within the source area.</param>
+    /// <param name="top">The region's vertical offset within the source area.</param>
+    /// <param name="width">The region width.</param>
+    /// <param name="height">The region height.</param>
+    internal static bool IsFullyOpaqueRectangle(Color[] pixels, int firstPixel, int rowWidth, int left, int top, int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+            return false;
+
+        int rowStart = firstPixel + top * rowWidth + left;
+        for (int row = 0; row < height; row++, rowStart += rowWidth)
+        {
+            if (!AssetDataForImage.IsFullyOpaque(pixels.AsSpan(rowStart, width)))
                 return false;
         }
 
