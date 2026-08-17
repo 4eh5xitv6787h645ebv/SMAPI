@@ -244,7 +244,7 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
     ** Cache invalidation
     ****/
     /// <inheritdoc />
-    public IEnumerable<KeyValuePair<string, object>> GetCachedAssets()
+    public ContentCache.EntryEnumerable GetCachedAssets()
     {
         return this.Cache.GetEntries();
     }

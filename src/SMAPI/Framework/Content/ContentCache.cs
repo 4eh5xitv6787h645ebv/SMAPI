@@ -10,6 +10,30 @@ namespace StardewModdingAPI.Framework.Content;
 internal class ContentCache
 {
     /*********
+    ** Types
+    *********/
+    /// <summary>An allocation-free view of the cached entries.</summary>
+    public readonly struct EntryEnumerable
+    {
+        /// <summary>The entries to enumerate.</summary>
+        private readonly Dictionary<string, object> Entries;
+
+        /// <summary>Construct an instance.</summary>
+        /// <param name="entries">The entries to enumerate.</param>
+        internal EntryEnumerable(Dictionary<string, object> entries)
+        {
+            this.Entries = entries;
+        }
+
+        /// <summary>Get an enumerator over the cached entries.</summary>
+        public Dictionary<string, object>.Enumerator GetEnumerator()
+        {
+            return this.Entries.GetEnumerator();
+        }
+    }
+
+
+    /*********
     ** Fields
     *********/
     /// <summary>The underlying asset cache.</summary>
@@ -59,10 +83,9 @@ internal class ContentCache
     }
 
     /// <summary>Get the cached assets.</summary>
-    public IEnumerable<KeyValuePair<string, object>> GetEntries()
+    public EntryEnumerable GetEntries()
     {
-        foreach (KeyValuePair<string, object> entry in this.Cache)
-            yield return entry;
+        return new EntryEnumerable(this.Cache);
     }
 
 
