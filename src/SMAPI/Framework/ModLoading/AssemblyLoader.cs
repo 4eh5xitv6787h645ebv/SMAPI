@@ -401,7 +401,10 @@ internal class AssemblyLoader : IDisposable
 
             // Always discover identity and local dependencies from the authoritative source. Rewriters can change
             // assembly references, so traversing a cached output graph could otherwise omit a bundled dependency.
-            assembly = this.ReadAssembly(file, sourceAssemblyBytes, sourceSymbolBytes, assemblyResolver);
+            ReadingMode sourceReadingMode = cachedRewrite?.Changed == false
+                ? ReadingMode.Deferred
+                : ReadingMode.Immediate;
+            assembly = this.ReadAssembly(file, sourceAssemblyBytes, sourceSymbolBytes, assemblyResolver, sourceReadingMode);
         }
         finally
         {
@@ -436,7 +439,7 @@ internal class AssemblyLoader : IDisposable
         {
             try
             {
-                AssemblyDefinition cachedAssembly = this.ReadAssembly(file, cachedRewrite.AssemblyBytes!, cachedRewrite.SymbolBytes, assemblyResolver);
+                AssemblyDefinition cachedAssembly = this.ReadAssembly(file, cachedRewrite.AssemblyBytes!, cachedRewrite.SymbolBytes, assemblyResolver, ReadingMode.Immediate);
                 if (!string.Equals(cachedAssembly.Name.Name, assemblyName, StringComparison.Ordinal))
                     throw new InvalidDataException("Cached rewrite has a different assembly identity.");
                 this.DisposeTracked(assembly);
@@ -454,7 +457,7 @@ internal class AssemblyLoader : IDisposable
     }
 
     /// <summary>Read an assembly definition from in-memory assembly and optional symbol bytes.</summary>
-    private AssemblyDefinition ReadAssembly(FileInfo file, byte[] assemblyBytes, byte[]? symbolBytes, IAssemblyResolver assemblyResolver)
+    private AssemblyDefinition ReadAssembly(FileInfo file, byte[] assemblyBytes, byte[]? symbolBytes, IAssemblyResolver assemblyResolver, ReadingMode readingMode)
     {
         Stream readStream = this.TrackForDisposal(new MemoryStream(assemblyBytes, writable: false));
         SymbolReaderProvider symbolReaderProvider = new();
@@ -462,13 +465,13 @@ internal class AssemblyLoader : IDisposable
         {
             if (symbolBytes != null)
                 symbolReaderProvider.TryAddSymbolData(file.Name, () => this.TrackForDisposal(new MemoryStream(symbolBytes, writable: false)));
-            return this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(ReadingMode.Immediate) { AssemblyResolver = assemblyResolver, InMemory = true, ReadSymbols = true, SymbolReaderProvider = symbolReaderProvider }));
+            return this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(readingMode) { AssemblyResolver = assemblyResolver, InMemory = true, ReadSymbols = true, SymbolReaderProvider = symbolReaderProvider }));
         }
         catch (SymbolsNotMatchingException ex)
         {
             this.Monitor.Log($"      Failed loading PDB for '{file.Name}'. Technical details:\n{ex}");
             readStream.Position = 0;
-            return this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(ReadingMode.Immediate) { AssemblyResolver = assemblyResolver, InMemory = true }));
+            return this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(readingMode) { AssemblyResolver = assemblyResolver, InMemory = true }));
         }
     }
 
