@@ -163,7 +163,7 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
         // check for localized asset
         // ReSharper disable once LocalVariableHidesMember -- this is deliberate
         Dictionary<string, string> localizedAssetNames = this.Coordinator.LocalizedAssetNames.Value;
-        if (!localizedAssetNames.TryGetValue(assetName.Name, out _))
+        if (!localizedAssetNames.TryGetValue(assetName.Name, out string? rawName))
         {
             string localeCode = this.GetLocale(language);
             IAssetName localizedName = new AssetName(baseName: assetName.BaseName, localeCode: localeCode, languageCode: language);
@@ -183,13 +183,12 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
                 return data;
             }
 
-            localizedAssetNames[assetName.Name] = assetName.Name;
+            localizedAssetNames[assetName.Name] = rawName = assetName.Name;
         }
 
         // use cached key
-        string rawName = localizedAssetNames[assetName.Name];
         if (assetName.Name != rawName)
-            assetName = this.Coordinator.ParseAssetName(rawName, allowLocales: this.TryLocalizeKeys);
+            assetName = this.Coordinator.ParseAssetName(rawName!, allowLocales: this.TryLocalizeKeys);
         return this.LoadExact<T>(assetName, useCache: useCache);
     }
 
