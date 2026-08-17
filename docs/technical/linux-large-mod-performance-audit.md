@@ -72,6 +72,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 60. Finding 60 — content routing state is case-sensitive on Linux — fixed.
 61. Finding 61 — no-op asset interception wraps every raw asset — fixed.
 62. Finding 62 — broad cache scans allocate an iterator per manager — fixed.
+63. Finding 63 — texture propagation retrieves cached targets twice — fixed.
 
 ## Detailed findings
 
@@ -695,6 +696,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The wrapper enumerates the same underlying dictionary in the same order and retains its mutation/version behavior; the API is internal.
 - **Status:** Fixed. Cache enumeration returns a concrete readonly view whose pattern-based `GetEnumerator` exposes the dictionary's struct enumerator. A warmed 10,000-pass regression check allocates zero bytes.
 
+### 63. Texture propagation retrieves each cached target twice
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`PropagateTexture`).
+- **Scenario:** Texture invalidations during Content Patcher reloads and context changes, multiplied by the content managers retaining an in-place texture reference.
+- **Root cause:** Each candidate manager first probed its exact cache key with `IsLoaded`, then retrieved the same object through `LoadLocalized`, which repeated cache and localization routing work.
+- **Impact:** Transition CPU proportional to invalidated textures and their retaining content managers.
+- **Expected benefit:** Each normal cached target is found and retrieved with one dictionary lookup, without localized-name routing or a check/use gap.
+- **Risk:** Low to medium. Localized and base-name propagation passes are unchanged. The incompatible-type fallback deliberately retains the old localized load path and its exception behavior.
+- **Status:** Fixed. Propagation uses `TryGetCachedAsset` once and copies directly into the exact cached `Texture2D`; only an impossible/mismatched cache entry takes the compatibility fallback.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -704,8 +715,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, and 60 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, and 55 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, and 62 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, and 63 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, and 63 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |

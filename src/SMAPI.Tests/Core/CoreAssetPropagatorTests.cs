@@ -200,7 +200,7 @@ internal class CoreAssetPropagatorTests
         IAssetName assetName = AssetName.Parse("Maps/Target", _ => null);
         Type textureType = Type.GetType("Microsoft.Xna.Framework.Graphics.Texture2D, MonoGame.Framework", throwOnError: true)!;
         Mock<IContentManager> targetManager = new(MockBehavior.Strict);
-        targetManager.Setup(manager => manager.IsLoaded(It.Is<IAssetName>(name => name.Equals(assetName)))).Returns(false);
+        targetManager.Setup(manager => manager.TryGetCachedAsset(It.Is<IAssetName>(name => name.Equals(assetName)), out It.Ref<object?>.IsAny)).Returns(false);
         Mock<IContentManager> unrelatedManager = new(MockBehavior.Strict);
 
         CoreAssetPropagator propagator = new(
@@ -218,7 +218,7 @@ internal class CoreAssetPropagatorTests
         propagator.Propagate([unrelatedManager.Object, targetManager.Object], assets, loadedTextureManagers, ignoreWorld: true, out Dictionary<IAssetName, bool> propagated, out bool changedWarpRoutes);
 
         // assert
-        targetManager.Verify(manager => manager.IsLoaded(It.Is<IAssetName>(name => name.Equals(assetName))), Times.Once);
+        targetManager.Verify(manager => manager.TryGetCachedAsset(It.Is<IAssetName>(name => name.Equals(assetName)), out It.Ref<object?>.IsAny), Times.Once);
         unrelatedManager.VerifyNoOtherCalls();
         propagated[assetName].Should().BeFalse();
         changedWarpRoutes.Should().BeFalse();
