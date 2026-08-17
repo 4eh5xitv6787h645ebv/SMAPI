@@ -12,14 +12,11 @@ public class SDate : IEquatable<SDate>
     /*********
     ** Fields
     *********/
-    /// <summary>The internal season names in order.</summary>
-    private readonly string[] Seasons = ["spring", "summer", "fall", "winter"];
-
     /// <summary>The number of seasons in a year.</summary>
-    private int SeasonsInYear => this.Seasons.Length;
+    private const int SeasonsInYear = 4;
 
     /// <summary>The number of days in a season.</summary>
-    private readonly int DaysInSeason = 28;
+    private const int DaysInSeason = 28;
 
     /// <summary>The core SMAPI translations.</summary>
     internal static Translator? Translations;
@@ -131,21 +128,21 @@ public class SDate : IEquatable<SDate>
             throw new ArithmeticException($"Adding {offset} days to {this} would result in a date before 01 spring Y1.");
 
         // get day
-        int day = hashCode % 28;
+        int day = hashCode % DaysInSeason;
         if (day == 0)
-            day = 28;
+            day = DaysInSeason;
 
         // get season index
-        int seasonIndex = hashCode / 28;
-        if (seasonIndex > 0 && hashCode % 28 == 0)
+        int seasonIndex = hashCode / DaysInSeason;
+        if (seasonIndex > 0 && hashCode % DaysInSeason == 0)
             seasonIndex -= 1;
-        seasonIndex %= 4;
+        seasonIndex %= SeasonsInYear;
 
         // get year
-        int year = (int)Math.Ceiling(hashCode / (this.Seasons.Length * this.DaysInSeason * 1m));
+        int year = (int)Math.Ceiling(hashCode / (SeasonsInYear * DaysInSeason * 1m));
 
         // create date
-        return new SDate(day, this.Seasons[seasonIndex], year);
+        return new SDate(day, (Season)seasonIndex, year);
     }
 
     /// <summary>Get a game date representation of the date.</summary>
@@ -273,10 +270,10 @@ public class SDate : IEquatable<SDate>
         // validate
         if (!Enum.IsDefined(season))
             throw new ArgumentException($"Unknown season '{season}', must be one of [{string.Join(", ", Enum.GetNames<Season>())}].");
-        if (day < 0 || day > this.DaysInSeason)
-            throw new ArgumentException($"Invalid day '{day}', must be a value from 1 to {this.DaysInSeason}.");
+        if (day < 0 || day > DaysInSeason)
+            throw new ArgumentException($"Invalid day '{day}', must be a value from 1 to {DaysInSeason}.");
         if (day == 0 && !(allowDayZero && this.IsDayZero(day, season, year)))
-            throw new ArgumentException($"Invalid day '{day}', must be a value from 1 to {this.DaysInSeason}.");
+            throw new ArgumentException($"Invalid day '{day}', must be a value from 1 to {DaysInSeason}.");
         if (year < 1)
             throw new ArgumentException($"Invalid year '{year}', must be at least 1.");
 
@@ -343,8 +340,8 @@ public class SDate : IEquatable<SDate>
         // return the number of days since 01 spring Y1 (inclusively)
         int yearIndex = year - 1;
         return
-            yearIndex * this.DaysInSeason * this.SeasonsInYear
-            + (int)season * this.DaysInSeason
+            yearIndex * DaysInSeason * SeasonsInYear
+            + (int)season * DaysInSeason
             + day;
     }
 }
