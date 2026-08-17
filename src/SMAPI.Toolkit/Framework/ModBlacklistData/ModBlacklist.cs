@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+#if NET6_0_OR_GREATER
+using System.IO.Enumeration;
+#endif
 using StardewModdingAPI.Toolkit.Utilities;
 
 namespace StardewModdingAPI.Toolkit.Framework.ModBlacklistData;
@@ -63,7 +66,28 @@ public class ModBlacklist
     /// <param name="rootPath">The root path to scan.</param>
     public IEnumerable<(string FilePath, LooseFileBlacklistEntryModel Match)> CheckLooseFiles(string rootPath)
     {
-        foreach (string path in Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories))
+#if NET6_0_OR_GREATER
+        FileSystemEnumerable<string> files = new(
+            rootPath,
+            static (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath(),
+            new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                AttributesToSkip = 0,
+                IgnoreInaccessible = false,
+                MatchType = MatchType.Win32
+            }
+        )
+        {
+            // Filter on the enumerator's filename span so non-candidates don't allocate a full path. The full
+            // validation below remains authoritative, including its hash check and first-match behavior.
+            ShouldIncludePredicate = (ref FileSystemEntry entry) => !entry.IsDirectory && this.CouldMatchLooseFile(entry.FileName)
+        };
+#else
+        IEnumerable<string> files = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories);
+#endif
+
+        foreach (string path in files)
         {
             LooseFileBlacklistEntryModel? blacklistEntry = this.CheckLooseFile(path);
 
@@ -111,4 +135,36 @@ public class ModBlacklist
 
         return null;
     }
+
+#if NET6_0_OR_GREATER
+    /// <summary>Get whether a filename satisfies the allocation-free fields of any loose-file blacklist entry.</summary>
+    /// <param name="fileName">The filename without its parent path.</param>
+    private bool CouldMatchLooseFile(ReadOnlySpan<char> fileName)
+    {
+        ReadOnlySpan<char> extension = default;
+        bool hasExtension = false;
+
+        foreach (LooseFileBlacklistEntryModel entry in this.Blacklist.LooseFileBlacklist)
+        {
+            if (entry.Name != null && !fileName.Equals(entry.Name.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (entry.Extension != null)
+            {
+                if (!hasExtension)
+                {
+                    extension = Path.GetExtension(fileName);
+                    hasExtension = true;
+                }
+
+                if (!extension.Equals(entry.Extension.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                    continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+#endif
 }
