@@ -153,9 +153,13 @@ internal class GameContentManager : BaseContentManager
                         return manager.RawLoad<T>(assetName, state.UseCache);
 
                     AssetOperationGroup operationGroup = operations.Value;
-                    IAssetData asset =
-                        manager.ApplyLoader<T>(info, operationGroup.LoadOperations)
-                        ?? new AssetDataForObject(info, manager.RawLoad<T>(assetName, state.UseCache), manager.AssetNameNormalizer, manager.Reflection);
+                    T data = manager.TryApplyLoader<T>(info, operationGroup.LoadOperations, out T? loadedData)
+                        ? loadedData
+                        : manager.RawLoad<T>(assetName, state.UseCache);
+                    if (operationGroup.EditOperations?.Count is not > 0)
+                        return data;
+
+                    IAssetData asset = new AssetDataForObject(info, data, manager.AssetNameNormalizer, manager.Reflection);
                     asset = manager.ApplyEditors<T>(info, asset, operationGroup.EditOperations);
                     return (T)asset.Data;
                 }
@@ -183,10 +187,13 @@ internal class GameContentManager : BaseContentManager
     /// <summary>Load the initial asset from the registered loaders.</summary>
     /// <param name="info">The basic asset metadata.</param>
     /// <param name="loadOperations">The load operations to apply to the asset.</param>
-    /// <returns>Returns the loaded asset metadata, or <c>null</c> if no loader matched.</returns>
-    private IAssetData? ApplyLoader<T>(IAssetInfo info, List<AssetLoadOperation>? loadOperations)
+    /// <param name="data">The loaded asset data, if a loader matched and returned a valid value.</param>
+    /// <returns>Returns whether a loader matched and returned a valid value.</returns>
+    private bool TryApplyLoader<T>(IAssetInfo info, List<AssetLoadOperation>? loadOperations, [NotNullWhen(true)] out T? data)
         where T : notnull
     {
+        data = default;
+
         // find matching loader
         AssetLoadOperation? loader = null;
         if (loadOperations?.Count > 0)
@@ -194,7 +201,7 @@ internal class GameContentManager : BaseContentManager
             if (!this.AssertMaxOneRequiredLoader(info, loadOperations, out string? error))
             {
                 this.Monitor.Log(error, LogLevel.Warn);
-                return null;
+                return false;
             }
 
             foreach (AssetLoadOperation candidate in loadOperations)
@@ -204,11 +211,10 @@ internal class GameContentManager : BaseContentManager
             }
         }
         if (loader == null)
-            return null;
+            return false;
 
         // fetch asset from loader
         IModMetadata mod = loader.Mod;
-        T data;
         Context.HeuristicModsRunningCode.Push(loader.Mod);
         try
         {
@@ -221,17 +227,15 @@ internal class GameContentManager : BaseContentManager
         catch (Exception ex)
         {
             mod.LogAsMod($"Mod crashed when loading asset '{info.Name}'{this.GetOnBehalfOfLabel(loader.OnBehalfOf)}. SMAPI will use the default asset instead. Error details:\n{ex.GetLogSummary()}", LogLevel.Error);
-            return null;
+            data = default;
+            return false;
         }
         finally
         {
             Context.HeuristicModsRunningCode.TryPop(out _);
         }
 
-        // return matched asset
-        return this.TryFixAndValidateLoadedAsset(info, data, loader)
-            ? new AssetDataForObject(info, data, this.AssetNameNormalizer, this.Reflection)
-            : null;
+        return this.TryFixAndValidateLoadedAsset(info, data, loader);
     }
 
     /// <summary>Apply any editors to a loaded asset.</summary>
