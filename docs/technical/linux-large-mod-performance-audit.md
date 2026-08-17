@@ -94,7 +94,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transitions and garbage-collection pressure.
 - **Expected benefit:** Direct key lookup avoids whole-cache work when the caller already knows the affected asset.
 - **Risk:** Medium. Exact matching must preserve locale, separator, and case-insensitive equivalence semantics.
-- **Status:** Fixed. The exact-name helper now uses direct cache-key lookup across only game content managers, with the same localization cleanup, temporary-map handling, propagation, events, and reporting as predicate invalidation.
+- **Status:** Fixed. The exact-name helper now uses direct cache-key lookup across only game content managers, with the same localization cleanup, temporary-map handling, propagation, events, and reporting as predicate invalidation. The long-standing single-name overload also retains a scalar path: it normalizes one key and probes it directly without first allocating an array and a `HashSet` for the batch implementation. True batches still use the deduplicated set path.
 
 ### 4. Invalidation lacks a first-class multi-key transaction
 
@@ -114,7 +114,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transitions.
 - **Expected benefit:** A single world pass and indexed lookups can substantially reduce repeated traversal during large invalidation batches.
 - **Risk:** High. Propagation has many asset-specific side effects and ordering dependencies.
-- **Status:** Partially fixed. Non-caching namespaced managers are excluded from invalidation and loaded-value scans. Texture propagation reuses the exact manager targets already discovered during invalidation instead of rescanning every code mod's game content manager, with a full-scan fallback for the base-name half of localized invalidations. Multi-asset NPC dialogue/schedule bursts build one exact-name index instead of scanning every NPC for each asset. Multi-map bursts similarly index locations and spouse-room targets in one world pass instead of scanning every location for each map. Resuming an invalidated NPC schedule now finds the latest applicable entry in one linear, allocation-free pass instead of filtering and sorting every key. Single-asset world invalidations retain the cheaper direct scans. Side-effect batching remains deferred.
+- **Status:** Partially fixed. Non-caching namespaced managers are excluded from invalidation and loaded-value scans. Texture propagation reuses the exact manager targets already discovered during invalidation instead of rescanning every code mod's game content manager, with a full-scan fallback for the base-name half of localized invalidations. Multi-asset NPC dialogue/schedule bursts build one exact-name index instead of scanning every NPC for each asset. Multi-map bursts similarly index locations and spouse-room targets in one world pass instead of scanning every location for each map. Resuming an invalidated NPC schedule now finds the latest applicable entry in one linear, allocation-free pass instead of filtering and sorting every key. Single-asset world invalidations retain the cheaper direct scans. Reusing the live-location topology built during invalidation was rejected: `AssetsInvalidated` handlers run before propagation and may mutate locations, buildings, interiors, or map paths, so the pre-event topology isn't a valid propagation snapshot. Side-effect batching remains deferred.
 
 ### 6. File logging flushes synchronously on the game thread
 
