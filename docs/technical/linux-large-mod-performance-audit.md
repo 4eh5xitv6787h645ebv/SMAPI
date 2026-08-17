@@ -74,6 +74,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 62. Finding 62 — broad cache scans allocate an iterator per manager — fixed.
 63. Finding 63 — texture propagation retrieves cached targets twice — fixed.
 64. Finding 64 — custom-map tilesheet routing splits every path repeatedly — fixed.
+65. Finding 65 — successful mod asset loads allocate type arrays — fixed.
 
 ## Detailed findings
 
@@ -717,6 +718,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. Focused coverage locks single/multiple/non-leading traversal, exact `..` segment identity, `Maps` routing, case-insensitive PNG removal, and dot-prefixed normal folders.
 - **Status:** Fixed. Directory traversal validation and content-key routing use allocation-free exact segment scans over normalized `/`-separated paths.
 
+### 65. Successful mod asset loads allocate temporary type arrays
+
+- **Affected code:** `Framework/ContentManagers/ModContentManager.cs` (`LoadFont`, `LoadImageFile`, `LoadMapFile`, and `AssertValidType`).
+- **Scenario:** Every unpacked PNG, TMX/TBIN map, and bitmap-font load from a mod, directly proportional to large content-pack reload volume.
+- **Root cause:** Type validation accepted a `params Type[]`, so the compiler allocated a one- or two-element array before every successful load even though the valid type count is fixed at each call site.
+- **Impact:** Short-lived transition allocation and garbage collection proportional to mod asset loads.
+- **Expected benefit:** Successful validation performs only direct type comparisons with no array, enumeration, or diagnostic formatting allocation.
+- **Risk:** Very low. Fixed one- and two-type overloads retain the same assignability checks and produce the same allowed-type information on the exceptional invalid-type path.
+- **Status:** Fixed. Successful font, image, and map validations use fixed-arity overloads; error strings are still created only when validation fails.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -730,7 +741,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, and 63 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
-| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |
+| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, and 65 |
 | Content-manager lookup scaling | Findings 9, 53, 57, and 58 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
@@ -740,7 +751,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, and 61 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, and 57 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, and 65 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
