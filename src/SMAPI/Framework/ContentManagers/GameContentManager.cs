@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -22,8 +23,18 @@ namespace StardewModdingAPI.Framework.ContentManagers;
 internal class GameContentManager : BaseContentManager
 {
     /*********
+    ** Delegates
+    *********/
+    /// <summary>Apply editors using the asset's concrete type.</summary>
+    private delegate IAssetData ApplyEditorsDelegate(GameContentManager manager, IAssetInfo info, IAssetData asset, List<AssetEditOperation>? editOperations);
+
+
+    /*********
     ** Fields
     *********/
+    /// <summary>The editor methods specialized for concrete asset types loaded through a more general type like <see cref="object"/>.</summary>
+    private static readonly ConcurrentDictionary<Type, ApplyEditorsDelegate> ApplyEditorsByType = new();
+
     /// <summary>The assets currently being intercepted by <see cref="AssetLoadOperation"/> instances. This is used to prevent infinite loops when a loader loads a new asset.</summary>
     private readonly ContextHash<string> AssetsBeingLoaded = [];
 
@@ -236,12 +247,7 @@ internal class GameContentManager : BaseContentManager
             Type? actualOpenType = actualType.IsGenericType ? actualType.GetGenericTypeDefinition() : null;
 
             if (typeof(T) != actualType && (actualOpenType == typeof(Dictionary<,>) || actualOpenType == typeof(List<>) || actualType == typeof(Texture2D) || actualType == typeof(Map)))
-            {
-                return (IAssetData)this.GetType()
-                    .GetMethod(nameof(this.ApplyEditors), BindingFlags.NonPublic | BindingFlags.Instance)!
-                    .MakeGenericMethod(actualType)
-                    .Invoke(this, [info, asset, editOperations])!;
-            }
+                return GameContentManager.GetApplyEditorsDelegate(actualType)(this, info, asset, editOperations);
         }
 
         // edit asset
@@ -285,6 +291,23 @@ internal class GameContentManager : BaseContentManager
 
         // return result
         return asset;
+    }
+
+    /// <summary>Get a cached editor method specialized for a concrete asset type.</summary>
+    /// <param name="assetType">The concrete asset type.</param>
+    private static ApplyEditorsDelegate GetApplyEditorsDelegate(Type assetType)
+    {
+        return GameContentManager.ApplyEditorsByType.GetOrAdd(
+            assetType,
+            static type =>
+            {
+                MethodInfo method = typeof(GameContentManager)
+                    .GetMethod(nameof(GameContentManager.ApplyEditors), BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .MakeGenericMethod(type);
+
+                return (ApplyEditorsDelegate)method.CreateDelegate(typeof(ApplyEditorsDelegate));
+            }
+        );
     }
 
     /// <summary>Assert that at most one loader will be applied to an asset.</summary>
