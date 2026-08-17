@@ -57,7 +57,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 45. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
 46. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
 47. Finding 45 — incorrect overlay alpha composition — queued.
-48. Finding 49 — mod messages serialize even when no remote peer will receive them — trace-gated.
+48. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
 49. Finding 50 — public reflection cache hits still allocate lookup machinery — trace-gated.
 50. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
@@ -551,7 +551,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Avoidable JSON traversal, string allocation, and GC pressure on the calling thread. Whether this contributes to walking jank depends entirely on the installed mods' message rate and payload sizes.
 - **Expected benefit:** Build the model for local delivery, but defer JSON serialization until at least one remote peer needs it or network logging will consume it.
 - **Risk:** Low to medium. Local delivery must retain the same payload conversion, error timing, recipient metadata, and logging behavior.
-- **Status:** Trace-gated. Measure `BroadcastModMessage` call frequency, recipient distribution, payload size, and serialization time in the target pack before changing a compatibility-sensitive multiplayer path.
+- **Status:** Fixed. Local delivery still constructs the same `JToken`-backed model, but SMAPI now serializes its JSON envelope only when a reachable remote peer or enabled network-traffic log will consume it. Remote messages are still serialized before local event delivery, preserving payload ordering and mutation semantics; invalid-recipient and disconnected-host paths avoid serialization too. A static string scan found 50 target-pack assemblies containing `SendMessage` or `IMultiplayerHelper` metadata, but that does not establish call frequency; frame-time impact remains workload-dependent.
 
 ### 50. Public reflection cache hits still allocate lookup machinery
 
@@ -592,7 +592,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 ## Remaining implementation priority
 
 1. Capture representative Linux traces from the target 200-code-mod/400-content-pack installation, especially cursor-position consumption, live `AssetRequested` frequency, propagation side-effect repetition, and the before/after chest-tracking frame cost.
-2. Measure mod-message frequency and hot-loop public reflection use before changing those compatibility-sensitive paths.
+2. Measure hot-loop public reflection use before redesigning that compatibility-sensitive API.
 3. Add a provider-generation model only if traces justify extending asset-operation caching across ticks without stale dynamic conditions.
 4. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
 5. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
