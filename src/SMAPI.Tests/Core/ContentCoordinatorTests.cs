@@ -87,6 +87,34 @@ internal class ContentCoordinatorTests
         requestedTypes.Should().Equal(typeof(string), typeof(object));
     }
 
+    [Test]
+    public void AssetInfoPredicateCache_EvaluatesEquivalentAssetsOnce()
+    {
+        List<(IAssetName Name, Type DataType)> requests = [];
+        var cache = new AssetInfoPredicateCache(
+            locale: "en-US",
+            normalizeAssetName: static raw => raw,
+            predicate: info =>
+            {
+                requests.Add((info.Name, info.DataType));
+                return info.DataType == typeof(string);
+            }
+        );
+
+        IAssetName firstCase = new AssetName("Data/Example", localeCode: null, languageCode: null);
+        IAssetName secondCase = new AssetName("data/example", localeCode: null, languageCode: null);
+
+        cache.Matches(firstCase, typeof(string)).Should().BeTrue();
+        cache.Matches(secondCase, typeof(string)).Should().BeTrue();
+        cache.Matches(firstCase, typeof(object)).Should().BeFalse();
+        cache.Matches(secondCase, typeof(object)).Should().BeFalse();
+
+        requests.Should().Equal(
+            (firstCase, typeof(string)),
+            (firstCase, typeof(object))
+        );
+    }
+
     [Test(Description = "Assert that the deferred invalidation report preserves its contents and case-insensitive asset order.")]
     public void FormatInvalidationReport_FormatsSortedSummary()
     {
