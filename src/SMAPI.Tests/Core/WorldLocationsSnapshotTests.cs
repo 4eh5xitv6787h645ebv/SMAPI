@@ -21,6 +21,19 @@ internal class WorldLocationsSnapshotTests
     /*********
     ** Unit tests
     *********/
+    [Test(Description = "Assert that a tracker initialized after locations exist discovers them on its first update.")]
+    public void Update_DiscoversLocationsPresentAtConstruction()
+    {
+        GameLocation location = new();
+        ObservableCollection<GameLocation> locations = [location];
+        using WorldLocationsTracker tracker = new(locations, new List<MineShaft>(), new List<VolcanoDungeon>());
+
+        tracker.Update();
+
+        tracker.HasLocationTracker(location).Should().BeTrue();
+        tracker.Added.Should().ContainSingle().Which.Should().BeSameAs(location);
+    }
+
     [Test(Description = "Assert that location additions and removals keep their direction when copied into a snapshot.")]
     public void Update_PreservesLocationListChangeDirection()
     {

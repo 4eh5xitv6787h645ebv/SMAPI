@@ -50,6 +50,12 @@ internal class ObservableCollectionWatcher<TValue> : BaseDisposableWatcher, ICol
     {
         this.Name = name;
         this.Field = field;
+        if (field.Count > 0)
+        {
+            this.PreviousValues.AddRange(field);
+            this.AddedImpl.AddRange(field);
+            this.IsChanged = true;
+        }
         field.CollectionChanged += this.OnCollectionChanged;
     }
 

@@ -86,6 +86,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 74. Finding 74 — every registered asset edit allocates a wrapper object — fixed.
 75. Finding 75 — case variants create duplicate map tilesheets — fixed.
 76. Finding 76 — explicit XNB fallback tilesheets get a double extension — fixed.
+77. Finding 77 — observable watchers start with an empty baseline — fixed.
 
 ## Detailed findings
 
@@ -848,6 +849,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Expected benefit:** Explicit `.xnb` and `.XNB` paths resolve to the same canonical game asset as extensionless paths, avoiding the failed load/retry route.
 - **Risk:** Low. SMAPI's public game-content normalization already treats `.xnb` as a legacy removable extension, and local mod tilesheets still resolve physical `.xnb` files before fallback.
 - **Status:** Fixed. Game-content tilesheet keys strip `.png` or `.xnb` ordinal-ignore-case, with focused lower/upper-case coverage.
+
+### 77. Observable collection watchers start with an empty baseline
+
+- **Affected code:** `Framework/StateTracking/FieldWatchers/ObservableCollectionWatcher.cs` and `WorldLocationsTracker.cs` initialization.
+- **Scenario:** A watcher is constructed after its source collection already contains values, notably a late or split-screen world tracker after game locations are populated.
+- **Root cause:** The watcher subscribed to future notifications but left its ordered `PreviousValues` baseline empty. Removing or replacing an initial item could index outside that list; reset could not report initial removals; and the world tracker never discovered unchanged preexisting locations.
+- **Impact:** Potential update exception, incomplete world tracking, and missed location/content changes rather than a direct speed cost.
+- **Expected benefit:** Nonempty collections are safely tracked from construction and world locations are discovered on the first update without waiting for another collection change.
+- **Risk:** Medium-low. Initial values follow the existing comparable-list watcher contract by appearing as added until the first reset, then serving as the stable baseline. Focused tests cover initial discovery, removal, replacement, and reset/clear.
+- **Status:** Fixed. Construction seeds the ordered baseline and initial added set before subscribing to changes.
 
 ## Requested audit coverage
 
