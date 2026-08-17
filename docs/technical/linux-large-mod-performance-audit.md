@@ -941,6 +941,17 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. The index uses the same existing per-tick topology and spouse-room semantics already used for multi-map batches, and expires on the same game-tick boundary. Focused coverage verifies both immediate multi-map indexing and the adaptive sequence across four separate calls.
 - **Status:** Fixed. Map propagation now shares an adaptive per-tick index across invalidation transactions after the direct-scan crossover.
 
+### 86. TMX conversion searches tileset metadata for every populated tile
+
+- **Affected code:** `Framework/SCore.cs`, the bundled `Platonymous.TMXTile` format registration, and `Framework/Content/OptimizedTmxFormat.cs`.
+- **Scenario:** Loading large expansion maps from unpacked TMX files during startup, a warp, or content invalidation.
+- **Root cause:** The bundled TMX converter linearly selected a target tilesheet and then created LINQ iterators to search the parsed tileset and its explicit tile definitions for every populated map cell. Most cells only need a static tile, but still repeated both metadata searches.
+- **Measured evidence:** The 255,000-cell Ridgeside Village map contained 48,568 populated cells. Its repeated metadata lookups took about 151 ms in isolation versus about 9 ms through a map-level index. Full conversion fell from about 259 ms to 131 ms. Across the 20 largest installed TMX maps, conversion fell from 1,843 ms to 750 ms (59.3%), and serializing both results to xTile's binary format produced byte-identical output for every map.
+- **Impact:** Main-thread map-load stalls and transition jank proportional to populated TMX tile count, plus one or more short-lived LINQ iterator objects per populated tile.
+- **Expected benefit:** Tilesheet ranges and animated-tile definitions are indexed once per conversion. Static tiles take a short range scan with no LINQ allocation; animated definitions use one dictionary probe. XML parsing itself is unchanged and remains roughly half of a large map's total parse-and-convert time.
+- **Risk:** Medium-low. SMAPI registers a derived TMX format which retains the bundled implementation for tileset, image-layer, compatibility, and storage behavior, while reproducing its layer/property/object conversion semantics. Focused tests cover interface dispatch, binary-equivalent map output, animations, every flip combination, sheet selection, empty cells, and invalid IDs; the 20-map installed-pack comparison adds representative expansion coverage.
+- **Status:** Fixed. TMX registration now uses the indexed converter without a persistent cache or first-load write penalty.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -950,7 +961,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, 80, and 84 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, 82, and 85 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, 81, 82, 85, and 86 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, 79, and 85 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
@@ -964,7 +975,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, 71, and 74 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, and 84 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, 74, 82, 83, 84, and 86 |
+| TMX map parsing and conversion | Finding 86 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
