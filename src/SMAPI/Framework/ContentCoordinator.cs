@@ -295,6 +295,12 @@ internal class ContentCoordinator : IDisposable
             localizedAssets.Clear();
     }
 
+    /// <summary>Perform any updates needed after the player returns to the title screen.</summary>
+    public void OnReturnedToTitleScreen()
+    {
+        this.CoreAssets.ClearWorldCache();
+    }
+
     /// <summary>Parse a raw asset name.</summary>
     /// <param name="rawName">The raw asset name to parse.</param>
     /// <param name="allowLocales">Whether to parse locales in the <paramref name="rawName"/>. If this is false, any locale codes in the name are treated as if they were part of the base name (e.g. for mod files).</param>

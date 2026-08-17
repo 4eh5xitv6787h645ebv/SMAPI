@@ -50,6 +50,13 @@ internal class TickCacheDictionary<TKey, TValue>
         return cached;
     }
 
+    /// <summary>Remove all cached values.</summary>
+    public void Clear()
+    {
+        this.Cache.Clear();
+        this.LastGameTick = null;
+    }
+
     /// <summary>Remove an entry from the cache.</summary>
     /// <param name="cacheKey">The unique key for the cached value.</param>
     /// <returns>Returns whether the key was present in the dictionary.</returns>
