@@ -67,6 +67,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 55. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 56. Finding 56 — duplicate content-cache hashing during scans and invalidation — fixed.
 57. Finding 57 — managed-asset parsing and lock closures — fixed.
+58. Finding 58 — localized cached loads probe their mapping twice — fixed.
 
 ## Detailed findings
 
@@ -640,6 +641,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. Parser coverage locks valid slash and backslash forms, malformed/partial prefixes, empty IDs and paths, platform-normalized manager IDs, and case-insensitive routing. Every lock path retains `finally`-based release and existing first-manager precedence.
 - **Status:** Fixed. Managed keys are scanned by separator index without split arrays, exact prefix-segment matching is ordinal-ignore-case, the namespaced index is case-insensitive, and explicit-state read/write lock overloads replace capturing callbacks. A warmed 20,000-operation read/write regression check allocates zero bytes.
 
+### 58. Non-English cached loads probe their localized-name mapping twice
+
+- **Affected code:** `Framework/ContentManagers/BaseContentManager.cs` (`LoadLocalized`).
+- **Scenario:** Every repeated localized game-content load after SMAPI has resolved the asset's language-specific, international, or base key, including loads issued from update and draw callbacks.
+- **Root cause:** `LoadLocalized` called `TryGetValue` to determine whether the stable base-to-localized mapping existed, discarded the returned string, then indexed the same dictionary again to retrieve it on the overwhelmingly common cache-hit path.
+- **Impact:** Steady content-load and transition CPU for non-English players.
+- **Expected benefit:** Each cached localized-name resolution uses one dictionary hash/probe instead of two, with no added allocation.
+- **Risk:** Low. Cache misses retain the same localized and `_international` existence checks and early returns; the no-variant branch stores and reuses the same base name.
+- **Status:** Fixed. The first `TryGetValue` retains its mapped raw name, and the miss branch assigns that same local when caching the base-name fallback.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -647,14 +658,14 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, and 57 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, and 58 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, and 55 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, and 56 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |
-| Content-manager lookup scaling | Findings 9, 53, and 57 |
+| Content-manager lookup scaling | Findings 9, 53, 57, and 58 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
 | Assembly loading and rewrite caching | Findings 12 and 44 |
