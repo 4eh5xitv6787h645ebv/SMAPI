@@ -25,6 +25,9 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
     /// <summary>The pressed buttons.</summary>
     private readonly HashSet<Buttons> PressedButtons = [];
 
+    /// <summary>Whether <see cref="PressedButtons"/> has been initialized from the current state for overrides.</summary>
+    private bool ArePressedButtonsInitialized;
+
     /// <summary>The left trigger value.</summary>
     private float LeftTrigger;
 
@@ -45,32 +48,13 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
     public void Reset(GamePadState state)
     {
         this.State = state;
+        this.ArePressedButtonsInitialized = false;
 
         // reset tracked values
-        this.PressedButtons.Clear();
         if (state.IsConnected)
         {
-            GamePadDPad pad = state.DPad;
-            GamePadButtons buttons = state.Buttons;
             GamePadTriggers triggers = state.Triggers;
             GamePadThumbSticks sticks = state.ThumbSticks;
-
-            HashSet<Buttons> pressed = this.PressedButtons;
-            AddIfPressed(pressed, Buttons.DPadUp, pad.Up);
-            AddIfPressed(pressed, Buttons.DPadDown, pad.Down);
-            AddIfPressed(pressed, Buttons.DPadLeft, pad.Left);
-            AddIfPressed(pressed, Buttons.DPadRight, pad.Right);
-            AddIfPressed(pressed, Buttons.A, buttons.A);
-            AddIfPressed(pressed, Buttons.B, buttons.B);
-            AddIfPressed(pressed, Buttons.X, buttons.X);
-            AddIfPressed(pressed, Buttons.Y, buttons.Y);
-            AddIfPressed(pressed, Buttons.LeftStick, buttons.LeftStick);
-            AddIfPressed(pressed, Buttons.RightStick, buttons.RightStick);
-            AddIfPressed(pressed, Buttons.LeftShoulder, buttons.LeftShoulder);
-            AddIfPressed(pressed, Buttons.RightShoulder, buttons.RightShoulder);
-            AddIfPressed(pressed, Buttons.Back, buttons.Back);
-            AddIfPressed(pressed, Buttons.Start, buttons.Start);
-            AddIfPressed(pressed, Buttons.BigButton, buttons.BigButton);
 
             this.LeftTrigger = triggers.Left;
             this.RightTrigger = triggers.Right;
@@ -85,12 +69,6 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
             this.RightStickPos = Vector2.Zero;
         }
 
-        return;
-        static void AddIfPressed(HashSet<Buttons> pressed, Buttons button, ButtonState state)
-        {
-            if (state == ButtonState.Pressed)
-                pressed.Add(button);
-        }
     }
 
     /// <summary>Override the state for a button.</summary>
@@ -98,6 +76,7 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
     /// <param name="state">The new state to set.</param>
     public void OverrideButton(Buttons button, SButtonState state)
     {
+        this.EnsurePressedButtons();
         bool isDown = state.IsDown();
         bool changed;
 
@@ -168,8 +147,32 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
     public void FillPressedButtons(HashSet<SButton> set)
     {
         // buttons
-        foreach (Buttons button in this.PressedButtons)
-            set.Add(button.ToSButton());
+        if (this.ArePressedButtonsInitialized)
+        {
+            foreach (Buttons button in this.PressedButtons)
+                set.Add(button.ToSButton());
+        }
+        else
+        {
+            GamePadState state = this.State.GetValueOrDefault();
+            GamePadDPad pad = state.DPad;
+            GamePadButtons buttons = state.Buttons;
+            AddIfPressed(set, SButton.DPadUp, pad.Up);
+            AddIfPressed(set, SButton.DPadDown, pad.Down);
+            AddIfPressed(set, SButton.DPadLeft, pad.Left);
+            AddIfPressed(set, SButton.DPadRight, pad.Right);
+            AddIfPressed(set, SButton.ControllerA, buttons.A);
+            AddIfPressed(set, SButton.ControllerB, buttons.B);
+            AddIfPressed(set, SButton.ControllerX, buttons.X);
+            AddIfPressed(set, SButton.ControllerY, buttons.Y);
+            AddIfPressed(set, SButton.LeftStick, buttons.LeftStick);
+            AddIfPressed(set, SButton.RightStick, buttons.RightStick);
+            AddIfPressed(set, SButton.LeftShoulder, buttons.LeftShoulder);
+            AddIfPressed(set, SButton.RightShoulder, buttons.RightShoulder);
+            AddIfPressed(set, SButton.ControllerBack, buttons.Back);
+            AddIfPressed(set, SButton.ControllerStart, buttons.Start);
+            AddIfPressed(set, SButton.BigButton, buttons.BigButton);
+        }
 
         // triggers
         if (this.LeftTrigger > 0.2f)
@@ -199,6 +202,12 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
             if (this.RightStickPos.X < 0)
                 set.Add(SButton.RightThumbstickLeft);
         }
+
+        static void AddIfPressed(HashSet<SButton> pressed, SButton button, ButtonState state)
+        {
+            if (state == ButtonState.Pressed)
+                pressed.Add(button);
+        }
     }
 
     /// <inheritdoc />
@@ -213,5 +222,44 @@ internal class GamePadStateBuilder : IInputStateBuilder<GamePadStateBuilder, Gam
                 ? this.PressedButtons.ToArray()
                 : []
         );
+    }
+
+
+    /*********
+    ** Private methods
+    *********/
+    /// <summary>Initialize the mutable pressed-button set from the current state.</summary>
+    private void EnsurePressedButtons()
+    {
+        if (this.ArePressedButtonsInitialized)
+            return;
+
+        GamePadState state = this.State.GetValueOrDefault();
+        GamePadDPad pad = state.DPad;
+        GamePadButtons buttons = state.Buttons;
+        HashSet<Buttons> pressed = this.PressedButtons;
+        pressed.Clear();
+        AddIfPressed(pressed, Buttons.DPadUp, pad.Up);
+        AddIfPressed(pressed, Buttons.DPadDown, pad.Down);
+        AddIfPressed(pressed, Buttons.DPadLeft, pad.Left);
+        AddIfPressed(pressed, Buttons.DPadRight, pad.Right);
+        AddIfPressed(pressed, Buttons.A, buttons.A);
+        AddIfPressed(pressed, Buttons.B, buttons.B);
+        AddIfPressed(pressed, Buttons.X, buttons.X);
+        AddIfPressed(pressed, Buttons.Y, buttons.Y);
+        AddIfPressed(pressed, Buttons.LeftStick, buttons.LeftStick);
+        AddIfPressed(pressed, Buttons.RightStick, buttons.RightStick);
+        AddIfPressed(pressed, Buttons.LeftShoulder, buttons.LeftShoulder);
+        AddIfPressed(pressed, Buttons.RightShoulder, buttons.RightShoulder);
+        AddIfPressed(pressed, Buttons.Back, buttons.Back);
+        AddIfPressed(pressed, Buttons.Start, buttons.Start);
+        AddIfPressed(pressed, Buttons.BigButton, buttons.BigButton);
+        this.ArePressedButtonsInitialized = true;
+
+        static void AddIfPressed(HashSet<Buttons> pressed, Buttons button, ButtonState state)
+        {
+            if (state == ButtonState.Pressed)
+                pressed.Add(button);
+        }
     }
 }

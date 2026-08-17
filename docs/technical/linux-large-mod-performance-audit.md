@@ -297,15 +297,15 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The callback must receive the exact `GameTime` for its invocation and remain synchronous.
 - **Status:** Fixed. The wrapper delegates now accept `GameTime` directly and each game object reuses one cached base-update callback, preserving the existing synchronous control flow without per-tick closures.
 
-### 24. Keyboard polling allocates an array while walking
+### 24. Input polling allocates and rehashes held buttons while walking
 
-- **Affected code:** `Framework/Input/KeyboardStateBuilder.cs` (`Reset`).
-- **Scenario:** Every focused Linux update while one or more keyboard keys are held, including ordinary WASD walking.
-- **Root cause:** SMAPI calls MonoGame's parameterless `KeyboardState.GetPressedKeys`, which constructs a new exact-sized array whenever at least one key is pressed, then immediately copies those keys into SMAPI's reusable set.
+- **Affected code:** `Framework/Input/KeyboardStateBuilder.cs`, `MouseStateBuilder.cs`, and `GamePadStateBuilder.cs` (`Reset`, `FillPressedButtons`, and override handling).
+- **Scenario:** Every focused Linux update, including ordinary WASD or controller walking.
+- **Root cause:** SMAPI called MonoGame's parameterless `KeyboardState.GetPressedKeys`, which constructed a new exact-sized array whenever at least one key was pressed. All three builders then cleared and repopulated their own mutable button hash sets before immediately copying those buttons into SMAPI's combined set, even though the private sets are only needed when a mod overrides input.
 - **Impact:** Steady gameplay and garbage collection.
-- **Expected benefit:** A caller-owned key buffer removes the continuous pressed-key array allocation during keyboard movement and other held input.
-- **Risk:** Low. MonoGame exposes the key count and a buffer-filling overload; SMAPI must process only the populated prefix because a reused buffer can retain older values past that count.
-- **Status:** Fixed. Keyboard polling now grows one per-player buffer only when the simultaneous key-count high-water mark exceeds its capacity, fills it through MonoGame's nonallocating overload, and reads exactly the reported number of keys.
+- **Expected benefit:** A caller-owned key buffer removes the continuous pressed-key array allocation, while direct immutable-state enumeration removes one redundant hash-set clear/fill/enumeration layer from normal keyboard, mouse, and controller ticks.
+- **Risk:** Low to medium. Reused keyboard buffers must process only their populated prefix, and the lazy mutable sets must reconstruct every digital button before applying the first override without changing analog trigger or thumbstick state.
+- **Status:** Fixed. Keyboard polling grows one per-player buffer only when its simultaneous key-count high-water mark increases and fills it through MonoGame's nonallocating overload. Keyboard, mouse, and controller builders now read the original immutable state directly on normal ticks and materialize their private mutable pressed-button sets only when an override is requested. Focused tests verify the sets remain lazy and that reconstructed keyboard, mouse, digital controller, trigger, and thumbstick output is equivalent after overrides.
 
 ### 25. ButtonsChanged constructs three lists on every held-input tick
 

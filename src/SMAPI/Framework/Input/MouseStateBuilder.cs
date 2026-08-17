@@ -16,6 +16,9 @@ internal class MouseStateBuilder : IInputStateBuilder<MouseStateBuilder, MouseSt
     /// <summary>The pressed buttons.</summary>
     private readonly HashSet<SButton> PressedButtons = [];
 
+    /// <summary>Whether <see cref="PressedButtons"/> has been initialized from the current state for overrides.</summary>
+    private bool ArePressedButtonsInitialized;
+
     /// <summary>The mouse wheel scroll value.</summary>
     private int ScrollWheelValue;
 
@@ -37,25 +40,12 @@ internal class MouseStateBuilder : IInputStateBuilder<MouseStateBuilder, MouseSt
     public void Reset(MouseState state)
     {
         this.State = state;
-
-        // reset tracked buttons
-        this.PressedButtons.Clear();
-        AddIfPressed(this.PressedButtons, SButton.MouseLeft, state.LeftButton);
-        AddIfPressed(this.PressedButtons, SButton.MouseMiddle, state.MiddleButton);
-        AddIfPressed(this.PressedButtons, SButton.MouseRight, state.RightButton);
-        AddIfPressed(this.PressedButtons, SButton.MouseX1, state.XButton1);
-        AddIfPressed(this.PressedButtons, SButton.MouseX2, state.XButton2);
+        this.ArePressedButtonsInitialized = false;
 
         this.X = state.X;
         this.Y = state.Y;
         this.ScrollWheelValue = state.ScrollWheelValue;
 
-        return;
-        static void AddIfPressed(HashSet<SButton> pressed, SButton button, ButtonState state)
-        {
-            if (state == ButtonState.Pressed)
-                pressed.Add(button);
-        }
     }
 
     /// <summary>Override the state for a button.</summary>
@@ -63,6 +53,7 @@ internal class MouseStateBuilder : IInputStateBuilder<MouseStateBuilder, MouseSt
     /// <param name="state">The new state to set.</param>
     public void OverrideButton(SButton button, SButtonState state)
     {
+        this.EnsurePressedButtons();
         bool changed = state.IsDown()
             ? this.PressedButtons.Add(button)
             : this.PressedButtons.Remove(button);
@@ -74,8 +65,19 @@ internal class MouseStateBuilder : IInputStateBuilder<MouseStateBuilder, MouseSt
     /// <inheritdoc />
     public void FillPressedButtons(HashSet<SButton> set)
     {
-        foreach (SButton button in this.PressedButtons)
-            set.Add(button);
+        if (this.ArePressedButtonsInitialized)
+        {
+            foreach (SButton button in this.PressedButtons)
+                set.Add(button);
+            return;
+        }
+
+        MouseState state = this.State.GetValueOrDefault();
+        MouseStateBuilder.AddIfPressed(set, SButton.MouseLeft, state.LeftButton);
+        MouseStateBuilder.AddIfPressed(set, SButton.MouseMiddle, state.MiddleButton);
+        MouseStateBuilder.AddIfPressed(set, SButton.MouseRight, state.RightButton);
+        MouseStateBuilder.AddIfPressed(set, SButton.MouseX1, state.XButton1);
+        MouseStateBuilder.AddIfPressed(set, SButton.MouseX2, state.XButton2);
     }
 
     /// <inheritdoc />
@@ -98,5 +100,32 @@ internal class MouseStateBuilder : IInputStateBuilder<MouseStateBuilder, MouseSt
                 ? ButtonState.Pressed
                 : ButtonState.Released;
         }
+    }
+
+
+    /*********
+    ** Private methods
+    *********/
+    /// <summary>Initialize the mutable pressed-button set from the current state.</summary>
+    private void EnsurePressedButtons()
+    {
+        if (this.ArePressedButtonsInitialized)
+            return;
+
+        MouseState state = this.State.GetValueOrDefault();
+        this.PressedButtons.Clear();
+        MouseStateBuilder.AddIfPressed(this.PressedButtons, SButton.MouseLeft, state.LeftButton);
+        MouseStateBuilder.AddIfPressed(this.PressedButtons, SButton.MouseMiddle, state.MiddleButton);
+        MouseStateBuilder.AddIfPressed(this.PressedButtons, SButton.MouseRight, state.RightButton);
+        MouseStateBuilder.AddIfPressed(this.PressedButtons, SButton.MouseX1, state.XButton1);
+        MouseStateBuilder.AddIfPressed(this.PressedButtons, SButton.MouseX2, state.XButton2);
+        this.ArePressedButtonsInitialized = true;
+    }
+
+    /// <summary>Add a mouse button to a set if it's pressed.</summary>
+    private static void AddIfPressed(HashSet<SButton> pressed, SButton button, ButtonState state)
+    {
+        if (state == ButtonState.Pressed)
+            pressed.Add(button);
     }
 }
