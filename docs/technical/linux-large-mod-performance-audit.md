@@ -73,6 +73,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 61. Finding 61 — no-op asset interception wraps every raw asset — fixed.
 62. Finding 62 — broad cache scans allocate an iterator per manager — fixed.
 63. Finding 63 — texture propagation retrieves cached targets twice — fixed.
+64. Finding 64 — custom-map tilesheet routing splits every path repeatedly — fixed.
 
 ## Detailed findings
 
@@ -706,6 +707,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. Localized and base-name propagation passes are unchanged. The incompatible-type fallback deliberately retains the old localized load path and its exception behavior.
 - **Status:** Fixed. Propagation uses `TryGetCachedAsset` once and copies directly into the exact cached `Texture2D`; only an impossible/mismatched cache entry takes the compatibility fallback.
 
+### 64. Custom-map tilesheet routing repeatedly splits normalized paths
+
+- **Affected code:** `Framework/ContentManagers/ModContentManager.cs` (`FixTilesheetPaths`, `TryGetTilesheetAssetName`, and `GetContentKeyForTilesheetImageSource`).
+- **Scenario:** Loading or reloading expansion maps with many tilesheets during warps and content-pack context changes.
+- **Root cause:** After canonicalizing separators, SMAPI still split each tilesheet path into substring arrays to validate parent traversal, check its leading segment, and route game-content fallbacks. The broad leading `StartsWith("..")` check also treated a valid local folder such as `..foo/` as parent traversal.
+- **Impact:** Transition allocation and garbage collection proportional to custom-map tilesheet count, plus incorrect Linux fallback routing for dot-prefixed folder names.
+- **Expected benefit:** Exact segment checks now scan the canonical string without arrays or substrings, eliminating two or three split arrays per tilesheet while resolving `..foo/` locally as intended.
+- **Risk:** Low to medium. Focused coverage locks single/multiple/non-leading traversal, exact `..` segment identity, `Maps` routing, case-insensitive PNG removal, and dot-prefixed normal folders.
+- **Status:** Fixed. Directory traversal validation and content-key routing use allocation-free exact segment scans over normalized `/`-separated paths.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -713,9 +724,9 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, and 60 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, and 64 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, and 63 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, and 64 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, and 63 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
