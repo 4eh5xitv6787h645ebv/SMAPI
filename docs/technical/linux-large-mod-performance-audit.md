@@ -65,6 +65,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 53. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
 54. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
 55. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+56. Finding 56 — duplicate content-cache hashing during scans and invalidation — fixed.
 
 ## Detailed findings
 
@@ -618,6 +619,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Location order, reference deduplication, active mine and volcano coverage, building-interior selection, and entity loops are unchanged; only the intermediate array is removed.
 - **Status:** Fixed. Character, farm-animal, and paint-mask propagation read each `Location` from the already cached `WorldLocationInfo` sequence, and the redundant `GetLocations` projection is removed.
 
+### 56. Content-cache scans and invalidations hash every key twice
+
+- **Affected code:** `Framework/Content/ContentCache.cs`, `Framework/ContentManagers/BaseContentManager.cs` (`GetCachedAssets` and `InvalidateCache`), and `Framework/ContentCoordinator.cs` (predicate invalidation scans).
+- **Scenario:** Content Patcher-style predicate invalidations scan every cached asset across game content managers, while exact and predicate invalidations remove matched entries.
+- **Root cause:** Cache enumeration walked the dictionary's keys and then indexed the dictionary again for every value, repeating the hash lookup. Removal first called `ContainsKey`, then called a removal method which performs the same lookup and already returns whether it succeeded.
+- **Impact:** Transition CPU proportional to scanned cache entries and invalidated manager/asset pairs.
+- **Expected benefit:** Predicate scans traverse each dictionary entry directly with no per-entry re-hash, and each removal uses one dictionary probe instead of two.
+- **Risk:** Low. Enumeration order and mutation behavior remain those of the same underlying dictionary, disposal still occurs only after successful removal, and the returned success flag is unchanged.
+- **Status:** Fixed. Content managers return the underlying cache entry enumeration, and invalidation directly returns the cache removal result.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -625,10 +636,10 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, and 53 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, and 56 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, and 55 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, and 55 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, and 56 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |
