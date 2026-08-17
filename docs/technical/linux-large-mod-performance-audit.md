@@ -21,47 +21,48 @@ This is the current jank-first order, combining likely frame-time impact, freque
 9. Finding 47 — eager cursor coordinate derivation while walking — deprioritized for the target pack.
 10. Finding 25 — held-input event snapshot allocations — fixed.
 11. Finding 7 — normal-tile rendering overhead — fixed.
-12. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
-13. Finding 37 — redundant invalidation-batch cloning — fixed.
-14. Finding 36 — per-parse locale delegate allocation — fixed.
-15. Finding 34 — layer work repeated for every patched map tile — fixed.
-16. Finding 15 — one-tick asset-operation cache lifetime — rejected without a provider contract.
-17. Finding 31 — intercepted asset-operation dispatch churn — fixed.
-18. Finding 33 — asset-loader adapter closures — fixed.
-19. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-20. Finding 6 — synchronous game-thread log flushing — fixed.
-21. Finding 46 — synchronous log formatting on the game thread — fixed.
-22. Finding 52 — eager asset-operation trace formatting — fixed.
-23. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-24. Finding 41 — incomplete and duplicate world-location topology — fixed.
-25. Finding 43 — per-asset propagation key normalization allocations — fixed.
-26. Finding 32 — per-map warp comparison sets — fixed.
-27. Finding 19 — repeated propagation side effects — partially fixed.
-28. Finding 4 — no first-class batched exact invalidation — fixed.
-29. Finding 3 — exact invalidation performing cache scans — fixed.
-30. Finding 22 — oversized sparse image-patch transfers — fixed.
-31. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
-32. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
-33. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-34. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
-35. Finding 9 — linear content-manager routing — fixed.
-36. Finding 10 — repeated asset-name strings — fixed.
-37. Finding 14 — retained dead disposable wrappers — fixed.
-38. Finding 29 — world trackers lost across reordered transfers — fixed.
-39. Finding 42 — location trackers lack source ownership — fixed.
-40. Finding 30 — rectangular transformed-tile origin — fixed.
-41. Finding 18 — reversed location event changes — fixed.
-42. Finding 17 — swapped managed-event identifiers — fixed.
-43. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-44. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-45. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-46. Finding 13 — repeated dependency-list scans — fixed.
-47. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
-48. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
-49. Finding 45 — incorrect overlay alpha composition — queued.
-50. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
-51. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
-52. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+12. Finding 53 — duplicate cached-asset probes — fixed.
+13. Finding 16 — managed-event and live asset-request dispatch allocations — partially fixed.
+14. Finding 37 — redundant invalidation-batch cloning — fixed.
+15. Finding 36 — per-parse locale delegate allocation — fixed.
+16. Finding 34 — layer work repeated for every patched map tile — fixed.
+17. Finding 15 — one-tick asset-operation cache lifetime — rejected without a provider contract.
+18. Finding 31 — intercepted asset-operation dispatch churn — fixed.
+19. Finding 33 — asset-loader adapter closures — fixed.
+20. Finding 27 — tick-cache factory and world-helper allocations — fixed.
+21. Finding 6 — synchronous game-thread log flushing — fixed.
+22. Finding 46 — synchronous log formatting on the game thread — fixed.
+23. Finding 52 — eager asset-operation trace formatting — fixed.
+24. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+25. Finding 41 — incomplete and duplicate world-location topology — fixed.
+26. Finding 43 — per-asset propagation key normalization allocations — fixed.
+27. Finding 32 — per-map warp comparison sets — fixed.
+28. Finding 19 — repeated propagation side effects — partially fixed.
+29. Finding 4 — no first-class batched exact invalidation — fixed.
+30. Finding 3 — exact invalidation performing cache scans — fixed.
+31. Finding 22 — oversized sparse image-patch transfers — fixed.
+32. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
+33. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
+34. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+35. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
+36. Finding 9 — linear content-manager routing — fixed.
+37. Finding 10 — repeated asset-name strings — fixed.
+38. Finding 14 — retained dead disposable wrappers — fixed.
+39. Finding 29 — world trackers lost across reordered transfers — fixed.
+40. Finding 42 — location trackers lack source ownership — fixed.
+41. Finding 30 — rectangular transformed-tile origin — fixed.
+42. Finding 18 — reversed location event changes — fixed.
+43. Finding 17 — swapped managed-event identifiers — fixed.
+44. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+45. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+46. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+47. Finding 13 — repeated dependency-list scans — fixed.
+48. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
+49. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
+50. Finding 45 — incorrect overlay alpha composition — queued.
+51. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
+52. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
+53. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -585,6 +586,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Warnings and errors remain immediate, visible trace output is still formatted synchronously, and queued messages capture immutable string values so later metadata changes can't alter the log.
 - **Status:** Fixed. Successful loader and editor traces use cached static deferred-message factories with stable mod, asset, and content-pack names; text and queue ordering are unchanged.
 
+### 53. Cached game-content loads probe the same cache repeatedly
+
+- **Affected code:** `Framework/ContentManagers/GameContentManager.cs` (`LoadExact`), `Framework/ContentManagers/BaseContentManager.cs` (`TryGetCachedAsset` and `RawLoad`), and `Framework/ContentCoordinator.cs` (`GetLoadedValues`).
+- **Scenario:** Mods repeatedly load an already-cached game asset from update or draw callbacks, and Content Patcher-style code requests all loaded instances during content updates.
+- **Root cause:** `LoadExact` first asks whether the cache contains the key, then invokes MonoGame's generic content load to probe and retrieve that same entry. `GetLoadedValues` adds another presence check before calling `LoadExact`, reaching at least three probes per returned manager value.
+- **Impact:** Steady update/draw CPU for repeated cached loads and transition CPU across multiple game content managers.
+- **Expected benefit:** Compatible cached loads return from one dictionary lookup, while loaded-value discovery performs one lookup per manager and directly reuses the value it found.
+- **Risk:** Low to medium. A cached value must satisfy the requested generic type; incompatible values still fall through to MonoGame's existing load path so its error behavior is retained.
+- **Status:** Fixed. `GameContentManager` uses `TryGetCachedAsset` and returns type-compatible hits directly, and `GetLoadedValues` adds the object returned by that same single probe without routing back through `LoadExact<object>`.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -592,14 +603,14 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, and 48 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, and 39 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, and 53 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, and 43 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, and 43 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |
-| Content-manager lookup scaling | Finding 9 |
+| Content-manager lookup scaling | Findings 9 and 53 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
 | Assembly loading and rewrite caching | Findings 12 and 44 |

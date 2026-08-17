@@ -618,11 +618,8 @@ internal class ContentCoordinator : IDisposable
             List<object> values = [];
             foreach (IContentManager content in this.GameContentManagers)
             {
-                if (!content.IsLoaded(assetName))
-                    continue;
-
-                object value = content.LoadExact<object>(assetName, useCache: true);
-                values.Add(value);
+                if (content.TryGetCachedAsset(assetName, out object? value))
+                    values.Add(value);
             }
             return values;
         });

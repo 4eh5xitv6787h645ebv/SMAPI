@@ -102,8 +102,14 @@ internal class GameContentManager : BaseContentManager
         }
 
         // get from cache
-        if (useCache && this.IsLoaded(assetName))
+        if (useCache && this.TryGetCachedAsset(assetName, out object? cachedAsset))
+        {
+            if (cachedAsset is T typedAsset)
+                return typedAsset;
+
+            // Preserve MonoGame's incompatible-type exception behavior for an existing cache entry.
             return this.RawLoad<T>(assetName, useCache: true);
+        }
 
         // get managed asset
         if (this.Coordinator.TryParseManagedAssetKey(assetName.Name, out string? contentManagerId, out IAssetName? relativePath))
