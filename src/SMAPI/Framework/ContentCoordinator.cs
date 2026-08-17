@@ -564,28 +564,37 @@ internal class ContentCoordinator : IDisposable
                 out bool updatedWarpRoutes
             );
 
-            // log summary
-            StringBuilder report = new();
-            {
-                ICollection<IAssetName> invalidatedKeys = invalidatedAssets.Keys;
-                IAssetName[] propagatedKeys = propagated.Where(p => p.Value).Select(p => p.Key).ToArray();
-
-                string FormatKeyList(ICollection<IAssetName> keys) => string.Join(", ", keys.Select(p => p.Name).OrderBy(p => p, StringComparer.OrdinalIgnoreCase));
-
-                report.AppendLine($"Invalidated {invalidatedKeys.Count} asset names ({FormatKeyList(invalidatedKeys)}).");
-                report.AppendLine(propagated.Count > 0
-                    ? $"Propagated {propagatedKeys.Length} core assets ({FormatKeyList(propagatedKeys)})."
-                    : "Propagated 0 core assets."
-                );
-                if (updatedWarpRoutes)
-                    report.AppendLine("Updated NPC warp route cache.");
-            }
-            this.Monitor.Log(report.ToString().TrimEnd());
+            // Build the sorted diagnostic report on the log-writer thread when trace output isn't visible.
+            // These dictionaries are privately owned and aren't mutated after this point.
+            this.Monitor.LogDeferred(
+                (Invalidated: invalidatedAssets, Propagated: propagated, UpdatedWarpRoutes: updatedWarpRoutes),
+                static state => ContentCoordinator.FormatInvalidationReport(state.Invalidated, state.Propagated, state.UpdatedWarpRoutes)
+            );
         }
         else
             this.Monitor.Log("Invalidated 0 cache entries.");
 
         return invalidatedAssets.Keys;
+    }
+
+    /// <summary>Format a diagnostic report for one completed invalidation transaction.</summary>
+    internal static string FormatInvalidationReport(IReadOnlyDictionary<IAssetName, Type> invalidatedAssets, IReadOnlyDictionary<IAssetName, bool> propagatedAssets, bool updatedWarpRoutes)
+    {
+        static string FormatKeyList(IEnumerable<IAssetName> keys)
+        {
+            return string.Join(", ", keys.Select(p => p.Name).OrderBy(p => p, StringComparer.OrdinalIgnoreCase));
+        }
+
+        IAssetName[] propagatedKeys = propagatedAssets.Where(p => p.Value).Select(p => p.Key).ToArray();
+        StringBuilder report = new();
+        report.AppendLine($"Invalidated {invalidatedAssets.Count} asset names ({FormatKeyList(invalidatedAssets.Keys)}).");
+        report.AppendLine(propagatedAssets.Count > 0
+            ? $"Propagated {propagatedKeys.Length} core assets ({FormatKeyList(propagatedKeys)})."
+            : "Propagated 0 core assets."
+        );
+        if (updatedWarpRoutes)
+            report.AppendLine("Updated NPC warp route cache.");
+        return report.ToString().TrimEnd();
     }
 
     /// <summary>Get the asset load and edit operations to apply to a given asset if it's (re)loaded now.</summary>

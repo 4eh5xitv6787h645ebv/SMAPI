@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
@@ -55,6 +56,40 @@ internal class LogFileManagerTests
             File.ReadAllText(path).Should().Be(
                 "[14:05:09 INFO  SMAPI] first\r\n"
                 + "[14:05:10 TRACE screen_2 Example Mod] second\r\n"
+            );
+        }
+        finally
+        {
+            log.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Test(Description = "Assert that deferred structured messages are created once on the writer thread in queue order.")]
+    public void Flush_FormatsDeferredStructuredMessages()
+    {
+        string path = this.GetTempFilePath();
+        LogFileManager log = new(path);
+        int callerThreadId = Environment.CurrentManagedThreadId;
+        int factoryThreadId = callerThreadId;
+        int factoryCalls = 0;
+
+        try
+        {
+            log.WriteLine(new DateTime(2026, 8, 17, 14, 5, 9), "TRACE", screenId: null, "SMAPI", 42, state =>
+            {
+                Interlocked.Increment(ref factoryCalls);
+                factoryThreadId = Environment.CurrentManagedThreadId;
+                return $"deferred {state}";
+            });
+            log.WriteLine("after");
+            log.Flush();
+
+            factoryCalls.Should().Be(1);
+            factoryThreadId.Should().NotBe(callerThreadId);
+            File.ReadAllText(path).Should().Be(
+                "[14:05:09 TRACE SMAPI] deferred 42\r\n"
+                + "after\r\n"
             );
         }
         finally

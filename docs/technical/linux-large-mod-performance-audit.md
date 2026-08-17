@@ -521,7 +521,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Potential frame-time spikes and allocation bursts under high log volume.
 - **Expected benefit:** Queue structured records, format file text on the writer thread, and only build console text when the level is visible.
 - **Risk:** Medium to high. Timestamp ordering, crash-time draining, mutable messages, and console/file consistency need explicit handling.
-- **Status:** Fixed. `Monitor` captures only the timestamp, cached level text, screen ID, source, and message for file output. `LogFileManager` formats those fields on its writer thread, raw lines no longer allocate a newline-appended copy on callers, and console text is only created when that level is actually visible. Explicit flush ordering and bounded backpressure are unchanged.
+- **Status:** Fixed. `Monitor` captures only the timestamp, cached level text, screen ID, source, and message for file output. `LogFileManager` formats those fields on its writer thread, raw lines no longer allocate a newline-appended copy on callers, and console text is only created when that level is actually visible. Invalidation reports now also queue their privately owned result state, so filtering, case-insensitive sorting, joining, and report-string construction happen on the writer thread when trace output is hidden. Visible console output is still formatted immediately, while explicit flush ordering and bounded backpressure remain unchanged.
 
 ### 47. Cursor coordinate derivation remains eager while walking
 

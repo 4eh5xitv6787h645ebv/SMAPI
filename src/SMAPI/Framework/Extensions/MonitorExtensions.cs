@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace StardewModdingAPI.Framework.Extensions;
@@ -16,6 +17,19 @@ internal static class MonitorExtensions
         {
             if (hash.Add(message))
                 monitor.Log(message, level);
+        }
+
+        /// <summary>Log a message whose text can be created on the log-writer thread when supported.</summary>
+        /// <typeparam name="TState">The type of state passed to the message factory.</typeparam>
+        /// <param name="state">The immutable or privately owned state from which to create the message.</param>
+        /// <param name="getMessage">Create the message text.</param>
+        /// <param name="level">The message severity.</param>
+        public void LogDeferred<TState>(TState state, Func<TState, string> getMessage, LogLevel level = LogLevel.Trace)
+        {
+            if (monitor is Monitor implementation)
+                implementation.LogDeferred(state, getMessage, level);
+            else
+                monitor.Log(getMessage(state), level);
         }
     }
 }
