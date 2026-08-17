@@ -385,17 +385,29 @@ internal sealed class ModContentManager : BaseContentManager
     /// <typeparam name="TAsset">The actual asset type.</typeparam>
     /// <param name="assetName">The asset name relative to the loader root directory.</param>
     /// <param name="file">The file being loaded.</param>
-    /// <param name="validTypes">The allowed asset types.</param>
-    /// <exception cref="SContentLoadException">The <typeparamref name="TAsset"/> is not compatible with any of the <paramref name="validTypes"/>.</exception>
-    private void AssertValidType<TAsset>(IAssetName assetName, FileInfo file, params Type[] validTypes)
+    /// <param name="validType">The allowed asset type.</param>
+    /// <exception cref="SContentLoadException">The <typeparamref name="TAsset"/> is not compatible with the <paramref name="validType"/>.</exception>
+    private void AssertValidType<TAsset>(IAssetName assetName, FileInfo file, Type validType)
     {
-        foreach (Type type in validTypes)
-        {
-            if (type.IsAssignableFrom(typeof(TAsset)))
-                return;
-        }
+        if (validType.IsAssignableFrom(typeof(TAsset)))
+            return;
 
-        this.ThrowLoadError(assetName, ContentLoadErrorType.InvalidData, $"can't read file with extension '{file.Extension}' as type '{typeof(TAsset)}'; must be type '{string.Join("' or '", validTypes.Select(p => p.FullName))}'.");
+        this.ThrowLoadError(assetName, ContentLoadErrorType.InvalidData, $"can't read file with extension '{file.Extension}' as type '{typeof(TAsset)}'; must be type '{validType.FullName}'.");
+    }
+
+    /// <summary>Assert that the asset type is compatible with one of two allowed types.</summary>
+    /// <typeparam name="TAsset">The actual asset type.</typeparam>
+    /// <param name="assetName">The asset name relative to the loader root directory.</param>
+    /// <param name="file">The file being loaded.</param>
+    /// <param name="firstValidType">The first allowed asset type.</param>
+    /// <param name="secondValidType">The second allowed asset type.</param>
+    /// <exception cref="SContentLoadException">The <typeparamref name="TAsset"/> is not compatible with either allowed type.</exception>
+    private void AssertValidType<TAsset>(IAssetName assetName, FileInfo file, Type firstValidType, Type secondValidType)
+    {
+        if (firstValidType.IsAssignableFrom(typeof(TAsset)) || secondValidType.IsAssignableFrom(typeof(TAsset)))
+            return;
+
+        this.ThrowLoadError(assetName, ContentLoadErrorType.InvalidData, $"can't read file with extension '{file.Extension}' as type '{typeof(TAsset)}'; must be type '{firstValidType.FullName}' or '{secondValidType.FullName}'.");
     }
 
     /// <summary>Throw an error which indicates that an asset couldn't be loaded.</summary>
