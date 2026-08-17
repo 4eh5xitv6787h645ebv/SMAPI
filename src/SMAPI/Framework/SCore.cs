@@ -1112,10 +1112,9 @@ internal class SCore : IDisposable
                         bool raiseLevelChanged = events.LevelChanged.HasListeners;
                         if (verbose || raiseLevelChanged)
                         {
-                            foreach ((SkillType skill, var value) in playerState.Skills)
+                            foreach (SkillType skill in playerState.ChangedSkills)
                             {
-                                if (!value.IsChanged)
-                                    continue;
+                                SnapshotDiff<int> value = playerState.Skills[skill];
 
                                 if (verbose)
                                     this.Monitor.Log($"Events: player skill '{skill}' changed from {value.Old} to {value.New}.", Monitor.ContextLogLevel);

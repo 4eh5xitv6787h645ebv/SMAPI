@@ -15,6 +15,9 @@ internal class PlayerSnapshot
     /// <summary>An empty item list diff.</summary>
     private readonly SnapshotItemListDiff EmptyItemListDiff = new([], [], []);
 
+    /// <summary>The skills with changes captured in the current snapshot.</summary>
+    private readonly List<SkillType> ChangedSkillsImpl = [];
+
 
     /*********
     ** Accessors
@@ -30,6 +33,9 @@ internal class PlayerSnapshot
         Enum
             .GetValues<SkillType>()
             .ToDictionary(skill => skill, _ => new SnapshotDiff<int>());
+
+    /// <summary>The skills with changes captured in the current snapshot, in event dispatch order.</summary>
+    public IReadOnlyList<SkillType> ChangedSkills => this.ChangedSkillsImpl;
 
     /// <summary>Get a list of inventory changes.</summary>
     public SnapshotItemListDiff Inventory { get; private set; }
@@ -51,8 +57,17 @@ internal class PlayerSnapshot
     public void Update(PlayerTracker watcher)
     {
         this.Location.Update(watcher.LocationWatcher!);
-        foreach ((SkillType skill, var value) in this.Skills)
-            value.Update(watcher.SkillWatchers[skill]);
+
+        // Clear diffs copied on the previous tick, then copy only fields which changed now. Updating an
+        // overlapping field twice is harmless and keeps the unchanged path free of skill traversal.
+        foreach (SkillType skill in this.ChangedSkillsImpl)
+            this.Skills[skill].Update(watcher.SkillWatchers[skill]);
+        this.ChangedSkillsImpl.Clear();
+        foreach (SkillType skill in watcher.ChangedSkills)
+        {
+            this.Skills[skill].Update(watcher.SkillWatchers[skill]);
+            this.ChangedSkillsImpl.Add(skill);
+        }
 
         this.Inventory = watcher.TryGetInventoryChanges(out SnapshotItemListDiff? itemChanges)
             ? itemChanges

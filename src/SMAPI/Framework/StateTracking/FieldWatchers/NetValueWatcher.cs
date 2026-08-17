@@ -1,3 +1,4 @@
+using System;
 using Netcode;
 
 namespace StardewModdingAPI.Framework.StateTracking.FieldWatchers;
@@ -12,6 +13,9 @@ internal class NetValueWatcher<TValue, TNetField> : BaseDisposableWatcher, IValu
     *********/
     /// <summary>The field being watched.</summary>
     private readonly NetFieldBase<TValue, TNetField> Field;
+
+    /// <summary>Notify the owner when this watcher first changes after a reset.</summary>
+    private readonly Action? OnChanged;
 
 
     /*********
@@ -36,10 +40,12 @@ internal class NetValueWatcher<TValue, TNetField> : BaseDisposableWatcher, IValu
     /// <summary>Construct an instance.</summary>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
     /// <param name="field">The field to watch.</param>
-    public NetValueWatcher(string name, NetFieldBase<TValue, TNetField> field)
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public NetValueWatcher(string name, NetFieldBase<TValue, TNetField> field, Action? onChanged = null)
     {
         this.Name = name;
         this.Field = field;
+        this.OnChanged = onChanged;
         this.PreviousValue = field.Value;
         this.CurrentValue = field.Value;
 
@@ -83,7 +89,10 @@ internal class NetValueWatcher<TValue, TNetField> : BaseDisposableWatcher, IValu
     /// <param name="newValue">The new field value.</param>
     private void OnValueChanged(TNetField field, TValue oldValue, TValue newValue)
     {
+        bool wasChanged = this.IsChanged;
         this.CurrentValue = newValue;
         this.IsChanged = true;
+        if (!wasChanged)
+            this.OnChanged?.Invoke();
     }
 }

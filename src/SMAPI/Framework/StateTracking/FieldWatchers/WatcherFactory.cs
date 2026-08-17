@@ -50,10 +50,11 @@ internal static class WatcherFactory
     /// <typeparam name="T">The value type.</typeparam>
     /// <typeparam name="TSelf">The net field instance type.</typeparam>
     /// <param name="name">A name which identifies what the watcher is watching, used for troubleshooting.</param>
-    /// <param name="field">The net collection.</param>
-    public static IValueWatcher<T> ForNetValue<T, TSelf>(string name, NetFieldBase<T, TSelf> field) where TSelf : NetFieldBase<T, TSelf>
+    /// <param name="field">The net value field.</param>
+    /// <param name="onChanged">Notify the owner when this watcher first changes after a reset.</param>
+    public static IValueWatcher<T> ForNetValue<T, TSelf>(string name, NetFieldBase<T, TSelf> field, Action? onChanged = null) where TSelf : NetFieldBase<T, TSelf>
     {
-        return new NetValueWatcher<T, TSelf>(name, field);
+        return new NetValueWatcher<T, TSelf>(name, field, onChanged);
     }
 
     /****
