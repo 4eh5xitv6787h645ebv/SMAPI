@@ -890,6 +890,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. The same normalized case-insensitive name set determines matches, texture instances remain retained for in-place propagation, non-textures retain disposal behavior, and the scalar exact-name path is unchanged. Dictionary removal during enumeration retains the runtime behavior already used by predicate invalidation.
 - **Status:** Fixed. Content managers expose their internal cache count, and exact batches adapt per manager without constructing another index or collection.
 
+### 81. Map patches alternate layers and hash tilesheets for every tile
+
+- **Affected code:** `Framework/Content/AssetDataForMap.cs` (`PatchMap`).
+- **Scenario:** Content Patcher applies an overlay or replacement to a large expansion map with multiple layers and tilesheets during initial load or a context-driven reload.
+- **Root cause:** The tile-copy loop iterated coordinate first and layer second. Every coordinate re-entered layer enumeration, full replacement re-enumerated target-only layers, and adjacent tiles on one layer still performed a dictionary lookup for the same tilesheet because work alternated between layers.
+- **Impact:** Transition CPU proportional to patch width × height × layer count, on top of the unavoidable tile cloning. The target pack contains 1,873 TMX/TBIN maps totaling about 129 MB.
+- **Expected benefit:** Patches traverse one layer's contiguous tile matrix at a time, clear target-only layers in dedicated passes, and reuse the last source-to-target tilesheet mapping for neighboring tiles. Missing target layers also avoid an immediate ID lookup after creation.
+- **Risk:** Low to medium. Overlay, replace-by-layer, and full-replace final states are unchanged; tile and layer properties still copy once; source tiles still clone into target-owned sheets; and zero-area behavior is retained. Only the private order in which independent layer cells are assigned changes.
+- **Status:** Fixed. The patch loop is layer-first with a per-layer tilesheet fast cache and focused multi-layer coverage for all three patch modes.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -899,7 +909,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, and 80 |
 | Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, and 75 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, 75, and 81 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, and 79 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
