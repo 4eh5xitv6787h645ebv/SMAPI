@@ -251,7 +251,7 @@ internal class CoreAssetPropagator
                         changed = this.PropagateMap(
                             assetName,
                             ref spouseRoomMapPathCache,
-                            locationsByMapName,
+                            ref locationsByMapName,
                             ref oldWarpTargets,
                             ref newWarpTargets,
                             checkWarpChanges: !changedWarpRoutes,
@@ -305,7 +305,7 @@ internal class CoreAssetPropagator
     /// <param name="ignoreWorld">Whether the in-game world is fully unloaded (e.g. on the title screen), so there's no need to propagate changes into the world.</param>
     /// <param name="changedWarpRoutes">Whether the locations reachable by warps from this location changed as part of this propagation.</param>
     /// <returns>Returns whether any assets were updated.</returns>
-    private bool PropagateMap(IAssetName assetName, ref Dictionary<FarmHouse, string?>? spouseRoomMapPathCache, Dictionary<IAssetName, List<LocationInfo>>? locationsByMapName, ref HashSet<string>? oldWarpTargets, ref HashSet<string>? newWarpTargets, bool checkWarpChanges, bool ignoreWorld, out bool changedWarpRoutes)
+    private bool PropagateMap(IAssetName assetName, ref Dictionary<FarmHouse, string?>? spouseRoomMapPathCache, ref Dictionary<IAssetName, List<LocationInfo>>? locationsByMapName, ref HashSet<string>? oldWarpTargets, ref HashSet<string>? newWarpTargets, bool checkWarpChanges, bool ignoreWorld, out bool changedWarpRoutes)
     {
         bool changed = false;
         changedWarpRoutes = false;
@@ -360,6 +360,10 @@ internal class CoreAssetPropagator
                         FillWarpSet(location, oldWarpTargets);
                     }
 
+                    // Reloading a map can invoke asset callbacks, which may change another location's map path.
+                    // Discard the batch snapshot first so later assets use live values even if this update fails.
+                    locationsByMapName = null;
+                    spouseRoomMapPathCache = null;
                     this.UpdateMap(info);
 
                     if (checkWarpChanges && !changedWarpRoutes)
