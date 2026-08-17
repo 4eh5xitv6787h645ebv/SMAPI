@@ -40,7 +40,10 @@ internal class Program
             Program.AssertGamePresent();
             Program.AssertGameVersion();
             Program.AssertSmapiVersions();
-            Program.AssertDepsJson();
+            if (Program.IsUsingGameRuntimeFallback())
+                Program.AssertDepsJson("StardewModdingAPI-net6.deps.json");
+            else if (EarlyConstants.Platform != GamePlatform.Linux)
+                Program.AssertDepsJson("StardewModdingAPI.deps.json");
             Program.Start(args);
         }
         catch (BadImageFormatException ex) when (ex.FileName == EarlyConstants.GameAssemblyName)
@@ -164,12 +167,13 @@ internal class Program
         }
     }
 
-    /// <summary>Assert that SMAPI's <c>StardewModdingAPI.deps.json</c> matches <c>Stardew Valley.deps.json</c>, fixing it if necessary.</summary>
+    /// <summary>Assert that SMAPI's game-runtime deps file matches <c>Stardew Valley.deps.json</c>, fixing it if necessary.</summary>
+    /// <param name="targetFileName">The SMAPI deps filename to update.</param>
     /// <remarks>This is needed to resolve native DLLs like libSkiaSharp.</remarks>
-    private static void AssertDepsJson()
+    private static void AssertDepsJson(string targetFileName)
     {
         string sourcePath = Path.Combine(Constants.GamePath, "Stardew Valley.deps.json");
-        string targetPath = Path.Combine(Constants.GamePath, "StardewModdingAPI.deps.json");
+        string targetPath = Path.Combine(Constants.GamePath, targetFileName);
 
         if (!File.Exists(targetPath) || FileUtilities.GetFileHash(sourcePath) != FileUtilities.GetFileHash(targetPath))
         {
@@ -184,6 +188,15 @@ internal class Program
             Thread.Sleep(2500);
             Environment.Exit(0);
         }
+    }
+
+    /// <summary>Get whether SMAPI is running through the Linux game-runtime fallback host.</summary>
+    private static bool IsUsingGameRuntimeFallback()
+    {
+        return
+            EarlyConstants.Platform == GamePlatform.Linux
+            && AppContext.TryGetSwitch("SMAPI.UseGameRuntime", out bool useGameRuntime)
+            && useGameRuntime;
     }
 
     /// <summary>Initialize SMAPI and launch the game.</summary>
