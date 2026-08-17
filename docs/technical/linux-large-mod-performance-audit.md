@@ -83,6 +83,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 71. Finding 71 — successful on-behalf-of registration formats failure text — fixed.
 72. Finding 72 — disconnected gamepads scan every control each update — fixed.
 73. Finding 73 — every content manager repeats base-load reflection — fixed.
+74. Finding 74 — every registered asset edit allocates a wrapper object — fixed.
 
 ## Detailed findings
 
@@ -816,6 +817,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium-low. The nonvirtual base-call mechanism and per-manager delegate targets are unchanged; only the stable specialized method pointer is shared through a generic static holder.
 - **Status:** Fixed. A generic static holder resolves the base-load pointer once per `T`, while each manager still owns its bound delegate and asset cache.
 
+### 74. Every registered asset edit allocates a wrapper object
+
+- **Affected code:** `Framework/Content/AssetEditOperation.cs`, `Events/AssetRequestedEventArgs.cs`, `Framework/SCore.cs`, and `Framework/ContentManagers/GameContentManager.cs`.
+- **Scenario:** Every successful edit registered during `AssetRequested` discovery, multiplied across large Content Patcher reload batches.
+- **Root cause:** The immutable four-field edit carrier was a reference record, so each registration allocated a separate object in addition to the lazily created operation list.
+- **Impact:** Transition allocation, GC pressure, and pointer indirection proportional to registered edit count.
+- **Expected benefit:** Edit records are stored inline in their list with no per-operation wrapper object and improved iteration locality.
+- **Risk:** Low. Usages copy, sort, and read the immutable fields and never rely on null or reference identity; the extra value copies are four machine-word fields.
+- **Status:** Fixed. `AssetEditOperation` is a readonly record struct, with focused registration coverage asserting value-container semantics and retained callback identity.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -836,10 +847,10 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, and 71 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, 69, 71, and 74 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, and 67 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, 67, and 74 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority

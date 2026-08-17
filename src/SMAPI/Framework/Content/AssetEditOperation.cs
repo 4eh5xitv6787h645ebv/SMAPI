@@ -8,4 +8,4 @@ namespace StardewModdingAPI.Framework.Content;
 /// <param name="Priority">If there are multiple edits that apply to the same asset, the priority with which this one should be applied.</param>
 /// <param name="OnBehalfOf">The content pack on whose behalf the edit is being applied, if any.</param>
 /// <param name="ApplyEdit">Apply the edit to an asset.</param>
-internal record AssetEditOperation(IModMetadata Mod, AssetEditPriority Priority, IModMetadata? OnBehalfOf, Action<IAssetData> ApplyEdit);
+internal readonly record struct AssetEditOperation(IModMetadata Mod, AssetEditPriority Priority, IModMetadata? OnBehalfOf, Action<IAssetData> ApplyEdit);
