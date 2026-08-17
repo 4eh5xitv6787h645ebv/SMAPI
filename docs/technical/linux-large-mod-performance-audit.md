@@ -70,6 +70,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 58. Finding 58 — localized cached loads probe their mapping twice — fixed.
 59. Finding 59 — intercepted operation groups allocate wrapper objects — fixed.
 60. Finding 60 — content routing state is case-sensitive on Linux — fixed.
+61. Finding 61 — no-op asset interception wraps every raw asset — fixed.
 
 ## Detailed findings
 
@@ -673,6 +674,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The comparers now match the established `IAssetName` identity contract; canonical asset paths and case-distinct mod-file paths outside the game-content namespace are unaffected.
 - **Status:** Fixed. Localized mappings and target comparisons use ordinal-ignore-case semantics, and active game-asset loads use an ordinal-ignore-case context set with focused nested-key cleanup coverage.
 
+### 61. No-op global asset handlers still wrap every raw-loaded asset
+
+- **Affected code:** `Framework/ContentManagers/GameContentManager.cs` (`LoadExact`) and `Framework/Content/AssetDataForObject.cs`.
+- **Scenario:** Global `AssetRequested` listeners such as Content Patcher inspect an uncached or invalidated asset but register no applicable loader or editor, which is the normal result for most unrelated assets in a large pack.
+- **Root cause:** After handler discovery returned no operation group, SMAPI still raw-loaded the asset, allocated an `AssetDataForObject` wrapper, called `ApplyEditors` only for it to return immediately on a null list, then read the wrapper's `Data` back out.
+- **Impact:** Transition allocation and dispatch CPU proportional to unrelated uncached/reloaded assets observed by global handlers.
+- **Expected benefit:** The no-operation path performs the raw load and returns its value directly, with no editable-asset wrapper or no-op editor call.
+- **Risk:** Low. The load remains inside the same recursive-load context, while outer cache tracking, first-load handling, asset-loaded callbacks, exception behavior, and actual loader/editor paths are unchanged.
+- **Status:** Fixed. A null operation group now takes an immediate raw-load fast path; non-null groups retain the existing loader, wrapper, validation, and editor pipeline.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -693,7 +704,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, and 59 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, and 61 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
 | GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, and 57 |

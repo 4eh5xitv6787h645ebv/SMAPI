@@ -149,10 +149,14 @@ internal class GameContentManager : BaseContentManager
                     IAssetName assetName = state.AssetName;
                     IAssetInfo info = new AssetInfo(assetName.LocaleCode, assetName, typeof(T), manager.AssetNameNormalizer);
                     AssetOperationGroup? operations = manager.Coordinator.GetAssetOperations(info);
+                    if (operations is null)
+                        return manager.RawLoad<T>(assetName, state.UseCache);
+
+                    AssetOperationGroup operationGroup = operations.Value;
                     IAssetData asset =
-                        manager.ApplyLoader<T>(info, operations?.LoadOperations)
+                        manager.ApplyLoader<T>(info, operationGroup.LoadOperations)
                         ?? new AssetDataForObject(info, manager.RawLoad<T>(assetName, state.UseCache), manager.AssetNameNormalizer, manager.Reflection);
-                    asset = manager.ApplyEditors<T>(info, asset, operations?.EditOperations);
+                    asset = manager.ApplyEditors<T>(info, asset, operationGroup.EditOperations);
                     return (T)asset.Data;
                 }
             );
