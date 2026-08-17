@@ -1494,20 +1494,23 @@ internal class SCore : IDisposable
         // Preserve registration order for equal priorities, matching LINQ's stable OrderBy used at
         // application time, but sort once so every content manager can enumerate the cached group
         // directly without allocating another ordering pipeline.
-        List<AssetEditOperation> editOperations = args.EditOperations;
-        for (int i = 1; i < editOperations.Count; i++)
+        List<AssetEditOperation>? editOperations = args.EditOperations;
+        if (editOperations is not null)
         {
-            AssetEditOperation current = editOperations[i];
-            int insertAt = i;
-            while (insertAt > 0 && editOperations[insertAt - 1].Priority > current.Priority)
+            for (int i = 1; i < editOperations.Count; i++)
             {
-                editOperations[insertAt] = editOperations[insertAt - 1];
-                insertAt--;
+                AssetEditOperation current = editOperations[i];
+                int insertAt = i;
+                while (insertAt > 0 && editOperations[insertAt - 1].Priority > current.Priority)
+                {
+                    editOperations[insertAt] = editOperations[insertAt - 1];
+                    insertAt--;
+                }
+                editOperations[insertAt] = current;
             }
-            editOperations[insertAt] = current;
         }
 
-        return args.LoadOperations.Count != 0 || args.EditOperations.Count != 0
+        return args.LoadOperations is not null || editOperations is not null
             ? new AssetOperationGroup(args.LoadOperations, args.EditOperations)
             : null;
     }

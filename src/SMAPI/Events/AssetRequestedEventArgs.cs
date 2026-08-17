@@ -37,10 +37,10 @@ public class AssetRequestedEventArgs : EventArgs
     public Type DataType => this.AssetInfo.DataType;
 
     /// <summary>The load operations requested by the event handler.</summary>
-    internal List<AssetLoadOperation> LoadOperations { get; } = [];
+    internal List<AssetLoadOperation>? LoadOperations { get; private set; }
 
     /// <summary>The edit operations requested by the event handler.</summary>
-    internal List<AssetEditOperation> EditOperations { get; } = [];
+    internal List<AssetEditOperation>? EditOperations { get; private set; }
 
 
     /*********
@@ -77,7 +77,7 @@ public class AssetRequestedEventArgs : EventArgs
     public void LoadFrom(Func<object> load, AssetLoadPriority priority, string? onBehalfOf = null)
     {
         IModMetadata mod = this.GetMod();
-        this.LoadOperations.Add(
+        (this.LoadOperations ??= []).Add(
             new DelegateAssetLoadOperation(
                 mod: mod,
                 onBehalfOf: this.GetOnBehalfOf(mod, onBehalfOf, "load assets"),
@@ -96,7 +96,7 @@ public class AssetRequestedEventArgs : EventArgs
         where TAsset : notnull
     {
         IModMetadata mod = this.GetMod();
-        this.LoadOperations.Add(
+        (this.LoadOperations ??= []).Add(
             new ModFileAssetLoadOperation<TAsset>(mod, priority, relativePath)
         );
     }
@@ -115,7 +115,7 @@ public class AssetRequestedEventArgs : EventArgs
     public void Edit(Action<IAssetData> apply, AssetEditPriority priority = AssetEditPriority.Default, string? onBehalfOf = null)
     {
         IModMetadata mod = this.GetMod();
-        this.EditOperations.Add(
+        (this.EditOperations ??= []).Add(
             new AssetEditOperation(
                 Mod: mod,
                 Priority: priority,
