@@ -503,8 +503,22 @@ internal class ContentCoordinator : IDisposable
             {
                 foreach (IContentManager contentManager in this.GameContentManagers)
                 {
-                    foreach (IAssetName name in normalizedNames!)
-                        ContentCoordinator.InvalidateExactCacheEntry(contentManager, name, dispose, invalidatedAssets, ref loadedTextureManagers);
+                    // Probe the smaller side of the manager/name intersection. Large content-pack batches often
+                    // contain far more requested names than most mod-owned managers have cached entries.
+                    if (normalizedNames!.Count <= contentManager.CachedAssetCount)
+                    {
+                        foreach (IAssetName name in normalizedNames)
+                            ContentCoordinator.InvalidateExactCacheEntry(contentManager, name, dispose, invalidatedAssets, ref loadedTextureManagers);
+                    }
+                    else
+                    {
+                        foreach ((string rawName, object asset) in contentManager.GetCachedAssets())
+                        {
+                            AssetName name = this.ParseAssetName(rawName, allowLocales: true);
+                            if (normalizedNames.Contains(name))
+                                ContentCoordinator.InvalidateExactCachedAsset(contentManager, name, asset, dispose, invalidatedAssets, ref loadedTextureManagers);
+                        }
+                    }
                 }
             }
 
@@ -552,6 +566,18 @@ internal class ContentCoordinator : IDisposable
         if (!contentManager.TryGetCachedAsset(assetName, out object? asset))
             return;
 
+        ContentCoordinator.InvalidateExactCachedAsset(contentManager, assetName, asset, dispose, invalidatedAssets, ref loadedTextureManagers);
+    }
+
+    /// <summary>Invalidate a normalized exact asset which is already known to be cached by a content manager.</summary>
+    /// <param name="contentManager">The content manager containing the asset.</param>
+    /// <param name="assetName">The normalized asset name.</param>
+    /// <param name="asset">The cached asset.</param>
+    /// <param name="dispose">Whether to dispose the invalidated asset.</param>
+    /// <param name="invalidatedAssets">The invalidated asset types to update.</param>
+    /// <param name="loadedTextureManagers">The loaded texture managers to update.</param>
+    private static void InvalidateExactCachedAsset(IContentManager contentManager, IAssetName assetName, object asset, bool dispose, Dictionary<IAssetName, Type> invalidatedAssets, ref Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers)
+    {
         if (asset is Texture2D) // will edit in place
             ContentCoordinator.TrackLoadedTextureManager(ref loadedTextureManagers, assetName, contentManager);
         else

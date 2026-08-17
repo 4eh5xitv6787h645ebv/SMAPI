@@ -10,6 +10,19 @@ namespace SMAPI.Tests.Core;
 [TestFixture]
 internal class ContentCacheTests
 {
+    [Test]
+    public void Count_TracksCachedEntries()
+    {
+        Dictionary<string, object> values = new() { ["first"] = new object() };
+        ContentCache cache = new(values);
+
+        cache.Count.Should().Be(1);
+        values["second"] = new object();
+        cache.Count.Should().Be(2);
+        cache.Remove("first", dispose: false);
+        cache.Count.Should().Be(1);
+    }
+
     [Test(Description = "Assert that enumerating cache entries doesn't re-hash their keys.")]
     public void GetEntries_EnumeratesWithoutKeyLookups()
     {
