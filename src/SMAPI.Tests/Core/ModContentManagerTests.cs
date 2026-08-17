@@ -32,6 +32,8 @@ internal class ModContentManagerTests
     [TestCase("../LooseSprites/Cursors.png", "LooseSprites/Cursors")]
     [TestCase("Maps/spring_town.png", "Maps/spring_town")]
     [TestCase("maps/spring_town.PNG", "maps/spring_town")]
+    [TestCase("../TileSheets/Furniture.xnb", "TileSheets/Furniture")]
+    [TestCase("../TileSheets/Furniture.XNB", "TileSheets/Furniture")]
     [TestCase("..foo/bar.png", "Maps/..foo/bar")]
     [TestCase("local/bar", "Maps/local/bar")]
     public void GetContentKeyForTilesheetImageSource_RoutesWithoutSplitting(string path, string expected)
