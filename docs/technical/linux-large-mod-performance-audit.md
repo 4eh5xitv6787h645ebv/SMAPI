@@ -77,6 +77,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 65. Finding 65 — successful mod asset loads allocate type arrays — fixed.
 66. Finding 66 — vanilla map inspection probes before loading — fixed.
 67. Finding 67 — loader-only assets allocate editable wrappers — fixed.
+68. Finding 68 — texture replacement probes before every successful load — fixed.
 
 ## Detailed findings
 
@@ -750,6 +751,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium. Exclusive-loader conflict handling, loader exceptions, null/type validation, vanilla fallback, map repair, recursive-load tracking, and actual editor paths retain their existing order and behavior.
 - **Status:** Fixed. Loader application uses a typed try pattern, and `LoadExact` creates `AssetDataForObject` only for nonempty edit-operation groups.
 
+### 68. Texture replacement probes existence before every successful load
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`PropagateTexture`).
+- **Scenario:** Each invalidated texture which still has an in-place cached target during a Content Patcher reload or context change.
+- **Root cause:** Before loading the fresh replacement, propagation always called `DoesAssetExist` and then performed the actual uncached localized load. Existing assets—the normal case—therefore traversed provider/filesystem existence logic immediately before traversing the load pipeline.
+- **Impact:** Transition CPU and synchronous content/filesystem lookup work proportional to propagated textures.
+- **Expected benefit:** Successful replacements take one real load attempt and no preliminary existence probe.
+- **Risk:** Low to medium. On load failure, propagation still probes existence: genuinely removed assets keep the focused warning, while a present but broken provider rethrows into the existing per-asset propagation error handler.
+- **Status:** Fixed. The real load is attempted first; existence classification runs only on its exceptional path.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -760,7 +771,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, and 64 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, and 66 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, and 63 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, and 68 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, and 65 |
