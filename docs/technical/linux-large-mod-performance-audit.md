@@ -221,7 +221,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Steady gameplay, transitions, and garbage collection.
 - **Expected benefit:** Caching lazy callbacks removes repeat dispatch allocations; a correctly scoped context fast path could further reduce framework overhead, although mod handler time will usually dominate.
 - **Risk:** High. Current-mod attribution and exception isolation are correctness features and must not be weakened.
-- **Status:** Partially fixed. Each registered handler owns one cached lazy-dispatch callback, and stateful raises now pass stack-held per-raise state by reference to cached static invokers. Live asset requests and routed network messages therefore avoid both the per-handler callback allocations and their per-raise capturing dispatch closure. Context stack operations and exception boundaries remain unchanged pending runtime evidence.
+- **Status:** Partially fixed. Each registered handler owns one cached lazy-dispatch callback, and stateful raises now pass stack-held per-raise state by reference to cached static invokers. Live asset requests and routed network messages therefore avoid both the per-handler callback allocations and their per-raise capturing dispatch closure. `AssetRequestedEventArgs` now creates its loader and editor lists only when a handler actually registers that operation type; a no-op request fell from 120 to 56 allocated bytes in the warmed .NET 10 allocation check, and loader-only/editor-only requests avoid the unrelated empty list too. Context stack operations and exception boundaries remain unchanged pending runtime evidence.
 
 ### 17. World event manager identifiers for locations and buildings are swapped
 

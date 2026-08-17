@@ -74,9 +74,9 @@ internal class GameContentManager : BaseContentManager
         string locale = this.GetLocale();
         IAssetInfo info = new AssetInfo(locale, assetName, typeof(T), this.AssertAndNormalizeAssetName);
         AssetOperationGroup? operations = this.Coordinator.GetAssetOperations(info);
-        if (operations?.LoadOperations.Count > 0)
+        if (operations?.LoadOperations is { Count: > 0 } loadOperations)
         {
-            if (!this.AssertMaxOneRequiredLoader(info, operations.LoadOperations, out string? error))
+            if (!this.AssertMaxOneRequiredLoader(info, loadOperations, out string? error))
             {
                 this.Monitor.Log(error, LogLevel.Warn);
                 return false;
