@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Microsoft.Xna.Framework;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Toolkit.Utilities;
@@ -90,7 +89,9 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
                 // change ID if it conflicts with an existing tilesheet
                 if (target.GetTileSheet(id) != null)
                 {
-                    int disambiguator = Enumerable.Range(2, int.MaxValue - 1).First(p => target.GetTileSheet($"{id}_{p}") == null);
+                    int disambiguator = 2;
+                    while (target.GetTileSheet($"{id}_{disambiguator}") != null)
+                        disambiguator++;
                     id = $"{id}_{disambiguator}";
                 }
 

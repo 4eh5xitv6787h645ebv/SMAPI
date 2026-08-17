@@ -199,7 +199,7 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
         }
 
         // use cached key
-        if (assetName.Name != rawName)
+        if (!StringComparer.OrdinalIgnoreCase.Equals(assetName.Name, rawName))
             assetName = this.Coordinator.ParseAssetName(rawName!, allowLocales: this.TryLocalizeKeys);
         return this.LoadExact<T>(assetName, useCache: useCache);
     }

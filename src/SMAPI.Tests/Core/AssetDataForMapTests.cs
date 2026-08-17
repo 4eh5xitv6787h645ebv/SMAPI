@@ -78,6 +78,21 @@ internal class AssetDataForMapTests
         target.GetTileSheet("z_outdoors").Should().NotBeNull();
     }
 
+    [Test]
+    public void PatchMap_DisambiguatesPastExistingGeneratedTilesheets()
+    {
+        Map target = CreateMap("Back");
+        AddTileSheet(target, "outdoors", "Maps/Town/Sheet");
+        AddTileSheet(target, "z_outdoors", "Maps/Town/FirstPatch");
+        AddTileSheet(target, "z_outdoors_2", "Maps/Town/SecondPatch");
+        Map source = CreateMap("Back");
+        AddTileSheet(source, "outdoors", "Maps/Town/ThirdPatch");
+
+        CreateAssetData(target).PatchMap(source);
+
+        target.GetTileSheet("z_outdoors_3").Should().NotBeNull();
+    }
+
     [TestCase(PatchMapMode.Overlay, true, true)]
     [TestCase(PatchMapMode.ReplaceByLayer, false, true)]
     [TestCase(PatchMapMode.Replace, false, false)]
