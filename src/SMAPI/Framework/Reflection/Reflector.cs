@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using StardewModdingAPI.Framework.Utilities;
 
 namespace StardewModdingAPI.Framework.Reflection;
@@ -12,7 +14,10 @@ internal class Reflector
     ** Fields
     *********/
     /// <summary>The cached fields and methods found via reflection.</summary>
-    private readonly IntervalMemoryCache<string, MemberInfo?> Cache = new();
+    private readonly IntervalMemoryCache<ReflectionCacheKey, MemberInfo?> Cache = new();
+
+    /// <summary>The target-bound wrappers for cached members, indexed weakly so they don't retain game or mod objects.</summary>
+    private ConditionalWeakTable<object, Dictionary<ReflectionWrapperCacheKey, object>> WrapperCache = new();
 
 
     /*********
@@ -140,6 +145,7 @@ internal class Reflector
     public void NewCacheInterval()
     {
         this.Cache.StartNewInterval();
+        this.WrapperCache = new();
     }
 
 
@@ -154,28 +160,21 @@ internal class Reflector
     /// <param name="bindingFlags">The reflection binding which flags which indicates what type of field to find.</param>
     private IReflectedField<TValue>? GetFieldFromHierarchy<TValue>(Type type, object? obj, string name, BindingFlags bindingFlags)
     {
-        bool isStatic = bindingFlags.HasFlag(BindingFlags.Static);
-        FieldInfo? field = this.GetCached(
-            'f', type, name, isStatic,
-            fetch: () =>
-            {
-                for (Type? curType = type; curType != null; curType = curType.BaseType)
-                {
-                    FieldInfo? fieldInfo = curType.GetField(name, bindingFlags);
-                    if (fieldInfo != null)
-                    {
-                        type = curType;
-                        return fieldInfo;
-                    }
-                }
+        bool isStatic = (bindingFlags & BindingFlags.Static) != 0;
+        FieldInfo? field = this.GetCached<FieldInfo>(ReflectionMemberType.Field, type, name, isStatic);
 
-                return null;
-            }
-        );
+        if (field == null)
+            return null;
 
-        return field != null
-            ? new ReflectedField<TValue>(type, obj, field, isStatic)
-            : null;
+        object target = obj ?? type;
+        ReflectionWrapperCacheKey wrapperKey = new(field, typeof(TValue));
+        Dictionary<ReflectionWrapperCacheKey, object> wrappers = this.WrapperCache.GetOrCreateValue(target);
+        if (!wrappers.TryGetValue(wrapperKey, out object? wrapper))
+        {
+            wrapper = new ReflectedField<TValue>(field.DeclaringType ?? type, obj, field, isStatic);
+            wrappers[wrapperKey] = wrapper;
+        }
+        return (IReflectedField<TValue>)wrapper;
     }
 
     /// <summary>Get a property from the type hierarchy.</summary>
@@ -186,28 +185,21 @@ internal class Reflector
     /// <param name="bindingFlags">The reflection binding which flags which indicates what type of property to find.</param>
     private IReflectedProperty<TValue>? GetPropertyFromHierarchy<TValue>(Type type, object? obj, string name, BindingFlags bindingFlags)
     {
-        bool isStatic = bindingFlags.HasFlag(BindingFlags.Static);
-        PropertyInfo? property = this.GetCached(
-            'p', type, name, isStatic,
-            fetch: () =>
-            {
-                for (Type? curType = type; curType != null; curType = curType.BaseType)
-                {
-                    PropertyInfo? propertyInfo = curType.GetProperty(name, bindingFlags);
-                    if (propertyInfo != null)
-                    {
-                        type = curType;
-                        return propertyInfo;
-                    }
-                }
+        bool isStatic = (bindingFlags & BindingFlags.Static) != 0;
+        PropertyInfo? property = this.GetCached<PropertyInfo>(ReflectionMemberType.Property, type, name, isStatic);
 
-                return null;
-            }
-        );
+        if (property == null)
+            return null;
 
-        return property != null
-            ? new ReflectedProperty<TValue>(type, obj, property, isStatic)
-            : null;
+        object target = obj ?? type;
+        ReflectionWrapperCacheKey wrapperKey = new(property, typeof(TValue));
+        Dictionary<ReflectionWrapperCacheKey, object> wrappers = this.WrapperCache.GetOrCreateValue(target);
+        if (!wrappers.TryGetValue(wrapperKey, out object? wrapper))
+        {
+            wrapper = new ReflectedProperty<TValue>(property.DeclaringType ?? type, obj, property, isStatic);
+            wrappers[wrapperKey] = wrapper;
+        }
+        return (IReflectedProperty<TValue>)wrapper;
     }
 
     /// <summary>Get a method from the type hierarchy.</summary>
@@ -217,41 +209,70 @@ internal class Reflector
     /// <param name="bindingFlags">The reflection binding which flags which indicates what type of method to find.</param>
     private IReflectedMethod? GetMethodFromHierarchy(Type type, object? obj, string name, BindingFlags bindingFlags)
     {
-        bool isStatic = bindingFlags.HasFlag(BindingFlags.Static);
-        MethodInfo? method = this.GetCached(
-            'm', type, name, isStatic,
-            fetch: () =>
+        bool isStatic = (bindingFlags & BindingFlags.Static) != 0;
+        MethodInfo? method = this.GetCached<MethodInfo>(ReflectionMemberType.Method, type, name, isStatic);
+
+        if (method == null)
+            return null;
+
+        object target = obj ?? type;
+        ReflectionWrapperCacheKey wrapperKey = new(method, null);
+        Dictionary<ReflectionWrapperCacheKey, object> wrappers = this.WrapperCache.GetOrCreateValue(target);
+        if (!wrappers.TryGetValue(wrapperKey, out object? wrapper))
+        {
+            wrapper = new ReflectedMethod(method.DeclaringType ?? type, obj, method, isStatic: isStatic);
+            wrappers[wrapperKey] = wrapper;
+        }
+        return (IReflectedMethod)wrapper;
+    }
+
+    /// <summary>Get a method or field through the cache.</summary>
+    /// <typeparam name="TMemberInfo">The expected <see cref="MemberInfo"/> type.</typeparam>
+    /// <param name="memberType">The type of member to find.</param>
+    /// <param name="type">The type whose members are being reflected.</param>
+    /// <param name="memberName">The member name.</param>
+    /// <param name="isStatic">Whether the member is static.</param>
+    private TMemberInfo? GetCached<TMemberInfo>(ReflectionMemberType memberType, Type type, string memberName, bool isStatic)
+        where TMemberInfo : MemberInfo
+    {
+        ReflectionCacheKey key = new(memberType, type, memberName, isStatic);
+        return (TMemberInfo?)this.Cache.GetOrSet(
+            key,
+            key,
+            static lookup =>
             {
-                for (Type? curType = type; curType != null; curType = curType.BaseType)
+                BindingFlags bindingFlags = BindingFlags.NonPublic | BindingFlags.Public | (lookup.IsStatic ? BindingFlags.Static : BindingFlags.Instance);
+                for (Type? curType = lookup.Type; curType != null; curType = curType.BaseType)
                 {
-                    MethodInfo? methodInfo = curType.GetMethod(name, bindingFlags);
-                    if (methodInfo != null)
+                    MemberInfo? member = lookup.MemberType switch
                     {
-                        type = curType;
-                        return methodInfo;
-                    }
+                        ReflectionMemberType.Field => curType.GetField(lookup.MemberName, bindingFlags),
+                        ReflectionMemberType.Property => curType.GetProperty(lookup.MemberName, bindingFlags),
+                        ReflectionMemberType.Method => curType.GetMethod(lookup.MemberName, bindingFlags),
+                        _ => throw new InvalidOperationException($"Unknown reflection member type '{lookup.MemberType}'.")
+                    };
+                    if (member != null)
+                        return member;
                 }
 
                 return null;
             }
         );
-
-        return method != null
-            ? new ReflectedMethod(type, obj, method, isStatic: isStatic)
-            : null;
     }
 
-    /// <summary>Get a method or field through the cache.</summary>
-    /// <typeparam name="TMemberInfo">The expected <see cref="MemberInfo"/> type.</typeparam>
-    /// <param name="memberType">A letter representing the member type (like 'm' for method).</param>
-    /// <param name="type">The type whose members are being reflected.</param>
-    /// <param name="memberName">The member name.</param>
-    /// <param name="isStatic">Whether the member is static.</param>
-    /// <param name="fetch">Fetches a new value to cache.</param>
-    private TMemberInfo? GetCached<TMemberInfo>(char memberType, Type type, string memberName, bool isStatic, Func<TMemberInfo?> fetch)
-        where TMemberInfo : MemberInfo
+    /// <summary>A type of reflected member.</summary>
+    private enum ReflectionMemberType
     {
-        string key = $"{memberType}{(isStatic ? 's' : 'i')}{type.FullName}:{memberName}";
-        return (TMemberInfo?)this.Cache.GetOrSet(key, fetch);
+        Field,
+        Property,
+        Method
     }
+
+    /// <summary>A cache key for a reflected member lookup.</summary>
+    private readonly record struct ReflectionCacheKey(ReflectionMemberType MemberType, Type Type, string MemberName, bool IsStatic);
+
+    /// <summary>A cache key for a target-bound reflected member wrapper.</summary>
+    /// <param name="Member">The reflected member.</param>
+    /// <param name="ValueType">The requested field or property value type, or <c>null</c> for a method.</param>
+    private readonly record struct ReflectionWrapperCacheKey(MemberInfo Member, Type? ValueType);
 }
