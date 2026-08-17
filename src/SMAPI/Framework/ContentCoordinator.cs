@@ -112,7 +112,7 @@ internal class ContentCoordinator : IDisposable
 
     /// <summary>A lookup which tracks whether each given asset name has a localized form.</summary>
     /// <remarks>This is a per-screen equivalent to the base game's <see cref="LocalizedContentManager.localizedAssetNames"/> field, since mods may provide different assets per-screen.</remarks>
-    public PerScreen<Dictionary<string, string>> LocalizedAssetNames { get; } = new(() => new());
+    public PerScreen<Dictionary<string, string>> LocalizedAssetNames { get; } = new(static () => new(StringComparer.OrdinalIgnoreCase));
 
 
     /*********
@@ -795,7 +795,7 @@ internal class ContentCoordinator : IDisposable
         {
             localizedAssetNames.Remove(assetName.Name);
 
-            if (localizedAssetNames.TryGetValue(assetName.BaseName, out string? targetForBaseKey) && targetForBaseKey == assetName.Name)
+            if (localizedAssetNames.TryGetValue(assetName.BaseName, out string? targetForBaseKey) && string.Equals(targetForBaseKey, assetName.Name, StringComparison.OrdinalIgnoreCase))
                 localizedAssetNames.Remove(assetName.BaseName);
         }
     }

@@ -69,6 +69,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 57. Finding 57 — managed-asset parsing and lock closures — fixed.
 58. Finding 58 — localized cached loads probe their mapping twice — fixed.
 59. Finding 59 — intercepted operation groups allocate wrapper objects — fixed.
+60. Finding 60 — content routing state is case-sensitive on Linux — fixed.
 
 ## Detailed findings
 
@@ -662,6 +663,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The type is internal, no usage relies on reference identity, nullable group access remains the same, and equality still compares the same two list references.
 - **Status:** Fixed. `AssetOperationGroup` is a readonly record struct, while the existing nullable cache and call sites retain their current null/property patterns.
 
+### 60. Localized mappings and recursive-load guards are case-sensitive on Linux
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`LocalizedAssetNames` and `ForgetLocalizedAssetNames`) and `Framework/ContentManagers/GameContentManager.cs` (`AssetsBeingLoaded`).
+- **Scenario:** A non-English mod requests the same asset using different casing, or an asset loader recursively requests its current asset with case differences on Linux.
+- **Root cause:** Asset names use ordinal-ignore-case identity, but localized base-to-target mappings and the active-load context set used default case-sensitive string comparers. Mixed-case localized requests repeated existence checks and retained duplicate mappings; invalidation compared a mapped target case-sensitively and could retain stale state. A recursive mixed-case load could bypass SMAPI's loop guard and recurse until failure.
+- **Impact:** Steady localized-load and transition CPU, cache correctness, and recursive-load stability on Linux.
+- **Expected benefit:** Equivalent mixed-case requests share one localization mapping and invalidation removes it reliably, while recursive loaders are stopped at the first equivalent key instead of repeating the load pipeline.
+- **Risk:** Low. The comparers now match the established `IAssetName` identity contract; canonical asset paths and case-distinct mod-file paths outside the game-content namespace are unaffected.
+- **Status:** Fixed. Localized mappings and target comparisons use ordinal-ignore-case semantics, and active game-asset loads use an ordinal-ignore-case context set with focused nested-key cleanup coverage.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -669,7 +680,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, and 58 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, and 60 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, and 55 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, and 56 |

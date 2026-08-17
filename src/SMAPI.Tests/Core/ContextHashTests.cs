@@ -9,6 +9,17 @@ namespace SMAPI.Tests.Core;
 [TestFixture]
 internal class ContextHashTests
 {
+    [Test(Description = "Assert that a configured comparer detects equivalent recursive context keys.")]
+    public void Track_WithComparer_RejectsEquivalentNestedKey()
+    {
+        ContextHash<string> contexts = new(StringComparer.OrdinalIgnoreCase);
+
+        FluentActions.Invoking(() => contexts.Track("Data/Asset", () => contexts.Track("data/asset", static () => { })))
+            .Should().Throw<InvalidOperationException>();
+
+        contexts.Should().BeEmpty();
+    }
+
     [Test(Description = "Assert that stateful tracking passes state, returns the result, and removes the context afterward.")]
     public void Track_WithState_ReturnsResultAndCleansUp()
     {
