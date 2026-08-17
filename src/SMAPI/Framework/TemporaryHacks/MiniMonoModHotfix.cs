@@ -66,12 +66,20 @@ internal static class MiniMonoModHotfix
             transpiler: new HarmonyMethod(typeof(MiniMonoModHotfix), nameof(ResolveTokenFix))
         );
 
-        // Harmony 2.2 allowed Insert at Pos == Length, which some mods use to append instructions.
-        // Harmony 2.4 rejects that position, so relax only the exact Insert overload those mods call.
-        harmony.Patch(
-            original: typeof(CodeMatcher).GetMethod(nameof(CodeMatcher.Insert), [typeof(CodeInstruction[])])!,
-            transpiler: new HarmonyMethod(typeof(MiniMonoModHotfix), nameof(AllowLegacyCodeMatcherAppendAtEnd))
-        );
+        // Harmony 2.2 allowed insertion at Pos == Length, which some mods use to append instructions.
+        // Harmony 2.4 rejects that position, so relax only the insertion methods which allowed it before.
+        foreach (MethodInfo method in new[]
+        {
+            typeof(CodeMatcher).GetMethod(nameof(CodeMatcher.Insert), [typeof(CodeInstruction[])])!,
+            typeof(CodeMatcher).GetMethod(nameof(CodeMatcher.Insert), [typeof(IEnumerable<CodeInstruction>)])!,
+            typeof(CodeMatcher).GetMethod(nameof(CodeMatcher.InsertBranch), [typeof(OpCode), typeof(int)])!
+        })
+        {
+            harmony.Patch(
+                original: method,
+                transpiler: new HarmonyMethod(typeof(MiniMonoModHotfix), nameof(AllowLegacyCodeMatcherAppendAtEnd))
+            );
+        }
 
     }
 
@@ -86,7 +94,7 @@ internal static class MiniMonoModHotfix
             if (instruction.Calls(getIsInvalid))
             {
                 if (found)
-                    throw new InvalidOperationException("Found multiple CodeMatcher.IsInvalid checks in CodeMatcher.Insert.");
+                    throw new InvalidOperationException("Found multiple CodeMatcher.IsInvalid checks in a legacy-compatible insertion method.");
 
                 instruction.opcode = OpCodes.Call;
                 instruction.operand = isInvalidInsertPosition;
@@ -97,7 +105,7 @@ internal static class MiniMonoModHotfix
         }
 
         if (!found)
-            throw new InvalidOperationException("Couldn't find the CodeMatcher.IsInvalid check in CodeMatcher.Insert.");
+            throw new InvalidOperationException("Couldn't find the CodeMatcher.IsInvalid check in a legacy-compatible insertion method.");
     }
 
     private static bool IsInvalidInsertPosition(CodeMatcher matcher)
