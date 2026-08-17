@@ -95,7 +95,7 @@ internal class ContentCoordinator : IDisposable
     private readonly DecodedTextureCache DecodedTextures = new();
 
     /// <summary>The cached asset load/edit operations to apply, indexed by asset name.</summary>
-    private readonly TickCacheDictionary<IAssetName, AssetOperationGroup?> AssetOperationsByKey = new();
+    private readonly TickCacheDictionary<AssetOperationCacheKey, AssetOperationGroup?> AssetOperationsByKey = new();
 
 
     /*********
@@ -657,7 +657,7 @@ internal class ContentCoordinator : IDisposable
         {
             // clear cached editor checks
             foreach (IAssetName name in invalidatedAssets.Keys)
-                this.AssetOperationsByKey.Remove(name);
+                this.AssetOperationsByKey.RemoveWhere(name, static (key, invalidatedName) => key.Name.Equals(invalidatedName));
 
             // raise event
             this.OnAssetsInvalidated(invalidatedAssets.Keys);
@@ -710,7 +710,7 @@ internal class ContentCoordinator : IDisposable
     public AssetOperationGroup? GetAssetOperations(IAssetInfo info)
     {
         return this.AssetOperationsByKey.GetOrSet(
-            info.Name,
+            new AssetOperationCacheKey(info.Name, info.DataType),
             (Coordinator: this, Info: info),
             static state => state.Coordinator.RequestAssetOperations(state.Info)
         );
@@ -898,3 +898,8 @@ internal class ContentCoordinator : IDisposable
         return map;
     }
 }
+
+/// <summary>A type-sensitive key for cached asset operations.</summary>
+/// <param name="Name">The requested asset name.</param>
+/// <param name="DataType">The requested data type exposed to asset handlers.</param>
+internal readonly record struct AssetOperationCacheKey(IAssetName Name, Type DataType);

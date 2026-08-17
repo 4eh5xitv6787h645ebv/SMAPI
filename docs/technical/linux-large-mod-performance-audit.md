@@ -78,6 +78,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 66. Finding 66 — vanilla map inspection probes before loading — fixed.
 67. Finding 67 — loader-only assets allocate editable wrappers — fixed.
 68. Finding 68 — texture replacement probes before every successful load — fixed.
+69. Finding 69 — asset-operation cache ignores the requested data type — fixed.
 
 ## Detailed findings
 
@@ -761,6 +762,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low to medium. On load failure, propagation still probes existence: genuinely removed assets keep the focused warning, while a present but broken provider rethrows into the existing per-asset propagation error handler.
 - **Status:** Fixed. The real load is attempted first; existence classification runs only on its exceptional path.
 
+### 69. Asset-operation cache ignores the requested data type
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`AssetOperationsByKey`, `GetAssetOperations`, and invalidation) and `Framework/Utilities/TickCacheDictionary.cs`.
+- **Scenario:** The same asset name is queried under different generic types in one tick, such as an existence probe followed by a real load, while an `AssetRequested` handler selects operations using `IAssetInfo.DataType`.
+- **Root cause:** Per-tick loader/editor results were keyed only by `IAssetName` even though the requested type is part of the handler-visible request identity. Whichever type queried first supplied operations reused for every later type that tick.
+- **Impact:** Wrong or missing loader/editor selection, fallback/retry work, and potential content-load failures whose order depends on same-tick probes.
+- **Expected benefit:** Each `(asset name, requested type)` pair discovers operations once and reuses only compatible results.
+- **Risk:** Medium. Name invalidation must remove all cached type variants; focused coverage verifies composite-key identity and predicate removal of every matching variant while retaining unrelated entries.
+- **Status:** Fixed. The tick cache uses a value-type name/type key, and invalidation removes every entry whose asset name matches without allocating a captured predicate.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -768,7 +779,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, and 64 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, and 69 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, and 66 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, and 68 |
@@ -781,7 +792,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Assembly loading and rewrite caching | Findings 12 and 44 |
 | Dependency resolution | Finding 13 |
 | Disposable and weak-reference retention | Findings 14, 21, and 28 |
-| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, and 67 |
+| Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, 47, 59, 61, 67, and 69 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
 | GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, 57, 65, and 67 |
