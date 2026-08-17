@@ -82,6 +82,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 70. Finding 70 — existence checks probe irrelevant providers before cache/routing — fixed.
 71. Finding 71 — successful on-behalf-of registration formats failure text — fixed.
 72. Finding 72 — disconnected gamepads scan every control each update — fixed.
+73. Finding 73 — every content manager repeats base-load reflection — fixed.
 
 ## Detailed findings
 
@@ -805,6 +806,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Overrides initialize the mutable pressed-button set before changing digital or analog state, so virtual controller input still bypasses the early return. Focused tests cover both disconnected/no-override and disconnected digital/trigger/stick overrides.
 - **Status:** Fixed. `FillPressedButtons` exits immediately only for disconnected state with no initialized overrides.
 
+### 73. Every content manager repeats generic base-load method discovery
+
+- **Affected code:** `Framework/ContentManagers/BaseContentManager.cs` (`RawLoad`).
+- **Scenario:** The first cached load of each asset type through every game content manager; large code-mod sets create roughly one such manager per mod helper.
+- **Root cause:** Each manager independently reflected `ContentManager.Load`, specialized the generic method for the same common type, obtained its method pointer, and only then constructed the manager-bound nonvirtual delegate.
+- **Impact:** Repeated reflection and generic method specialization during startup and first-use content transitions, multiplied by manager and common asset-type counts.
+- **Expected benefit:** Method discovery, specialization, and pointer resolution occur once per asset type for the process; each manager retains only the necessary target-bound delegate construction and its isolated cache.
+- **Risk:** Medium-low. The nonvirtual base-call mechanism and per-manager delegate targets are unchanged; only the stable specialized method pointer is shared through a generic static holder.
+- **Status:** Fixed. A generic static holder resolves the base-load pointer once per `T`, while each manager still owns its bound delegate and asset cache.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -819,7 +830,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, 51, and 65 |
-| Content-manager lookup scaling | Findings 9, 53, 57, and 58 |
+| Content-manager lookup scaling | Findings 9, 53, 57, 58, and 73 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
 | Assembly loading and rewrite caching | Findings 12 and 44 |
