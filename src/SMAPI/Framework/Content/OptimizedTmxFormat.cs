@@ -151,7 +151,8 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                     Location origin = new(chunk.X, chunk.Y);
                     foreach (ParsedTile sourceTile in chunk.Tiles)
                     {
-                        layer.Tiles[origin] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
+                        if (sourceTile.Gid != 0)
+                            layer.Tiles[origin] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
                         ++origin.X;
                         if (origin.X >= layer.LayerWidth)
                         {
@@ -166,7 +167,8 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                 Location origin = Location.Origin;
                 foreach (ParsedTile sourceTile in sourceLayer.Data.Tiles)
                 {
-                    layer.Tiles[origin] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
+                    if (sourceTile.Gid != 0)
+                        layer.Tiles[origin] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
                     ++origin.X;
                     if (origin.X >= layer.LayerWidth)
                     {
