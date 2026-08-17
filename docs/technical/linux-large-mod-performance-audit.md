@@ -39,27 +39,28 @@ This is the current jank-first order, combining likely frame-time impact, freque
 27. Finding 4 — no first-class batched exact invalidation — fixed.
 28. Finding 3 — exact invalidation performing cache scans — fixed.
 29. Finding 22 — oversized sparse image-patch transfers — fixed.
-30. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
-31. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-32. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
-33. Finding 9 — linear content-manager routing — fixed.
-34. Finding 10 — repeated asset-name strings — fixed.
-35. Finding 14 — retained dead disposable wrappers — fixed.
-36. Finding 29 — world trackers lost across reordered transfers — fixed.
-37. Finding 42 — location trackers lack source ownership — fixed.
-38. Finding 30 — rectangular transformed-tile origin — fixed.
-39. Finding 18 — reversed location event changes — fixed.
-40. Finding 17 — swapped managed-event identifiers — fixed.
-41. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-42. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-43. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-44. Finding 13 — repeated dependency-list scans — fixed.
-45. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
-46. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
-47. Finding 45 — incorrect overlay alpha composition — queued.
-48. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
-49. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
-50. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+30. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
+31. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
+32. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+33. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
+34. Finding 9 — linear content-manager routing — fixed.
+35. Finding 10 — repeated asset-name strings — fixed.
+36. Finding 14 — retained dead disposable wrappers — fixed.
+37. Finding 29 — world trackers lost across reordered transfers — fixed.
+38. Finding 42 — location trackers lack source ownership — fixed.
+39. Finding 30 — rectangular transformed-tile origin — fixed.
+40. Finding 18 — reversed location event changes — fixed.
+41. Finding 17 — swapped managed-event identifiers — fixed.
+42. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+43. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+44. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+45. Finding 13 — repeated dependency-list scans — fixed.
+46. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
+47. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
+48. Finding 45 — incorrect overlay alpha composition — queued.
+49. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
+50. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
+51. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -563,6 +564,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Medium to high. Wrapper instances bind target objects, cache intervals intentionally expire stale lookups, and broad changes affect a public compatibility API.
 - **Status:** Fixed. Metadata uses a structural key containing the actual `Type`, avoiding both formatted key strings and collisions between same-named types from different assemblies. A state-passing cache overload removes capturing fetch delegates, bitwise flag checks avoid enum boxing, and a `ConditionalWeakTable` reuses field/property/method wrappers without keeping target objects alive. Wrapper entries reset at the existing daily reflection-cache interval. After warm-up, a 10,000-call .NET 10 allocation check for a cached instance field fell from 368 bytes per call on the parent commit to zero bytes per call; the result measures the reflection lookup itself, not arbitrary reflected member access or mod handler time.
 
+### 51. Decoded-texture cache misses refresh file metadata before checking the cache
+
+- **Affected code:** `Framework/Content/DecodedTextureCache.cs` (`TryGetCopy`).
+- **Scenario:** First and second loads of uncached content-pack PNGs on Linux, including large asset-load and invalidation bursts.
+- **Root cause:** The lookup refreshes `FileInfo` and reads the source file's length and modification time before checking whether the decoded-pixel cache contains that path. Second-use admission deliberately leaves most first loads uncached, so routine misses issue a synchronous metadata query which cannot validate or return any cached pixels.
+- **Impact:** Transition and load-time filesystem latency, proportional to PNG cache-miss volume.
+- **Expected benefit:** Cache misses return after one in-memory dictionary probe without touching the filesystem; real hits still refresh and validate file metadata before returning a private pixel copy.
+- **Risk:** Low. The entry reference is revalidated after the metadata query, so concurrent disposal, eviction, or replacement produces a safe miss instead of returning stale pixels.
+- **Status:** Fixed. `TryGetCopy` checks for an existing entry under the cache lock, refreshes metadata only for that candidate, then rechecks that the same entry is still current before validating its stamp and updating LRU order.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -576,7 +587,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, and 43 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6 and 46 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
-| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, and 45 |
+| PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |
 | Content-manager lookup scaling | Finding 9 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
