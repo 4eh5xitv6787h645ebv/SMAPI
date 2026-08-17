@@ -27,10 +27,6 @@ internal class ContentCache
         set => this.Cache[key] = value;
     }
 
-    /// <summary>The current cache keys.</summary>
-    public Dictionary<string, object>.KeyCollection Keys => this.Cache.Keys;
-
-
     /*********
     ** Public methods
     *********/
@@ -60,6 +56,13 @@ internal class ContentCache
     public bool TryGetValue(string key, [NotNullWhen(true)] out object? asset)
     {
         return this.Cache.TryGetValue(key, out asset);
+    }
+
+    /// <summary>Get the cached assets.</summary>
+    public IEnumerable<KeyValuePair<string, object>> GetEntries()
+    {
+        foreach (KeyValuePair<string, object> entry in this.Cache)
+            yield return entry;
     }
 
 

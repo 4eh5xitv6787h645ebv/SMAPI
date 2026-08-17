@@ -247,19 +247,13 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
     /// <inheritdoc />
     public IEnumerable<KeyValuePair<string, object>> GetCachedAssets()
     {
-        foreach (string key in this.Cache.Keys)
-            yield return new(key, this.Cache[key]);
+        return this.Cache.GetEntries();
     }
 
     /// <inheritdoc />
     public bool InvalidateCache(IAssetName assetName, bool dispose = false)
     {
-        if (!this.Cache.ContainsKey(assetName.Name))
-            return false;
-
-        // remove from cache
-        this.Cache.Remove(assetName.Name, dispose);
-        return true;
+        return this.Cache.Remove(assetName.Name, dispose);
     }
 
     /// <inheritdoc />
