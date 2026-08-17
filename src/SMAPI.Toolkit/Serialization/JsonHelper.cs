@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Linq;
@@ -19,6 +20,9 @@ public class JsonHelper
     *********/
     /// <summary>The options to use when converting a value to a System.Text.Json node.</summary>
     private static readonly System.Text.Json.JsonDocumentOptions ConvertToSystemTextJsonOptions = new() { CommentHandling = System.Text.Json.JsonCommentHandling.Skip };
+
+    /// <summary>The character buffer size for streamed JSON files.</summary>
+    private const int JsonFileBufferSize = 4096;
 
 
     /*********
@@ -94,19 +98,38 @@ public class JsonHelper
         if (string.IsNullOrWhiteSpace(fullPath))
             throw new ArgumentException("The file path is empty or invalid.", nameof(fullPath));
 
-        // read file
-        string json;
+        // Stream successful reads so large content-pack files don't need a complete UTF-16 string in memory
+        // alongside the deserialized object graph.
+        JsonReaderException? readerError = null;
         try
         {
-            json = File.ReadAllText(fullPath);
+            using FileStream stream = File.OpenRead(fullPath);
+            using StreamReader textReader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, JsonHelper.JsonFileBufferSize, leaveOpen: false);
+            using JsonTextReader jsonReader = new(textReader);
+            result = this.GetSerializer().Deserialize<TModel>(jsonReader);
+            return result != null;
         }
         catch (Exception ex) when (ex is DirectoryNotFoundException or FileNotFoundException)
         {
             result = default;
             return false;
         }
+        catch (JsonReaderException ex)
+        {
+            // Fall through to the text path. Besides preserving the detailed diagnostics below, Deserialize
+            // has a compatibility retry for invalid curly quotes used by some hand-edited mod files.
+            readerError = ex;
+        }
+        catch (Exception ex) when (ex is not IOException)
+        {
+            throw JsonHelper.CreateFileParseException(fullPath, ex, json: null);
+        }
 
-        // deserialize model
+        // deserialize through the compatibility path after a syntax error
+        string json = File.ReadAllText(fullPath);
+        if (!json.Contains("“") && !json.Contains("”"))
+            throw JsonHelper.CreateFileParseException(fullPath, readerError!, json);
+
         try
         {
             result = this.Deserialize<TModel>(json);
@@ -114,16 +137,7 @@ public class JsonHelper
         }
         catch (Exception ex)
         {
-            string error = $"Can't parse JSON file at {fullPath}.";
-
-            if (ex is JsonReaderException)
-            {
-                error += " This doesn't seem to be valid JSON.";
-                if (json.Contains("“") || json.Contains("”"))
-                    error += " Found curly quotes in the text; note that only straight quotes are allowed in JSON.";
-            }
-            error += $"\nTechnical details: {ex.Message}";
-            throw new JsonReaderException(error);
+            throw JsonHelper.CreateFileParseException(fullPath, ex, json);
         }
     }
 
@@ -190,5 +204,27 @@ public class JsonHelper
     public JsonSerializer GetSerializer()
     {
         return JsonSerializer.CreateDefault(this.JsonSettings);
+    }
+
+
+    /*********
+    ** Private methods
+    *********/
+    /// <summary>Create the public error for a JSON file which couldn't be parsed.</summary>
+    /// <param name="fullPath">The absolute file path.</param>
+    /// <param name="exception">The underlying parse error.</param>
+    /// <param name="json">The raw JSON text, if it was materialized for compatibility handling.</param>
+    private static JsonReaderException CreateFileParseException(string fullPath, Exception exception, string? json)
+    {
+        string error = $"Can't parse JSON file at {fullPath}.";
+
+        if (exception is JsonReaderException)
+        {
+            error += " This doesn't seem to be valid JSON.";
+            if (json?.Contains("“") is true || json?.Contains("”") is true)
+                error += " Found curly quotes in the text; note that only straight quotes are allowed in JSON.";
+        }
+        error += $"\nTechnical details: {exception.Message}";
+        return new JsonReaderException(error);
     }
 }
