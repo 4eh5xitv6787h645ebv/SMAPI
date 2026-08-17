@@ -414,13 +414,20 @@ internal class SMultiplayer : Multiplayer
             type: messageType,
             data: JToken.FromObject(message)
         );
-        string data = JsonConvert.SerializeObject(model, Formatting.None);
+
+        // Local delivery consumes the model directly. Only serialize its JSON envelope when a remote connection or
+        // network-traffic logging will actually consume it; this avoids payload traversal and a large transient
+        // string for every local-only message in single-player.
+        bool hasRemoteRecipient = sendToPeers.Count > 0 && (Context.IsMainPlayer || this.HostPeer?.HasSmapi == true);
+        string? data = hasRemoteRecipient || (sendToSelf && this.LogNetworkTraffic)
+            ? JsonConvert.SerializeObject(model, Formatting.None)
+            : null;
 
         // send self-message
         if (sendToSelf)
         {
             if (this.LogNetworkTraffic)
-                this.Monitor.Log($"Broadcasting '{messageType}' message to self: {data}.");
+                this.Monitor.Log($"Broadcasting '{messageType}' message to self: {data!}.");
 
             this.OnModMessageReceived(model);
         }
@@ -433,17 +440,17 @@ internal class SMultiplayer : Multiplayer
                 foreach (MultiplayerPeer peer in sendToPeers)
                 {
                     if (this.LogNetworkTraffic)
-                        this.Monitor.Log($"Broadcasting '{messageType}' message to farmhand {peer.PlayerID}: {data}.");
+                        this.Monitor.Log($"Broadcasting '{messageType}' message to farmhand {peer.PlayerID}: {data!}.");
 
-                    peer.SendMessage(new OutgoingMessage((byte)MessageType.ModMessage, peer.PlayerID, data));
+                    peer.SendMessage(new OutgoingMessage((byte)MessageType.ModMessage, peer.PlayerID, data!));
                 }
             }
             else if (this.HostPeer?.HasSmapi == true)
             {
                 if (this.LogNetworkTraffic)
-                    this.Monitor.Log($"Broadcasting '{messageType}' message to host {this.HostPeer.PlayerID}: {data}.");
+                    this.Monitor.Log($"Broadcasting '{messageType}' message to host {this.HostPeer.PlayerID}: {data!}.");
 
-                this.HostPeer.SendMessage(new OutgoingMessage((byte)MessageType.ModMessage, this.HostPeer.PlayerID, data));
+                this.HostPeer.SendMessage(new OutgoingMessage((byte)MessageType.ModMessage, this.HostPeer.PlayerID, data!));
             }
             else
                 this.Monitor.VerboseLog("  Can't send message because no valid connections were found.");
