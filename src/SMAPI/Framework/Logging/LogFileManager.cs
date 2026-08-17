@@ -105,6 +105,23 @@ internal class LogFileManager : IDisposable
         ));
     }
 
+    /// <summary>Write a structured log record whose message and file line will be formatted by the writer thread.</summary>
+    /// <typeparam name="TState">The type of state passed to the message factory.</typeparam>
+    /// <param name="timestamp">The time at which the caller logged the message.</param>
+    /// <param name="level">The padded log-level text.</param>
+    /// <param name="screenId">The split-screen ID associated with the caller, if any.</param>
+    /// <param name="source">The name of the module logging the message.</param>
+    /// <param name="state">The immutable or privately owned state from which to create the message.</param>
+    /// <param name="getMessage">Create the message text.</param>
+    public void WriteLine<TState>(DateTime timestamp, string level, int? screenId, string source, TState state, Func<TState, string> getMessage)
+    {
+        this.Enqueue(new LogEntry(
+            RawMessage: null,
+            StructuredMessage: new StructuredLogMessage(timestamp, level, screenId, source, new DeferredLogMessage<TState>(state, getMessage)),
+            FlushCompletion: null
+        ));
+    }
+
     /// <summary>Wait until all messages queued so far have been flushed to disk.</summary>
     public void Flush()
     {
@@ -238,7 +255,15 @@ internal class LogFileManager : IDisposable
         this.Stream.Write(' ');
         this.Stream.Write(message.Source);
         this.Stream.Write("] ");
-        this.Stream.Write(message.Message);
+        this.Stream.Write(
+            message.Message switch
+            {
+                string text => text,
+                IDeferredLogMessage deferred => deferred.GetMessage(),
+                null => "",
+                _ => throw new InvalidOperationException($"Unsupported structured log message type '{message.Message.GetType().FullName}'.")
+            }
+        );
 
         // always use Windows-style line endings for convenience
         // (Linux/macOS editors are fine with them, Windows editors often require them)
@@ -260,6 +285,37 @@ internal class LogFileManager : IDisposable
     /// <param name="Level">The padded log-level text.</param>
     /// <param name="ScreenId">The split-screen ID associated with the caller, if any.</param>
     /// <param name="Source">The name of the module logging the message.</param>
-    /// <param name="Message">The message text.</param>
-    private readonly record struct StructuredLogMessage(DateTime Timestamp, string Level, int? ScreenId, string Source, string Message);
+    /// <param name="Message">The message text or deferred message factory.</param>
+    private readonly record struct StructuredLogMessage(DateTime Timestamp, string Level, int? ScreenId, string Source, object? Message);
+
+    /// <summary>A deferred structured log message.</summary>
+    private interface IDeferredLogMessage
+    {
+        /// <summary>Create the message text.</summary>
+        string GetMessage();
+    }
+
+    /// <summary>A typed deferred structured log message.</summary>
+    /// <typeparam name="TState">The type of state passed to the message factory.</typeparam>
+    private sealed class DeferredLogMessage<TState> : IDeferredLogMessage
+    {
+        /// <summary>The state from which to create the message.</summary>
+        private readonly TState State;
+
+        /// <summary>Create the message text.</summary>
+        private readonly Func<TState, string> GetMessageImpl;
+
+        /// <summary>Construct an instance.</summary>
+        public DeferredLogMessage(TState state, Func<TState, string> getMessage)
+        {
+            this.State = state;
+            this.GetMessageImpl = getMessage ?? throw new ArgumentNullException(nameof(getMessage));
+        }
+
+        /// <inheritdoc />
+        public string GetMessage()
+        {
+            return this.GetMessageImpl(this.State);
+        }
+    }
 }

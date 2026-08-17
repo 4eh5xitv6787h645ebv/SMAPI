@@ -150,6 +150,32 @@ internal class Monitor : IMonitor
         );
     }
 
+    /// <summary>Log a message whose text can be created on the log-writer thread when it isn't visible in the console.</summary>
+    /// <typeparam name="TState">The type of state passed to the message factory.</typeparam>
+    /// <param name="state">The immutable or privately owned state from which to create the message.</param>
+    /// <param name="getMessage">Create the message text.</param>
+    /// <param name="level">The message severity.</param>
+    internal void LogDeferred<TState>(TState state, Func<TState, string> getMessage, LogLevel level)
+    {
+        DateTime timestamp = DateTime.Now;
+        ConsoleLogLevel consoleLevel = (ConsoleLogLevel)level;
+        string levelText = Monitor.LogStrings[consoleLevel];
+        int? screenId = this.GetScreenIdForLog();
+
+        bool writeToConsole = this.WriteToConsole && (this.ShowTraceInConsole || consoleLevel != ConsoleLogLevel.Trace || Monitor.ForceVerboseLoggingForAll || Monitor.ForceVerboseLogging.Contains(this.ModId));
+        if (writeToConsole)
+        {
+            string message = getMessage(state);
+            string consoleMessage = this.ShowFullStampInConsole
+                ? $"{Monitor.GenerateMessagePrefix(timestamp, this.Source, levelText, screenId)} {message}"
+                : $"[{this.Source}] {message}";
+            this.ConsoleWriter.WriteLine(consoleMessage, consoleLevel);
+            this.LogFile.WriteLine(timestamp, levelText, screenId, this.Source, message);
+        }
+        else
+            this.LogFile.WriteLine(timestamp, levelText, screenId, this.Source, state, getMessage);
+    }
+
 
     /*********
     ** Private methods
