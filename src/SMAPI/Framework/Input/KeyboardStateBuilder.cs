@@ -18,8 +18,14 @@ internal class KeyboardStateBuilder : IInputStateBuilder<KeyboardStateBuilder, K
     /// <summary>The pressed buttons.</summary>
     private readonly HashSet<Keys> PressedButtons = [];
 
+    /// <summary>Whether <see cref="PressedButtons"/> has been initialized from the current state for overrides.</summary>
+    private bool ArePressedButtonsInitialized;
+
     /// <summary>A reusable buffer for reading the pressed keys from MonoGame.</summary>
     private Keys[] PressedKeyBuffer = new Keys[8];
+
+    /// <summary>The number of pressed keys in <see cref="PressedKeyBuffer"/>.</summary>
+    private int PressedKeyCount;
 
 
     /*********
@@ -29,18 +35,17 @@ internal class KeyboardStateBuilder : IInputStateBuilder<KeyboardStateBuilder, K
     public void Reset(KeyboardState state)
     {
         this.State = state;
+        this.ArePressedButtonsInitialized = false;
 
-        // reset tracked values
-        this.PressedButtons.Clear();
-        int pressedKeyCount = state.GetPressedKeyCount();
-        if (pressedKeyCount > 0)
+        // Retain the caller-owned buffer snapshot for the normal path. The mutable hash set is only
+        // materialized if a mod actually overrides a key before the game handles input.
+        this.PressedKeyCount = state.GetPressedKeyCount();
+        if (this.PressedKeyCount > 0)
         {
-            if (pressedKeyCount > this.PressedKeyBuffer.Length)
-                Array.Resize(ref this.PressedKeyBuffer, Math.Max(pressedKeyCount, this.PressedKeyBuffer.Length * 2));
+            if (this.PressedKeyCount > this.PressedKeyBuffer.Length)
+                Array.Resize(ref this.PressedKeyBuffer, Math.Max(this.PressedKeyCount, this.PressedKeyBuffer.Length * 2));
 
             state.GetPressedKeys(this.PressedKeyBuffer);
-            for (int i = 0; i < pressedKeyCount; i++)
-                this.PressedButtons.Add(this.PressedKeyBuffer[i]);
         }
     }
 
@@ -49,6 +54,7 @@ internal class KeyboardStateBuilder : IInputStateBuilder<KeyboardStateBuilder, K
     /// <param name="state">The new state to set.</param>
     public void OverrideButton(Keys key, SButtonState state)
     {
+        this.EnsurePressedButtons();
         bool changed = state.IsDown()
             ? this.PressedButtons.Add(key)
             : this.PressedButtons.Remove(key);
@@ -60,13 +66,37 @@ internal class KeyboardStateBuilder : IInputStateBuilder<KeyboardStateBuilder, K
     /// <inheritdoc />
     public void FillPressedButtons(HashSet<SButton> set)
     {
-        foreach (Keys key in this.PressedButtons)
-            set.Add(key.ToSButton());
+        if (this.ArePressedButtonsInitialized)
+        {
+            foreach (Keys key in this.PressedButtons)
+                set.Add(key.ToSButton());
+        }
+        else
+        {
+            for (int i = 0; i < this.PressedKeyCount; i++)
+                set.Add(this.PressedKeyBuffer[i].ToSButton());
+        }
     }
 
     /// <inheritdoc />
     public KeyboardState GetState()
     {
         return this.State ??= new KeyboardState(this.PressedButtons.ToArray());
+    }
+
+
+    /*********
+    ** Private methods
+    *********/
+    /// <summary>Initialize the mutable pressed-key set from the current state.</summary>
+    private void EnsurePressedButtons()
+    {
+        if (this.ArePressedButtonsInitialized)
+            return;
+
+        this.PressedButtons.Clear();
+        for (int i = 0; i < this.PressedKeyCount; i++)
+            this.PressedButtons.Add(this.PressedKeyBuffer[i]);
+        this.ArePressedButtonsInitialized = true;
     }
 }
