@@ -475,15 +475,8 @@ internal sealed class ModContentManager : BaseContentManager
             //   1. Can only climb at the start of the path (e.g. `../LooseSprites/Cursors` but not `Mines/../Barn`).
             //   2. Can only climb once (to avoid escaping the `Content` folder).
             //   3. Always relative to the `Content/Maps` folder (not the map file).
-            {
-                const string climbSegment = ModContentManager.DirectoryClimbingPathSegment;
-                string[] pathSegments = PathUtilities.GetSegments(imageSource);
-                if (pathSegments.Contains(climbSegment))
-                {
-                    if (pathSegments[0] != climbSegment || pathSegments.Count(segment => segment == climbSegment) > 1)
-                        throw this.GetPathError(relativeMapFolder, imageSource, $"Directory climbing ({climbSegment}/) is only permitted once at the start of the path.");
-                }
-            }
+            if (ModContentManager.HasInvalidTilesheetDirectoryClimb(imageSource))
+                throw this.GetPathError(relativeMapFolder, imageSource, $"Directory climbing ({ModContentManager.DirectoryClimbingPathSegment}/) is only permitted once at the start of the path.");
 
             // load best match
             try
@@ -537,8 +530,7 @@ internal sealed class ModContentManager : BaseContentManager
         }
 
         // get relative to map file unless path has directory climbing
-        const string climbSegment = ModContentManager.DirectoryClimbingPathSegment;
-        if (!relativePath.StartsWith(climbSegment) && PathUtilities.GetSegments(relativePath, 2)[0] != climbSegment) // directory climbing can only be at the start of the path
+        if (!ModContentManager.HasLeadingTilesheetDirectoryClimb(relativePath)) // directory climbing can only be at the start of the path
         {
             string localKey = Path.Combine(modRelativeMapFolder, relativePath);
             if (this.GetModFile<Texture2D>(localKey).Exists)
@@ -549,7 +541,7 @@ internal sealed class ModContentManager : BaseContentManager
         }
 
         // get from game assets
-        AssetName contentKey = this.Coordinator.ParseAssetName(this.GetContentKeyForTilesheetImageSource(relativePath), allowLocales: false);
+        AssetName contentKey = this.Coordinator.ParseAssetName(ModContentManager.GetContentKeyForTilesheetImageSource(relativePath), allowLocales: false);
         try
         {
             this.GameContentManager.LoadLocalized<Texture2D>(contentKey, this.GameContentManager.Language, useCache: true); // no need to bypass cache here, since we're not storing the asset
@@ -590,26 +582,55 @@ internal sealed class ModContentManager : BaseContentManager
 
     /// <summary>Get the asset key for a tilesheet in the game's <c>Maps</c> content folder.</summary>
     /// <param name="relativePath">The tilesheet image source.</param>
-    private string GetContentKeyForTilesheetImageSource(string relativePath)
+    internal static string GetContentKeyForTilesheetImageSource(string relativePath)
     {
         string key = relativePath;
 
         // make path relative to Content folder
-        {
-            string topFolder = PathUtilities.GetSegments(key, limit: 2)[0];
-            const string climbSegment = ModContentManager.DirectoryClimbingPathSegment;
-
-            if (topFolder == climbSegment)
-                key = key[(climbSegment.Length + 1)..];
-            else if (!topFolder.Equals("Maps", StringComparison.OrdinalIgnoreCase))
-                key = Path.Combine("Maps", key);
-        }
+        if (ModContentManager.HasLeadingTilesheetDirectoryClimb(key))
+            key = key.Length == ModContentManager.DirectoryClimbingPathSegment.Length ? "" : key[(ModContentManager.DirectoryClimbingPathSegment.Length + 1)..];
+        else if (!ModContentManager.StartsWithPathSegment(key, "Maps", StringComparison.OrdinalIgnoreCase))
+            key = Path.Combine("Maps", key);
 
         // remove file extension from unpacked file
         if (key.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
             key = key[..^4];
 
         return key;
+    }
+
+    /// <summary>Get whether a normalized tilesheet path climbs to the parent directory at its first segment.</summary>
+    internal static bool HasLeadingTilesheetDirectoryClimb(string path)
+    {
+        return ModContentManager.StartsWithPathSegment(path, ModContentManager.DirectoryClimbingPathSegment, StringComparison.Ordinal);
+    }
+
+    /// <summary>Get whether a normalized tilesheet path climbs after its first segment or more than once.</summary>
+    internal static bool HasInvalidTilesheetDirectoryClimb(string path)
+    {
+        int segmentStart = 0;
+        while (segmentStart < path.Length)
+        {
+            int separatorIndex = path.IndexOf(PathUtilities.PreferredAssetSeparator, segmentStart);
+            int segmentEnd = separatorIndex >= 0 ? separatorIndex : path.Length;
+            bool isClimb = segmentEnd - segmentStart == ModContentManager.DirectoryClimbingPathSegment.Length
+                && path.AsSpan(segmentStart, ModContentManager.DirectoryClimbingPathSegment.Length).SequenceEqual(ModContentManager.DirectoryClimbingPathSegment);
+            if (isClimb && segmentStart != 0)
+                return true;
+
+            if (separatorIndex < 0)
+                break;
+            segmentStart = separatorIndex + 1;
+        }
+
+        return false;
+    }
+
+    /// <summary>Get whether a normalized path starts with the exact segment.</summary>
+    private static bool StartsWithPathSegment(string path, string segment, StringComparison comparison)
+    {
+        return path.StartsWith(segment, comparison)
+            && (path.Length == segment.Length || path[segment.Length] == PathUtilities.PreferredAssetSeparator);
     }
 
     /// <summary>Get an exception indicating that a map asset can't be loaded because one of its tilesheets has an invalid path.</summary>
