@@ -43,7 +43,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 31. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
 32. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
 33. Finding 9 — linear content-manager routing — fixed.
-34. Finding 10 — repeated asset-name strings — partially fixed.
+34. Finding 10 — repeated asset-name strings — fixed.
 35. Finding 14 — retained dead disposable wrappers — fixed.
 36. Finding 29 — world trackers lost across reordered transfers — fixed.
 37. Finding 42 — location trackers lack source ownership — fixed.
@@ -161,7 +161,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Transitions, memory, and garbage collection.
 - **Expected benefit:** Reused canonical asset-name instances, comparer-based hashing, and allocation-light separator normalization reduce transient allocations.
 - **Risk:** Medium. Asset equivalence is public behavior and must remain identical for mixed separators, case, locale, and relative segments.
-- **Status:** Partially fixed. `AssetName` no longer allocates and retains a lowercase copy for every parsed name; ordinal case-insensitive equality and hashing operate directly on the canonical name. Runtime asset normalization now returns already-canonical strings unchanged and writes noncanonical paths directly into one result string instead of splitting into an array and per-segment strings. Reusable parsed-name instances remain deferred.
+- **Status:** Fixed. `AssetName` no longer allocates and retains a lowercase copy for every parsed name; ordinal case-insensitive equality and hashing operate directly on the canonical name. Runtime asset normalization returns already-canonical strings unchanged and writes noncanonical paths directly into one result string instead of splitting into an array and per-segment strings. `ContentCoordinator` now reuses exact parsed inputs through a thread-safe 8,192-entry insertion-bounded cache, with separate entries for locale-aware and mod-file semantics. The immutable instances are safe to share, and the cache is atomically cleared after custom language definitions load so negative locale parsing can't become stale. After warm-up on .NET 10, two million repeated canonical parses took 263.5 million stopwatch ticks directly versus 41.2 million through the cache (about 6.4 times faster in that microbenchmark), while minimum managed allocation fell from 48 bytes to zero per call. This does not imply the same whole-frame speedup; benefit scales with repeated content-key parsing.
 
 ### 11. Linux case-insensitive compatibility indexes each mod tree independently
 

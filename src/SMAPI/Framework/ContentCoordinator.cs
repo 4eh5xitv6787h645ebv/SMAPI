@@ -88,6 +88,9 @@ internal class ContentCoordinator : IDisposable
     /// <summary>Parse a locale suffix in an asset name.</summary>
     private readonly Func<string, LocalizedContentManager.LanguageCode?> ParseLocale;
 
+    /// <summary>The bounded cache of parsed immutable asset names.</summary>
+    private readonly ParsedAssetNameCache ParsedAssetNames;
+
     /// <summary>A shared byte-bounded cache of decoded mod image pixels.</summary>
     private readonly DecodedTextureCache DecodedTextures = new();
 
@@ -139,6 +142,9 @@ internal class ContentCoordinator : IDisposable
         this.OnAssetsInvalidated = onAssetsInvalidated;
         this.RequestAssetOperations = requestAssetOperations;
         this.FullRootDirectory = Path.Combine(Constants.GamePath, rootDirectory);
+        this.LocaleCodes = new Lazy<Dictionary<string, LocalizedContentManager.LanguageCode>>(() => this.GetLocaleCodes(customLanguages: []));
+        this.ParseLocale = this.TryParseLocale;
+        this.ParsedAssetNames = new ParsedAssetNameCache(this.ParseLocale);
         this.AddContentManager(
             this.MainContentManager = new GameContentManager(
                 name: "Game1.content",
@@ -170,8 +176,6 @@ internal class ContentCoordinator : IDisposable
 
         this.VanillaContentManager = new LocalizedContentManager(serviceProvider, rootDirectory);
         this.CoreAssets = new CoreAssetPropagator(this.MainContentManager, contentManagerForAssetPropagation, this.Monitor, multiplayer, reflection, name => this.ParseAssetName(name, allowLocales: true));
-        this.LocaleCodes = new Lazy<Dictionary<string, LocalizedContentManager.LanguageCode>>(() => this.GetLocaleCodes(customLanguages: []));
-        this.ParseLocale = this.TryParseLocale;
     }
 
     /// <summary>Get a new content manager which handles reading files from the game content folder with support for interception.</summary>
@@ -239,6 +243,7 @@ internal class ContentCoordinator : IDisposable
         var customLanguages = DataLoader.AdditionalLanguages(this.MainContentManager);
         this.LocaleCodes = new Lazy<Dictionary<string, LocalizedContentManager.LanguageCode>>(() => this.GetLocaleCodes(customLanguages));
         _ = this.LocaleCodes.Value;
+        this.ParsedAssetNames.Clear();
     }
 
     /// <summary>Perform any updates needed when the locale changes.</summary>
@@ -294,14 +299,10 @@ internal class ContentCoordinator : IDisposable
     /// <exception cref="ArgumentException">The <paramref name="rawName"/> is null or empty.</exception>
     public AssetName ParseAssetName(string rawName, bool allowLocales)
     {
-        return !string.IsNullOrWhiteSpace(rawName)
-            ? AssetName.Parse(
-                rawName: rawName,
-                parseLocale: allowLocales
-                    ? this.ParseLocale
-                    : _ => null
-            )
-            : throw new ArgumentException("The asset name can't be null or empty.", nameof(rawName));
+        if (string.IsNullOrWhiteSpace(rawName))
+            throw new ArgumentException("The asset name can't be null or empty.", nameof(rawName));
+
+        return this.ParsedAssetNames.GetOrAdd(rawName, allowLocales);
     }
 
     /// <summary>Parse a locale suffix in an asset name.</summary>
