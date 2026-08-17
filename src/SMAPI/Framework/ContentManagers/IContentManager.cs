@@ -26,6 +26,9 @@ internal interface IContentManager : IDisposable
     /// <summary>Whether this content manager can be targeted by managed asset keys (e.g. to load assets from a mod folder).</summary>
     bool IsNamespaced { get; }
 
+    /// <summary>The number of assets currently held in this content manager's cache.</summary>
+    int CachedAssetCount { get; }
+
 
     /*********
     ** Methods

@@ -74,6 +74,9 @@ internal abstract class BaseContentManager : LocalizedContentManager, IContentMa
     /// <inheritdoc />
     public bool IsNamespaced { get; }
 
+    /// <inheritdoc />
+    public int CachedAssetCount => this.Cache.Count;
+
     /// <summary>The cached callback which normalizes an asset key to match this manager's cache.</summary>
     internal Func<string, string> AssetNameNormalizer { get; }
 

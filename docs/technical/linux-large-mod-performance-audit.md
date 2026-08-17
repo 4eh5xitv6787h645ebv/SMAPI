@@ -880,6 +880,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The same ordinal-ignore-case `IAssetName` identity is used, every data-type variant for an invalidated name is removed, and unrelated names remain cached.
 - **Status:** Fixed. Batched operation-cache cleanup now performs one stateful `RemoveWhere` pass over all cached keys.
 
+### 80. Exact invalidation batches probe every name in every manager
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`InvalidateExactCache`), `Framework/ContentManagers/IContentManager.cs` and `BaseContentManager.cs`, and `Framework/Content/ContentCache.cs`.
+- **Scenario:** A mod submits a large exact-name invalidation batch while SMAPI has roughly one game content manager per code mod, many of which have empty or small private caches.
+- **Root cause:** SMAPI nested every game content manager over every requested name and performed a dictionary lookup for each pair. A batch of `N` names across `M` managers therefore performed `M × N` probes even when most managers cached only a handful of assets.
+- **Impact:** Main-thread transition CPU proportional to manager count times invalidation batch size.
+- **Expected benefit:** Each manager now probes the smaller side of the intersection: direct name lookups when the request set is smaller, or one enumeration of its actual cached entries when its cache is smaller. Expected work becomes the sum of `min(requested names, cached entries)` across managers.
+- **Risk:** Low to medium. The same normalized case-insensitive name set determines matches, texture instances remain retained for in-place propagation, non-textures retain disposal behavior, and the scalar exact-name path is unchanged. Dictionary removal during enumeration retains the runtime behavior already used by predicate invalidation.
+- **Status:** Fixed. Content managers expose their internal cache count, and exact batches adapt per manager without constructing another index or collection.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -887,8 +897,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, 54, and 72 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, and 79 |
-| Exact and batched invalidation APIs | Findings 3 and 4 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, 57, 58, 60, 64, 69, 70, 76, 78, 79, and 80 |
+| Exact and batched invalidation APIs | Findings 3, 4, 79, and 80 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, 55, 63, 64, 66, and 75 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, 56, 62, 63, 68, 78, and 79 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |

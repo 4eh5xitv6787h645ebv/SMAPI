@@ -43,6 +43,9 @@ internal class ContentCache
     /*********
     ** Accessors
     *********/
+    /// <summary>The number of cached assets.</summary>
+    public int Count => this.Cache.Count;
+
     /// <summary>Get or set the value of a raw cache entry.</summary>
     /// <param name="key">The cache key.</param>
     public object this[string key]
