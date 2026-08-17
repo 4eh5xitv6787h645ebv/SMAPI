@@ -451,19 +451,26 @@ internal class ContentCoordinator : IDisposable
             this.ForgetLocalizedAssetNames(invalidatedAssets.Keys);
 
             // Special case: maps may be loaded through a temporary content manager that's removed while the map is still in use.
-            // This notably affects the town and farmhouse maps.
-            foreach (WorldLocationUtilities.WorldLocationInfo info in WorldLocationUtilities.GetLocations())
+            // This notably affects the town and farmhouse maps. If every requested name was found in a cache, propagation
+            // already has each name and type it needs, so building the expansion-sized live topology can't add anything.
+            bool hasMissingName = normalizedName is not null
+                ? !invalidatedAssets.ContainsKey(normalizedName)
+                : invalidatedAssets.Count < normalizedNames!.Count;
+            if (hasMissingName)
             {
-                GameLocation location = info.Location;
-                if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
-                    continue;
+                foreach (WorldLocationUtilities.WorldLocationInfo info in WorldLocationUtilities.GetLocations())
+                {
+                    GameLocation location = info.Location;
+                    if (location.map == null || string.IsNullOrWhiteSpace(location.mapPath.Value))
+                        continue;
 
-                AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
-                bool matches = normalizedName is not null
-                    ? normalizedName.Equals(mapPath)
-                    : normalizedNames!.Contains(mapPath);
-                if (!invalidatedAssets.ContainsKey(mapPath) && matches)
-                    invalidatedAssets[mapPath] = typeof(Map);
+                    AssetName mapPath = this.ParseAssetName(this.MainContentManager.AssertAndNormalizeAssetName(location.mapPath.Value), allowLocales: true);
+                    bool matches = normalizedName is not null
+                        ? normalizedName.Equals(mapPath)
+                        : normalizedNames!.Contains(mapPath);
+                    if (!invalidatedAssets.ContainsKey(mapPath) && matches)
+                        invalidatedAssets[mapPath] = typeof(Map);
+                }
             }
         });
 
