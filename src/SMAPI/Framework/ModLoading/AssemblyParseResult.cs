@@ -20,6 +20,12 @@ internal class AssemblyParseResult
     /// <summary>The result of the assembly load.</summary>
     public AssemblyLoadStatus Status;
 
+    /// <summary>The content-addressed rewrite cache key for this assembly, if available.</summary>
+    public readonly string? RewriteCacheKey;
+
+    /// <summary>The cached rewrite result for this assembly, if found.</summary>
+    public readonly AssemblyRewriteCacheEntry? CachedRewrite;
+
     /// <summary>Whether the <see cref="Definition"/> is loaded and ready (i.e. the <see cref="Status"/> is not <see cref="AssemblyLoadStatus.AlreadyLoaded"/> or <see cref="AssemblyLoadStatus.Failed"/>).</summary>
     [MemberNotNullWhen(true, nameof(AssemblyParseResult.Definition))]
     public bool HasDefinition => this.Status == AssemblyLoadStatus.Okay;
@@ -32,11 +38,15 @@ internal class AssemblyParseResult
     /// <param name="file">The original assembly file.</param>
     /// <param name="assembly">The assembly definition.</param>
     /// <param name="status">The result of the assembly load.</param>
-    public AssemblyParseResult(FileInfo file, AssemblyDefinition? assembly, AssemblyLoadStatus status)
+    /// <param name="rewriteCacheKey">The content-addressed rewrite cache key, if available.</param>
+    /// <param name="cachedRewrite">The cached rewrite result, if found.</param>
+    public AssemblyParseResult(FileInfo file, AssemblyDefinition? assembly, AssemblyLoadStatus status, string? rewriteCacheKey = null, AssemblyRewriteCacheEntry? cachedRewrite = null)
     {
         this.File = file;
         this.Definition = assembly;
         this.Status = status;
+        this.RewriteCacheKey = rewriteCacheKey;
+        this.CachedRewrite = cachedRewrite;
 
         if (status == AssemblyLoadStatus.Okay && assembly == null)
             throw new InvalidOperationException($"Invalid assembly parse result: load status {status} with a null assembly.");

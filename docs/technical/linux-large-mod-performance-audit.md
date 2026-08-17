@@ -55,7 +55,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 43. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
 44. Finding 13 — repeated dependency-list scans — fixed.
 45. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
-46. Finding 12 — repeated assembly parsing and compatibility rewriting — deferred.
+46. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
 47. Finding 45 — incorrect overlay alpha composition — queued.
 48. Finding 49 — mod messages serialize even when no remote peer will receive them — trace-gated.
 49. Finding 50 — public reflection cache hits still allocate lookup machinery — trace-gated.
@@ -181,7 +181,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Startup and temporary memory pressure.
 - **Expected benefit:** A content-addressed rewrite cache can skip unchanged compatibility work.
 - **Risk:** High. The key must cover SMAPI, game, platform, rewrite-handler, symbol, and configuration versions; stale rewritten code is unacceptable.
-- **Status:** Confirmed; deferred behind gameplay fixes.
+- **Status:** Fixed. SMAPI now persists content-addressed analysis/rewrite results keyed by the exact DLL and PDB bytes plus the SMAPI module identity, target platform, live game/framework module identities, paranoid/rewrite settings, and diagnostic-detail mode. Cache hits still parse the authoritative source dependency graph, replay the same warnings and trace messages, recheck currently missing references, and only load a cached rewritten image after validating its assembly identity. Entries have a SHA-256 integrity check, writes are atomic, corrupt entries fall back to a normal rewrite, obsolete environments are removed, and an unavailable cache never blocks loading. On the target Linux/Proton installation, a cold run populated 270 entries and the 250-mod `Loading mods` phase took 13 seconds; the immediately repeated warm run took 4 seconds. Both runs loaded all 250 mods, emitted the same 231 rewrite/detection diagnostics, and produced identical normalized SMAPI warning/error output (37 entries).
 
 ### 13. Mod dependency resolution repeatedly scans the mod list
 
@@ -597,8 +597,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 4. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
 5. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
 6. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-7. Add a content-addressed assembly-rewrite cache with complete SMAPI, game, platform, symbol, handler, and configuration keys.
-8. Correct source-over alpha composition after representative content-pack visual comparisons.
-9. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+7. Correct source-over alpha composition after representative content-pack visual comparisons.
+8. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.

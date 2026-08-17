@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using StardewModdingAPI.Framework.Exceptions;
@@ -35,9 +36,6 @@ internal class AssemblyLoader : IDisposable
     /// <summary>A minimal assembly definition resolver which resolves references to known loaded assemblies.</summary>
     private readonly AssemblyDefinitionResolver AssemblyDefinitionResolver;
 
-    /// <summary>Provides assembly symbol readers for Mono.Cecil.</summary>
-    private readonly SymbolReaderProvider SymbolReaderProvider = new();
-
     /// <summary>Provides assembly symbol writers for Mono.Cecil.</summary>
     private readonly SymbolWriterProvider SymbolWriterProvider = new();
 
@@ -59,6 +57,9 @@ internal class AssemblyLoader : IDisposable
     /// <summary>Compare canonical assembly file paths for the current platform.</summary>
     private readonly StringComparer AssemblyPathComparer;
 
+    /// <summary>Persists content-addressed rewrite results across launches.</summary>
+    private readonly AssemblyRewriteCache RewriteCache;
+
 
     /*********
     ** Public methods
@@ -79,6 +80,10 @@ internal class AssemblyLoader : IDisposable
         this.AssemblyPathComparer = targetPlatform == Platform.Windows
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
+        this.RewriteCache = new AssemblyRewriteCache(
+            rootPath: Path.Combine(Constants.DataPath, "Cache", "AssemblyRewrite"),
+            environmentKey: this.GetRewriteCacheEnvironmentKey(targetPlatform, paranoidMode, rewriteMods, logTechnicalDetailsForBrokenMods)
+        );
 
         // init resolver
         this.AssemblyDefinitionResolver = this.TrackForDisposal(new AssemblyDefinitionResolver());
@@ -156,8 +161,17 @@ internal class AssemblyLoader : IDisposable
             if (!assembly.HasDefinition)
                 continue;
 
-            // rewrite assembly
-            bool changed = this.RewriteAssembly(mod, assembly.Definition, loggedMessages, logPrefix: "      ");
+            // rewrite assembly, or replay the equivalent diagnostics from a content-addressed cache hit
+            AssemblyRewriteResult rewriteResult;
+            if (assembly.CachedRewrite is not null)
+            {
+                foreach (string message in assembly.CachedRewrite.Messages)
+                    this.Monitor.LogOnce(loggedMessages, message);
+                mod.SetWarning(assembly.CachedRewrite.Warnings);
+                rewriteResult = new AssemblyRewriteResult(assembly.CachedRewrite.Changed, assembly.CachedRewrite.Warnings, assembly.CachedRewrite.Messages);
+            }
+            else
+                rewriteResult = this.RewriteAssembly(mod, assembly.Definition, loggedMessages, logPrefix: "      ");
 
             // detect broken assembly reference
             foreach (AssemblyNameReference reference in assembly.Definition.MainModule.AssemblyReferences)
@@ -173,23 +187,44 @@ internal class AssemblyLoader : IDisposable
             }
 
             // load assembly
-            if (changed)
+            byte[]? rewrittenAssemblyBytes = null;
+            byte[]? rewrittenSymbolBytes = null;
+            if (rewriteResult.Changed)
             {
                 if (!oneAssembly)
                     this.Monitor.Log($"      Loading assembly '{assembly.File.Name}' (rewritten)...");
 
-                // load assembly
-                using MemoryStream outAssemblyStream = new();
-                using MemoryStream outSymbolStream = new();
-                assembly.Definition.Write(outAssemblyStream, new WriterParameters { WriteSymbols = true, SymbolStream = outSymbolStream, SymbolWriterProvider = this.SymbolWriterProvider });
-                byte[] bytes = outAssemblyStream.ToArray();
-                lastAssembly = Assembly.Load(bytes, outSymbolStream.ToArray());
+                if (assembly.CachedRewrite is not null)
+                {
+                    rewrittenAssemblyBytes = assembly.CachedRewrite.AssemblyBytes!;
+                    rewrittenSymbolBytes = assembly.CachedRewrite.SymbolBytes;
+                }
+                else
+                {
+                    using MemoryStream outAssemblyStream = new();
+                    using MemoryStream outSymbolStream = new();
+                    assembly.Definition.Write(outAssemblyStream, new WriterParameters { WriteSymbols = true, SymbolStream = outSymbolStream, SymbolWriterProvider = this.SymbolWriterProvider });
+                    rewrittenAssemblyBytes = outAssemblyStream.ToArray();
+                    rewrittenSymbolBytes = outSymbolStream.ToArray();
+                }
+
+                lastAssembly = Assembly.Load(rewrittenAssemblyBytes, rewrittenSymbolBytes);
             }
             else
             {
                 if (!oneAssembly)
                     this.Monitor.Log($"      Loading assembly '{assembly.File.Name}'...");
                 lastAssembly = Assembly.UnsafeLoadFrom(assembly.File.FullName);
+            }
+
+            // Only publish the cache entry after the rewritten/original assembly has loaded successfully. A bad
+            // generated image therefore can't poison every later launch.
+            if (assembly.CachedRewrite is null && assembly.RewriteCacheKey is not null)
+            {
+                this.RewriteCache.Store(
+                    assembly.RewriteCacheKey,
+                    new AssemblyRewriteCacheEntry(rewriteResult.Changed, rewriteResult.Warnings, rewriteResult.Messages, rewrittenAssemblyBytes, rewrittenSymbolBytes)
+                );
             }
 
             // track loaded assembly for definition resolution
@@ -258,6 +293,13 @@ internal class AssemblyLoader : IDisposable
         return instance;
     }
 
+    /// <summary>Dispose and stop tracking an object which is no longer needed.</summary>
+    private void DisposeTracked(IDisposable instance)
+    {
+        if (this.Disposables.Remove(instance))
+            instance.Dispose();
+    }
+
     /// <summary>Track an assembly loaded after this loader was created.</summary>
     private void OnAssemblyLoaded(object? sender, AssemblyLoadEventArgs e)
     {
@@ -270,6 +312,31 @@ internal class AssemblyLoader : IDisposable
         string? name = assembly.GetName().Name;
         if (name != null)
             this.LoadedAssemblyNames.TryAdd(name, 0);
+    }
+
+    /// <summary>Get a stable identity for everything outside a mod DLL/PDB which can affect rewrite output or diagnostics.</summary>
+    private string GetRewriteCacheEnvironmentKey(Platform targetPlatform, bool paranoidMode, bool rewriteMods, bool logTechnicalDetailsForBrokenMods)
+    {
+        StringBuilder key = new();
+        key.Append("assembly-rewrite-v2|")
+            .Append(typeof(AssemblyLoader).Module.ModuleVersionId).Append('|')
+            .Append(targetPlatform).Append('|')
+            .Append(paranoidMode).Append('|')
+            .Append(rewriteMods).Append('|')
+            .Append(logTechnicalDetailsForBrokenMods);
+
+        // The handlers are compiled into SMAPI (covered by its MVID above), while their mapped target member and
+        // assembly identities depend on these live game/framework modules. This also invalidates on game updates
+        // even when the same SMAPI build remains installed.
+        foreach ((Assembly targetAssembly, ModuleDefinition targetModule) in this.AssemblyMap.TargetModules.OrderBy(p => p.Key.FullName, StringComparer.Ordinal))
+        {
+            key.Append('|')
+                .Append(targetAssembly.FullName)
+                .Append('|')
+                .Append(targetModule.Mvid);
+        }
+
+        return key.ToString();
     }
 
     /****
@@ -316,28 +383,25 @@ internal class AssemblyLoader : IDisposable
         if (this.AssemblyDefinitionResolver.TryAddSearchDirectory(file.DirectoryName))
             temporarySearchDir = file.DirectoryName;
 
-        // read assembly
+        // read the source assembly and look up a matching persistent rewrite result
         AssemblyDefinition assembly;
+        byte[] sourceAssemblyBytes;
+        byte[]? sourceSymbolBytes;
+        string rewriteCacheKey;
+        AssemblyRewriteCacheEntry? cachedRewrite;
         try
         {
-            byte[] assemblyBytes = File.ReadAllBytes(file.FullName);
-            Stream readStream = this.TrackForDisposal(new MemoryStream(assemblyBytes));
+            sourceAssemblyBytes = File.ReadAllBytes(file.FullName);
+            FileInfo symbolsFile = new(Path.Combine(file.Directory.FullName, Path.GetFileNameWithoutExtension(file.Name)) + ".pdb");
+            sourceSymbolBytes = symbolsFile.Exists
+                ? File.ReadAllBytes(symbolsFile.FullName)
+                : null;
+            rewriteCacheKey = this.RewriteCache.GetKey(sourceAssemblyBytes, sourceSymbolBytes);
+            this.RewriteCache.TryGet(rewriteCacheKey, out cachedRewrite);
 
-            try
-            {
-                // read assembly with symbols
-                FileInfo symbolsFile = new(Path.Combine(Path.GetDirectoryName(file.FullName)!, Path.GetFileNameWithoutExtension(file.FullName)) + ".pdb");
-                if (symbolsFile.Exists)
-                    this.SymbolReaderProvider.TryAddSymbolData(file.Name, () => this.TrackForDisposal(symbolsFile.OpenRead()));
-                assembly = this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(ReadingMode.Immediate) { AssemblyResolver = assemblyResolver, InMemory = true, ReadSymbols = true, SymbolReaderProvider = this.SymbolReaderProvider }));
-            }
-            catch (SymbolsNotMatchingException ex)
-            {
-                // read assembly without symbols
-                this.Monitor.Log($"      Failed loading PDB for '{file.Name}'. Technical details:\n{ex}");
-                readStream.Position = 0;
-                assembly = this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(ReadingMode.Immediate) { AssemblyResolver = assemblyResolver, InMemory = true }));
-            }
+            // Always discover identity and local dependencies from the authoritative source. Rewriters can change
+            // assembly references, so traversing a cached output graph could otherwise omit a bundled dependency.
+            assembly = this.ReadAssembly(file, sourceAssemblyBytes, sourceSymbolBytes, assemblyResolver);
         }
         finally
         {
@@ -366,8 +430,46 @@ internal class AssemblyLoader : IDisposable
                 yield return result;
         }
 
+        // A changed cache entry contains the definition that later dependents must resolve against. Parse it only
+        // after traversing the original dependency graph, and fall back to a normal rewrite if it's damaged.
+        if (cachedRewrite?.Changed == true)
+        {
+            try
+            {
+                AssemblyDefinition cachedAssembly = this.ReadAssembly(file, cachedRewrite.AssemblyBytes!, cachedRewrite.SymbolBytes, assemblyResolver);
+                if (!string.Equals(cachedAssembly.Name.Name, assemblyName, StringComparison.Ordinal))
+                    throw new InvalidDataException("Cached rewrite has a different assembly identity.");
+                this.DisposeTracked(assembly);
+                assembly = cachedAssembly;
+            }
+            catch
+            {
+                this.RewriteCache.Remove(rewriteCacheKey);
+                cachedRewrite = null;
+            }
+        }
+
         // yield assembly
-        yield return new AssemblyParseResult(file, assembly, AssemblyLoadStatus.Okay);
+        yield return new AssemblyParseResult(file, assembly, AssemblyLoadStatus.Okay, rewriteCacheKey, cachedRewrite);
+    }
+
+    /// <summary>Read an assembly definition from in-memory assembly and optional symbol bytes.</summary>
+    private AssemblyDefinition ReadAssembly(FileInfo file, byte[] assemblyBytes, byte[]? symbolBytes, IAssemblyResolver assemblyResolver)
+    {
+        Stream readStream = this.TrackForDisposal(new MemoryStream(assemblyBytes, writable: false));
+        SymbolReaderProvider symbolReaderProvider = new();
+        try
+        {
+            if (symbolBytes != null)
+                symbolReaderProvider.TryAddSymbolData(file.Name, () => this.TrackForDisposal(new MemoryStream(symbolBytes, writable: false)));
+            return this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(ReadingMode.Immediate) { AssemblyResolver = assemblyResolver, InMemory = true, ReadSymbols = true, SymbolReaderProvider = symbolReaderProvider }));
+        }
+        catch (SymbolsNotMatchingException ex)
+        {
+            this.Monitor.Log($"      Failed loading PDB for '{file.Name}'. Technical details:\n{ex}");
+            readStream.Position = 0;
+            return this.TrackForDisposal(AssemblyDefinition.ReadAssembly(readStream, new ReaderParameters(ReadingMode.Immediate) { AssemblyResolver = assemblyResolver, InMemory = true }));
+        }
     }
 
     /****
@@ -378,12 +480,14 @@ internal class AssemblyLoader : IDisposable
     /// <param name="assembly">The assembly to rewrite.</param>
     /// <param name="loggedMessages">The messages that have already been logged for this mod.</param>
     /// <param name="logPrefix">A string to prefix to log messages.</param>
-    /// <returns>Returns whether the assembly was modified.</returns>
+    /// <returns>Returns the rewrite output and diagnostics.</returns>
     /// <exception cref="IncompatibleInstructionException">An incompatible CIL instruction was found while rewriting the assembly.</exception>
-    private bool RewriteAssembly(IModMetadata mod, AssemblyDefinition assembly, HashSet<string> loggedMessages, string logPrefix)
+    private AssemblyRewriteResult RewriteAssembly(IModMetadata mod, AssemblyDefinition assembly, HashSet<string> loggedMessages, string logPrefix)
     {
         ModuleDefinition module = assembly.MainModule;
         string filename = $"{assembly.Name.Name}.dll";
+        List<string> messages = [];
+        ModWarning warnings = ModWarning.None;
 
         // swap assembly references if needed (e.g. XNA => MonoGame)
         bool platformChanged = false;
@@ -397,7 +501,10 @@ internal class AssemblyLoader : IDisposable
                     platformChanged = true;
                     module.AssemblyReferences.RemoveAt(i);
                     i--;
-                    this.Monitor.LogOnce(loggedMessages, $"{logPrefix}Rewrote {filename} for OS...");
+                    string message = $"{logPrefix}Rewrote {filename} for OS...";
+                    if (!messages.Contains(message))
+                        messages.Add(message);
+                    this.Monitor.LogOnce(loggedMessages, message);
                 }
             }
             if (platformChanged)
@@ -461,10 +568,10 @@ internal class AssemblyLoader : IDisposable
         foreach (IInstructionHandler handler in handlers)
         {
             foreach (var flag in handler.Flags)
-                this.ProcessInstructionHandleResult(mod, handler, flag, loggedMessages, logPrefix, filename);
+                warnings |= this.ProcessInstructionHandleResult(mod, handler, flag, loggedMessages, messages, logPrefix, filename);
         }
 
-        return platformChanged || anyRewritten;
+        return new AssemblyRewriteResult(platformChanged || anyRewritten, warnings, messages);
     }
 
     /// <summary>Process the result from an instruction handler.</summary>
@@ -472,13 +579,16 @@ internal class AssemblyLoader : IDisposable
     /// <param name="handler">The instruction handler.</param>
     /// <param name="result">The result returned by the handler.</param>
     /// <param name="loggedMessages">The messages already logged for the current mod.</param>
+    /// <param name="rewriteMessages">The messages captured for this assembly's persistent rewrite result.</param>
     /// <param name="logPrefix">A string to prefix to log messages.</param>
     /// <param name="filename">The assembly filename for log messages.</param>
-    private void ProcessInstructionHandleResult(IModMetadata mod, IInstructionHandler handler, InstructionHandleResult result, HashSet<string> loggedMessages, string logPrefix, string filename)
+    /// <returns>The mod warning flag detected by the handler, if any.</returns>
+    private ModWarning ProcessInstructionHandleResult(IModMetadata mod, IInstructionHandler handler, InstructionHandleResult result, HashSet<string> loggedMessages, List<string> rewriteMessages, string logPrefix, string filename)
     {
         // get message template
         // ($phrase is replaced with the noun phrase or messages)
         string? template = null;
+        ModWarning warning = ModWarning.None;
         switch (result)
         {
             case InstructionHandleResult.Rewritten:
@@ -487,37 +597,37 @@ internal class AssemblyLoader : IDisposable
 
             case InstructionHandleResult.NotCompatible:
                 template = $"{logPrefix}Broken code in {filename}: $phrase.";
-                mod.SetWarning(ModWarning.BrokenCodeLoaded);
+                warning = ModWarning.BrokenCodeLoaded;
                 break;
 
             case InstructionHandleResult.DetectedGamePatch:
                 template = $"{logPrefix}Detected game patcher in assembly {filename}."; // no need for phrase, which would confusingly be 'Harmony 1.x' here
-                mod.SetWarning(ModWarning.PatchesGame);
+                warning = ModWarning.PatchesGame;
                 break;
 
             case InstructionHandleResult.DetectedSaveSerializer:
                 template = $"{logPrefix}Detected possible save serializer change ($phrase) in assembly {filename}.";
-                mod.SetWarning(ModWarning.ChangesSaveSerializer);
+                warning = ModWarning.ChangesSaveSerializer;
                 break;
 
             case InstructionHandleResult.DetectedUnvalidatedUpdateTick:
                 template = $"{logPrefix}Detected reference to $phrase in assembly {filename}.";
-                mod.SetWarning(ModWarning.UsesUnvalidatedUpdateTick);
+                warning = ModWarning.UsesUnvalidatedUpdateTick;
                 break;
 
             case InstructionHandleResult.DetectedConsoleAccess:
                 template = $"{logPrefix}Detected direct console access ($phrase) in assembly {filename}.";
-                mod.SetWarning(ModWarning.AccessesConsole);
+                warning = ModWarning.AccessesConsole;
                 break;
 
             case InstructionHandleResult.DetectedFilesystemAccess:
                 template = $"{logPrefix}Detected filesystem access ($phrase) in assembly {filename}.";
-                mod.SetWarning(ModWarning.AccessesFilesystem);
+                warning = ModWarning.AccessesFilesystem;
                 break;
 
             case InstructionHandleResult.DetectedShellAccess:
                 template = $"{logPrefix}Detected shell or process access ($phrase) in assembly {filename}.";
-                mod.SetWarning(ModWarning.AccessesShell);
+                warning = ModWarning.AccessesShell;
                 break;
 
             case InstructionHandleResult.None:
@@ -527,7 +637,10 @@ internal class AssemblyLoader : IDisposable
                 throw new NotSupportedException($"Unrecognized instruction handler result '{result}'.");
         }
         if (template == null)
-            return;
+            return ModWarning.None;
+
+        if (warning != ModWarning.None)
+            mod.SetWarning(warning);
 
         // format messages
         string phrase;
@@ -538,7 +651,11 @@ internal class AssemblyLoader : IDisposable
         else
             phrase = string.Join(", ", handler.Phrases.OrderBy(p => p, StringComparer.OrdinalIgnoreCase));
 
-        this.Monitor.LogOnce(loggedMessages, template.Replace("$phrase", phrase));
+        string message = template.Replace("$phrase", phrase);
+        if (!rewriteMessages.Contains(message))
+            rewriteMessages.Add(message);
+        this.Monitor.LogOnce(loggedMessages, message);
+        return warning;
     }
 
     /// <summary>Get the correct reference to use for compatibility with the current platform.</summary>
