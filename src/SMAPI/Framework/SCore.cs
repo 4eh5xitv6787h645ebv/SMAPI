@@ -1280,7 +1280,10 @@ internal class SCore : IDisposable
         if (events.LoadStageChanged.HasListeners)
             events.LoadStageChanged.Raise(new LoadStageChangedEventArgs(oldStage, newStage));
         if (newStage == LoadStage.None)
+        {
             events.ReturnedToTitle.RaiseEmpty();
+            this.ContentCore.OnReturnedToTitleScreen();
+        }
     }
 
     /// <summary>Raised when the game starts a render step in the draw loop.</summary>

@@ -127,6 +127,12 @@ internal class CoreAssetPropagator
         this.ResetItemRegistry = resetItemRegistry ?? ItemRegistry.ResetCache;
     }
 
+    /// <summary>Release cached references to the in-game world.</summary>
+    public void ClearWorldCache()
+    {
+        this.WorldCache.Clear();
+    }
+
     /// <summary>Get the propagation route for an exact normalized texture asset name.</summary>
     /// <param name="assetName">The normalized asset name.</param>
     internal static TextureAssetRoute GetTextureAssetRoute(string assetName)
