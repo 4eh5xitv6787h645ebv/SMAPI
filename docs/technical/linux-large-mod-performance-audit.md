@@ -66,6 +66,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 54. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
 55. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 56. Finding 56 — duplicate content-cache hashing during scans and invalidation — fixed.
+57. Finding 57 — managed-asset parsing and lock closures — fixed.
 
 ## Detailed findings
 
@@ -629,6 +630,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. Enumeration order and mutation behavior remain those of the same underlying dictionary, disposal still occurs only after successful removal, and the returned success flag is unchanged.
 - **Status:** Fixed. Content managers return the underlying cache entry enumeration, and invalidation directly returns the cache removal result.
 
+### 57. Managed mod assets split paths and allocate lock closures on every resolution
+
+- **Affected code:** `Framework/ContentCoordinator.cs` (`TryParseManagedAssetKey`, managed content-manager lookup, creation, invalidation, and disposal) and `Framework/Extensions/ReaderWriterLockSlimExtensions.cs`.
+- **Scenario:** Custom maps and content packs load managed `SMAPI/mod-id/path` assets, including tilesheets reloaded during warps and context changes; large mod sets also create and dispose hundreds of content managers.
+- **Root cause:** Each managed key used `Split` to allocate a segment array and three substrings, then `Path.Combine` allocated the manager ID. The subsequent indexed lookup created a capturing closure and delegate solely to enter a read lock. Other content-manager lifecycle and loaded-value lock calls had the same closure pattern, and invalidation closures captured several mutable transaction values. Prefix matching also allowed a partial `SMAPIFoo` segment and the manager index was case-sensitive on Linux.
+- **Impact:** Transition and managed-asset load CPU, temporary allocation, and Linux path correctness.
+- **Expected benefit:** A managed key now allocates only the manager ID and relative path which downstream APIs retain, while warmed state-passing lock calls allocate nothing. Invalidation avoids its transaction closure, and lifecycle/loaded-value paths reuse cached static callbacks.
+- **Risk:** Low to medium. Parser coverage locks valid slash and backslash forms, malformed/partial prefixes, empty IDs and paths, platform-normalized manager IDs, and case-insensitive routing. Every lock path retains `finally`-based release and existing first-manager precedence.
+- **Status:** Fixed. Managed keys are scanned by separator index without split arrays, exact prefix-segment matching is ordinal-ignore-case, the namespaced index is case-insensitive, and explicit-state read/write lock overloads replace capturing callbacks. A warmed 20,000-operation read/write regression check allocates zero bytes.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -636,14 +647,14 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Per-tick world, location, building, object, NPC, terrain, furniture, and chest tracking | Findings 1, 2, 18, 23, 29, 40, 41, 42, 48, and 54 |
 | Duplicate `LocationsWatcher` update/reset | Finding 1 |
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
-| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, and 56 |
+| Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, 53, 56, and 57 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
 | Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, and 55 |
 | Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, 55, and 56 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |
-| Content-manager lookup scaling | Findings 9 and 53 |
+| Content-manager lookup scaling | Findings 9, 53, and 57 |
 | Asset-name parsing and normalization | Findings 10 and 36 |
 | Linux case-insensitive file lookup | Findings 11, 38, and 39 |
 | Assembly loading and rewrite caching | Findings 12 and 44 |
@@ -652,7 +663,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, and 47 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, and 55 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, 55, and 57 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority

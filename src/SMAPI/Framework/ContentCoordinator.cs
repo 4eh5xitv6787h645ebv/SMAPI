@@ -31,7 +31,7 @@ internal class ContentCoordinator : IDisposable
     ** Fields
     *********/
     /// <summary>An asset key prefix for assets from SMAPI mod folders.</summary>
-    private readonly string ManagedPrefix = "SMAPI";
+    private const string ManagedPrefix = "SMAPI";
 
     /// <summary>Get a file lookup for the given directory.</summary>
     private readonly Func<string, IFileLookup> GetFileLookup;
@@ -67,7 +67,7 @@ internal class ContentCoordinator : IDisposable
     private readonly List<IContentManager> GameContentManagers = [];
 
     /// <summary>The first registered namespaced content manager for each managed asset prefix.</summary>
-    private readonly Dictionary<string, IContentManager> NamespacedContentManagers = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IContentManager> NamespacedContentManagers = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Whether the content coordinator has been disposed.</summary>
     private bool IsDisposed;
@@ -182,21 +182,22 @@ internal class ContentCoordinator : IDisposable
     /// <param name="name">A name for the mod manager. Not guaranteed to be unique.</param>
     public GameContentManager CreateGameContentManager(string name)
     {
-        return this.ContentManagerLock.InWriteLock(() =>
+        return this.ContentManagerLock.InWriteLock((Coordinator: this, Name: name), static state =>
         {
+            ContentCoordinator coordinator = state.Coordinator;
             GameContentManager manager = new(
-                name: name,
-                serviceProvider: this.MainContentManager.ServiceProvider,
-                rootDirectory: this.MainContentManager.RootDirectory,
-                currentCulture: this.MainContentManager.CurrentCulture,
-                coordinator: this,
-                monitor: this.Monitor,
-                reflection: this.Reflection,
-                onDisposing: this.OnDisposing,
-                onLoadingFirstAsset: this.OnLoadingFirstAsset,
-                onAssetLoaded: this.OnAssetLoaded
+                name: state.Name,
+                serviceProvider: coordinator.MainContentManager.ServiceProvider,
+                rootDirectory: coordinator.MainContentManager.RootDirectory,
+                currentCulture: coordinator.MainContentManager.CurrentCulture,
+                coordinator: coordinator,
+                monitor: coordinator.Monitor,
+                reflection: coordinator.Reflection,
+                onDisposing: coordinator.OnDisposing,
+                onLoadingFirstAsset: coordinator.OnLoadingFirstAsset,
+                onAssetLoaded: coordinator.OnAssetLoaded
             );
-            this.AddContentManager(manager);
+            coordinator.AddContentManager(manager);
             return manager;
         });
     }
@@ -208,26 +209,30 @@ internal class ContentCoordinator : IDisposable
     /// <param name="gameContentManager">The game content manager used for map tilesheets not provided by the mod.</param>
     public ModContentManager CreateModContentManager(string name, string modName, string rootDirectory, IContentManager gameContentManager)
     {
-        return this.ContentManagerLock.InWriteLock(() =>
-        {
-            ModContentManager manager = new(
-                name: name,
-                gameContentManager: gameContentManager,
-                serviceProvider: this.MainContentManager.ServiceProvider,
-                rootDirectory: rootDirectory,
-                modName: modName,
-                currentCulture: this.MainContentManager.CurrentCulture,
-                coordinator: this,
-                monitor: this.Monitor,
-                reflection: this.Reflection,
-                jsonHelper: this.JsonHelper,
-                onDisposing: this.OnDisposing,
-                fileLookup: this.GetFileLookup(rootDirectory),
-                decodedTextures: this.DecodedTextures
-            );
-            this.AddContentManager(manager);
-            return manager;
-        });
+        return this.ContentManagerLock.InWriteLock(
+            (Coordinator: this, Name: name, ModName: modName, RootDirectory: rootDirectory, GameContentManager: gameContentManager),
+            static state =>
+            {
+                ContentCoordinator coordinator = state.Coordinator;
+                ModContentManager manager = new(
+                    name: state.Name,
+                    gameContentManager: state.GameContentManager,
+                    serviceProvider: coordinator.MainContentManager.ServiceProvider,
+                    rootDirectory: state.RootDirectory,
+                    modName: state.ModName,
+                    currentCulture: coordinator.MainContentManager.CurrentCulture,
+                    coordinator: coordinator,
+                    monitor: coordinator.Monitor,
+                    reflection: coordinator.Reflection,
+                    jsonHelper: coordinator.JsonHelper,
+                    onDisposing: coordinator.OnDisposing,
+                    fileLookup: coordinator.GetFileLookup(state.RootDirectory),
+                    decodedTextures: coordinator.DecodedTextures
+                );
+                coordinator.AddContentManager(manager);
+                return manager;
+            }
+        );
     }
 
     /// <summary>Get the current content locale.</summary>
@@ -250,10 +255,7 @@ internal class ContentCoordinator : IDisposable
     public void OnLocaleChanged()
     {
         // reset baseline cache
-        this.ContentManagerLock.InReadLock(() =>
-        {
-            this.VanillaContentManager.Unload();
-        });
+        this.ContentManagerLock.InReadLock(this.VanillaContentManager, static contentManager => contentManager.Unload());
 
         // forget localized flags (to match the logic in Game1.TranslateFields, which is called on language change)
         this.LocalizedAssetNames.Value.Clear();
@@ -318,7 +320,7 @@ internal class ContentCoordinator : IDisposable
     /// <param name="key">The asset name.</param>
     public bool IsManagedAssetKey(IAssetName key)
     {
-        return key.StartsWith(this.ManagedPrefix);
+        return ContentCoordinator.HasManagedAssetPrefix(key.Name);
     }
 
     /// <summary>Parse a managed SMAPI asset key which maps to a mod folder.</summary>
@@ -328,27 +330,82 @@ internal class ContentCoordinator : IDisposable
     /// <returns>Returns whether the asset was parsed successfully.</returns>
     public bool TryParseManagedAssetKey(string key, [NotNullWhen(true)] out string? contentManagerId, [NotNullWhen(true)] out IAssetName? relativePath)
     {
+        relativePath = null;
+
+        if (!ContentCoordinator.TryParseManagedAssetKeyParts(key, out contentManagerId, out string? rawRelativePath))
+            return false;
+
+        relativePath = this.ParseAssetName(rawRelativePath, allowLocales: false);
+        return true;
+    }
+
+    /// <summary>Parse the manager ID and relative path from a normalized managed asset key.</summary>
+    /// <param name="key">The asset key.</param>
+    /// <param name="contentManagerId">The platform-normalized content manager ID.</param>
+    /// <param name="relativePath">The raw relative asset path.</param>
+    internal static bool TryParseManagedAssetKeyParts(string key, [NotNullWhen(true)] out string? contentManagerId, [NotNullWhen(true)] out string? relativePath)
+    {
         contentManagerId = null;
         relativePath = null;
 
-        // not a managed asset
-        if (!key.StartsWith(this.ManagedPrefix))
+        if (!ContentCoordinator.HasManagedAssetPrefix(key))
             return false;
 
-        // parse
-        string[] parts = PathUtilities.GetSegments(key, 3);
-        if (parts.Length != 3) // managed key prefix, mod id, relative path
+        int modIdStart = ContentCoordinator.ManagedPrefix.Length + 1;
+        int relativePathSeparator = -1;
+        for (int i = modIdStart; i < key.Length; i++)
+        {
+            if (key[i] is '/' or '\\')
+            {
+                relativePathSeparator = i;
+                break;
+            }
+        }
+
+        if (relativePathSeparator <= modIdStart)
             return false;
-        contentManagerId = Path.Combine(parts[0], parts[1]);
-        relativePath = this.ParseAssetName(parts[2], allowLocales: false);
+
+        bool hasRelativePath = false;
+        for (int i = relativePathSeparator + 1; i < key.Length; i++)
+        {
+            if (key[i] is not ('/' or '\\'))
+            {
+                hasRelativePath = true;
+                break;
+            }
+        }
+        if (!hasRelativePath)
+            return false;
+
+        int modIdLength = relativePathSeparator - modIdStart;
+        contentManagerId = string.Create(
+            ContentCoordinator.ManagedPrefix.Length + 1 + modIdLength,
+            (Key: key, ModIdStart: modIdStart, ModIdLength: modIdLength),
+            static (result, state) =>
+            {
+                ContentCoordinator.ManagedPrefix.AsSpan().CopyTo(result);
+                result[ContentCoordinator.ManagedPrefix.Length] = Path.DirectorySeparatorChar;
+                state.Key.AsSpan(state.ModIdStart, state.ModIdLength).CopyTo(result[(ContentCoordinator.ManagedPrefix.Length + 1)..]);
+            }
+        );
+        relativePath = key[(relativePathSeparator + 1)..];
         return true;
+    }
+
+    /// <summary>Get whether an asset key starts with the managed asset path segment.</summary>
+    internal static bool HasManagedAssetPrefix(string key)
+    {
+        return
+            key.Length > ContentCoordinator.ManagedPrefix.Length
+            && key.StartsWith(ContentCoordinator.ManagedPrefix, StringComparison.OrdinalIgnoreCase)
+            && key[ContentCoordinator.ManagedPrefix.Length] is '/' or '\\';
     }
 
     /// <summary>Get the managed asset key prefix for a mod.</summary>
     /// <param name="modId">The mod's unique ID.</param>
     public string GetManagedAssetPrefix(string modId)
     {
-        return Path.Combine(this.ManagedPrefix, modId.ToLower());
+        return Path.Combine(ContentCoordinator.ManagedPrefix, modId.ToLowerInvariant());
     }
 
     /// <summary>Get whether an asset from a mod folder exists.</summary>
@@ -359,8 +416,9 @@ internal class ContentCoordinator : IDisposable
         where T : notnull
     {
         // get content manager
-        IContentManager? contentManager = this.ContentManagerLock.InReadLock(() =>
-            this.NamespacedContentManagers.GetValueOrDefault(contentManagerId)
+        IContentManager? contentManager = this.ContentManagerLock.InReadLock(
+            (Coordinator: this, ContentManagerId: contentManagerId),
+            static state => state.Coordinator.NamespacedContentManagers.GetValueOrDefault(state.ContentManagerId)
         );
         if (contentManager == null)
             throw new InvalidOperationException($"The '{contentManagerId}' prefix isn't handled by any mod.");
@@ -377,8 +435,9 @@ internal class ContentCoordinator : IDisposable
         where T : notnull
     {
         // get content manager
-        IContentManager? contentManager = this.ContentManagerLock.InReadLock(() =>
-            this.NamespacedContentManagers.GetValueOrDefault(contentManagerId)
+        IContentManager? contentManager = this.ContentManagerLock.InReadLock(
+            (Coordinator: this, ContentManagerId: contentManagerId),
+            static state => state.Coordinator.NamespacedContentManagers.GetValueOrDefault(state.ContentManagerId)
         );
         if (contentManager == null)
             throw new InvalidOperationException($"The '{contentManagerId}' prefix isn't handled by any mod.");
@@ -431,7 +490,8 @@ internal class ContentCoordinator : IDisposable
         Dictionary<IAssetName, Type> invalidatedAssets = [];
         Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers = null;
 
-        this.ContentManagerLock.InReadLock(() =>
+        this.ContentManagerLock.EnterReadLock();
+        try
         {
             // Directly check the exact cache keys in game content managers. Namespaced content managers don't cache assets.
             if (normalizedName is not null)
@@ -468,11 +528,15 @@ internal class ContentCoordinator : IDisposable
                     bool matches = normalizedName is not null
                         ? normalizedName.Equals(mapPath)
                         : normalizedNames!.Contains(mapPath);
-                    if (!invalidatedAssets.ContainsKey(mapPath) && matches)
-                        invalidatedAssets[mapPath] = typeof(Map);
+                    if (matches)
+                        invalidatedAssets.TryAdd(mapPath, typeof(Map));
                 }
             }
-        });
+        }
+        finally
+        {
+            this.ContentManagerLock.ExitReadLock();
+        }
 
         return this.ProcessInvalidatedAssets(invalidatedAssets, loadedTextureManagers);
     }
@@ -520,7 +584,8 @@ internal class ContentCoordinator : IDisposable
         // invalidate cache & track removed assets
         Dictionary<IAssetName, Type> invalidatedAssets = new();
         Dictionary<IAssetName, List<IContentManager>>? loadedTextureManagers = null;
-        this.ContentManagerLock.InReadLock(() =>
+        this.ContentManagerLock.EnterReadLock();
+        try
         {
             // cached assets
             foreach (IContentManager contentManager in this.GameContentManagers)
@@ -537,8 +602,7 @@ internal class ContentCoordinator : IDisposable
                     else
                         contentManager.InvalidateCache(assetName, dispose);
 
-                    if (!invalidatedAssets.ContainsKey(assetName))
-                        invalidatedAssets[assetName] = asset.GetType();
+                    invalidatedAssets.TryAdd(assetName, asset.GetType());
                 }
             }
 
@@ -561,7 +625,11 @@ internal class ContentCoordinator : IDisposable
                 if (!invalidatedAssets.ContainsKey(mapPath) && predicate(this.MainContentManager, mapPath.Name, typeof(Map)))
                     invalidatedAssets[mapPath] = typeof(Map);
             }
-        });
+        }
+        finally
+        {
+            this.ContentManagerLock.ExitReadLock();
+        }
 
         return this.ProcessInvalidatedAssets(invalidatedAssets, loadedTextureManagers);
     }
@@ -653,12 +721,12 @@ internal class ContentCoordinator : IDisposable
     [SuppressMessage("ReSharper", "UnusedMember.Global", Justification = "This method is provided for Content Patcher.")]
     public IReadOnlyList<object> GetLoadedValues(IAssetName assetName)
     {
-        return this.ContentManagerLock.InReadLock(() =>
+        return this.ContentManagerLock.InReadLock((Coordinator: this, AssetName: assetName), static state =>
         {
             List<object> values = [];
-            foreach (IContentManager content in this.GameContentManagers)
+            foreach (IContentManager content in state.Coordinator.GameContentManagers)
             {
-                if (content.TryGetCachedAsset(assetName, out object? value))
+                if (content.TryGetCachedAsset(state.AssetName, out object? value))
                     values.Add(value);
             }
             return values;
@@ -752,19 +820,29 @@ internal class ContentCoordinator : IDisposable
         if (this.IsDisposed)
             return;
 
-        this.ContentManagerLock.InWriteLock(() =>
+        this.ContentManagerLock.InWriteLock((Coordinator: this, ContentManager: contentManager), static state =>
         {
-            this.ContentManagers.Remove(contentManager);
+            ContentCoordinator coordinator = state.Coordinator;
+            IContentManager contentManager = state.ContentManager;
+            coordinator.ContentManagers.Remove(contentManager);
 
             if (!contentManager.IsNamespaced)
-                this.GameContentManagers.Remove(contentManager);
-            else if (this.NamespacedContentManagers.GetValueOrDefault(contentManager.Name) == contentManager)
+                coordinator.GameContentManagers.Remove(contentManager);
+            else if (coordinator.NamespacedContentManagers.GetValueOrDefault(contentManager.Name) == contentManager)
             {
-                this.NamespacedContentManagers.Remove(contentManager.Name);
+                coordinator.NamespacedContentManagers.Remove(contentManager.Name);
 
-                IContentManager? next = this.ContentManagers.FirstOrDefault(p => p.IsNamespaced && p.Name == contentManager.Name);
+                IContentManager? next = null;
+                foreach (IContentManager candidate in coordinator.ContentManagers)
+                {
+                    if (candidate.IsNamespaced && candidate.Name == contentManager.Name)
+                    {
+                        next = candidate;
+                        break;
+                    }
+                }
                 if (next != null)
-                    this.NamespacedContentManagers[contentManager.Name] = next;
+                    coordinator.NamespacedContentManagers[contentManager.Name] = next;
             }
         });
     }

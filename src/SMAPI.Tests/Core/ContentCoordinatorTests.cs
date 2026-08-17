@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI;
@@ -12,6 +13,40 @@ namespace SMAPI.Tests.Core;
 [TestFixture]
 internal class ContentCoordinatorTests
 {
+    [TestCase("SMAPI/Example.Mod/path/to/asset", "Example.Mod", "path/to/asset")]
+    [TestCase("smapi\\Example.Mod\\path\\to\\asset", "Example.Mod", "path\\to\\asset")]
+    [TestCase("SmApI/EXAMPLE/asset", "EXAMPLE", "asset")]
+    public void TryParseManagedAssetKeyParts_ParsesValidKeys(string key, string expectedModId, string expectedRelativePath)
+    {
+        bool parsed = ContentCoordinator.TryParseManagedAssetKeyParts(key, out string? contentManagerId, out string? relativePath);
+
+        parsed.Should().BeTrue();
+        contentManagerId.Should().Be(Path.Combine("SMAPI", expectedModId));
+        relativePath.Should().Be(expectedRelativePath);
+    }
+
+    [TestCase("SMAPI")]
+    [TestCase("SMAPI/")]
+    [TestCase("SMAPIFoo/mod/asset")]
+    [TestCase("SMAPI//asset")]
+    [TestCase("SMAPI/mod")]
+    [TestCase("SMAPI/mod///")]
+    public void TryParseManagedAssetKeyParts_RejectsInvalidKeys(string key)
+    {
+        ContentCoordinator.TryParseManagedAssetKeyParts(key, out string? contentManagerId, out string? relativePath).Should().BeFalse();
+        contentManagerId.Should().BeNull();
+        relativePath.Should().BeNull();
+    }
+
+    [TestCase("SMAPI/mod/asset", true)]
+    [TestCase("smapi\\mod\\asset", true)]
+    [TestCase("SMAPIFoo/mod/asset", false)]
+    [TestCase("Other/mod/asset", false)]
+    public void HasManagedAssetPrefix_RequiresExactPathSegment(string key, bool expected)
+    {
+        ContentCoordinator.HasManagedAssetPrefix(key).Should().Be(expected);
+    }
+
     [Test(Description = "Assert that the deferred invalidation report preserves its contents and case-insensitive asset order.")]
     public void FormatInvalidationReport_FormatsSortedSummary()
     {
