@@ -79,6 +79,7 @@ internal class AssetRequestedEventArgsTests
 
         args.LoadOperations.Should().BeNull();
         args.EditOperations.Should().ContainSingle();
+        typeof(AssetEditOperation).IsValueType.Should().BeTrue();
         args.EditOperations![0].ApplyEdit.Should().BeSameAs(edit);
     }
 }
