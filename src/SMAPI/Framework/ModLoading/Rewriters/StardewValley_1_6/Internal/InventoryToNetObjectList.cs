@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Netcode;
 using StardewValley;
 using StardewValley.Inventories;
@@ -12,7 +13,10 @@ internal class InventoryToNetObjectList : NetObjectList<Item>
     ** Fields
     *********/
     /// <summary>A cached lookup of inventory wrappers.</summary>
-    private static readonly Dictionary<Inventory, InventoryToNetObjectList> CachedWrappers = new(ReferenceEqualityComparer.Instance);
+    private static readonly ConditionalWeakTable<Inventory, InventoryToNetObjectList> CachedWrappers = new();
+
+    /// <summary>A lock for creating and publishing cached wrappers.</summary>
+    private static readonly object CachedWrappersLock = new();
 
     /// <summary>The underlying inventory to track.</summary>
     private readonly Inventory Inventory;
@@ -37,10 +41,19 @@ internal class InventoryToNetObjectList : NetObjectList<Item>
     /// <param name="inventory">The inventory to track.</param>
     public static InventoryToNetObjectList GetCachedWrapperFor(Inventory inventory)
     {
-        if (!CachedWrappers.TryGetValue(inventory, out InventoryToNetObjectList? wrapper))
-            CachedWrappers[inventory] = wrapper = new InventoryToNetObjectList(inventory);
+        if (CachedWrappers.TryGetValue(inventory, out InventoryToNetObjectList? wrapper))
+            return wrapper;
 
-        return wrapper;
+        lock (CachedWrappersLock)
+        {
+            if (!CachedWrappers.TryGetValue(inventory, out wrapper))
+            {
+                wrapper = new InventoryToNetObjectList(inventory);
+                CachedWrappers.Add(inventory, wrapper);
+            }
+
+            return wrapper;
+        }
     }
 
     /// <inheritdoc />
