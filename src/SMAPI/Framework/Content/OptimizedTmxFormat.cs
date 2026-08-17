@@ -245,11 +245,13 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
         else
             result = new StaticTile(layer, range.TileSheet, BlendMode.Alpha, tileIndex);
 
-        if (result.GetRotationValue() == 0)
-            result.SetRotationValue(GetRotationForFlippedTile(flippedHorizontally, flippedVertically, flippedDiagonally));
+        int rotation = GetRotationForFlippedTile(flippedHorizontally, flippedVertically, flippedDiagonally);
+        if (rotation != 0)
+            result.SetRotationValue(rotation);
 
-        if (result.GetFlip() == 0)
-            result.SetFlip(GetEffectForFlippedTile(flippedHorizontally, flippedVertically, flippedDiagonally));
+        int flip = GetEffectForFlippedTile(flippedHorizontally, flippedVertically, flippedDiagonally);
+        if (flip != 0)
+            result.SetFlip(flip);
 
         return result;
     }
