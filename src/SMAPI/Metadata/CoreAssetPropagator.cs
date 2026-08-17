@@ -699,8 +699,9 @@ internal class CoreAssetPropagator
 
         // reload building textures
         bool anyReloaded = false;
-        foreach (GameLocation location in this.GetLocations(buildingInteriors: false))
+        foreach (LocationInfo info in this.GetLocationsWithInfo(buildingInteriors: false))
         {
+            GameLocation location = info.Location;
             foreach (Building building in location.buildings)
             {
                 if (building.paintedTexture != null && assetName.IsEquivalentTo(building.textureName() + "_PaintMask"))
@@ -952,8 +953,9 @@ internal class CoreAssetPropagator
             {
                 List<NPC> characters = [];
 
-                foreach (GameLocation location in propagator.GetLocations())
+                foreach (LocationInfo info in propagator.GetLocationsWithInfo())
                 {
+                    GameLocation location = info.Location;
                     foreach (NPC character in location.characters)
                         characters.Add(character);
                 }
@@ -1015,8 +1017,9 @@ internal class CoreAssetPropagator
             {
                 List<FarmAnimal> animals = [];
 
-                foreach (GameLocation location in propagator.GetLocations())
+                foreach (LocationInfo info in propagator.GetLocationsWithInfo())
                 {
+                    GameLocation location = info.Location;
                     if (location.animals.Length > 0)
                     {
                         foreach (FarmAnimal animal in location.animals.Values)
@@ -1025,27 +1028,6 @@ internal class CoreAssetPropagator
                 }
 
                 return animals;
-            }
-        );
-    }
-
-    /// <summary>Get all locations in the game.</summary>
-    /// <param name="buildingInteriors">Whether to also get the interior locations for constructable buildings.</param>
-    private IReadOnlyList<GameLocation> GetLocations(bool buildingInteriors = true)
-    {
-        return this.WorldCache.GetOrSet(
-            buildingInteriors
-                ? nameof(this.GetLocations) + "_True"
-                : nameof(this.GetLocations) + "_False",
-            (Propagator: this, BuildingInteriors: buildingInteriors),
-            static state =>
-            {
-                IReadOnlyList<LocationInfo> locationsWithInfo = state.Propagator.GetLocationsWithInfo(state.BuildingInteriors);
-                GameLocation[] locations = new GameLocation[locationsWithInfo.Count];
-                for (int i = 0; i < locations.Length; i++)
-                    locations[i] = locationsWithInfo[i].Location;
-
-                return locations;
             }
         );
     }
