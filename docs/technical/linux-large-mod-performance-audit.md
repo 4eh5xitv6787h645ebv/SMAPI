@@ -913,12 +913,12 @@ This is the current jank-first order, combining likely frame-time impact, freque
 ### 83. Opaque image overlays read back and blend the target texture
 
 - **Affected code:** `Framework/Content/AssetDataForImage.cs` (`PatchImageImpl`).
-- **Scenario:** Content Patcher or another editor applies a fully opaque overlay to a texture, including large replacement-like patches expressed using overlay mode.
-- **Root cause:** Only explicit replace mode used the direct GPU upload path. Overlay mode always read the target region back from the GPU, rented a merge buffer, visited every pixel, and uploaded the result even though each opaque source pixel necessarily replaces the destination exactly.
+- **Scenario:** Content Patcher or another editor applies a fully opaque overlay to a texture, including large replacement-like patches expressed using overlay mode and solid rectangles surrounded by transparent margins.
+- **Root cause:** Only explicit replace mode used the direct GPU upload path. Overlay mode always read the target region back from the GPU, rented a merge buffer, visited every pixel, and uploaded the result even when every pixel inside the effective non-transparent bounds necessarily replaced the destination exactly.
 - **Impact:** Avoidable synchronous GPU readback, pooled-buffer traffic, and per-pixel alpha work on the content-reload/warp path.
-- **Expected benefit:** Fully opaque overlays perform one linear alpha check followed by the same direct upload as replacement, eliminating target readback and blend work. Sparse and translucent overlays exit the check at their first non-opaque pixel and retain the cropped merge path.
+- **Expected benefit:** Fully opaque overlays perform a linear alpha check followed by the same direct upload as replacement, eliminating target readback and blend work. Solid rectangles with transparent margins upload only their cropped rows. Sparse and translucent overlays exit the check at their first non-opaque pixel and retain the cropped merge path.
 - **Risk:** Low. The fast path applies only when every source alpha is 255, for which the existing overlay branch always assigns the source color regardless of destination. Empty and partially transparent inputs retain existing behavior.
-- **Status:** Fixed. Opaque overlays now take the direct upload path, with focused coverage for opaque, translucent, transparent, and empty spans.
+- **Status:** Fixed. Opaque overlays and opaque effective rectangles now take the direct upload path, with focused coverage for opaque, translucent, transparent, empty, offset, and strided spans.
 
 ## Requested audit coverage
 
