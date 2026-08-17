@@ -173,8 +173,9 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
                             lastTargetSheet = tilesheetMap[sourceSheet];
                         }
 
-                        newTile = this.CreateTile(sourceTile, targetLayer, lastTargetSheet!);
-                        newTile?.Properties.CopyFrom(sourceTile.Properties);
+                        newTile = this.CreateTile(sourceTile, targetLayer, lastSourceSheet!, lastTargetSheet!, tilesheetMap);
+                        if (newTile is not null && sourceTile.Properties.Count > 0)
+                            newTile.Properties.CopyFrom(sourceTile.Properties);
                     }
 
                     // replace tile
@@ -229,8 +230,10 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
     /// <summary>Create a new tile for the target map.</summary>
     /// <param name="sourceTile">The source tile to copy.</param>
     /// <param name="targetLayer">The target layer.</param>
+    /// <param name="sourceSheet">The source tile's current tilesheet.</param>
     /// <param name="targetSheet">The target tilesheet.</param>
-    private Tile? CreateTile(Tile sourceTile, Layer targetLayer, TileSheet targetSheet)
+    /// <param name="tilesheetMap">The source-to-target tilesheet mappings.</param>
+    private Tile? CreateTile(Tile sourceTile, Layer targetLayer, TileSheet sourceSheet, TileSheet targetSheet, Dictionary<TileSheet, TileSheet> tilesheetMap)
     {
         switch (sourceTile)
         {
@@ -239,11 +242,20 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
 
             case AnimatedTile animatedTile:
                 {
-                    StaticTile[] tileFrames = new StaticTile[animatedTile.TileFrames.Length];
-                    for (int frame = 0; frame < animatedTile.TileFrames.Length; ++frame)
+                    // TileFrames returns a defensive copy, so read it once instead of copying the full array
+                    // for the allocation length, each loop condition, and every indexed access.
+                    StaticTile[] sourceFrames = animatedTile.TileFrames;
+                    StaticTile[] tileFrames = new StaticTile[sourceFrames.Length];
+                    for (int frame = 0; frame < sourceFrames.Length; ++frame)
                     {
-                        StaticTile frameTile = animatedTile.TileFrames[frame];
-                        tileFrames[frame] = new StaticTile(targetLayer, targetSheet, frameTile.BlendMode, frameTile.TileIndex);
+                        StaticTile frameTile = sourceFrames[frame];
+                        TileSheet frameTargetSheet = ReferenceEquals(frameTile.TileSheet, sourceSheet)
+                            ? targetSheet
+                            : tilesheetMap[frameTile.TileSheet];
+                        StaticTile targetFrame = new(targetLayer, frameTargetSheet, frameTile.BlendMode, frameTile.TileIndex);
+                        if (frameTile.Properties.Count > 0)
+                            targetFrame.Properties.CopyFrom(frameTile.Properties);
+                        tileFrames[frame] = targetFrame;
                     }
 
                     return new AnimatedTile(targetLayer, tileFrames, animatedTile.FrameInterval);
@@ -263,7 +275,7 @@ internal class AssetDataForMap : AssetData<Map>, IAssetDataForMap
         path = PathUtilities.NormalizeAssetName(path);
         if (path.StartsWith($"Maps{PathUtilities.PreferredAssetSeparator}", StringComparison.OrdinalIgnoreCase))
             path = path.Substring($"Maps{PathUtilities.PreferredAssetSeparator}".Length);
-        if (path.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+        if (path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".xnb", StringComparison.OrdinalIgnoreCase))
             path = path.Substring(0, path.Length - 4);
 
         return path;
