@@ -102,6 +102,17 @@ internal sealed class DecodedTextureCache : IDisposable
     public bool TryGetCopy(FileInfo file, [NotNullWhen(true)] out RawTextureData? data)
     {
         data = null;
+
+        string path = file.FullName;
+        CacheEntry candidate;
+        lock (this.SyncRoot)
+        {
+            if (this.IsDisposed || !this.Cache.TryGetValue(path, out candidate!))
+                return false;
+        }
+
+        // Refreshing FileInfo can issue a synchronous metadata syscall on Linux. Most lookups are
+        // misses due to second-use admission, so don't touch the filesystem until a cache entry exists.
         if (!DecodedTextureCache.TryGetStamp(file, out FileStamp stamp))
             return false;
 
@@ -110,7 +121,11 @@ internal sealed class DecodedTextureCache : IDisposable
         Color[] pixels;
         lock (this.SyncRoot)
         {
-            if (this.IsDisposed || !this.Cache.TryGetValue(file.FullName, out CacheEntry? entry))
+            if (
+                this.IsDisposed
+                || !this.Cache.TryGetValue(path, out CacheEntry? entry)
+                || !object.ReferenceEquals(entry, candidate)
+            )
                 return false;
 
             if (entry.Stamp != stamp)
