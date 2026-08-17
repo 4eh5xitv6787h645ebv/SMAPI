@@ -446,6 +446,7 @@ internal class CoreAssetPropagator
             // is already a delayed branch, and a Lazy plus its capturing factory would be allocated for every
             // invalidated texture. Always dispose the temporary in case a target texture rejects the copy.
             Texture2D? newTexture = null;
+            Color[]? newTexturePixels = null;
             bool triedLoadingNewTexture = false;
             try
             {
@@ -479,7 +480,17 @@ internal class CoreAssetPropagator
                     // incompatible entry so it retains the content manager's established type-error behavior.
                     Texture2D texture = cachedAsset as Texture2D
                         ?? contentManager.LoadLocalized<Texture2D>(name, currentLanguage, useCache: true);
-                    texture.CopyFromTexture(newTexture);
+                    if (this.HasSameTextureCopyMetadata(texture, newTexture))
+                    {
+                        if (newTexturePixels is null)
+                        {
+                            newTexturePixels = new Color[newTexture.Width * newTexture.Height];
+                            newTexture.GetData(newTexturePixels);
+                        }
+                        texture.SetData(newTexturePixels);
+                    }
+                    else
+                        texture.CopyFromTexture(newTexture);
                     changed = true;
                 }
             }
@@ -518,6 +529,20 @@ internal class CoreAssetPropagator
         }
 
         return changed;
+    }
+
+    /// <summary>Get whether copying a texture's pixels to a target would leave all metadata unchanged.</summary>
+    /// <param name="target">The target texture.</param>
+    /// <param name="source">The source texture.</param>
+    private bool HasSameTextureCopyMetadata(Texture2D target, Texture2D source)
+    {
+        return
+            target.Width == source.Width
+            && target.Height == source.Height
+            && target.ActualWidth == source.ActualWidth
+            && target.ActualHeight == source.ActualHeight
+            && this.Reflection.GetProperty<float>(target, "TexelWidth").GetValue() == this.Reflection.GetProperty<float>(source, "TexelWidth").GetValue()
+            && this.Reflection.GetProperty<float>(target, "TexelHeight").GetValue() == this.Reflection.GetProperty<float>(source, "TexelHeight").GetValue();
     }
 
     /// <summary>Propagate changes to an asset which isn't a map (handled by <see cref="PropagateMap"/>) or texture (handled by <see cref="PropagateTexture"/>).</summary>
