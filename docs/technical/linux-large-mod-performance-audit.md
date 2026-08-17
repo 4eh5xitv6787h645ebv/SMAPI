@@ -31,39 +31,40 @@ This is the current jank-first order, combining likely frame-time impact, freque
 19. Finding 31 — intercepted asset-operation dispatch churn — fixed.
 20. Finding 33 — asset-loader adapter closures — fixed.
 21. Finding 27 — tick-cache factory and world-helper allocations — fixed.
-22. Finding 6 — synchronous game-thread log flushing — fixed.
-23. Finding 46 — synchronous log formatting on the game thread — fixed.
-24. Finding 52 — eager asset-operation trace formatting — fixed.
-25. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
-26. Finding 41 — incomplete and duplicate world-location topology — fixed.
-27. Finding 43 — per-asset propagation key normalization allocations — fixed.
-28. Finding 32 — per-map warp comparison sets — fixed.
-29. Finding 19 — repeated propagation side effects — partially fixed.
-30. Finding 4 — no first-class batched exact invalidation — fixed.
-31. Finding 3 — exact invalidation performing cache scans — fixed.
-32. Finding 22 — oversized sparse image-patch transfers — fixed.
-33. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
-34. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
-35. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
-36. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
-37. Finding 9 — linear content-manager routing — fixed.
-38. Finding 10 — repeated asset-name strings — fixed.
-39. Finding 14 — retained dead disposable wrappers — fixed.
-40. Finding 29 — world trackers lost across reordered transfers — fixed.
-41. Finding 42 — location trackers lack source ownership — fixed.
-42. Finding 30 — rectangular transformed-tile origin — fixed.
-43. Finding 18 — reversed location event changes — fixed.
-44. Finding 17 — swapped managed-event identifiers — fixed.
-45. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
-46. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
-47. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
-48. Finding 13 — repeated dependency-list scans — fixed.
-49. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
-50. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
-51. Finding 45 — incorrect overlay alpha composition — queued.
-52. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
-53. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
-54. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
+22. Finding 55 — redundant propagation location-array projection — fixed.
+23. Finding 6 — synchronous game-thread log flushing — fixed.
+24. Finding 46 — synchronous log formatting on the game thread — fixed.
+25. Finding 52 — eager asset-operation trace formatting — fixed.
+26. Finding 5 — repeated global invalidation-propagation searches — partially fixed.
+27. Finding 41 — incomplete and duplicate world-location topology — fixed.
+28. Finding 43 — per-asset propagation key normalization allocations — fixed.
+29. Finding 32 — per-map warp comparison sets — fixed.
+30. Finding 19 — repeated propagation side effects — partially fixed.
+31. Finding 4 — no first-class batched exact invalidation — fixed.
+32. Finding 3 — exact invalidation performing cache scans — fixed.
+33. Finding 22 — oversized sparse image-patch transfers — fixed.
+34. Finding 51 — decoded-texture cache-miss metadata syscalls — fixed.
+35. Finding 8 — PNG decode and conversion churn — fixed with a bounded repeat-decode cache.
+36. Finding 28 — texture-propagation temporary allocations and lifetime — fixed.
+37. Finding 21 — unbudgeted texture and decoded-content memory — partially fixed.
+38. Finding 9 — linear content-manager routing — fixed.
+39. Finding 10 — repeated asset-name strings — fixed.
+40. Finding 14 — retained dead disposable wrappers — fixed.
+41. Finding 29 — world trackers lost across reordered transfers — fixed.
+42. Finding 42 — location trackers lack source ownership — fixed.
+43. Finding 30 — rectangular transformed-tile origin — fixed.
+44. Finding 18 — reversed location event changes — fixed.
+45. Finding 17 — swapped managed-event identifiers — fixed.
+46. Finding 38 — case-sensitive Linux paint-mask matching — fixed.
+47. Finding 39 — culture-sensitive and ambiguous Linux content-path comparisons — fixed.
+48. Finding 11 — eager Linux case-insensitive tree indexing — partially fixed.
+49. Finding 13 — repeated dependency-list scans — fixed.
+50. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
+51. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
+52. Finding 45 — incorrect overlay alpha composition — queued.
+53. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
+54. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
+55. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
 
 ## Detailed findings
 
@@ -607,6 +608,16 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Risk:** Low. The ordered sequence is only a fast-path hint; public changes remain set-based, so reorder-only and duplicate-count changes keep their previous behavior.
 - **Status:** Fixed. Reference-list watchers retain the prior ordered sequence, bypass hashing when it matches, and refresh that hint after a slow-path comparison. Focused tests cover no-rehash unchanged updates, reorders, real add/remove diffs, and duplicates.
 
+### 55. World propagation projects its cached topology into a redundant array
+
+- **Affected code:** `Metadata/CoreAssetPropagator.cs` (`UpdateBuildingPaintMask`, `GetCharacters`, `GetFarmAnimals`, and world-location helpers).
+- **Scenario:** Content Patcher-scale reloads of character, farm-animal, or building paint-mask assets in an expansion save with many live locations.
+- **Root cause:** Propagation first builds and caches a reference-deduplicated list of location records, then allocates and fills a second `GameLocation[]` containing the same location references before scanning characters, animals, or buildings.
+- **Impact:** Transition CPU and temporary allocation proportional to the live world topology.
+- **Expected benefit:** Those propagation paths iterate the existing topology directly, avoiding one full location projection and array allocation per propagation tick that needs it.
+- **Risk:** Low. Location order, reference deduplication, active mine and volcano coverage, building-interior selection, and entity loops are unchanged; only the intermediate array is removed.
+- **Status:** Fixed. Character, farm-animal, and paint-mask propagation read each `Location` from the already cached `WorldLocationInfo` sequence, and the redundant `GetLocations` projection is removed.
+
 ## Requested audit coverage
 
 | Requested area | Detailed evidence |
@@ -616,8 +627,8 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Chest scanning and snapshot comparisons | Findings 2 and 48 |
 | Asset loading, lookup, and invalidation | Findings 3, 4, 9, 10, 15, 31, 33, 37, 38, 39, and 53 |
 | Exact and batched invalidation APIs | Findings 3 and 4 |
-| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, and 43 |
-| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, and 43 |
+| Map, NPC, texture, and content-manager propagation | Findings 5, 19, 28, 32, 34, 41, 43, and 55 |
+| Content Patcher-scale invalidation bursts | Findings 4, 5, 19, 22, 27, 32, 34, 37, 41, 43, and 55 |
 | Synchronous logging and `AutoFlush` stalls | Findings 6, 46, and 52 |
 | Per-tile rendering overhead | Findings 7, 30, and 35 |
 | PNG decode, conversion, texture creation, and decoded caching | Findings 8, 21, 22, 28, 45, and 51 |
@@ -630,7 +641,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 | Event dispatch and asset-request routing | Findings 15, 16, 25, 26, 27, 31, 33, 35, and 47 |
 | Multiplayer message delivery | Finding 49 |
 | Reflection API overhead | Findings 35 and 50 |
-| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, and 52 |
+| GC pressure, memory growth, and texture memory | Findings 8, 14, 21, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36, 37, 39, 40, 43, 44, 46, 48, 49, 50, 52, and 55 |
 | .NET 10, Harmony, tiering, and dynamic PGO | Finding 20 |
 
 ## Remaining implementation priority
