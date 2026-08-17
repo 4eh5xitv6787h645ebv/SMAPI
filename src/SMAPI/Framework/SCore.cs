@@ -412,7 +412,7 @@ internal class SCore : IDisposable
         }
 
         // init TMX support
-        xTile.Format.FormatManager.Instance.RegisterMapFormat(new TMXTile.TMXFormat(Game1.tileSize / Game1.pixelZoom, Game1.tileSize / Game1.pixelZoom, Game1.pixelZoom, Game1.pixelZoom));
+        xTile.Format.FormatManager.Instance.RegisterMapFormat(new OptimizedTmxFormat(Game1.tileSize / Game1.pixelZoom, Game1.tileSize / Game1.pixelZoom, Game1.pixelZoom, Game1.pixelZoom));
 
         // load mod data
         ModToolkit toolkit = new();
