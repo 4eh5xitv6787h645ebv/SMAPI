@@ -47,6 +47,13 @@ internal class ContentCoordinatorTests
         ContentCoordinator.HasManagedAssetPrefix(key).Should().Be(expected);
     }
 
+    [TestCase("SMAPI/Example.Mod", "smapi/example.mod", true)]
+    [TestCase("SMAPI/Example.Mod", "SMAPI/Other.Mod", false)]
+    public void AreManagedContentManagerNamesEqual_MatchesRoutingIdentity(string left, string right, bool expected)
+    {
+        ContentCoordinator.AreManagedContentManagerNamesEqual(left, right).Should().Be(expected);
+    }
+
     [Test(Description = "Assert that the deferred invalidation report preserves its contents and case-insensitive asset order.")]
     public void FormatInvalidationReport_FormatsSortedSummary()
     {
