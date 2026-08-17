@@ -192,7 +192,10 @@ internal class GameContentManager : BaseContentManager
         try
         {
             data = (T)loader.GetData();
-            this.Monitor.Log($"{mod.DisplayName} loaded asset '{info.Name}'{this.GetOnBehalfOfLabel(loader.OnBehalfOf)}.");
+            this.Monitor.LogDeferred(
+                (ModName: mod.DisplayName, AssetName: info.Name.Name, ContentPackName: loader.OnBehalfOf?.Manifest.Name),
+                static state => $"{state.ModName} loaded asset '{state.AssetName}'{FormatContentPackLabel(state.ContentPackName)}."
+            );
         }
         catch (Exception ex)
         {
@@ -248,7 +251,10 @@ internal class GameContentManager : BaseContentManager
             try
             {
                 editor.ApplyEdit(asset);
-                this.Monitor.Log($"{mod.DisplayName} edited {info.Name}{this.GetOnBehalfOfLabel(editor.OnBehalfOf)}.");
+                this.Monitor.LogDeferred(
+                    (ModName: mod.DisplayName, AssetName: info.Name.Name, ContentPackName: editor.OnBehalfOf?.Manifest.Name),
+                    static state => $"{state.ModName} edited {state.AssetName}{FormatContentPackLabel(state.ContentPackName)}."
+                );
             }
             catch (Exception ex)
             {
@@ -324,6 +330,15 @@ internal class GameContentManager : BaseContentManager
         return parenthetical
             ? $" (for the '{onBehalfOf.Manifest.Name}' content pack)"
             : $"the '{onBehalfOf.Manifest.Name}' content pack";
+    }
+
+    /// <summary>Get a parenthetical label for a content pack in a deferred trace message.</summary>
+    /// <param name="contentPackName">The content pack name, if applicable.</param>
+    private static string? FormatContentPackLabel(string? contentPackName)
+    {
+        return contentPackName is null
+            ? null
+            : $" (for the '{contentPackName}' content pack)";
     }
 
     /// <summary>Validate that an asset loaded by a mod is valid and won't cause issues, and fix issues if possible.</summary>
