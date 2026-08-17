@@ -133,6 +133,11 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
         {
             Layer layer = new(sourceLayer.Name, map, new Size((int)sourceLayer.Width, (int)sourceLayer.Height), this.FixedTileSizeMultiplied);
 
+            // Populate the new backing array directly. Tile constructors already validate their sheets,
+            // and the layer isn't observable until it's complete and added to the map. Its first draw
+            // initializes every skip-map row, so dirty marks aren't needed while constructing it.
+            Tile?[,] tiles = layer.Tiles.Array;
+
             if (sourceLayer.Properties is not null)
             {
                 foreach (TMXProperty property in sourceLayer.Properties)
@@ -152,7 +157,7 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                     foreach (ParsedTile sourceTile in chunk.Tiles)
                     {
                         if (sourceTile.Gid != 0)
-                            layer.Tiles[origin] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
+                            tiles[origin.X, origin.Y] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
                         ++origin.X;
                         if (origin.X >= layer.LayerWidth)
                         {
@@ -168,7 +173,7 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                 foreach (ParsedTile sourceTile in sourceLayer.Data.Tiles)
                 {
                     if (sourceTile.Gid != 0)
-                        layer.Tiles[origin] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
+                        tiles[origin.X, origin.Y] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
                     ++origin.X;
                     if (origin.X >= layer.LayerWidth)
                     {
