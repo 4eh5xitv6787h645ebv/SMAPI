@@ -124,6 +124,41 @@ internal class InputStateBuilderTests
         IsPressedSetInitialized(builder).Should().BeFalse();
     }
 
+    [Test(Description = "Assert that a disconnected controller reports no buttons without materializing override state.")]
+    public void GamePad_DisconnectedFastPathReturnsEmpty()
+    {
+        GamePadStateBuilder builder = new();
+        builder.Reset(default);
+        HashSet<SButton> pressed = [];
+
+        builder.FillPressedButtons(pressed);
+
+        pressed.Should().BeEmpty();
+        IsPressedSetInitialized(builder).Should().BeFalse();
+    }
+
+    [Test(Description = "Assert that virtual controller overrides remain active without connected hardware.")]
+    public void GamePad_DisconnectedFastPathRetainsOverrides()
+    {
+        GamePadStateBuilder builder = new();
+        builder.Reset(default);
+        builder.OverrideButton(Buttons.A, SButtonState.Pressed);
+        builder.OverrideButton(Buttons.LeftTrigger, SButtonState.Pressed);
+        builder.OverrideButton(Buttons.LeftThumbstickRight, SButtonState.Pressed);
+        builder.OverrideButton(Buttons.RightThumbstickUp, SButtonState.Pressed);
+        HashSet<SButton> pressed = [];
+
+        builder.FillPressedButtons(pressed);
+
+        pressed.Should().BeEquivalentTo([
+            SButton.ControllerA,
+            SButton.LeftTrigger,
+            SButton.LeftThumbstickRight,
+            SButton.RightThumbstickUp
+        ]);
+        builder.GetState().IsConnected.Should().BeTrue();
+    }
+
     /// <summary>Get whether a builder materialized its mutable override set.</summary>
     private static bool IsPressedSetInitialized(object builder)
     {
