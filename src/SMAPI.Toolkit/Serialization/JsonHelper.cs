@@ -106,7 +106,9 @@ public class JsonHelper
             using FileStream stream = File.OpenRead(fullPath);
             using StreamReader textReader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, JsonHelper.JsonFileBufferSize, leaveOpen: false);
             using JsonTextReader jsonReader = new(textReader);
-            result = this.GetSerializer().Deserialize<TModel>(jsonReader);
+            JsonSerializer serializer = this.GetSerializer();
+            serializer.CheckAdditionalContent = true; // match JsonConvert.DeserializeObject
+            result = serializer.Deserialize<TModel>(jsonReader);
             return result != null;
         }
         catch (Exception ex) when (ex is DirectoryNotFoundException or FileNotFoundException)
