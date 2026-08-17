@@ -423,7 +423,7 @@ internal class CoreAssetPropagator
             {
                 foreach (IContentManager contentManager in contentManagers)
                 {
-                    if (!contentManager.IsLoaded(name))
+                    if (!contentManager.TryGetCachedAsset(name, out object? cachedAsset))
                         continue;
 
                     if (!triedLoadingNewTexture)
@@ -438,7 +438,10 @@ internal class CoreAssetPropagator
                     if (newTexture is null)
                         break;
 
-                    Texture2D texture = contentManager.LoadLocalized<Texture2D>(name, currentLanguage, useCache: true);
+                    // The exact cached object is the target being updated. Only use the old load path for an
+                    // incompatible entry so it retains the content manager's established type-error behavior.
+                    Texture2D texture = cachedAsset as Texture2D
+                        ?? contentManager.LoadLocalized<Texture2D>(name, currentLanguage, useCache: true);
                     texture.CopyFromTexture(newTexture);
                     changed = true;
                 }
