@@ -64,7 +64,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 52. Finding 13 — repeated dependency-list scans — fixed.
 53. Finding 44 — repeated loaded-assembly scans and dependency parsing — fixed.
 54. Finding 12 — repeated assembly parsing and compatibility rewriting — fixed.
-55. Finding 45 — incorrect overlay alpha composition — queued.
+55. Finding 45 — incorrect overlay alpha composition — fixed.
 56. Finding 49 — mod messages serialize even when no remote peer will receive them — fixed.
 57. Finding 50 — public reflection cache hits allocate lookup machinery — fixed.
 58. Finding 20 — .NET 6 runtime and disabled tiered compilation — deferred.
@@ -543,7 +543,7 @@ This is the current jank-first order, combining likely frame-time impact, freque
 - **Impact:** Visual correctness. Incorrect alpha can also cause later overlays to produce progressively wrong results.
 - **Expected benefit:** Mathematically consistent source-over output for layered translucent content-pack patches.
 - **Risk:** Medium to high. Some packs may have authored around the old behavior, so representative visual comparison is required.
-- **Status:** Queued as a correctness fix, separate from performance patches.
+- **Status:** Fixed. Premultiplied RGB and alpha now use the same source-over calculation, with focused coverage for symmetric and asymmetric translucent pixels plus transparent and opaque edge values.
 
 ### 46. Async log writing still formats every record on the game thread
 
@@ -1088,7 +1088,6 @@ This is the current jank-first order, combining likely frame-time impact, freque
 3. Coalesce propagation side effects only after their ordering and intermediate-state contracts are proven.
 4. Measure live GPU textures and privately owned uncached assets before extending byte budgeting beyond decoded CPU pixels.
 5. Replace the fallback Linux mis-cased-path tree index only if traces show meaningful use after exact-first lookup.
-6. Correct source-over alpha composition after representative content-pack visual comparisons.
-7. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
+6. Migrate to .NET 10 only after Harmony patching, tiered compilation, mod binary compatibility, installer packaging, and all supported platforms pass end-to-end game validation.
 
 This order may change when a finding is disproved, an upstream change supersedes it, or runtime evidence shows a different bottleneck. Such changes should be recorded in the relevant finding rather than silently removing it.
