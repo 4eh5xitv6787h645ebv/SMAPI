@@ -1,0 +1,199 @@
+using System;
+using System.Globalization;
+using System.Linq;
+using StardewModdingAPI.Framework.Performance;
+
+namespace StardewModdingAPI.Framework.Commands;
+
+/// <summary>The built-in <c>performance</c> diagnostic command.</summary>
+internal sealed class PerformanceCommand : IInternalCommand
+{
+    /*********
+    ** Fields
+    *********/
+    /// <summary>Collects mod performance diagnostics.</summary>
+    private readonly ModPerformanceManager PerformanceManager;
+
+
+    /*********
+    ** Accessors
+    *********/
+    /// <inheritdoc />
+    public string Name { get; } = "performance";
+
+    /// <inheritdoc />
+    public string Description { get; } =
+        """
+        Record and report which mod callbacks consume time or emit errors. This includes SMAPI events, content load/edit callbacks, mod console commands, and lifecycle callbacks. Harmony patches and other unobserved work may appear as unattributed tick time.
+
+        Usage: performance start [tick-threshold-ms]
+        Start a fresh sample. If a nonnegative threshold is provided, log each update tick at or above that duration; use 0 to log every tick.
+
+        Usage: performance ticks <off|tick-threshold-ms>
+        Change live tick logging without resetting the sample. Use 0 to log every tick.
+
+        Usage: performance report [limit]
+        Show ranked mod, callback, error, and recent slow-tick data. The default limit is 10.
+
+        Usage: performance status
+        Show whether sampling and individual tick logging are enabled.
+
+        Usage: performance reset
+        Clear recorded performance and error data without changing whether sampling is enabled.
+
+        Usage: performance stop [limit]
+        Stop sampling and show the final report.
+        """;
+
+
+    /*********
+    ** Public methods
+    *********/
+    /// <summary>Construct an instance.</summary>
+    /// <param name="performanceManager">Collects mod performance diagnostics.</param>
+    public PerformanceCommand(ModPerformanceManager performanceManager)
+    {
+        this.PerformanceManager = performanceManager;
+    }
+
+    /// <inheritdoc />
+    public void HandleCommand(string[] args, IMonitor monitor)
+    {
+        string action = args.Length > 0 ? args[0].ToLowerInvariant() : "report";
+        switch (action)
+        {
+            case "start":
+                this.Start(args, monitor);
+                break;
+
+            case "ticks":
+                this.ConfigureTicks(args, monitor);
+                break;
+
+            case "report":
+                if (this.TryGetLimit(args, 1, monitor, out int reportLimit))
+                    monitor.Log(ModPerformanceReportFormatter.Format(this.PerformanceManager.GetSnapshot(), reportLimit), LogLevel.Info);
+                break;
+
+            case "status":
+                this.LogStatus(monitor);
+                break;
+
+            case "reset":
+                if (args.Length != 1)
+                {
+                    monitor.Log("Usage: performance reset", LogLevel.Error);
+                    break;
+                }
+
+                this.PerformanceManager.Reset();
+                monitor.Log("Cleared the mod performance, warning, and error diagnostics.", LogLevel.Info);
+                break;
+
+            case "stop":
+                if (!this.TryGetLimit(args, 1, monitor, out int stopLimit))
+                    break;
+
+                this.PerformanceManager.Stop();
+                monitor.Log(ModPerformanceReportFormatter.Format(this.PerformanceManager.GetSnapshot(), stopLimit), LogLevel.Info);
+                break;
+
+            default:
+                monitor.Log($"Unknown performance action '{args[0]}'. Valid actions: start, ticks, report, status, reset, stop.", LogLevel.Error);
+                break;
+        }
+    }
+
+
+    /*********
+    ** Private methods
+    *********/
+    /// <summary>Handle the start action.</summary>
+    /// <param name="args">The command arguments.</param>
+    /// <param name="monitor">Writes messages to the console.</param>
+    private void Start(string[] args, IMonitor monitor)
+    {
+        if (args.Length > 2)
+        {
+            monitor.Log("Usage: performance start [tick-threshold-ms]", LogLevel.Error);
+            return;
+        }
+
+        bool logTicks = args.Length == 2;
+        double threshold = 0;
+        if (logTicks && !PerformanceCommand.TryParseThreshold(args[1], monitor, out threshold))
+            return;
+
+        this.PerformanceManager.Start(logTicks, threshold);
+        monitor.Log(
+            logTicks
+                ? $"Started a fresh mod performance sample. Individual update ticks at or above {threshold.ToString("0.###", CultureInfo.InvariantCulture)}ms will be logged. Use 'performance stop' when the slowdown has occurred."
+                : "Started a fresh mod performance sample. Use 'performance report' at any time or 'performance stop' when the slowdown has occurred.",
+            LogLevel.Info
+        );
+    }
+
+    /// <summary>Handle the individual-tick logging action.</summary>
+    /// <param name="args">The command arguments.</param>
+    /// <param name="monitor">Writes messages to the console.</param>
+    private void ConfigureTicks(string[] args, IMonitor monitor)
+    {
+        if (args.Length != 2)
+        {
+            monitor.Log("Usage: performance ticks <off|tick-threshold-ms>", LogLevel.Error);
+            return;
+        }
+
+        if (args[1].Equals("off", StringComparison.OrdinalIgnoreCase))
+        {
+            this.PerformanceManager.ConfigureTickLogging(enabled: false, thresholdMilliseconds: 0);
+            monitor.Log("Individual performance tick logging is disabled; aggregate sampling is unchanged.", LogLevel.Info);
+            return;
+        }
+
+        if (!PerformanceCommand.TryParseThreshold(args[1], monitor, out double threshold))
+            return;
+
+        this.PerformanceManager.ConfigureTickLogging(enabled: true, threshold);
+        monitor.Log($"Individual update ticks at or above {threshold.ToString("0.###", CultureInfo.InvariantCulture)}ms will be logged while performance sampling is active.", LogLevel.Info);
+    }
+
+    /// <summary>Log the current diagnostic state.</summary>
+    /// <param name="monitor">Writes messages to the console.</param>
+    private void LogStatus(IMonitor monitor)
+    {
+        ModPerformanceSnapshot snapshot = this.PerformanceManager.GetSnapshot();
+        string tickLogging = snapshot.LogIndividualTicks
+            ? $"enabled at {snapshot.TickLogThresholdMilliseconds.ToString("0.###", CultureInfo.InvariantCulture)}ms or slower"
+            : "disabled";
+
+        monitor.Log($"Mod performance sampling is {(snapshot.IsTracking ? "active" : "stopped")}; individual tick logging is {tickLogging}; {snapshot.CompletedTickCount:N0} ticks and {snapshot.Handlers.Sum(entry => entry.CallCount):N0} callback calls are recorded.", LogLevel.Info);
+    }
+
+    /// <summary>Parse an optional report entry limit.</summary>
+    private bool TryGetLimit(string[] args, int index, IMonitor monitor, out int limit)
+    {
+        limit = 10;
+        if (args.Length <= index)
+            return true;
+        if (args.Length > index + 1 || !int.TryParse(args[index], NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > 100)
+        {
+            monitor.Log($"The report limit must be a whole number from 1 through 100.", LogLevel.Error);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Parse a nonnegative finite tick threshold.</summary>
+    private static bool TryParseThreshold(string raw, IMonitor monitor, out double threshold)
+    {
+        if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out threshold) || !double.IsFinite(threshold) || threshold < 0)
+        {
+            monitor.Log("The tick threshold must be a nonnegative number of milliseconds; use 0 to log every tick.", LogLevel.Error);
+            return false;
+        }
+
+        return true;
+    }
+}

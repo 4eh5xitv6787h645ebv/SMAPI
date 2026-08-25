@@ -1,10 +1,20 @@
 # Linux large-mod performance and correctness audit
 
-This document tracks SMAPI-side performance and correctness findings for Linux players with very large mod sets (for example, 200+ code mods and 400+ content packs). It focuses on work SMAPI can avoid or make incremental; it does not attribute time spent inside individual mods to SMAPI.
+This document tracks SMAPI-side performance and correctness findings for Linux players with very large mod sets (for example, 200+ code mods and 400+ content packs). It focuses on work SMAPI can avoid or make incremental. SMAPI also has opt-in runtime diagnostics for the mod-owned execution boundaries it can observe.
 
 The rankings prioritize gameplay frame pacing, then transition stalls, memory pressure, and startup time. Expected benefits are qualitative until measured in-game on representative Linux systems; no percentage claims are implied.
 
 Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, and **needs runtime evidence**.
+
+## Runtime mod diagnostics
+
+Enter `performance start` in the SMAPI console, reproduce the slowdown, then enter `performance stop`. The final report ranks mods and individual callbacks by exclusive elapsed time, shows recent slow update ticks, and includes warning, error, and failed-callback counts.
+
+To log individual update ticks while sampling, use `performance start <threshold-ms>`. For example, `performance start 16.667` logs ticks which miss a 60 FPS frame budget, while `performance start 0` logs every tick. Every-tick logging is intentionally opt-in because it creates substantial log traffic. Use `performance ticks off` to stop individual tick messages without ending the aggregate sample.
+
+The advanced settings `EnableModPerformanceTracking`, `LogModPerformanceTicks`, and `ModPerformanceTickThresholdMilliseconds` can enable the same behavior automatically for a troubleshooting session. They are disabled by default so the normal event-dispatch path doesn't pay per-handler profiling costs.
+
+Instrumented time covers SMAPI-managed event handlers, content load/edit callbacks, mod console commands, and lifecycle callbacks. The report labels the rest of each update as *unattributed*: that can include Stardew Valley, SMAPI itself, Harmony patches, direct mod API calls, background work, waiting, and operating-system scheduling. A high timing identifies where SMAPI observed time, not necessarily the ultimate root cause. History is bounded to the latest 600 ticks and aggregate counters for 8,192 distinct callback identities, avoiding the large per-invocation history used by SMAPI's removed experimental profiler.
 
 ## Current priority ranking
 

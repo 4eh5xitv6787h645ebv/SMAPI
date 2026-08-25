@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Framework.Extensions;
+using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Internal;
 
 namespace StardewModdingAPI.Framework.Events;
@@ -24,6 +25,9 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     *********/
     /// <summary>The mod registry with which to identify mods.</summary>
     protected readonly ModRegistry ModRegistry;
+
+    /// <summary>Collects mod-owned handler timing and failure diagnostics.</summary>
+    private readonly ModPerformanceManager? PerformanceManager;
 
     /// <summary>The underlying event handlers.</summary>
     private readonly List<ManagedEventHandler<TEventArgs>> Handlers = [];
@@ -57,10 +61,12 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     /// <summary>Construct an instance.</summary>
     /// <param name="eventName">A human-readable name for the event.</param>
     /// <param name="modRegistry">The mod registry with which to identify mods.</param>
-    public ManagedEvent(string eventName, ModRegistry modRegistry)
+    /// <param name="performanceManager">Collects mod-owned handler performance diagnostics, if enabled.</param>
+    public ManagedEvent(string eventName, ModRegistry modRegistry, ModPerformanceManager? performanceManager = null)
     {
         this.EventName = eventName;
         this.ModRegistry = modRegistry;
+        this.PerformanceManager = performanceManager;
     }
 
     /// <summary>Add an event handler.</summary>
@@ -108,6 +114,12 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
         if (!this.HasListeners)
             return;
 
+        if (this.PerformanceManager?.IsTracking is true)
+        {
+            this.RaiseProfiled(args);
+            return;
+        }
+
         // raise event
         foreach (ManagedEventHandler<TEventArgs> handler in this.GetHandlers())
         {
@@ -137,6 +149,12 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
         if (!this.HasListeners)
             return;
 
+        if (this.PerformanceManager?.IsTracking is true)
+        {
+            this.RaiseProfiled(ref state, invoke);
+            return;
+        }
+
         // raise event
         foreach (ManagedEventHandler<TEventArgs> handler in this.GetHandlers())
         {
@@ -161,6 +179,71 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     /*********
     ** Private methods
     *********/
+    /// <summary>Raise the event with per-handler performance attribution.</summary>
+    /// <param name="args">The event arguments to pass.</param>
+    private void RaiseProfiled(TEventArgs args)
+    {
+        foreach (ManagedEventHandler<TEventArgs> handler in this.GetHandlers())
+        {
+            Context.HeuristicModsRunningCode.Push(handler.SourceMod);
+            HandlerTimingToken timing = this.BeginPerformance(handler);
+            bool failed = false;
+
+            try
+            {
+                handler.Handler(null, args);
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                this.LogError(handler, ex);
+            }
+            finally
+            {
+                this.PerformanceManager!.EndHandler(timing, failed);
+                Context.HeuristicModsRunningCode.TryPop(out _);
+            }
+        }
+    }
+
+    /// <summary>Raise a stateful event with per-handler performance attribution.</summary>
+    /// <typeparam name="TState">The per-raise state type.</typeparam>
+    /// <param name="state">The per-raise state, which may be updated between handlers.</param>
+    /// <param name="invoke">Invoke an event handler.</param>
+    private void RaiseProfiled<TState>(ref TState state, ManagedEventInvoker<TState, TEventArgs> invoke)
+    {
+        foreach (ManagedEventHandler<TEventArgs> handler in this.GetHandlers())
+        {
+            Context.HeuristicModsRunningCode.Push(handler.SourceMod);
+            HandlerTimingToken timing = this.BeginPerformance(handler);
+            bool failed = false;
+
+            try
+            {
+                invoke(ref state, handler.SourceMod, handler.Callback);
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                this.LogError(handler, ex);
+            }
+            finally
+            {
+                this.PerformanceManager!.EndHandler(timing, failed);
+                Context.HeuristicModsRunningCode.TryPop(out _);
+            }
+        }
+    }
+
+    /// <summary>Begin one profiled handler invocation.</summary>
+    /// <param name="handler">The invoked handler.</param>
+    /// <returns>The timing token to complete after invocation.</returns>
+    private HandlerTimingToken BeginPerformance(ManagedEventHandler<TEventArgs> handler)
+    {
+        IModMetadata mod = handler.SourceMod;
+        return this.PerformanceManager!.BeginHandler(mod, this.EventName, handler.HandlerName);
+    }
+
     /// <summary>Log an exception from an event handler.</summary>
     /// <param name="handler">The event handler instance.</param>
     /// <param name="ex">The exception that was raised.</param>

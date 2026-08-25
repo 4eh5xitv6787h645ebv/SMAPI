@@ -35,6 +35,9 @@ internal class Monitor : IMonitor
     /// <summary>Get the screen ID that should be logged to distinguish between players in split-screen mode, if any.</summary>
     private readonly Func<int?> GetScreenIdForLog;
 
+    /// <summary>Receives warning/error metadata for diagnostics, if any.</summary>
+    private readonly Action<string, string, LogLevel>? OnLog;
+
 
     /*********
     ** Accessors
@@ -80,7 +83,8 @@ internal class Monitor : IMonitor
     /// <param name="logFile">The log file to which to write messages.</param>
     /// <param name="consoleWriter">Handles writing text to the console.</param>
     /// <param name="getScreenIdForLog">Get the screen ID that should be logged to distinguish between players in split-screen mode, if any.</param>
-    public Monitor(string modId, string source, LogFileManager logFile, IConsoleWriter consoleWriter, Func<int?> getScreenIdForLog)
+    /// <param name="onLog">Receives log metadata for diagnostics, if any.</param>
+    public Monitor(string modId, string source, LogFileManager logFile, IConsoleWriter consoleWriter, Func<int?> getScreenIdForLog, Action<string, string, LogLevel>? onLog = null)
     {
         // validate
         if (string.IsNullOrWhiteSpace(source))
@@ -92,6 +96,7 @@ internal class Monitor : IMonitor
         this.LogFile = logFile ?? throw new ArgumentNullException(nameof(logFile), "The log file manager cannot be null.");
         this.ConsoleWriter = consoleWriter ?? throw new ArgumentNullException(nameof(consoleWriter), "The console writer cannot be null.");
         this.GetScreenIdForLog = getScreenIdForLog;
+        this.OnLog = onLog;
     }
 
     /// <inheritdoc />
@@ -186,6 +191,17 @@ internal class Monitor : IMonitor
     /// <param name="level">The log level.</param>
     private void LogImpl(string source, string message, ConsoleLogLevel level)
     {
+        this.OnLog?.Invoke(
+            this.ModId,
+            source,
+            level switch
+            {
+                ConsoleLogLevel.Critical => LogLevel.Error,
+                ConsoleLogLevel.Success => LogLevel.Info,
+                _ => (LogLevel)level
+            }
+        );
+
         DateTime timestamp = DateTime.Now;
         string levelText = Monitor.LogStrings[level];
         int? screenId = this.GetScreenIdForLog();

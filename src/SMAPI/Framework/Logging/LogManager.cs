@@ -59,14 +59,15 @@ internal class LogManager : IDisposable
     /// <param name="verboseLogging">The log contexts for which to enable verbose logging, which may show a lot more information to simplify troubleshooting.</param>
     /// <param name="isDeveloperMode">Whether to enable full console output for developers.</param>
     /// <param name="getScreenIdForLog">Get the screen ID that should be logged to distinguish between players in split-screen mode, if any.</param>
-    public LogManager(string logPath, MonitorColorScheme colorSchemeId, Dictionary<MonitorColorScheme, Dictionary<ConsoleLogLevel, ConsoleColor>> colorConfig, bool writeToConsole, HashSet<string> verboseLogging, bool isDeveloperMode, Func<int?> getScreenIdForLog)
+    /// <param name="onLog">Receives log metadata for diagnostics, if any.</param>
+    public LogManager(string logPath, MonitorColorScheme colorSchemeId, Dictionary<MonitorColorScheme, Dictionary<ConsoleLogLevel, ConsoleColor>> colorConfig, bool writeToConsole, HashSet<string> verboseLogging, bool isDeveloperMode, Func<int?> getScreenIdForLog, Action<string, string, LogLevel>? onLog = null)
     {
         // init log file
         this.LogFile = new LogFileManager(logPath);
 
         // init monitor
         this.ConsoleWriter = new ColorfulConsoleWriter(Constants.Platform, colorSchemeId, colorConfig);
-        this.GetMonitorImpl = (id, name) => this.CreateAndRegisterMonitor(id, name, verboseLogging, getScreenIdForLog, writeToConsole, isDeveloperMode);
+        this.GetMonitorImpl = (id, name) => this.CreateAndRegisterMonitor(id, name, verboseLogging, getScreenIdForLog, writeToConsole, isDeveloperMode, onLog);
 
         this.Monitor = this.GetMonitor("SMAPI", "SMAPI");
         this.MonitorForGame = this.GetMonitor("game", "game");
@@ -367,9 +368,10 @@ internal class LogManager : IDisposable
     /// <param name="getScreenIdForLog">Get the screen ID that should be logged to distinguish between players in split-screen mode, if any.</param>
     /// <param name="writeToConsole">Whether to write anything to the console. This should be disabled if no console is available.</param>
     /// <param name="isDeveloperMode">Whether to enable full console output for developers.</param>
-    private Monitor CreateAndRegisterMonitor(string modId, string source, HashSet<string> verboseLogging, Func<int?> getScreenIdForLog, bool writeToConsole, bool isDeveloperMode)
+    /// <param name="onLog">Receives log metadata for diagnostics, if any.</param>
+    private Monitor CreateAndRegisterMonitor(string modId, string source, HashSet<string> verboseLogging, Func<int?> getScreenIdForLog, bool writeToConsole, bool isDeveloperMode, Action<string, string, LogLevel>? onLog)
     {
-        Monitor monitor = new(modId, source, this.LogFile, this.ConsoleWriter, getScreenIdForLog)
+        Monitor monitor = new(modId, source, this.LogFile, this.ConsoleWriter, getScreenIdForLog, onLog)
         {
             WriteToConsole = writeToConsole
         };
