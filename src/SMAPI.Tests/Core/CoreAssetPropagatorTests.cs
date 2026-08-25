@@ -193,8 +193,8 @@ internal class CoreAssetPropagatorTests
         }
     }
 
-    [Test(Description = "Assert that repeated isolated map propagations share an adaptive per-tick location index.")]
-    public void Propagate_RepeatedSingleMaps_IndexesAfterTwoScans()
+    [Test(Description = "Assert that isolated map propagations rescan live location paths instead of reusing a cross-transaction snapshot.")]
+    public void Propagate_RepeatedSingleMaps_RescansLiveLocations()
     {
         // arrange
         Game1? previousGameInstance = Game1.game1;
@@ -235,7 +235,7 @@ internal class CoreAssetPropagatorTests
             }
 
             // assert
-            parsedMapPaths.Should().Be(6, "two direct scans and one index build should parse each loaded map once");
+            parsedMapPaths.Should().Be(8, "each isolated propagation should rescan both live location paths");
         }
         finally
         {
