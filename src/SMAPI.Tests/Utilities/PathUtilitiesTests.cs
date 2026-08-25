@@ -185,7 +185,7 @@ internal class PathUtilitiesTests
         string normalized = PathUtilities.NormalizeAssetName(path.OriginalPath);
 
         // assert
-        normalized.Should().Be(path.NormalizedOnUnix); // MonoGame uses the Linux format
+        normalized.Should().Be(string.Join(PathUtilities.PreferredAssetSeparator.ToString(), path.Segments)); // MonoGame uses Linux separators and omits trailing separators
     }
 
     [Test(Description = $"Assert that {nameof(PathUtilities.NormalizeAssetName)} doesn't copy an asset name which is already canonical.")]
@@ -294,9 +294,9 @@ internal class PathUtilitiesTests
         ExpectedResult = @"../../Content"
     )]
     [TestCase(
-        @"~/.steam/steam/steamapps/common/Stardew Valley/Mods/Automate",
+        @"/home/user/game/Mods/Automate",
         @"/mnt/another-drive",
-        ExpectedResult = @"/mnt/another-drive"
+        ExpectedResult = @"../../../../../mnt/another-drive"
     )]
     [TestCase(
         @"~/same/path",
@@ -304,9 +304,9 @@ internal class PathUtilitiesTests
         ExpectedResult = @"."
     )]
     [TestCase(
-        @"~/parent",
-        @"~/PARENT/child",
-        ExpectedResult = @"child" // note: incorrect on Linux and sometimes macOS, but not worth the complexity of detecting whether the filesystem is case-sensitive for SMAPI's purposes
+        @"/home/user/parent",
+        @"/home/user/PARENT/child",
+        ExpectedResult = @"../PARENT/child"
     )]
 #endif
     public string GetRelativePath(string sourceDir, string targetPath)
