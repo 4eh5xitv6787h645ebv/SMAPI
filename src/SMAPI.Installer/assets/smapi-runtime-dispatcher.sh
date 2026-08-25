@@ -1,29 +1,8 @@
 #!/usr/bin/env bash
 
-# Select the newest bundled runtime supported by this system. Unknown libc implementations
-# deliberately use the game's .NET 6 runtime, which has the same compatibility floor as the game.
-
-get_glibc_version() {
-    local output
-
-    if command -v getconf >/dev/null 2>&1; then
-        output=$(LC_ALL=C getconf GNU_LIBC_VERSION 2>/dev/null) || output=""
-        if [[ "$output" =~ ^glibc[[:space:]]+([0-9]+)\.([0-9]+)($|[^0-9]) ]]; then
-            printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
-            return 0
-        fi
-    fi
-
-    if command -v ldd >/dev/null 2>&1; then
-        output=$(LC_ALL=C ldd --version 2>&1 | { IFS= read -r line; printf '%s' "$line"; })
-        if [[ ( "$output" == *GLIBC* || "$output" == *"GNU libc"* || "$output" == *"GNU C Library"* ) && "$output" =~ ([0-9]+)\.([0-9]+)($|[^0-9]) ]]; then
-            printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
-            return 0
-        fi
-    fi
-
-    return 1
-}
+# Use the game's .NET 6 runtime by default. The private .NET 10 host remains available through
+# SMAPI_DOTNET_RUNTIME=net10 for diagnostics, but isn't safe as the automatic choice while common
+# Harmony generic detours can silently become type-unsafe there (issue #146).
 
 get_cgroup_layout() {
     local controller=$1
@@ -313,11 +292,6 @@ runtime=${SMAPI_DOTNET_RUNTIME:-auto}
 case "$runtime" in
     auto)
         runtime=net6
-        if read -r glibc_major glibc_minor < <(get_glibc_version); then
-            if (( glibc_major > 2 || (glibc_major == 2 && glibc_minor >= 27) )); then
-                runtime=net10
-            fi
-        fi
         ;;
     net6|net10)
         ;;
