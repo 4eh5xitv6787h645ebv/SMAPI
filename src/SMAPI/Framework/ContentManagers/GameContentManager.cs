@@ -10,6 +10,7 @@ using StardewModdingAPI.Events;
 using StardewModdingAPI.Framework.Content;
 using StardewModdingAPI.Framework.Exceptions;
 using StardewModdingAPI.Framework.Extensions;
+using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Framework.Utilities;
 using StardewModdingAPI.Internal;
@@ -221,6 +222,11 @@ internal class GameContentManager : BaseContentManager
         // fetch asset from loader
         IModMetadata mod = loader.Mod;
         Context.HeuristicModsRunningCode.Push(loader.Mod);
+        bool profile = this.Coordinator.PerformanceManager.IsTracking;
+        HandlerTimingToken timing = profile
+            ? this.Coordinator.PerformanceManager.BeginHandler(mod, "Content.Load", $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}")
+            : default;
+        bool failed = false;
         try
         {
             data = (T)loader.GetData();
@@ -231,12 +237,15 @@ internal class GameContentManager : BaseContentManager
         }
         catch (Exception ex)
         {
+            failed = true;
             mod.LogAsMod($"Mod crashed when loading asset '{info.Name}'{this.GetOnBehalfOfLabel(loader.OnBehalfOf)}. SMAPI will use the default asset instead. Error details:\n{ex.GetLogSummary()}", LogLevel.Error);
             data = default;
             return false;
         }
         finally
         {
+            if (profile)
+                this.Coordinator.PerformanceManager.EndHandler(timing, failed);
             Context.HeuristicModsRunningCode.TryPop(out _);
         }
 
@@ -271,6 +280,11 @@ internal class GameContentManager : BaseContentManager
             // try edit
             object prevAsset = asset.Data;
             Context.HeuristicModsRunningCode.Push(editor.Mod);
+            bool profile = this.Coordinator.PerformanceManager.IsTracking;
+            HandlerTimingToken timing = profile
+                ? this.Coordinator.PerformanceManager.BeginHandler(editor.Mod, "Content.Edit", $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}")
+                : default;
+            bool failed = false;
             try
             {
                 editor.ApplyEdit(asset);
@@ -281,10 +295,13 @@ internal class GameContentManager : BaseContentManager
             }
             catch (Exception ex)
             {
+                failed = true;
                 mod.LogAsMod($"Mod crashed when editing asset '{info.Name}'{this.GetOnBehalfOfLabel(editor.OnBehalfOf)}, which may cause errors in-game. Error details:\n{ex.GetLogSummary()}", LogLevel.Error);
             }
             finally
             {
+                if (profile)
+                    this.Coordinator.PerformanceManager.EndHandler(timing, failed);
                 Context.HeuristicModsRunningCode.TryPop(out _);
             }
 

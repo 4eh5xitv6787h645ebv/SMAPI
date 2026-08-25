@@ -23,6 +23,7 @@ using StardewModdingAPI.Enums;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Framework.Content;
 using StardewModdingAPI.Framework.ContentManagers;
+using StardewModdingAPI.Framework.Commands;
 using StardewModdingAPI.Framework.Deprecations;
 using StardewModdingAPI.Framework.Events;
 using StardewModdingAPI.Framework.Exceptions;
@@ -33,6 +34,7 @@ using StardewModdingAPI.Framework.Models;
 using StardewModdingAPI.Framework.ModHelpers;
 using StardewModdingAPI.Framework.ModLoading;
 using StardewModdingAPI.Framework.Networking;
+using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Framework.Rendering;
 using StardewModdingAPI.Framework.Serialization;
@@ -98,6 +100,9 @@ internal class SCore : IDisposable
     ****/
     /// <summary>Manages console commands.</summary>
     private readonly CommandManager CommandManager;
+
+    /// <summary>Collects bounded mod-owned performance and error diagnostics.</summary>
+    private readonly ModPerformanceManager ModPerformanceManager;
 
     /// <summary>The underlying game instance.</summary>
     private SGameRunner Game = null!; // initialized very early
@@ -201,9 +206,12 @@ internal class SCore : IDisposable
         this.ReloadSettings();
 
         // init basics
-        this.LogManager = new LogManager(logPath: logPath, colorSchemeId: this.Settings.ConsoleColorScheme, colorConfig: this.Settings.ConsoleColorSchemes, writeToConsole: writeToConsole, verboseLogging: this.Settings.VerboseLogging, isDeveloperMode: this.Settings.DeveloperMode, getScreenIdForLog: this.GetScreenIdForLog);
+        this.ModPerformanceManager = new ModPerformanceManager();
+        this.ModPerformanceManager.ApplySettings(this.Settings.EnableModPerformanceTracking, this.Settings.LogModPerformanceTicks, this.Settings.ModPerformanceTickThresholdMilliseconds);
+        this.LogManager = new LogManager(logPath: logPath, colorSchemeId: this.Settings.ConsoleColorScheme, colorConfig: this.Settings.ConsoleColorSchemes, writeToConsole: writeToConsole, verboseLogging: this.Settings.VerboseLogging, isDeveloperMode: this.Settings.DeveloperMode, getScreenIdForLog: this.GetScreenIdForLog, onLog: this.ModPerformanceManager.RecordLog);
         this.CommandManager = new CommandManager(this.Monitor);
-        this.EventManager = new EventManager(this.ModRegistry);
+        this.CommandManager.Add(new PerformanceCommand(this.ModPerformanceManager), this.Monitor);
+        this.EventManager = new EventManager(this.ModRegistry, this.ModPerformanceManager);
         SCore.DeprecationManager = new DeprecationManager(this.Monitor, this.ModRegistry);
         SDate.Translations = this.Translator;
 
@@ -573,6 +581,13 @@ internal class SCore : IDisposable
     /// <param name="runGameUpdate">Invoke the game's update logic for the given timing state.</param>
     private void OnGameUpdating(GameTime gameTime, Action<GameTime> runGameUpdate)
     {
+        bool profileTick = this.ModPerformanceManager.IsTracking;
+        if (profileTick)
+        {
+            long performanceTickStart = Stopwatch.GetTimestamp();
+            this.ModPerformanceManager.BeginTick(SCore.TicksElapsed, performanceTickStart);
+        }
+
         try
         {
             /*********
@@ -662,6 +677,13 @@ internal class SCore : IDisposable
         }
         finally
         {
+            if (profileTick)
+            {
+                TickPerformanceSnapshot? tick = this.ModPerformanceManager.CompleteTick(Stopwatch.GetTimestamp());
+                if (tick.HasValue)
+                    this.Monitor.Log(ModPerformanceReportFormatter.FormatTick(tick.Value), LogLevel.Info);
+            }
+
             SCore.TicksElapsed++;
             SCore.ProcessTicksElapsed++;
         }
@@ -697,16 +719,27 @@ internal class SCore : IDisposable
                 var commandQueue = this.ScreenCommandQueue.Value;
                 foreach ((Command? command, string? name, string[]? args) in commandQueue)
                 {
+                    bool profile = command.Mod != null && this.ModPerformanceManager.IsTracking;
+                    HandlerTimingToken timing = profile
+                        ? this.ModPerformanceManager.BeginHandler(command.Mod!, $"ConsoleCommand.{command.Name}", $"{command.Callback.Method.DeclaringType?.FullName}.{command.Callback.Method.Name}")
+                        : default;
+                    bool failed = false;
                     try
                     {
                         command.Callback.Invoke(name, args);
                     }
                     catch (Exception ex)
                     {
+                        failed = true;
                         if (command.Mod != null)
                             command.Mod.LogAsMod($"Mod failed handling that command:\n{ex.GetLogSummary()}", LogLevel.Error);
                         else
                             this.Monitor.Log($"Failed handling that command:\n{ex.GetLogSummary()}", LogLevel.Error);
+                    }
+                    finally
+                    {
+                        if (profile)
+                            this.ModPerformanceManager.EndHandler(timing, failed);
                     }
                 }
                 commandQueue.Clear();
@@ -1470,6 +1503,10 @@ internal class SCore : IDisposable
         // update log manager if already initialized
         // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
         this.LogManager?.ApplySettings(settings.ConsoleColorScheme, settings.ConsoleColorSchemes, settings.VerboseLogging, this.OverrideDeveloperMode ?? settings.DeveloperMode);
+
+        // update performance diagnostics if already initialized
+        // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
+        this.ModPerformanceManager?.ApplySettings(settings.EnableModPerformanceTracking, settings.LogModPerformanceTicks, settings.ModPerformanceTickThresholdMilliseconds);
     }
 
     /// <summary>Get the load/edit operations to apply to an asset by querying registered <see cref="IContentEvents.AssetRequested"/> event handlers.</summary>
@@ -1604,6 +1641,7 @@ internal class SCore : IDisposable
                 multiplayer: this.Multiplayer,
                 reflection: this.Reflection,
                 jsonHelper: this.Toolkit.JsonHelper,
+                performanceManager: this.ModPerformanceManager,
                 onLoadingFirstAsset: this.InitializeBeforeFirstAssetLoaded,
                 onAssetLoaded: this.OnAssetLoaded,
                 onAssetsInvalidated: this.OnAssetsInvalidated,
@@ -2058,16 +2096,32 @@ internal class SCore : IDisposable
             Context.HeuristicModsRunningCode.Push(metadata);
             {
                 // call entry method
+                bool profileEntry = this.ModPerformanceManager.IsTracking;
+                HandlerTimingToken entryTiming = profileEntry
+                    ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.Entry", $"{mod.GetType().FullName}.{nameof(Mod.Entry)}")
+                    : default;
+                bool entryFailed = false;
                 try
                 {
                     mod.Entry(mod.Helper);
                 }
                 catch (Exception ex)
                 {
+                    entryFailed = true;
                     metadata.LogAsMod($"Mod crashed on entry and might not work correctly. Technical details:\n{ex.GetLogSummary()}", LogLevel.Error);
+                }
+                finally
+                {
+                    if (profileEntry)
+                        this.ModPerformanceManager.EndHandler(entryTiming, entryFailed);
                 }
 
                 // get mod API
+                bool profileApi = this.ModPerformanceManager.IsTracking;
+                HandlerTimingToken apiTiming = profileApi
+                    ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.GetApi", $"{mod.GetType().FullName}.{nameof(Mod.GetApi)}")
+                    : default;
+                bool apiFailed = false;
                 try
                 {
                     object? api = mod.GetApi();
@@ -2083,7 +2137,13 @@ internal class SCore : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    apiFailed = true;
                     this.Monitor.Log($"Failed loading mod-provided API for {metadata.DisplayName}. Integrations with other mods may not work. Error: {ex.GetLogSummary()}", LogLevel.Error);
+                }
+                finally
+                {
+                    if (profileApi)
+                        this.ModPerformanceManager.EndHandler(apiTiming, apiFailed);
                 }
 
                 // validate mod doesn't implement both GetApi() and GetApi(mod)

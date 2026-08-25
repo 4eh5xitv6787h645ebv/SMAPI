@@ -173,6 +173,26 @@ in future SMAPI versions.
     "SuppressHarmonyDebugMode": true,
 
     /**
+     * Whether SMAPI should continuously record bounded timing data for mod-owned event handlers.
+     * This adds profiler overhead, so it's disabled by default. You can also control it temporarily
+     * with the `performance` console command.
+     */
+    "EnableModPerformanceTracking": false,
+
+    /**
+     * Whether to write qualifying update ticks to the SMAPI log while mod performance tracking is
+     * enabled. Leave this disabled for normal aggregate reports; enabling it can produce a lot of
+     * log output.
+     */
+    "LogModPerformanceTicks": false,
+
+    /**
+     * The minimum update tick duration in milliseconds to log when LogModPerformanceTicks is
+     * enabled. Set this to 0 to log every tick.
+     */
+    "ModPerformanceTickThresholdMilliseconds": 16.667,
+
+    /**
      * The mod IDs SMAPI should ignore when performing update checks or validating update keys.
      */
     "SuppressUpdateChecks": [

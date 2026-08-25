@@ -12,6 +12,7 @@ using StardewModdingAPI.Events;
 using StardewModdingAPI.Framework.Content;
 using StardewModdingAPI.Framework.ContentManagers;
 using StardewModdingAPI.Framework.Extensions;
+using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Framework.Utilities;
 using StardewModdingAPI.Metadata;
@@ -48,6 +49,9 @@ internal class ContentCoordinator : IDisposable
 
     /// <summary>Encapsulates SMAPI's JSON file parsing.</summary>
     private readonly JsonHelper JsonHelper;
+
+    /// <summary>Collects mod-owned performance diagnostics.</summary>
+    internal ModPerformanceManager PerformanceManager { get; }
 
     /// <summary>A callback to invoke the first time *any* game content manager loads an asset.</summary>
     private readonly Action OnLoadingFirstAsset;
@@ -127,17 +131,19 @@ internal class ContentCoordinator : IDisposable
     /// <param name="multiplayer">The multiplayer instance whose map cache to update during asset propagation.</param>
     /// <param name="reflection">Simplifies access to private code.</param>
     /// <param name="jsonHelper">Encapsulates SMAPI's JSON file parsing.</param>
+    /// <param name="performanceManager">Collects mod-owned performance diagnostics.</param>
     /// <param name="onLoadingFirstAsset">A callback to invoke the first time *any* game content manager loads an asset.</param>
     /// <param name="onAssetLoaded">A callback to invoke when an asset is fully loaded.</param>
     /// <param name="getFileLookup">Get a file lookup for the given directory.</param>
     /// <param name="onAssetsInvalidated">A callback to invoke when any asset names have been invalidated from the cache.</param>
     /// <param name="requestAssetOperations">Get the load/edit operations to apply to an asset by querying registered <see cref="IContentEvents.AssetRequested"/> event handlers.</param>
-    public ContentCoordinator(IServiceProvider serviceProvider, string rootDirectory, CultureInfo currentCulture, IMonitor monitor, Multiplayer multiplayer, Reflector reflection, JsonHelper jsonHelper, Action onLoadingFirstAsset, Action<BaseContentManager, IAssetName> onAssetLoaded, Func<string, IFileLookup> getFileLookup, Action<ICollection<IAssetName>> onAssetsInvalidated, Func<IAssetInfo, AssetOperationGroup?> requestAssetOperations)
+    public ContentCoordinator(IServiceProvider serviceProvider, string rootDirectory, CultureInfo currentCulture, IMonitor monitor, Multiplayer multiplayer, Reflector reflection, JsonHelper jsonHelper, ModPerformanceManager performanceManager, Action onLoadingFirstAsset, Action<BaseContentManager, IAssetName> onAssetLoaded, Func<string, IFileLookup> getFileLookup, Action<ICollection<IAssetName>> onAssetsInvalidated, Func<IAssetInfo, AssetOperationGroup?> requestAssetOperations)
     {
         this.GetFileLookup = getFileLookup;
         this.Monitor = monitor ?? throw new ArgumentNullException(nameof(monitor));
         this.Reflection = reflection;
         this.JsonHelper = jsonHelper;
+        this.PerformanceManager = performanceManager;
         this.OnLoadingFirstAsset = onLoadingFirstAsset;
         this.OnAssetLoaded = onAssetLoaded;
         this.OnAssetsInvalidated = onAssetsInvalidated;

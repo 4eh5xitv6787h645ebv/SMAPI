@@ -25,6 +25,9 @@ internal class ManagedEventHandler<TEventArgs> : IComparable
     /// <summary>The mod which registered the handler.</summary>
     public IModMetadata SourceMod { get; set; }
 
+    /// <summary>The fully qualified registered handler method name.</summary>
+    public string HandlerName { get; }
+
 
     /*********
     ** Accessors
@@ -41,6 +44,7 @@ internal class ManagedEventHandler<TEventArgs> : IComparable
         this.RegistrationOrder = registrationOrder;
         this.Priority = priority;
         this.SourceMod = sourceMod;
+        this.HandlerName = $"{handler.Method.DeclaringType?.FullName?.Replace('+', '.') ?? "<unknown type>"}.{handler.Method.Name}";
     }
 
     /// <inheritdoc />

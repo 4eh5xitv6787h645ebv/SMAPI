@@ -5,6 +5,7 @@ using NUnit.Framework;
 using StardewModdingAPI;
 using StardewModdingAPI.Framework;
 using StardewModdingAPI.Framework.Events;
+using StardewModdingAPI.Framework.Performance;
 
 namespace SMAPI.Tests.Core;
 
@@ -51,6 +52,48 @@ internal class ManagedEventTests
         // assert
         invocationCount.Should().Be(2);
         firstCallback.Should().BeSameAs(secondCallback);
+        Context.HeuristicModsRunningCode.Should().BeEmpty();
+    }
+
+    [Test]
+    public void Raise_Profiled_AttributesExclusiveTimeAndFailureToMod()
+    {
+        long timestamp = 0;
+        ModPerformanceManager performance = new(timestampFrequency: 1000, getTimestamp: () => timestamp);
+        performance.Start();
+
+        Mock<IManifest> manifest = new();
+        manifest.SetupGet(instance => instance.UniqueID).Returns("Example.Mod");
+        Mock<IMonitor> monitor = new();
+        Mock<IModMetadata> mod = new();
+        mod.Setup(instance => instance.HasManifest()).Returns(true);
+        mod.SetupGet(instance => instance.Manifest).Returns(manifest.Object);
+        mod.SetupGet(instance => instance.DisplayName).Returns("Example Mod");
+        mod.SetupGet(instance => instance.Monitor).Returns(monitor.Object);
+
+        ManagedEvent<EventArgs> managedEvent = new("GameLoop.UpdateTicked", new ModRegistry(), performance);
+        managedEvent.Add((_, _) =>
+        {
+            timestamp += 4;
+            throw new InvalidOperationException("test failure");
+        }, mod.Object);
+
+        managedEvent.Raise(EventArgs.Empty);
+
+        performance.GetSnapshot().Handlers.Should().ContainSingle().Which.Should().BeEquivalentTo(
+            new
+            {
+                ModId = "Example.Mod",
+                ModName = "Example Mod",
+                EventName = "GameLoop.UpdateTicked",
+                CallCount = 1,
+                TotalMilliseconds = 4d,
+                MaximumMilliseconds = 4d,
+                FailureCount = 1
+            },
+            options => options.ExcludingMissingMembers()
+        );
+        monitor.Verify(instance => instance.Log(It.Is<string>(message => message.Contains("test failure")), LogLevel.Error), Times.Once);
         Context.HeuristicModsRunningCode.Should().BeEmpty();
     }
 }

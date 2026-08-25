@@ -29,7 +29,10 @@ internal class SConfig
         [nameof(SConfig.EnableConfigMenu)] = true,
         [nameof(SConfig.FixHarmony)] = true,
         [nameof(SConfig.UseCaseInsensitivePaths)] = Constants.Platform is Platform.Android or Platform.Linux,
-        [nameof(SConfig.SuppressHarmonyDebugMode)] = true
+        [nameof(SConfig.SuppressHarmonyDebugMode)] = true,
+        [nameof(SConfig.EnableModPerformanceTracking)] = false,
+        [nameof(SConfig.LogModPerformanceTicks)] = false,
+        [nameof(SConfig.ModPerformanceTickThresholdMilliseconds)] = 16.667
     };
 
     /// <summary>The default values for <see cref="SuppressUpdateChecks"/>, to log changes if different.</summary>
@@ -108,6 +111,15 @@ internal class SConfig
     /// <summary>Whether to prevent mods from enabling Harmony's debug mode, which impacts performance and creates a file on your desktop. Debug mode should never be enabled by a released mod.</summary>
     public bool SuppressHarmonyDebugMode { get; set; }
 
+    /// <summary>Whether to continuously record bounded mod event-handler performance diagnostics.</summary>
+    public bool EnableModPerformanceTracking { get; set; }
+
+    /// <summary>Whether to log individual update ticks which reach the configured performance threshold.</summary>
+    public bool LogModPerformanceTicks { get; set; }
+
+    /// <summary>The minimum update tick duration to log when <see cref="LogModPerformanceTicks"/> is enabled, or zero to log every tick.</summary>
+    public double ModPerformanceTickThresholdMilliseconds { get; set; }
+
     /// <summary>The mod IDs SMAPI should ignore when performing update checks or validating update keys.</summary>
     public HashSet<string> SuppressUpdateChecks { get; set; }
 
@@ -142,6 +154,9 @@ internal class SConfig
     /// <param name="consoleColorScheme"><inheritdoc cref="ConsoleColorScheme" path="/summary" /></param>
     /// <param name="consoleColorSchemes"><inheritdoc cref="ConsoleColorSchemes" path="/summary" /></param>
     /// <param name="suppressHarmonyDebugMode"><inheritdoc cref="SuppressHarmonyDebugMode" path="/summary" /></param>
+    /// <param name="enableModPerformanceTracking"><inheritdoc cref="EnableModPerformanceTracking" path="/summary" /></param>
+    /// <param name="logModPerformanceTicks"><inheritdoc cref="LogModPerformanceTicks" path="/summary" /></param>
+    /// <param name="modPerformanceTickThresholdMilliseconds"><inheritdoc cref="ModPerformanceTickThresholdMilliseconds" path="/summary" /></param>
     /// <param name="suppressUpdateChecks"><inheritdoc cref="SuppressUpdateChecks" path="/summary" /></param>
     /// <param name="modsToLoadEarly"><inheritdoc cref="ModsToLoadEarly" path="/summary" /></param>
     /// <param name="modsToLoadLate"><inheritdoc cref="ModsToLoadLate" path="/summary" /></param>
@@ -166,6 +181,9 @@ internal class SConfig
         MonitorColorScheme consoleColorScheme,
         Dictionary<MonitorColorScheme, Dictionary<ConsoleLogLevel, ConsoleColor>>? consoleColorSchemes,
         bool? suppressHarmonyDebugMode,
+        bool? enableModPerformanceTracking,
+        bool? logModPerformanceTicks,
+        double? modPerformanceTickThresholdMilliseconds,
         string[]? suppressUpdateChecks,
         string[]? modsToLoadEarly,
         string[]? modsToLoadLate
@@ -191,6 +209,12 @@ internal class SConfig
         this.ConsoleColorScheme = consoleColorScheme;
         this.ConsoleColorSchemes = consoleColorSchemes ?? [];
         this.SuppressHarmonyDebugMode = suppressHarmonyDebugMode ?? (bool)SConfig.DefaultValues[nameof(this.SuppressHarmonyDebugMode)];
+        this.EnableModPerformanceTracking = enableModPerformanceTracking ?? (bool)SConfig.DefaultValues[nameof(this.EnableModPerformanceTracking)];
+        this.LogModPerformanceTicks = logModPerformanceTicks ?? (bool)SConfig.DefaultValues[nameof(this.LogModPerformanceTicks)];
+        double tickThreshold = modPerformanceTickThresholdMilliseconds ?? (double)SConfig.DefaultValues[nameof(this.ModPerformanceTickThresholdMilliseconds)];
+        this.ModPerformanceTickThresholdMilliseconds = double.IsFinite(tickThreshold) && tickThreshold >= 0
+            ? tickThreshold
+            : (double)SConfig.DefaultValues[nameof(this.ModPerformanceTickThresholdMilliseconds)];
         this.SuppressUpdateChecks = new HashSet<string>(suppressUpdateChecks ?? [], StringComparer.OrdinalIgnoreCase);
         this.ModsToLoadEarly = new HashSet<string>(modsToLoadEarly ?? [], StringComparer.OrdinalIgnoreCase);
         this.ModsToLoadLate = new HashSet<string>(modsToLoadLate ?? [], StringComparer.OrdinalIgnoreCase);
