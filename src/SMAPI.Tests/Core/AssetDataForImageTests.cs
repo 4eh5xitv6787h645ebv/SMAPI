@@ -10,6 +10,23 @@ namespace SMAPI.Tests.Core;
 internal class AssetDataForImageTests
 {
     [Test]
+    public void BlendOverlay_ComposesPremultipliedColorAndAlpha()
+    {
+        AssetDataForImage.BlendOverlay(
+            above: new Color(64, 0, 0, 128),
+            below: new Color(0, 0, 64, 128)
+        ).Should().Be(new Color(64, 0, 31, 191));
+
+        AssetDataForImage.BlendOverlay(
+            above: new Color(20, 30, 40, 64),
+            below: new Color(100, 80, 60, 192)
+        ).Should().Be(new Color(94, 89, 84, 207));
+
+        AssetDataForImage.BlendOverlay(Color.Transparent, new Color(10, 20, 30, 40)).Should().Be(new Color(10, 20, 30, 40));
+        AssetDataForImage.BlendOverlay(new Color(10, 20, 30, 255), new Color(40, 50, 60, 255)).Should().Be(new Color(10, 20, 30, 255));
+    }
+
+    [Test]
     public void IsFullyOpaque_RequiresEveryPixel()
     {
         AssetDataForImage.IsFullyOpaque([Color.Red, Color.Green, Color.Blue]).Should().BeTrue();

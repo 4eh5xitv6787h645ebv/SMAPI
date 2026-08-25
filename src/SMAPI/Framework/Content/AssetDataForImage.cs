@@ -304,16 +304,7 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
                             mergedData[targetIndex] = above;
                         else
                         {
-                            // This performs a conventional alpha blend for the pixels, which are already
-                            // premultiplied by the content pipeline. The formula is derived from
-                            // https://blogs.msdn.microsoft.com/shawnhar/2009/11/06/premultiplied-alpha/.
-                            float alphaBelow = 1 - (above.A / 255f);
-                            mergedData[targetIndex] = new Color(
-                                r: (int)(above.R + (below.R * alphaBelow)),
-                                g: (int)(above.G + (below.G * alphaBelow)),
-                                b: (int)(above.B + (below.B * alphaBelow)),
-                                alpha: Math.Max(above.A, below.A)
-                            );
+                            mergedData[targetIndex] = AssetDataForImage.BlendOverlay(above, below);
                         }
                     }
                     else
@@ -344,6 +335,21 @@ internal class AssetDataForImage : AssetData<Texture2D>, IAssetDataForImage
         {
             ArrayPool<Color>.Shared.Return(mergedData);
         }
+    }
+
+    /// <summary>Apply source-over composition to two colors which are already premultiplied by alpha.</summary>
+    /// <param name="above">The source color.</param>
+    /// <param name="below">The destination color.</param>
+    internal static Color BlendOverlay(Color above, Color below)
+    {
+        // Formula derived from https://shawnhargreaves.com/blog/how-shawn-learned-to-stop-worrying-and-love-premultiplied-alpha.html.
+        float remainingBelow = 1 - (above.A / 255f);
+        return new Color(
+            r: (int)(above.R + (below.R * remainingBelow)),
+            g: (int)(above.G + (below.G * remainingBelow)),
+            b: (int)(above.B + (below.B * remainingBelow)),
+            alpha: (int)(above.A + (below.A * remainingBelow))
+        );
     }
 
     /// <summary>Get whether a pixel span is nonempty and every pixel is fully opaque.</summary>
