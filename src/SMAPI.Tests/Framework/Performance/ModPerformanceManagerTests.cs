@@ -14,7 +14,7 @@ internal sealed class ModPerformanceManagerTests
     public void RecordHandler_AggregatesHandlerTickAndLogData()
     {
         long timestamp = 0;
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
         manager.Start();
         manager.BeginTick(tick: 42, startTimestamp: 100);
 
@@ -40,7 +40,7 @@ internal sealed class ModPerformanceManagerTests
     [Test]
     public void TickHistory_IsBoundedAndKeepsNewestTicks()
     {
-        ModPerformanceManager manager = new(tickHistoryCapacity: 2, timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(tickHistoryCapacity: 2, timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.Start(logIndividualTicks: true, tickLogThresholdMilliseconds: 0);
 
         for (uint tick = 1; tick <= 3; tick++)
@@ -60,7 +60,7 @@ internal sealed class ModPerformanceManagerTests
     [Test]
     public void HandlerCapacity_DoesNotLosePerTickAttribution()
     {
-        ModPerformanceManager manager = new(handlerCapacity: 1, timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(handlerCapacity: 1, timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.Start();
         manager.BeginTick(7, 0);
         manager.RecordHandler("First.Mod", "First", "Event.One", "First.Handler", 3, failed: false);
@@ -77,7 +77,7 @@ internal sealed class ModPerformanceManagerTests
     public void NestedHandlers_RecordExclusiveTimeWithoutDoubleCounting()
     {
         long timestamp = 0;
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
         manager.Start();
         manager.BeginTick(1, 0);
 
@@ -100,7 +100,7 @@ internal sealed class ModPerformanceManagerTests
     [Test]
     public void CompleteTick_OnlyReturnsTicksAtConfiguredThreshold()
     {
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.Start(logIndividualTicks: true, tickLogThresholdMilliseconds: 16.667);
 
         manager.BeginTick(1, 0);
@@ -113,9 +113,74 @@ internal sealed class ModPerformanceManagerTests
     }
 
     [Test]
+    public void GameUpdate_SplitsTickAttribution()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        manager.BeginGameUpdate(startTimestamp: 2);
+        manager.RecordHandler("During.Mod", "During Mod", "GameLoop.UpdateTicked", "During.Mod.OnTicked", elapsedTimestampTicks: 3, failed: false);
+        manager.EndGameUpdate(endTimestamp: 12);
+        manager.RecordHandler("Outside.Mod", "Outside Mod", "Display.Rendered", "Outside.Mod.OnRendered", elapsedTimestampTicks: 4, failed: false);
+        manager.CompleteTick(endTimestamp: 20);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        TickPerformanceSnapshot tick = snapshot.RecentTicks.Should().ContainSingle().Subject;
+        tick.TotalMilliseconds.Should().Be(20);
+        tick.InstrumentedModMilliseconds.Should().Be(7);
+        tick.GameUpdateMilliseconds.Should().Be(10);
+        tick.InstrumentedDuringGameUpdateMilliseconds.Should().Be(3);
+        tick.GameUpdateExclusiveMilliseconds.Should().Be(7);
+        tick.OutsideGameUpdateMilliseconds.Should().Be(6);
+
+        snapshot.TickTotalMilliseconds.Should().Be(20);
+        snapshot.GameUpdateMilliseconds.Should().Be(10);
+        snapshot.TickInstrumentedMilliseconds.Should().Be(7);
+        snapshot.InstrumentedDuringGameUpdateMilliseconds.Should().Be(3);
+        snapshot.GameUpdateExclusiveMilliseconds.Should().Be(7);
+        snapshot.OutsideGameUpdateMilliseconds.Should().Be(6);
+    }
+
+    [Test]
+    public void GcCollections_AreCountedPerTickAndSample()
+    {
+        int[] collections = [0, 0, 0];
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: generation => collections[generation]);
+        manager.Start();
+
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        collections = [2, 1, 0];
+        manager.CompleteTick(endTimestamp: 10);
+
+        manager.BeginTick(tick: 2, startTimestamp: 10);
+        collections = [3, 1, 1];
+        manager.CompleteTick(endTimestamp: 20);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        snapshot.RecentTicks.Should().SatisfyRespectively(
+            first =>
+            {
+                first.Gen0Collections.Should().Be(2);
+                first.Gen1Collections.Should().Be(1);
+                first.Gen2Collections.Should().Be(0);
+            },
+            second =>
+            {
+                second.Gen0Collections.Should().Be(1);
+                second.Gen1Collections.Should().Be(0);
+                second.Gen2Collections.Should().Be(1);
+            }
+        );
+        snapshot.Gen0Collections.Should().Be(3);
+        snapshot.Gen1Collections.Should().Be(1);
+        snapshot.Gen2Collections.Should().Be(1);
+    }
+
+    [Test]
     public void DisabledManager_DoesNotCreateHandlerCounters()
     {
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.RecordHandler("Example.Mod", "Example", "Event", "Handler", 10, failed: true);
         manager.RecordLog("Example.Mod", "Example", LogLevel.Error);
         manager.RecordLog("SMAPI", "SMAPI", LogLevel.Error);

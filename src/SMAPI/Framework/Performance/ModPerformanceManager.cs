@@ -31,6 +31,9 @@ internal sealed class ModPerformanceManager
     /// <summary>Get a high-resolution timestamp.</summary>
     private readonly Func<long> GetTimestamp;
 
+    /// <summary>Get the number of garbage collections for a generation.</summary>
+    private readonly Func<int, int> GetGcCollectionCount;
+
     /// <summary>Performance counters by mod, event, and handler.</summary>
     private readonly Dictionary<HandlerIdentity, HandlerCounter> HandlerCounters = [];
 
@@ -73,6 +76,42 @@ internal sealed class ModPerformanceManager
     /// <summary>The number of error messages emitted by mods during the current update tick.</summary>
     private int CurrentTickErrors;
 
+    /// <summary>The instrumented handler time recorded during the current update tick.</summary>
+    private long CurrentTickInstrumentedTimestampTicks;
+
+    /// <summary>The base game update time recorded during the current update tick.</summary>
+    private long CurrentTickGameUpdateTimestampTicks;
+
+    /// <summary>The instrumented handler time recorded while a base game update was executing during the current update tick.</summary>
+    private long CurrentTickInstrumentedDuringGameUpdateTicks;
+
+    /// <summary>Whether a base game update is currently being measured.</summary>
+    private bool IsGameUpdateOpen;
+
+    /// <summary>The timestamp when the current base game update began.</summary>
+    private long GameUpdateStartTimestamp;
+
+    /// <summary>The instrumented handler time already recorded in this tick when the current base game update began.</summary>
+    private long InstrumentedAtGameUpdateStartTicks;
+
+    /// <summary>The garbage collection counts per generation when the current update tick began.</summary>
+    private readonly int[] TickStartGcCollections = new int[3];
+
+    /// <summary>The total measured update-tick time in this sample.</summary>
+    private long TotalTickTimestampTicks;
+
+    /// <summary>The total base game update time measured within ticks in this sample.</summary>
+    private long TotalGameUpdateTimestampTicks;
+
+    /// <summary>The total instrumented handler time measured within ticks in this sample.</summary>
+    private long TotalTickInstrumentedTimestampTicks;
+
+    /// <summary>The total instrumented handler time measured within base game updates in this sample.</summary>
+    private long TotalInstrumentedDuringGameUpdateTicks;
+
+    /// <summary>The total garbage collections per generation observed within ticks in this sample.</summary>
+    private readonly long[] TotalGcCollections = new long[3];
+
     /// <summary>Whether completed ticks should be logged individually.</summary>
     private bool LogIndividualTicks;
 
@@ -95,7 +134,8 @@ internal sealed class ModPerformanceManager
     /// <param name="handlerCapacity">The maximum number of distinct handler counters to retain.</param>
     /// <param name="timestampFrequency">The timestamp frequency used for elapsed-time conversion.</param>
     /// <param name="getTimestamp">Get a high-resolution timestamp.</param>
-    public ModPerformanceManager(int tickHistoryCapacity = 600, int handlerCapacity = 8192, long? timestampFrequency = null, Func<long>? getTimestamp = null)
+    /// <param name="getGcCollectionCount">Get the number of garbage collections for a generation.</param>
+    public ModPerformanceManager(int tickHistoryCapacity = 600, int handlerCapacity = 8192, long? timestampFrequency = null, Func<long>? getTimestamp = null, Func<int, int>? getGcCollectionCount = null)
     {
         if (tickHistoryCapacity <= 0)
             throw new ArgumentOutOfRangeException(nameof(tickHistoryCapacity));
@@ -106,6 +146,7 @@ internal sealed class ModPerformanceManager
         this.HandlerCapacity = handlerCapacity;
         this.TimestampFrequency = timestampFrequency ?? Stopwatch.Frequency;
         this.GetTimestamp = getTimestamp ?? Stopwatch.GetTimestamp;
+        this.GetGcCollectionCount = getGcCollectionCount ?? GC.CollectionCount;
         if (this.TimestampFrequency <= 0)
             throw new ArgumentOutOfRangeException(nameof(timestampFrequency));
 
@@ -136,6 +177,7 @@ internal sealed class ModPerformanceManager
         lock (this.SyncRoot)
         {
             this.IsTickOpen = false;
+            this.IsGameUpdateOpen = false;
             this.CurrentTickMods.Clear();
         }
     }
@@ -196,6 +238,45 @@ internal sealed class ModPerformanceManager
             this.CurrentTickStartTimestamp = startTimestamp;
             this.CurrentTickErrors = 0;
             this.CurrentTickMods.Clear();
+            this.CurrentTickInstrumentedTimestampTicks = 0;
+            this.CurrentTickGameUpdateTimestampTicks = 0;
+            this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
+            this.IsGameUpdateOpen = false;
+            for (int generation = 0; generation < this.TickStartGcCollections.Length; generation++)
+                this.TickStartGcCollections[generation] = this.GetGcCollectionCount(generation);
+        }
+    }
+
+    /// <summary>Begin measuring a base game update within the current update tick.</summary>
+    /// <param name="startTimestamp">The timestamp at which the base game update began.</param>
+    public void BeginGameUpdate(long startTimestamp)
+    {
+        if (!this.IsTracking)
+            return;
+
+        lock (this.SyncRoot)
+        {
+            if (!this.IsTracking || !this.IsTickOpen || this.IsGameUpdateOpen)
+                return;
+
+            this.IsGameUpdateOpen = true;
+            this.GameUpdateStartTimestamp = startTimestamp;
+            this.InstrumentedAtGameUpdateStartTicks = this.CurrentTickInstrumentedTimestampTicks;
+        }
+    }
+
+    /// <summary>Finish measuring a base game update within the current update tick.</summary>
+    /// <param name="endTimestamp">The timestamp at which the base game update ended.</param>
+    public void EndGameUpdate(long endTimestamp)
+    {
+        lock (this.SyncRoot)
+        {
+            if (!this.IsGameUpdateOpen)
+                return;
+
+            this.IsGameUpdateOpen = false;
+            this.CurrentTickGameUpdateTimestampTicks += Math.Max(0, endTimestamp - this.GameUpdateStartTimestamp);
+            this.CurrentTickInstrumentedDuringGameUpdateTicks += Math.Max(0, this.CurrentTickInstrumentedTimestampTicks - this.InstrumentedAtGameUpdateStartTicks);
         }
     }
 
@@ -213,14 +294,13 @@ internal sealed class ModPerformanceManager
                 return null;
 
             long totalTimestampTicks = Math.Max(0, endTimestamp - this.CurrentTickStartTimestamp);
-            long instrumentedTimestampTicks = 0;
+            long instrumentedTimestampTicks = this.CurrentTickInstrumentedTimestampTicks;
             string? slowestModId = null;
             string? slowestModName = null;
             long slowestModTimestampTicks = 0;
 
             foreach ((string modId, TickModCounter counter) in this.CurrentTickMods)
             {
-                instrumentedTimestampTicks += counter.TimestampTicks;
                 if (counter.TimestampTicks > slowestModTimestampTicks)
                 {
                     slowestModId = modId;
@@ -229,6 +309,10 @@ internal sealed class ModPerformanceManager
                 }
             }
 
+            Span<int> gcCollections = stackalloc int[3];
+            for (int generation = 0; generation < gcCollections.Length; generation++)
+                gcCollections[generation] = Math.Max(0, this.GetGcCollectionCount(generation) - this.TickStartGcCollections[generation]);
+
             TickPerformanceSnapshot sample = new(
                 Tick: this.CurrentTick,
                 TotalMilliseconds: this.ToMilliseconds(totalTimestampTicks),
@@ -236,12 +320,25 @@ internal sealed class ModPerformanceManager
                 SlowestModId: slowestModId,
                 SlowestModName: slowestModName,
                 SlowestModMilliseconds: this.ToMilliseconds(slowestModTimestampTicks),
-                ErrorCount: this.CurrentTickErrors
+                ErrorCount: this.CurrentTickErrors,
+                GameUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickGameUpdateTimestampTicks),
+                InstrumentedDuringGameUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickInstrumentedDuringGameUpdateTicks),
+                Gen0Collections: gcCollections[0],
+                Gen1Collections: gcCollections[1],
+                Gen2Collections: gcCollections[2]
             );
+
+            this.TotalTickTimestampTicks += totalTimestampTicks;
+            this.TotalGameUpdateTimestampTicks += this.CurrentTickGameUpdateTimestampTicks;
+            this.TotalTickInstrumentedTimestampTicks += instrumentedTimestampTicks;
+            this.TotalInstrumentedDuringGameUpdateTicks += this.CurrentTickInstrumentedDuringGameUpdateTicks;
+            for (int generation = 0; generation < gcCollections.Length; generation++)
+                this.TotalGcCollections[generation] += gcCollections[generation];
 
             this.AddTick(sample);
             this.CompletedTicks++;
             this.IsTickOpen = false;
+            this.IsGameUpdateOpen = false;
             this.CurrentTickMods.Clear();
 
             return this.LogIndividualTicks && sample.TotalMilliseconds >= this.TickLogThresholdMilliseconds
@@ -340,6 +437,7 @@ internal sealed class ModPerformanceManager
 
                 tickCounter.TimestampTicks += elapsedTimestampTicks;
                 this.CurrentTickMods[modId] = tickCounter;
+                this.CurrentTickInstrumentedTimestampTicks += elapsedTimestampTicks;
             }
 
             if (!this.HandlerCounters.TryGetValue(identity, out HandlerCounter? counter))
@@ -421,7 +519,14 @@ internal sealed class ModPerformanceManager
                 RecentTicks: ticks,
                 OmittedHandlerInvocations: this.OmittedHandlerInvocations,
                 LogIndividualTicks: this.LogIndividualTicks,
-                TickLogThresholdMilliseconds: this.TickLogThresholdMilliseconds
+                TickLogThresholdMilliseconds: this.TickLogThresholdMilliseconds,
+                TickTotalMilliseconds: this.ToMilliseconds(this.TotalTickTimestampTicks),
+                GameUpdateMilliseconds: this.ToMilliseconds(this.TotalGameUpdateTimestampTicks),
+                TickInstrumentedMilliseconds: this.ToMilliseconds(this.TotalTickInstrumentedTimestampTicks),
+                InstrumentedDuringGameUpdateMilliseconds: this.ToMilliseconds(this.TotalInstrumentedDuringGameUpdateTicks),
+                Gen0Collections: this.TotalGcCollections[0],
+                Gen1Collections: this.TotalGcCollections[1],
+                Gen2Collections: this.TotalGcCollections[2]
             );
         }
     }
@@ -453,6 +558,15 @@ internal sealed class ModPerformanceManager
         this.SampleStartTimestamp = timestamp;
         this.IsTickOpen = false;
         this.CurrentTickErrors = 0;
+        this.CurrentTickInstrumentedTimestampTicks = 0;
+        this.CurrentTickGameUpdateTimestampTicks = 0;
+        this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
+        this.IsGameUpdateOpen = false;
+        this.TotalTickTimestampTicks = 0;
+        this.TotalGameUpdateTimestampTicks = 0;
+        this.TotalTickInstrumentedTimestampTicks = 0;
+        this.TotalInstrumentedDuringGameUpdateTicks = 0;
+        Array.Clear(this.TotalGcCollections);
     }
 
     /// <summary>Add a tick to the bounded circular history.</summary>
@@ -562,8 +676,22 @@ internal sealed record ModPerformanceSnapshot(
     IReadOnlyList<TickPerformanceSnapshot> RecentTicks,
     long OmittedHandlerInvocations,
     bool LogIndividualTicks,
-    double TickLogThresholdMilliseconds
-);
+    double TickLogThresholdMilliseconds,
+    double TickTotalMilliseconds = 0,
+    double GameUpdateMilliseconds = 0,
+    double TickInstrumentedMilliseconds = 0,
+    double InstrumentedDuringGameUpdateMilliseconds = 0,
+    long Gen0Collections = 0,
+    long Gen1Collections = 0,
+    long Gen2Collections = 0
+)
+{
+    /// <summary>Base game update time in completed ticks, excluding instrumented mod callbacks which ran within it.</summary>
+    public double GameUpdateExclusiveMilliseconds => Math.Max(0, this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
+
+    /// <summary>Tick time outside both the base game update and instrumented mod callbacks, such as SMAPI's own dispatch and per-tick framework work.</summary>
+    public double OutsideGameUpdateMilliseconds => Math.Max(0, this.TickTotalMilliseconds - this.GameUpdateMilliseconds - Math.Max(0, this.TickInstrumentedMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds));
+}
 
 /// <summary>Aggregate timing for one mod-owned event handler.</summary>
 internal readonly record struct HandlerPerformanceSnapshot(
@@ -592,9 +720,20 @@ internal readonly record struct TickPerformanceSnapshot(
     string? SlowestModId,
     string? SlowestModName,
     double SlowestModMilliseconds,
-    int ErrorCount
+    int ErrorCount,
+    double GameUpdateMilliseconds = 0,
+    double InstrumentedDuringGameUpdateMilliseconds = 0,
+    int Gen0Collections = 0,
+    int Gen1Collections = 0,
+    int Gen2Collections = 0
 )
 {
     /// <summary>Time in the update which wasn't observed inside a SMAPI-managed mod event handler.</summary>
     public double UnattributedMilliseconds => Math.Max(0, this.TotalMilliseconds - this.InstrumentedModMilliseconds);
+
+    /// <summary>Base game update time excluding instrumented mod callbacks which ran within it. This can include Harmony patches and other unobserved work invoked by the game.</summary>
+    public double GameUpdateExclusiveMilliseconds => Math.Max(0, this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
+
+    /// <summary>Tick time outside both the base game update and instrumented mod callbacks, such as SMAPI's own dispatch and per-tick framework work.</summary>
+    public double OutsideGameUpdateMilliseconds => Math.Max(0, this.TotalMilliseconds - this.GameUpdateMilliseconds - Math.Max(0, this.InstrumentedModMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds));
 }

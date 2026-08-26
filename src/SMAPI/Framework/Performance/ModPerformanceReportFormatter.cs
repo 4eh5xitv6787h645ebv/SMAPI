@@ -58,6 +58,36 @@ internal static class ModPerformanceReportFormatter
         else
             report.AppendLine("Individual tick logging: disabled.");
 
+        if (snapshot.CompletedTickCount > 0)
+        {
+            double tickCount = snapshot.CompletedTickCount;
+            report.Append("Measured tick time: ")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickTotalMilliseconds))
+                .Append("ms total (")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickTotalMilliseconds / tickCount))
+                .Append("ms/tick): base game update ")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.GameUpdateExclusiveMilliseconds))
+                .Append("ms (")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.GameUpdateExclusiveMilliseconds / tickCount))
+                .Append("ms/tick), instrumented mod callbacks ")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds))
+                .Append("ms (")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds / tickCount))
+                .Append("ms/tick), SMAPI dispatch & other ")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds))
+                .Append("ms (")
+                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds / tickCount))
+                .AppendLine("ms/tick).");
+
+            report.Append("GC collections during measured ticks: ")
+                .Append(snapshot.Gen0Collections.ToString("N0", CultureInfo.InvariantCulture))
+                .Append(" gen0, ")
+                .Append(snapshot.Gen1Collections.ToString("N0", CultureInfo.InvariantCulture))
+                .Append(" gen1, ")
+                .Append(snapshot.Gen2Collections.ToString("N0", CultureInfo.InvariantCulture))
+                .AppendLine(" gen2.");
+        }
+
         if (mods.Count == 0)
             report.AppendLine("No mod callback timings, warnings, or errors have been recorded yet.");
         else
@@ -148,7 +178,8 @@ internal static class ModPerformanceReportFormatter
 
         report.AppendLine();
         report.Append("Interpretation: instrumented time covers SMAPI-managed event handlers, content load/edit callbacks, console commands, and lifecycle callbacks. ")
-            .Append("Unattributed tick time can include Stardew Valley, SMAPI itself, Harmony patches, direct mod API calls, background work, waiting, or operating-system scheduling. ")
+            .Append("Base game update time is measured around the vanilla update, so it can include Harmony patches, direct mod API calls, and other unobserved work invoked by the game. ")
+            .Append("'SMAPI dispatch & other' is the remaining tick time outside both, such as SMAPI's own event dispatch and per-tick framework work, background work, waiting, or operating-system scheduling. ")
             .Append("A high timing identifies where SMAPI observed time; it does not by itself prove the underlying cause.");
 
         return report.ToString();
@@ -162,7 +193,7 @@ internal static class ModPerformanceReportFormatter
             ? "none"
             : $"{tick.SlowestModName} ({tick.SlowestModId}) {ModPerformanceReportFormatter.FormatMilliseconds(tick.SlowestModMilliseconds)}ms";
 
-        return $"tick {tick.Tick}: {ModPerformanceReportFormatter.FormatMilliseconds(tick.TotalMilliseconds)}ms total; {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms instrumented mod callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.UnattributedMilliseconds)}ms unattributed; slowest mod {slowest}; {tick.ErrorCount} mod errors";
+        return $"tick {tick.Tick}: {ModPerformanceReportFormatter.FormatMilliseconds(tick.TotalMilliseconds)}ms total; {ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateExclusiveMilliseconds)}ms base game update; {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms instrumented mod callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.OutsideGameUpdateMilliseconds)}ms SMAPI dispatch & other; GC {tick.Gen0Collections}/{tick.Gen1Collections}/{tick.Gen2Collections}; slowest mod {slowest}; {tick.ErrorCount} mod errors";
     }
 
     /// <summary>Format milliseconds with enough precision for handler-level diagnostics.</summary>

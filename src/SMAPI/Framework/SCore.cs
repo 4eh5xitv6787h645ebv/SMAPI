@@ -698,6 +698,25 @@ internal class SCore : IDisposable
         EventManager events = this.EventManager;
         bool verbose = this.Monitor.IsVerbose;
 
+        // measure the base game update separately from mod callbacks and SMAPI dispatch while profiling
+        if (this.ModPerformanceManager.IsTracking)
+        {
+            ModPerformanceManager performanceManager = this.ModPerformanceManager;
+            Action<GameTime> baseRunUpdate = runUpdate;
+            runUpdate = time =>
+            {
+                performanceManager.BeginGameUpdate(Stopwatch.GetTimestamp());
+                try
+                {
+                    baseRunUpdate(time);
+                }
+                finally
+                {
+                    performanceManager.EndGameUpdate(Stopwatch.GetTimestamp());
+                }
+            };
+        }
+
         try
         {
             /*********
