@@ -274,6 +274,59 @@ internal sealed class ModHealthLedgerTests
     }
 
     [Test]
+    public void RegisteredLogCounter_IsAllocationFreeAfterWarmup()
+    {
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 0);
+        IModHealthLogCounter counter = ledger.RegisterLogSource("example.mod", "Example Mod", ModHealthLogSourceCategory.Mod);
+        for (int i = 0; i < 100; i++)
+            counter.Record(LogLevel.Trace, 3, 1, ModHealthLogObservationCategory.Normal);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++)
+            counter.Record(LogLevel.Info, 7, 1, ModHealthLogObservationCategory.Normal);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        allocated.Should().Be(0);
+        ledger.GetSnapshot().LogTotalsSinceLedgerStart.GetMessages(LogLevel.Info).Should().Be(10_000);
+    }
+
+    [Test]
+    public void RegisteredLogCounter_ConcurrentlyCountsTraceAndInfoWithExactSnapshotCutoff()
+    {
+        const int count = 20_000;
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 0);
+        IModHealthLogCounter counter = ledger.RegisterLogSource("example.mod", "Example Mod", ModHealthLogSourceCategory.Mod);
+
+        Parallel.For(0, count, index => counter.Record(index % 2 == 0 ? LogLevel.Trace : LogLevel.Info, 3, Environment.CurrentManagedThreadId, ModHealthLogObservationCategory.Normal));
+
+        ModHealthLedgerSnapshot snapshot = ledger.GetSnapshot();
+        snapshot.CutoffSequence.Should().Be(count);
+        snapshot.LogTotalsSinceLedgerStart.GetMessages(LogLevel.Trace).Should().Be(count / 2);
+        snapshot.LogTotalsSinceLedgerStart.GetMessages(LogLevel.Info).Should().Be(count / 2);
+        Enum.GetValues<LogLevel>().Sum(level => snapshot.LogSources.Single().SinceLedgerStart.GetMessages(level)).Should().Be(count);
+    }
+
+    [Test]
+    public async Task ReporterSuppression_FlowsAcrossAsyncAndDoesNotAdvanceCutoff()
+    {
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 0);
+        IModHealthLogCounter counter = ledger.RegisterLogSource("SMAPI", "SMAPI", ModHealthLogSourceCategory.Smapi);
+        counter.Record(LogLevel.Info, 5, 1, ModHealthLogObservationCategory.Normal);
+
+        using (ledger.SuppressReporterLogs())
+        {
+            await Task.Yield();
+            ModHealthReporterLogScope.IsActive.Should().BeTrue();
+            counter.Record(LogLevel.Error, 99, 1, ModHealthLogObservationCategory.Reporter);
+        }
+
+        ModHealthLedgerSnapshot snapshot = ledger.GetSnapshot();
+        snapshot.CutoffSequence.Should().Be(1);
+        Enum.GetValues<LogLevel>().Sum(level => snapshot.LogTotalsSinceLedgerStart.GetMessages(level)).Should().Be(1);
+        ModHealthReporterLogScope.IsActive.Should().BeFalse();
+    }
+
+    [Test]
     public void Snapshot_DoesNotExposeMutableLedgerCollections()
     {
         ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: () => 0);

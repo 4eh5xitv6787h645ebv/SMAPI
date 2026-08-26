@@ -9,7 +9,7 @@ using System.Threading;
 namespace StardewModdingAPI.Framework.Health;
 
 /// <summary>Collects bounded, message-free session evidence for a mod health report.</summary>
-internal sealed class ModHealthLedger
+internal sealed class ModHealthLedger : IModHealthLogSink
 {
     /*********
     ** Constants
@@ -23,6 +23,7 @@ internal sealed class ModHealthLedger
     ** Fields
     *********/
     private readonly object SyncRoot = new();
+    private readonly object SnapshotRoot = new();
     private readonly Func<long> GetTimestamp;
     private readonly long TimestampFrequency;
     private readonly long StartedTimestamp;
@@ -43,6 +44,8 @@ internal sealed class ModHealthLedger
     private long LogIdentityObservationsOmitted;
     private long FailureObservationsOmitted;
     private long DependenciesOmitted;
+    private int FreezeLogWriters;
+    private int ActiveLogWriters;
 
 
     /*********
@@ -143,40 +146,28 @@ internal sealed class ModHealthLedger
     public long ObserveLog(in ModHealthLogObservation observation)
     {
         if (observation.SourceCategory == ModHealthLogSourceCategory.Reporter)
-        {
-            lock (this.SyncRoot)
-                return this.Sequence;
-        }
+            return Volatile.Read(ref this.Sequence);
 
+        RegisteredLogCounter counter = (RegisteredLogCounter)this.RegisterLogSource(observation.ModId, observation.ModName, observation.SourceCategory);
+        return counter.RecordCore(observation.Level, observation.MessageLength, observation.ManagedThreadId, ModHealthLogObservationCategory.Normal);
+    }
+
+    /// <inheritdoc />
+    public IModHealthLogCounter RegisterLogSource(string? modId, string? modName, ModHealthLogSourceCategory sourceCategory)
+    {
+        ModHealthLogIdentity identity = CreateLogIdentity(modId, modName, sourceCategory);
         lock (this.SyncRoot)
         {
-            long sequence = this.AdvanceSequence();
-            long timestamp = this.GetTimestamp();
-            int severity = GetSeverityIndex(observation.Level);
-            int countIndex = severity * 2;
-            long characterCount = Math.Max(0, observation.MessageLength);
-            this.TotalLogCounts[countIndex] = SaturatingIncrement(this.TotalLogCounts[countIndex]);
-            this.TotalLogCounts[countIndex + 1] = SaturatingAdd(this.TotalLogCounts[countIndex + 1], characterCount);
-
-            ModHealthLogIdentity identity = CreateLogIdentity(observation);
-            if (!this.Logs.TryGetValue(identity, out MutableLogRecord? record))
-            {
-                if (this.Logs.Count >= this.LogIdentityCapacity)
-                {
-                    this.LogIdentityObservationsOmitted = SaturatingIncrement(this.LogIdentityObservationsOmitted);
-                    return sequence;
-                }
-
-                this.Logs[identity] = record = new MutableLogRecord(identity, sequence, timestamp);
-            }
-
-            record.Counts[countIndex] = SaturatingIncrement(record.Counts[countIndex]);
-            record.Counts[countIndex + 1] = SaturatingAdd(record.Counts[countIndex + 1], characterCount);
-            record.LastSequence = sequence;
-            record.LastTimestamp = timestamp;
-            record.LastManagedThreadId = observation.ManagedThreadId;
-            return sequence;
+            if (!this.Logs.TryGetValue(identity, out MutableLogRecord? record) && this.Logs.Count < this.LogIdentityCapacity)
+                this.Logs[identity] = record = new MutableLogRecord(identity);
+            return new RegisteredLogCounter(this, record);
         }
+    }
+
+    /// <inheritdoc />
+    public IDisposable SuppressReporterLogs()
+    {
+        return ModHealthReporterLogScope.Enter();
     }
 
     /// <summary>Record one structured callback failure without accepting an exception message or stack trace.</summary>
@@ -211,25 +202,38 @@ internal sealed class ModHealthLedger
     /// <summary>Freeze counter values used to calculate evidence observed during a timed capture.</summary>
     public ModHealthLedgerBaseline CreateCaptureBaseline()
     {
-        lock (this.SyncRoot)
+        lock (this.SnapshotRoot)
         {
-            Dictionary<ModHealthLogIdentity, long[]> logs = new(this.Logs.Count, ModHealthLogIdentityComparer.Instance);
-            foreach ((ModHealthLogIdentity identity, MutableLogRecord record) in this.Logs)
-                logs[identity] = (long[])record.Counts.Clone();
+            this.FreezeLogs();
+            try
+            {
+                lock (this.SyncRoot)
+                {
+                    Dictionary<ModHealthLogIdentity, long[]> logs = new(this.Logs.Count, ModHealthLogIdentityComparer.Instance);
+                    foreach ((ModHealthLogIdentity identity, MutableLogRecord record) in this.Logs)
+                        logs[identity] = ReadCounts(record.Counts);
 
-            Dictionary<ModHealthFailureIdentity, long> failures = new(this.Failures.Count, ModHealthFailureIdentityComparer.Instance);
-            foreach ((ModHealthFailureIdentity identity, MutableFailureRecord record) in this.Failures)
-                failures[identity] = record.Count;
+                    Dictionary<ModHealthFailureIdentity, long> failures = new(this.Failures.Count, ModHealthFailureIdentityComparer.Instance);
+                    foreach ((ModHealthFailureIdentity identity, MutableFailureRecord record) in this.Failures)
+                        failures[identity] = record.Count;
 
-            return new ModHealthLedgerBaseline(this.Sequence, (long[])this.TotalLogCounts.Clone(), logs, this.TotalFailureCount, failures);
+                    return new ModHealthLedgerBaseline(Volatile.Read(ref this.Sequence), ReadCounts(this.TotalLogCounts), logs, this.TotalFailureCount, failures);
+                }
+            }
+            finally { this.UnfreezeLogs(); }
         }
     }
 
     /// <summary>Create an immutable, deterministically ordered snapshot at a precise completed-observation cutoff.</summary>
     public ModHealthLedgerSnapshot GetSnapshot(ModHealthLedgerBaseline? captureBaseline = null)
     {
-        lock (this.SyncRoot)
+        lock (this.SnapshotRoot)
         {
+            this.FreezeLogs();
+            try
+            {
+              lock (this.SyncRoot)
+              {
             ModHealthModSnapshot[] mods = this.Mods.Values
                 .OrderBy(record => GetModPriority(record.Status))
                 .ThenBy(record => record.UniqueId, StringComparer.OrdinalIgnoreCase)
@@ -241,24 +245,26 @@ internal sealed class ModHealthLedger
                 .ToArray();
 
             ModHealthLogSourceSnapshot[] logs = this.Logs.Values
+                .Where(record => Volatile.Read(ref record.FirstSequence) > 0)
                 .OrderBy(record => record.Identity.SourceCategory)
                 .ThenBy(record => record.Identity.ModId, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(record => record.Identity.ModId, StringComparer.Ordinal)
                 .ThenBy(record => record.Identity.ModName, StringComparer.Ordinal)
                 .Select(record =>
                 {
-                    long[] during = SubtractCounts(record.Counts, captureBaseline, record.Identity);
+                    long[] counts = ReadCounts(record.Counts);
+                    long[] during = SubtractCounts(counts, captureBaseline, record.Identity);
                     return new ModHealthLogSourceSnapshot(
                         record.Identity.ModId,
                         record.Identity.ModName,
                         record.Identity.SourceCategory,
-                        CreateSeveritySnapshot(record.Counts),
+                        CreateSeveritySnapshot(counts),
                         CreateSeveritySnapshot(during),
-                        record.FirstSequence,
-                        record.LastSequence,
-                        this.ToOffset(record.FirstTimestamp),
-                        this.ToOffset(record.LastTimestamp),
-                        record.LastManagedThreadId
+                        Volatile.Read(ref record.FirstSequence),
+                        Volatile.Read(ref record.LastSequence),
+                        this.ToOffset(Volatile.Read(ref record.FirstTimestamp)),
+                        this.ToOffset(Volatile.Read(ref record.LastTimestamp)),
+                        Volatile.Read(ref record.LastManagedThreadId)
                     );
                 })
                 .ToArray();
@@ -295,16 +301,17 @@ internal sealed class ModHealthLedger
             foreach (ModHealthLedgerModStatus status in Enum.GetValues<ModHealthLedgerModStatus>())
                 statusTotals[status] = this.ModStatusTotals[(int)status];
 
-            long[] totalDuring = SubtractCounts(this.TotalLogCounts, captureBaseline);
+            long[] totalCounts = ReadCounts(this.TotalLogCounts);
+            long[] totalDuring = SubtractCounts(totalCounts, captureBaseline);
             return new ModHealthLedgerSnapshot(
                 this.StartedUtc,
                 this.Completeness,
-                this.Sequence,
+                Volatile.Read(ref this.Sequence),
                 captureBaseline?.Sequence,
                 this.TotalDiscoveredMods,
                 new ReadOnlyDictionary<ModHealthLedgerModStatus, long>(statusTotals),
                 Array.AsReadOnly(mods),
-                CreateSeveritySnapshot(this.TotalLogCounts),
+                CreateSeveritySnapshot(totalCounts),
                 CreateSeveritySnapshot(totalDuring),
                 Array.AsReadOnly(logs),
                 this.TotalFailureCount,
@@ -313,11 +320,14 @@ internal sealed class ModHealthLedger
                 this.Capacities,
                 new ModHealthLedgerOmissions(
                     SaturatingSubtract(this.TotalDiscoveredMods, this.Mods.Count),
-                    this.LogIdentityObservationsOmitted,
+                    Volatile.Read(ref this.LogIdentityObservationsOmitted),
                     this.FailureObservationsOmitted,
                     this.DependenciesOmitted
                 )
             );
+              }
+            }
+            finally { this.UnfreezeLogs(); }
         }
     }
 
@@ -327,7 +337,64 @@ internal sealed class ModHealthLedger
     *********/
     private long AdvanceSequence()
     {
-        return this.Sequence = SaturatingIncrement(this.Sequence);
+        while (true)
+        {
+            long current = Volatile.Read(ref this.Sequence);
+            if (current == long.MaxValue)
+                return current;
+            if (Interlocked.CompareExchange(ref this.Sequence, current + 1, current) == current)
+                return current + 1;
+        }
+    }
+
+    /// <remarks>The freeze gate admits no new writers and waits for admitted writers to finish, so baselines and snapshots have an exact completed-observation cutoff.</remarks>
+    private void FreezeLogs()
+    {
+        Volatile.Write(ref this.FreezeLogWriters, 1);
+        SpinWait spin = new();
+        while (Volatile.Read(ref this.ActiveLogWriters) != 0)
+            spin.SpinOnce();
+    }
+
+    private void UnfreezeLogs() => Volatile.Write(ref this.FreezeLogWriters, 0);
+
+    private long RecordLog(MutableLogRecord? record, LogLevel level, int messageLength, int managedThreadId, ModHealthLogObservationCategory observationCategory)
+    {
+        if (observationCategory == ModHealthLogObservationCategory.Reporter)
+            return Volatile.Read(ref this.Sequence);
+
+        SpinWait spin = new();
+        while (true)
+        {
+            while (Volatile.Read(ref this.FreezeLogWriters) != 0)
+                spin.SpinOnce();
+            Interlocked.Increment(ref this.ActiveLogWriters);
+            if (Volatile.Read(ref this.FreezeLogWriters) == 0)
+                break;
+            Interlocked.Decrement(ref this.ActiveLogWriters);
+        }
+
+        try
+        {
+            int index = GetSeverityIndex(level) * 2;
+            long characters = Math.Max(0, messageLength);
+            AtomicSaturatingAdd(ref this.TotalLogCounts[index], 1);
+            AtomicSaturatingAdd(ref this.TotalLogCounts[index + 1], characters);
+            if (record == null)
+                AtomicSaturatingAdd(ref this.LogIdentityObservationsOmitted, 1);
+            else
+            {
+                AtomicSaturatingAdd(ref record.Counts[index], 1);
+                AtomicSaturatingAdd(ref record.Counts[index + 1], characters);
+            }
+
+            long timestamp = this.GetTimestamp();
+            long sequence = this.AdvanceSequence();
+            if (record != null)
+                record.Complete(sequence, timestamp, managedThreadId);
+            return sequence;
+        }
+        finally { Interlocked.Decrement(ref this.ActiveLogWriters); }
     }
 
     private MutableModRecord CreateModRecord(ModHealthModKey key, ModHealthModObservation observation)
@@ -415,14 +482,19 @@ internal sealed class ModHealthLedger
 
     private static ModHealthLogIdentity CreateLogIdentity(in ModHealthLogObservation observation)
     {
-        return observation.SourceCategory switch
+        return CreateLogIdentity(observation.ModId, observation.ModName, observation.SourceCategory);
+    }
+
+    private static ModHealthLogIdentity CreateLogIdentity(string? modId, string? modName, ModHealthLogSourceCategory sourceCategory)
+    {
+        return sourceCategory switch
         {
-            ModHealthLogSourceCategory.Smapi => new ModHealthLogIdentity("SMAPI", "SMAPI", observation.SourceCategory),
-            ModHealthLogSourceCategory.Game => new ModHealthLogIdentity("game", "game", observation.SourceCategory),
+            ModHealthLogSourceCategory.Smapi => new ModHealthLogIdentity("SMAPI", "SMAPI", sourceCategory),
+            ModHealthLogSourceCategory.Game => new ModHealthLogIdentity("game", "game", sourceCategory),
             _ => new ModHealthLogIdentity(
-                SanitizeIdentity(observation.ModId, "unknown-mod"),
-                SanitizeIdentity(observation.ModName, SanitizeIdentity(observation.ModId, "unknown-mod")),
-                observation.SourceCategory
+                SanitizeIdentity(modId, "unknown-mod"),
+                SanitizeIdentity(modName, SanitizeIdentity(modId, "unknown-mod")),
+                sourceCategory
             )
         };
     }
@@ -552,6 +624,27 @@ internal sealed class ModHealthLedger
         return value >= baseline ? value - baseline : 0;
     }
 
+    private static void AtomicSaturatingAdd(ref long target, long amount)
+    {
+        if (amount <= 0)
+            return;
+        while (true)
+        {
+            long current = Volatile.Read(ref target);
+            long next = SaturatingAdd(current, amount);
+            if (next == current || Interlocked.CompareExchange(ref target, next, current) == current)
+                return;
+        }
+    }
+
+    private static long[] ReadCounts(long[] counts)
+    {
+        long[] result = new long[counts.Length];
+        for (int i = 0; i < counts.Length; i++)
+            result[i] = Volatile.Read(ref counts[i]);
+        return result;
+    }
+
 
     /*********
     ** Private models
@@ -610,15 +703,56 @@ internal sealed class ModHealthLedger
         }
     }
 
-    private sealed class MutableLogRecord(ModHealthLogIdentity identity, long sequence, long timestamp)
+    private sealed class MutableLogRecord(ModHealthLogIdentity identity)
     {
         public ModHealthLogIdentity Identity { get; } = identity;
         public long[] Counts { get; } = new long[SeverityCount * 2];
-        public long FirstSequence { get; } = sequence;
-        public long LastSequence { get; set; } = sequence;
-        public long FirstTimestamp { get; } = timestamp;
-        public long LastTimestamp { get; set; } = timestamp;
-        public int LastManagedThreadId { get; set; }
+        public long FirstSequence;
+        public long LastSequence;
+        public long FirstTimestamp;
+        public long LastTimestamp;
+        public int LastManagedThreadId;
+
+        public void Complete(long sequence, long timestamp, int managedThreadId)
+        {
+            while (true)
+            {
+                long first = Volatile.Read(ref this.FirstSequence);
+                if (first != 0 && first <= sequence)
+                    break;
+                if (Interlocked.CompareExchange(ref this.FirstSequence, sequence, first) == first)
+                {
+                    Volatile.Write(ref this.FirstTimestamp, timestamp);
+                    break;
+                }
+            }
+
+            while (true)
+            {
+                long last = Volatile.Read(ref this.LastSequence);
+                if (last >= sequence)
+                    return;
+                if (Interlocked.CompareExchange(ref this.LastSequence, sequence, last) == last)
+                {
+                    Volatile.Write(ref this.LastTimestamp, timestamp);
+                    Volatile.Write(ref this.LastManagedThreadId, managedThreadId);
+                    return;
+                }
+            }
+        }
+    }
+
+    private sealed class RegisteredLogCounter(ModHealthLedger ledger, MutableLogRecord? record) : IModHealthLogCounter
+    {
+        public void Record(LogLevel level, int messageLength, int managedThreadId, ModHealthLogObservationCategory observationCategory)
+        {
+            this.RecordCore(level, messageLength, managedThreadId, observationCategory);
+        }
+
+        public long RecordCore(LogLevel level, int messageLength, int managedThreadId, ModHealthLogObservationCategory observationCategory)
+        {
+            return ledger.RecordLog(record, level, messageLength, managedThreadId, observationCategory);
+        }
     }
 
     private sealed class MutableFailureRecord(ModHealthFailureIdentity identity, long sequence, long timestamp)

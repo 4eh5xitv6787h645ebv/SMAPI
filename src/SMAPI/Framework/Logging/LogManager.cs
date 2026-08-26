@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using StardewModdingAPI.Framework.Commands;
 using StardewModdingAPI.Framework.Models;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.ModLoading;
 using StardewModdingAPI.Internal;
 using StardewModdingAPI.Internal.ConsoleWriting;
@@ -60,14 +61,15 @@ internal class LogManager : IDisposable
     /// <param name="isDeveloperMode">Whether to enable full console output for developers.</param>
     /// <param name="getScreenIdForLog">Get the screen ID that should be logged to distinguish between players in split-screen mode, if any.</param>
     /// <param name="onLog">Receives log metadata for diagnostics, if any.</param>
-    public LogManager(string logPath, MonitorColorScheme colorSchemeId, Dictionary<MonitorColorScheme, Dictionary<ConsoleLogLevel, ConsoleColor>> colorConfig, bool writeToConsole, HashSet<string> verboseLogging, bool isDeveloperMode, Func<int?> getScreenIdForLog, Action<string, string, LogLevel>? onLog = null)
+    /// <param name="healthLogSink">The health ledger which registers allocation-free counters, if enabled.</param>
+    public LogManager(string logPath, MonitorColorScheme colorSchemeId, Dictionary<MonitorColorScheme, Dictionary<ConsoleLogLevel, ConsoleColor>> colorConfig, bool writeToConsole, HashSet<string> verboseLogging, bool isDeveloperMode, Func<int?> getScreenIdForLog, Action<string, string, LogLevel>? onLog = null, IModHealthLogSink? healthLogSink = null)
     {
         // init log file
         this.LogFile = new LogFileManager(logPath);
 
         // init monitor
         this.ConsoleWriter = new ColorfulConsoleWriter(Constants.Platform, colorSchemeId, colorConfig);
-        this.GetMonitorImpl = (id, name) => this.CreateAndRegisterMonitor(id, name, verboseLogging, getScreenIdForLog, writeToConsole, isDeveloperMode, onLog);
+        this.GetMonitorImpl = (id, name) => this.CreateAndRegisterMonitor(id, name, verboseLogging, getScreenIdForLog, writeToConsole, isDeveloperMode, onLog, healthLogSink);
 
         this.Monitor = this.GetMonitor("SMAPI", "SMAPI");
         this.MonitorForGame = this.GetMonitor("game", "game");
@@ -369,9 +371,17 @@ internal class LogManager : IDisposable
     /// <param name="writeToConsole">Whether to write anything to the console. This should be disabled if no console is available.</param>
     /// <param name="isDeveloperMode">Whether to enable full console output for developers.</param>
     /// <param name="onLog">Receives log metadata for diagnostics, if any.</param>
-    private Monitor CreateAndRegisterMonitor(string modId, string source, HashSet<string> verboseLogging, Func<int?> getScreenIdForLog, bool writeToConsole, bool isDeveloperMode, Action<string, string, LogLevel>? onLog)
+    /// <param name="healthLogSink">The health ledger which registers allocation-free counters, if enabled.</param>
+    private Monitor CreateAndRegisterMonitor(string modId, string source, HashSet<string> verboseLogging, Func<int?> getScreenIdForLog, bool writeToConsole, bool isDeveloperMode, Action<string, string, LogLevel>? onLog, IModHealthLogSink? healthLogSink)
     {
-        Monitor monitor = new(modId, source, this.LogFile, this.ConsoleWriter, getScreenIdForLog, onLog)
+        ModHealthLogSourceCategory sourceCategory = modId switch
+        {
+            "SMAPI" => ModHealthLogSourceCategory.Smapi,
+            "game" => ModHealthLogSourceCategory.Game,
+            _ => ModHealthLogSourceCategory.Mod
+        };
+        IModHealthLogCounter? healthCounter = healthLogSink?.RegisterLogSource(modId, source, sourceCategory);
+        Monitor monitor = new(modId, source, this.LogFile, this.ConsoleWriter, getScreenIdForLog, onLog, healthCounter)
         {
             WriteToConsole = writeToConsole
         };
