@@ -9,6 +9,8 @@ This disposable desktop-only SMAPI mod checks whether short physical X11 clicks 
 
 It also logs update gaps and process-wide GC collection-count changes for correlation. It does not synthesize input through SMAPI and does not retry missed clicks, since either would hide the defect or risk double activation.
 
+The probe requires an X11 session and `xdotool` installed at `/usr/bin/xdotool`.
+
 Build it against the exact isolated game under test:
 
 ```sh
