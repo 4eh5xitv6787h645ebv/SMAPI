@@ -141,6 +141,38 @@ internal sealed class ModHealthLedgerTests
     }
 
     [Test]
+    public void RegisteredLogCounter_TracksBoundedOneSecondPeakRates()
+    {
+        long timestamp = 0;
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: () => timestamp);
+        IModHealthLogCounter counter = ledger.RegisterLogSource("example.mod", "Example Mod", ModHealthLogSourceCategory.Mod);
+
+        counter.Record(LogLevel.Info, 10, 1, ModHealthLogObservationCategory.Normal);
+        timestamp = 999;
+        counter.Record(LogLevel.Info, 20, 1, ModHealthLogObservationCategory.Normal);
+        timestamp = 1000;
+        counter.Record(LogLevel.Info, 50, 1, ModHealthLogObservationCategory.Normal);
+
+        ModHealthLogSourceSnapshot source = ledger.GetSnapshot().LogSources.Single();
+        source.PeakMessagesPerSecond.Should().Be(2);
+        source.PeakCharactersPerSecond.Should().Be(50);
+    }
+
+    [Test]
+    public void RegisteredLogCounter_TracksConcurrentPeakWithoutTextOrAllocatingBuckets()
+    {
+        const int count = 20_000;
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 500);
+        IModHealthLogCounter counter = ledger.RegisterLogSource("example.mod", "Example Mod", ModHealthLogSourceCategory.Mod);
+
+        Parallel.For(0, count, _ => counter.Record(LogLevel.Trace, 3, Environment.CurrentManagedThreadId, ModHealthLogObservationCategory.Normal));
+
+        ModHealthLogSourceSnapshot source = ledger.GetSnapshot().LogSources.Single();
+        source.PeakMessagesPerSecond.Should().Be(count);
+        source.PeakCharactersPerSecond.Should().Be(count * 3);
+    }
+
+    [Test]
     public void ObserveLog_ClassifiesCoreAndGameAndExcludesReporterMessages()
     {
         ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: () => 0);

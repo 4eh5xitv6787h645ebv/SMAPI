@@ -73,11 +73,21 @@ internal sealed class ModHealthReportTextFormatter
         }
 
         text.Append("\nTop observed mods and callbacks\n");
+        foreach (ModHealthMod mod in report.Mods
+                     .Where(mod => mod.ObservedCallbackCount > 0)
+                     .OrderByDescending(mod => mod.ObservedCallbackMilliseconds)
+                     .ThenByDescending(mod => mod.ObservedCallbackPeakMilliseconds)
+                     .ThenBy(mod => mod.Id, StringComparer.OrdinalIgnoreCase)
+                     .Take(20))
+        {
+            text.Append("- Mod total: ").Append(mod.Name).Append(" (").Append(mod.Id).Append("): ").Append(ModHealthReportTextFormatter.FormatMilliseconds(mod.ObservedCallbackMilliseconds)).Append(" ms exclusive observed time, ").Append(ModHealthReportTextFormatter.FormatMilliseconds(mod.ObservedCallbackPeakMilliseconds)).Append(" ms peak, ").Append(mod.ObservedCallbackCount.ToString(CultureInfo.InvariantCulture)).Append(" calls, ").Append(mod.SlowUpdateParticipationCount.ToString(CultureInfo.InvariantCulture)).Append(" retained slow updates\n");
+        }
         if (report.Performance.Callbacks.Length == 0)
             text.Append("No callback timing detail was retained.\n");
         foreach (ModHealthCallback callback in report.Performance.Callbacks.Take(20))
         {
             text.Append("- ").Append(callback.ModName).Append(" (").Append(callback.ModId).Append(") | ").Append(callback.Phase.ToString().ToLowerInvariant()).Append('/').Append(callback.Operation.ToString().ToLowerInvariant()).Append(" | ").Append(callback.Callback)
+                .Append(" [").Append(callback.Event).Append(']')
                 .Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(callback.TotalMilliseconds)).Append(" ms total, ").Append(ModHealthReportTextFormatter.FormatMilliseconds(callback.MaximumMilliseconds)).Append(" ms peak, ").Append(callback.CallCount.ToString(CultureInfo.InvariantCulture)).Append(" calls\n");
         }
 
@@ -87,21 +97,26 @@ internal sealed class ModHealthReportTextFormatter
         foreach (ModHealthEpisode episode in report.Performance.Episodes.Take(10))
             text.Append("- Episode ticks ").Append(episode.FirstUpdateTick.ToString(CultureInfo.InvariantCulture)).Append('-').Append(episode.LastUpdateTick.ToString(CultureInfo.InvariantCulture)).Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(episode.MaximumMilliseconds)).Append(" ms maximum\n");
         foreach (ModHealthUpdate update in report.Performance.WorstUpdates.Take(10))
-            text.Append("- Update tick ").Append(update.UpdateTick.ToString(CultureInfo.InvariantCulture)).Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.TotalMilliseconds)).Append(" ms total; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ObservedModMilliseconds)).Append(" ms observed mod callbacks; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ResidualMilliseconds)).Append(" ms remaining unattributed\n");
+            text.Append("- Update tick ").Append(update.UpdateTick.ToString(CultureInfo.InvariantCulture)).Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.TotalMilliseconds)).Append(" ms total; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ObservedModMilliseconds)).Append(" ms observed mod callbacks; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.BaseGameExclusiveMilliseconds)).Append(" ms base-game exclusive; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.SmapiOtherMilliseconds)).Append(" ms SMAPI/other; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ResidualMilliseconds)).Append(" ms remaining unattributed\n");
 
         text.Append("\nErrors, failures, and logging volume\n")
-            .Append("A failed callback may also emit an error; do not sum those columns as unique incidents.\n");
+            .Append("A failed callback may also emit an error; do not sum those columns as unique incidents.\n")
+            .Append("Session totals: ").Append(report.LogTotals.SinceLedgerStart.WarningMessages.ToString(CultureInfo.InvariantCulture)).Append(" warnings, ").Append(report.LogTotals.SinceLedgerStart.AlertMessages.ToString(CultureInfo.InvariantCulture)).Append(" alerts, ").Append(report.LogTotals.SinceLedgerStart.ErrorMessages.ToString(CultureInfo.InvariantCulture)).Append(" errors, ").Append(report.CallbackFailureTotals.SinceLedgerStart.ToString(CultureInfo.InvariantCulture)).Append(" failed callbacks.\n")
+            .Append("Capture totals: ").Append(report.LogTotals.DuringCapture.WarningMessages.ToString(CultureInfo.InvariantCulture)).Append(" warnings, ").Append(report.LogTotals.DuringCapture.AlertMessages.ToString(CultureInfo.InvariantCulture)).Append(" alerts, ").Append(report.LogTotals.DuringCapture.ErrorMessages.ToString(CultureInfo.InvariantCulture)).Append(" errors, ").Append(report.CallbackFailureTotals.DuringCapture.ToString(CultureInfo.InvariantCulture)).Append(" failed callbacks.\n");
         foreach (ModHealthLogSummary log in report.Logs)
-            text.Append("- ").Append(log.Source).Append(": ").Append(log.WarningCount.ToString(CultureInfo.InvariantCulture)).Append(" warnings, ").Append(log.ErrorCount.ToString(CultureInfo.InvariantCulture)).Append(" errors, approximately ").Append(log.CharacterCount.ToString(CultureInfo.InvariantCulture)).Append(" characters\n");
+            text.Append("- ").Append(log.Source).Append(" [").Append(log.SourceCategory.ToString().ToLowerInvariant()).Append("]: ").Append(log.SinceLedgerStart.WarningMessages.ToString(CultureInfo.InvariantCulture)).Append(" warnings, ").Append(log.SinceLedgerStart.ErrorMessages.ToString(CultureInfo.InvariantCulture)).Append(" errors, approximately ").Append(log.SinceLedgerStart.TotalCharacters.ToString(CultureInfo.InvariantCulture)).Append(" characters since ledger start; ").Append(log.DuringCapture.ErrorMessages.ToString(CultureInfo.InvariantCulture)).Append(" errors during capture\n");
+        foreach (ModHealthCallbackFailure failure in report.CallbackFailures)
+            text.Append("- Failed callback: ").Append(failure.ModName).Append(" (").Append(failure.ModId).Append(") | ").Append(failure.Operation.ToString().ToLowerInvariant()).Append(" | ").Append(failure.Callback).Append(" | ").Append(failure.ExceptionType).Append(": ").Append(failure.SessionCount.ToString(CultureInfo.InvariantCulture)).Append(" since ledger start, ").Append(failure.CaptureCount.ToString(CultureInfo.InvariantCulture)).Append(" during capture\n");
 
-        text.Append("\nInstalled mod and content-pack inventory\n");
+        text.Append("\nInstalled mod and content-pack inventory\n")
+            .Append("Discovered: ").Append(report.ModInventory.TotalDiscovered.ToString(CultureInfo.InvariantCulture)).Append(" total; ").Append(report.ModInventory.Loaded.ToString(CultureInfo.InvariantCulture)).Append(" loaded, ").Append(report.ModInventory.Skipped.ToString(CultureInfo.InvariantCulture)).Append(" skipped, ").Append(report.ModInventory.Ignored.ToString(CultureInfo.InvariantCulture)).Append(" ignored, ").Append(report.ModInventory.Invalid.ToString(CultureInfo.InvariantCulture)).Append(" invalid, ").Append(report.ModInventory.Failed.ToString(CultureInfo.InvariantCulture)).Append(" failed, ").Append(report.ModInventory.Discovered.ToString(CultureInfo.InvariantCulture)).Append(" unresolved.\n");
         foreach (ModHealthMod mod in report.Mods)
-            text.Append("- ").Append(mod.Name).Append(" (").Append(mod.Id).Append(") ").Append(mod.Version).Append(" — ").Append(ModHealthReportTextFormatter.GetModKind(mod.Kind)).Append(", ").Append(mod.Status.ToString().ToLowerInvariant()).Append('\n');
+            text.Append("- ").Append(mod.Name).Append(" (").Append(mod.Id).Append(") ").Append(mod.Version).Append(" — ").Append(ModHealthReportTextFormatter.GetModKind(mod.Kind)).Append(", ").Append(mod.Status.ToString().ToLowerInvariant()).Append(", update ").Append(ModHealthReportTextFormatter.GetUpdateStatus(mod.UpdateStatus)).Append('\n');
 
         text.Append("\nEnvironment\n")
             .Append("SMAPI: ").Append(report.Environment.SmapiVersion).Append('\n')
             .Append("Game: ").Append(report.Environment.GameVersion).Append('\n')
-            .Append("Runtime: ").Append(report.Environment.RuntimeVersion).Append(" (").Append(report.Environment.ProcessArchitecture).Append(")\n")
+            .Append("Runtime: ").Append(report.Environment.RuntimeVersion).Append(" (").Append(report.Environment.ProcessArchitecture).Append(", ").Append(report.Environment.ProcessBitness.ToString(CultureInfo.InvariantCulture)).Append("-bit)\n")
             .Append("Linux/session: ").Append(report.Environment.LinuxDistribution ?? "unknown").Append(" / ").Append(report.Environment.SessionType).Append('\n')
             .Append("Locale: ").Append(report.Environment.Locale).Append('\n')
             .Append("Multiplayer/split screen: ").Append(report.Environment.MultiplayerRole).Append(" / ").Append(report.Environment.SplitScreenCount.ToString(CultureInfo.InvariantCulture)).Append('\n');
@@ -158,5 +173,12 @@ internal sealed class ModHealthReportTextFormatter
         ModHealthModKind.CodeMod => "code-mod",
         ModHealthModKind.ContentPack => "content-pack",
         _ => "invalid"
+    };
+
+    private static string GetUpdateStatus(ModHealthReportUpdateStatus status) => status switch
+    {
+        ModHealthReportUpdateStatus.UpToDate => "up-to-date",
+        ModHealthReportUpdateStatus.UpdateAvailable => "update-available",
+        _ => status.ToString().ToLowerInvariant()
     };
 }

@@ -183,7 +183,9 @@ internal sealed record ModHealthLogSourceSnapshot(
     long LastSequence,
     TimeSpan FirstOffset,
     TimeSpan LastOffset,
-    int LastManagedThreadId
+    int LastManagedThreadId,
+    long PeakMessagesPerSecond,
+    long PeakCharactersPerSecond
 );
 
 /// <summary>Aggregate evidence for one structured callback-failure identity.</summary>

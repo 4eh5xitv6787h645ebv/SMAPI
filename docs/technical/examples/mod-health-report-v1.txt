@@ -33,23 +33,27 @@ Mods needing attention
 None recorded.
 
 Top observed mods and callbacks
-- Example Mod (Example.Mod) | update/event | Example.Mod.OnUpdate: 12 ms total, 0.08 ms peak, 3600 calls
+- Mod total: Example Mod (Example.Mod): 12 ms exclusive observed time, 0.08 ms peak, 3600 calls, 1 retained slow updates
+- Example Mod (Example.Mod) | update/event | Example.Mod.OnUpdate [UpdateTicked]: 12 ms total, 0.08 ms peak, 3600 calls
 
 Slow episodes and worst updates
 - Episode ticks 1200-1202: 41.2 ms maximum
-- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 1 ms remaining unattributed
+- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 38 ms base-game exclusive; 2 ms SMAPI/other; 1 ms remaining unattributed
 
 Errors, failures, and logging volume
 A failed callback may also emit an error; do not sum those columns as unique incidents.
-- Example.Mod: 0 warnings, 0 errors, approximately 120 characters
+Session totals: 0 warnings, 0 alerts, 0 errors, 0 failed callbacks.
+Capture totals: 0 warnings, 0 alerts, 0 errors, 0 failed callbacks.
+- Example.Mod [mod]: 0 warnings, 0 errors, approximately 120 characters since ledger start; 0 errors during capture
 
 Installed mod and content-pack inventory
-- Example Mod (Example.Mod) 1.2.3 — code-mod, loaded
+Discovered: 1 total; 1 loaded, 0 skipped, 0 ignored, 0 invalid, 0 failed, 0 unresolved.
+- Example Mod (Example.Mod) 1.2.3 — code-mod, loaded, update up-to-date
 
 Environment
 SMAPI: 4.5.2-fork
 Game: 1.6.15
-Runtime: .NET 6.0.36 (x64)
+Runtime: .NET 6.0.36 (x64, 64-bit)
 Linux/session: Linux / wayland
 Locale: en-AU
 Multiplayer/split screen: single-player / 1

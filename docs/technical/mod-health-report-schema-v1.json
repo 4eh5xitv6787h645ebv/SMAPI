@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://smapi.io/schemas/mod-health-report-v1.json",
   "title": "SMAPI Mod Health Report v1",
+  "$comment": "This is the pre-release schema-v1 contract. Warning/update state, ranked observed-mod aggregates, per-severity session/capture log counters, and structured callback failures were added before the first supported release; consumers should ignore unknown future fields.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "header", "completeness", "environment", "capture", "findings", "performance", "mods", "logs", "capacities", "omissions", "privacy", "limitations"],
+  "required": ["schemaVersion", "header", "completeness", "environment", "capture", "findings", "performance", "modInventory", "mods", "logTotals", "logs", "callbackFailureTotals", "callbackFailures", "capacities", "omissions", "privacy", "limitations"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "header": { "$ref": "#/$defs/header" },
@@ -13,8 +14,12 @@
     "capture": { "$ref": "#/$defs/capture" },
     "findings": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/finding" } },
     "performance": { "$ref": "#/$defs/performance" },
+    "modInventory": { "$ref": "#/$defs/modInventory" },
     "mods": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/mod" } },
+    "logTotals": { "$ref": "#/$defs/logTotals" },
     "logs": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/log" } },
+    "callbackFailureTotals": { "$ref": "#/$defs/callbackFailureTotals" },
+    "callbackFailures": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/callbackFailure" } },
     "capacities": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/capacity" } },
     "omissions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/omission" } },
     "privacy": { "$ref": "#/$defs/privacy" },
@@ -50,11 +55,11 @@
     },
     "environment": {
       "type": "object", "additionalProperties": false,
-      "required": ["smapiVersion", "smapiCommit", "gameVersion", "runtimeVersion", "processArchitecture", "linuxDistribution", "kernel", "sessionType", "locale", "logicalProcessorCount", "multiplayerRole", "splitScreenCount"],
+      "required": ["smapiVersion", "smapiCommit", "gameVersion", "runtimeVersion", "processArchitecture", "processBitness", "linuxDistribution", "kernel", "sessionType", "locale", "logicalProcessorCount", "multiplayerRole", "splitScreenCount"],
       "properties": {
         "smapiVersion": { "$ref": "#/$defs/identity" }, "smapiCommit": { "$ref": "#/$defs/nullableIdentity" },
         "gameVersion": { "$ref": "#/$defs/identity" }, "runtimeVersion": { "$ref": "#/$defs/identity" },
-        "processArchitecture": { "$ref": "#/$defs/identity" }, "linuxDistribution": { "$ref": "#/$defs/nullableIdentity" },
+        "processArchitecture": { "$ref": "#/$defs/identity" }, "processBitness": { "enum": [0, 32, 64] }, "linuxDistribution": { "$ref": "#/$defs/nullableIdentity" },
         "kernel": { "$ref": "#/$defs/nullableIdentity" }, "sessionType": { "$ref": "#/$defs/identity" },
         "locale": { "$ref": "#/$defs/identity" }, "logicalProcessorCount": { "type": "integer", "minimum": 1 },
         "multiplayerRole": { "$ref": "#/$defs/identity" }, "splitScreenCount": { "$ref": "#/$defs/nonnegativeInteger" }
@@ -114,12 +119,12 @@
     },
     "callback": {
       "type": "object", "additionalProperties": false,
-      "required": ["modId", "modName", "phase", "operation", "callback", "onBehalfOfModId", "callCount", "totalMilliseconds", "maximumMilliseconds", "failureCount"],
+      "required": ["modId", "modName", "phase", "operation", "event", "callback", "onBehalfOfModId", "callCount", "totalMilliseconds", "maximumMilliseconds", "failureCount"],
       "properties": {
         "modId": { "$ref": "#/$defs/identity" }, "modName": { "$ref": "#/$defs/identity" },
         "phase": { "enum": ["startup", "update", "draw", "background", "unscoped"] },
         "operation": { "enum": ["event", "content-load", "content-edit", "console", "entry", "get-api", "other"] },
-        "callback": { "$ref": "#/$defs/callbackName" }, "onBehalfOfModId": { "$ref": "#/$defs/nullableIdentity" },
+        "event": { "$ref": "#/$defs/callbackName" }, "callback": { "$ref": "#/$defs/callbackName" }, "onBehalfOfModId": { "$ref": "#/$defs/nullableIdentity" },
         "callCount": { "$ref": "#/$defs/nonnegativeInteger" }, "totalMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
         "maximumMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "failureCount": { "$ref": "#/$defs/nonnegativeInteger" }
       }
@@ -150,24 +155,75 @@
     },
     "mod": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "name", "version", "kind", "parentId", "status", "failureCategory", "dependencies", "suggestedUpdateVersion", "sessionWarningCount", "sessionErrorCount", "captureErrorCount", "callbackFailureCount", "peakMessagesPerSecond", "peakCharactersPerSecond"],
+      "required": ["id", "name", "version", "kind", "parentId", "status", "failureCategory", "warningFlags", "dependencies", "updateStatus", "suggestedUpdateVersion", "sessionWarningCount", "sessionErrorCount", "captureErrorCount", "callbackFailureCount", "observedCallbackMilliseconds", "observedCallbackPeakMilliseconds", "observedCallbackCount", "observedCallbackFailureCount", "slowUpdateParticipationCount", "instrumentedTimeShare", "peakMessagesPerSecond", "peakCharactersPerSecond"],
       "properties": {
         "id": { "$ref": "#/$defs/identity" }, "name": { "$ref": "#/$defs/identity" }, "version": { "$ref": "#/$defs/identity" },
         "kind": { "enum": ["code-mod", "content-pack", "invalid"] }, "parentId": { "$ref": "#/$defs/nullableIdentity" },
         "status": { "enum": ["loaded", "skipped", "ignored", "invalid", "failed"] }, "failureCategory": { "$ref": "#/$defs/nullableIdentity" },
-        "dependencies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/identity" } }, "suggestedUpdateVersion": { "$ref": "#/$defs/nullableIdentity" },
+        "warningFlags": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/identity" } },
+        "dependencies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/identity" } },
+        "updateStatus": { "enum": ["unknown", "pending", "up-to-date", "update-available", "disabled", "suppressed", "unavailable"] }, "suggestedUpdateVersion": { "$ref": "#/$defs/nullableIdentity" },
         "sessionWarningCount": { "$ref": "#/$defs/nonnegativeInteger" }, "sessionErrorCount": { "$ref": "#/$defs/nonnegativeInteger" }, "captureErrorCount": { "$ref": "#/$defs/nonnegativeInteger" },
-        "callbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" }, "peakMessagesPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }, "peakCharactersPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }
+        "callbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "observedCallbackMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "observedCallbackPeakMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "observedCallbackCount": { "$ref": "#/$defs/nonnegativeInteger" }, "observedCallbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "slowUpdateParticipationCount": { "$ref": "#/$defs/nonnegativeInteger" }, "instrumentedTimeShare": { "type": "number", "minimum": 0, "maximum": 1 },
+        "peakMessagesPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }, "peakCharactersPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "modInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["totalDiscovered", "discovered", "loaded", "skipped", "ignored", "invalid", "failed", "retained"],
+      "properties": {
+        "totalDiscovered": { "$ref": "#/$defs/nonnegativeInteger" }, "discovered": { "$ref": "#/$defs/nonnegativeInteger" },
+        "loaded": { "$ref": "#/$defs/nonnegativeInteger" }, "skipped": { "$ref": "#/$defs/nonnegativeInteger" },
+        "ignored": { "$ref": "#/$defs/nonnegativeInteger" }, "invalid": { "$ref": "#/$defs/nonnegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonnegativeInteger" }, "retained": { "$ref": "#/$defs/nonnegativeInteger" }
       }
     },
     "log": {
       "type": "object", "additionalProperties": false,
-      "required": ["source", "traceCount", "debugCount", "infoCount", "warningCount", "errorCount", "characterCount", "firstOffsetMilliseconds", "lastOffsetMilliseconds"],
+      "required": ["source", "sourceCategory", "sinceLedgerStart", "duringCapture", "peakMessagesPerSecond", "peakCharactersPerSecond", "firstOffsetMilliseconds", "lastOffsetMilliseconds"],
       "properties": {
-        "source": { "$ref": "#/$defs/identity" }, "traceCount": { "$ref": "#/$defs/nonnegativeInteger" }, "debugCount": { "$ref": "#/$defs/nonnegativeInteger" }, "infoCount": { "$ref": "#/$defs/nonnegativeInteger" },
-        "warningCount": { "$ref": "#/$defs/nonnegativeInteger" }, "errorCount": { "$ref": "#/$defs/nonnegativeInteger" }, "characterCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "source": { "$ref": "#/$defs/identity" }, "sourceCategory": { "enum": ["mod", "smapi", "game"] },
+        "sinceLedgerStart": { "$ref": "#/$defs/logSeverity" }, "duringCapture": { "$ref": "#/$defs/logSeverity" },
+        "peakMessagesPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }, "peakCharactersPerSecond": { "$ref": "#/$defs/nonnegativeInteger" },
         "firstOffsetMilliseconds": { "$ref": "#/$defs/nullableNumber" }, "lastOffsetMilliseconds": { "$ref": "#/$defs/nullableNumber" }
       }
+    },
+    "logSeverity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["traceMessages", "traceCharacters", "debugMessages", "debugCharacters", "infoMessages", "infoCharacters", "warningMessages", "warningCharacters", "errorMessages", "errorCharacters", "alertMessages", "alertCharacters"],
+      "properties": {
+        "traceMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "traceCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "debugMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "debugCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "infoMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "infoCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "warningMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "warningCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "errorMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "errorCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "alertMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "alertCharacters": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "logTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sinceLedgerStart", "duringCapture"],
+      "properties": { "sinceLedgerStart": { "$ref": "#/$defs/logSeverity" }, "duringCapture": { "$ref": "#/$defs/logSeverity" } }
+    },
+    "callbackFailure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["modId", "modName", "phase", "operation", "callback", "exceptionType", "onBehalfOfModId", "sessionCount", "captureCount", "firstOffsetMilliseconds", "lastOffsetMilliseconds"],
+      "properties": {
+        "modId": { "$ref": "#/$defs/identity" }, "modName": { "$ref": "#/$defs/identity" },
+        "phase": { "enum": ["startup", "update", "draw", "background", "unscoped"] },
+        "operation": { "enum": ["event", "content-load", "content-edit", "console", "entry", "get-api", "other"] },
+        "callback": { "$ref": "#/$defs/callbackName" }, "exceptionType": { "$ref": "#/$defs/callbackName" }, "onBehalfOfModId": { "$ref": "#/$defs/nullableIdentity" },
+        "sessionCount": { "$ref": "#/$defs/nonnegativeInteger" }, "captureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "firstOffsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "lastOffsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }
+      }
+    },
+    "callbackFailureTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sinceLedgerStart", "duringCapture"],
+      "properties": { "sinceLedgerStart": { "$ref": "#/$defs/nonnegativeInteger" }, "duringCapture": { "$ref": "#/$defs/nonnegativeInteger" } }
     },
     "finding": {
       "type": "object", "additionalProperties": false,

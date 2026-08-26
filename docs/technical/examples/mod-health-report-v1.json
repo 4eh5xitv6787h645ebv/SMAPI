@@ -19,6 +19,7 @@
     "gameVersion": "1.6.15",
     "runtimeVersion": ".NET 6.0.36",
     "processArchitecture": "x64",
+    "processBitness": 64,
     "linuxDistribution": "Linux",
     "kernel": "6.12",
     "sessionType": "wayland",
@@ -70,6 +71,7 @@
         "modName": "Example Mod",
         "phase": "update",
         "operation": "event",
+        "event": "UpdateTicked",
         "callback": "Example.Mod.OnUpdate",
         "onBehalfOfModId": null,
         "callCount": 3600,
@@ -116,6 +118,16 @@
     "gen1Collections": 0,
     "gen2Collections": 0
   },
+  "modInventory": {
+    "totalDiscovered": 1,
+    "discovered": 0,
+    "loaded": 1,
+    "skipped": 0,
+    "ignored": 0,
+    "invalid": 0,
+    "failed": 0,
+    "retained": 1
+  },
   "mods": [
     {
       "id": "Example.Mod",
@@ -125,29 +137,97 @@
       "parentId": null,
       "status": "loaded",
       "failureCategory": null,
+      "warningFlags": [],
       "dependencies": [],
+      "updateStatus": "up-to-date",
       "suggestedUpdateVersion": null,
       "sessionWarningCount": 0,
       "sessionErrorCount": 0,
       "captureErrorCount": 0,
       "callbackFailureCount": 0,
+      "observedCallbackMilliseconds": 12.0,
+      "observedCallbackPeakMilliseconds": 0.08,
+      "observedCallbackCount": 3600,
+      "observedCallbackFailureCount": 0,
+      "slowUpdateParticipationCount": 1,
+      "instrumentedTimeShare": 1.0,
       "peakMessagesPerSecond": 3,
       "peakCharactersPerSecond": 120
     }
   ],
+  "logTotals": {
+    "sinceLedgerStart": {
+      "traceMessages": 3,
+      "traceCharacters": 120,
+      "debugMessages": 0,
+      "debugCharacters": 0,
+      "infoMessages": 0,
+      "infoCharacters": 0,
+      "warningMessages": 0,
+      "warningCharacters": 0,
+      "errorMessages": 0,
+      "errorCharacters": 0,
+      "alertMessages": 0,
+      "alertCharacters": 0
+    },
+    "duringCapture": {
+      "traceMessages": 2,
+      "traceCharacters": 80,
+      "debugMessages": 0,
+      "debugCharacters": 0,
+      "infoMessages": 0,
+      "infoCharacters": 0,
+      "warningMessages": 0,
+      "warningCharacters": 0,
+      "errorMessages": 0,
+      "errorCharacters": 0,
+      "alertMessages": 0,
+      "alertCharacters": 0
+    }
+  },
   "logs": [
     {
       "source": "Example.Mod",
-      "traceCount": 3,
-      "debugCount": 0,
-      "infoCount": 0,
-      "warningCount": 0,
-      "errorCount": 0,
-      "characterCount": 120,
+      "sourceCategory": "mod",
+      "sinceLedgerStart": {
+        "traceMessages": 3,
+        "traceCharacters": 120,
+        "debugMessages": 0,
+        "debugCharacters": 0,
+        "infoMessages": 0,
+        "infoCharacters": 0,
+        "warningMessages": 0,
+        "warningCharacters": 0,
+        "errorMessages": 0,
+        "errorCharacters": 0,
+        "alertMessages": 0,
+        "alertCharacters": 0
+      },
+      "duringCapture": {
+        "traceMessages": 2,
+        "traceCharacters": 80,
+        "debugMessages": 0,
+        "debugCharacters": 0,
+        "infoMessages": 0,
+        "infoCharacters": 0,
+        "warningMessages": 0,
+        "warningCharacters": 0,
+        "errorMessages": 0,
+        "errorCharacters": 0,
+        "alertMessages": 0,
+        "alertCharacters": 0
+      },
+      "peakMessagesPerSecond": 3,
+      "peakCharactersPerSecond": 120,
       "firstOffsetMilliseconds": 100.0,
       "lastOffsetMilliseconds": 59000.0
     }
   ],
+  "callbackFailureTotals": {
+    "sinceLedgerStart": 0,
+    "duringCapture": 0
+  },
+  "callbackFailures": [],
   "capacities": [
     { "name": "callbacks", "limit": 500, "reached": false }
   ],

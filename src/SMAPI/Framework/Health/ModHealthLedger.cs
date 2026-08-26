@@ -264,7 +264,9 @@ internal sealed class ModHealthLedger : IModHealthLogSink
                         Volatile.Read(ref record.LastSequence),
                         this.ToOffset(Volatile.Read(ref record.FirstTimestamp)),
                         this.ToOffset(Volatile.Read(ref record.LastTimestamp)),
-                        Volatile.Read(ref record.LastManagedThreadId)
+                        Volatile.Read(ref record.LastManagedThreadId),
+                        Volatile.Read(ref record.PeakMessagesPerSecond),
+                        Volatile.Read(ref record.PeakCharactersPerSecond)
                     );
                 })
                 .ToArray();
@@ -389,6 +391,8 @@ internal sealed class ModHealthLedger : IModHealthLogSink
             }
 
             long timestamp = this.GetTimestamp();
+            if (record != null)
+                record.RecordRate(this.ToRateBucket(timestamp), characters);
             long sequence = this.AdvanceSequence();
             if (record != null)
                 record.Complete(sequence, timestamp, managedThreadId);
@@ -478,6 +482,13 @@ internal sealed class ModHealthLedger : IModHealthLogSink
     {
         long elapsed = Math.Max(0, timestamp - this.StartedTimestamp);
         return TimeSpan.FromSeconds(elapsed / (double)this.TimestampFrequency);
+    }
+
+    /// <summary>Get the nonnegative one-second ledger-relative rate bucket for a timestamp.</summary>
+    private long ToRateBucket(long timestamp)
+    {
+        long elapsed = Math.Max(0, timestamp - this.StartedTimestamp);
+        return elapsed / this.TimestampFrequency;
     }
 
     private static ModHealthLogIdentity CreateLogIdentity(in ModHealthLogObservation observation)
@@ -637,6 +648,27 @@ internal sealed class ModHealthLedger : IModHealthLogSink
         }
     }
 
+    private static long AtomicSaturatingIncrement(ref long target)
+    {
+        while (true)
+        {
+            long current = Volatile.Read(ref target);
+            long next = SaturatingIncrement(current);
+            if (next == current || Interlocked.CompareExchange(ref target, next, current) == current)
+                return next;
+        }
+    }
+
+    private static void AtomicMaximum(ref long target, long candidate)
+    {
+        while (true)
+        {
+            long current = Volatile.Read(ref target);
+            if (candidate <= current || Interlocked.CompareExchange(ref target, candidate, current) == current)
+                return;
+        }
+    }
+
     private static long[] ReadCounts(long[] counts)
     {
         long[] result = new long[counts.Length];
@@ -712,6 +744,41 @@ internal sealed class ModHealthLedger : IModHealthLogSink
         public long FirstTimestamp;
         public long LastTimestamp;
         public int LastManagedThreadId;
+        public long RateBucket;
+        public long RateBucketMessages;
+        public long RateBucketCharacters;
+        public long PeakMessagesPerSecond;
+        public long PeakCharactersPerSecond;
+
+        /// <summary>Update approximate one-second peak rates without a global lock or message retention.</summary>
+        public void RecordRate(long bucket, long characters)
+        {
+            SpinWait spin = new();
+            while (true)
+            {
+                long currentBucket = Volatile.Read(ref this.RateBucket);
+                if (currentBucket < 0)
+                {
+                    spin.SpinOnce();
+                    continue;
+                }
+                if (bucket <= currentBucket)
+                    break;
+                if (Interlocked.CompareExchange(ref this.RateBucket, ~bucket, currentBucket) == currentBucket)
+                {
+                    Interlocked.Exchange(ref this.RateBucketMessages, 0);
+                    Interlocked.Exchange(ref this.RateBucketCharacters, 0);
+                    Volatile.Write(ref this.RateBucket, bucket);
+                    break;
+                }
+            }
+
+            long messagesInBucket = AtomicSaturatingIncrement(ref this.RateBucketMessages);
+            AtomicSaturatingAdd(ref this.RateBucketCharacters, characters);
+            long charactersInBucket = Volatile.Read(ref this.RateBucketCharacters);
+            AtomicMaximum(ref this.PeakMessagesPerSecond, messagesInBucket);
+            AtomicMaximum(ref this.PeakCharactersPerSecond, charactersInBucket);
+        }
 
         public void Complete(long sequence, long timestamp, int managedThreadId)
         {

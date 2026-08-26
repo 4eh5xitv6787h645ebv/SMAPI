@@ -16,12 +16,16 @@ internal sealed record ModHealthReport(
     [property: JsonProperty("capture", Order = 4, Required = Required.Always)] ModHealthCapture Capture,
     [property: JsonProperty("findings", Order = 5, Required = Required.Always)] ImmutableArray<ModHealthFinding> Findings,
     [property: JsonProperty("performance", Order = 6, Required = Required.Always)] ModHealthPerformance Performance,
-    [property: JsonProperty("mods", Order = 7, Required = Required.Always)] ImmutableArray<ModHealthMod> Mods,
-    [property: JsonProperty("logs", Order = 8, Required = Required.Always)] ImmutableArray<ModHealthLogSummary> Logs,
-    [property: JsonProperty("capacities", Order = 9, Required = Required.Always)] ImmutableArray<ModHealthCapacity> Capacities,
-    [property: JsonProperty("omissions", Order = 10, Required = Required.Always)] ImmutableArray<ModHealthOmission> Omissions,
-    [property: JsonProperty("privacy", Order = 11, Required = Required.Always)] ModHealthPrivacy Privacy,
-    [property: JsonProperty("limitations", Order = 12, Required = Required.Always)] ImmutableArray<string> Limitations
+    [property: JsonProperty("modInventory", Order = 7, Required = Required.Always)] ModHealthModInventorySummary ModInventory,
+    [property: JsonProperty("mods", Order = 8, Required = Required.Always)] ImmutableArray<ModHealthMod> Mods,
+    [property: JsonProperty("logTotals", Order = 9, Required = Required.Always)] ModHealthLogTotals LogTotals,
+    [property: JsonProperty("logs", Order = 10, Required = Required.Always)] ImmutableArray<ModHealthLogSummary> Logs,
+    [property: JsonProperty("callbackFailureTotals", Order = 11, Required = Required.Always)] ModHealthCallbackFailureTotals CallbackFailureTotals,
+    [property: JsonProperty("callbackFailures", Order = 12, Required = Required.Always)] ImmutableArray<ModHealthCallbackFailure> CallbackFailures,
+    [property: JsonProperty("capacities", Order = 13, Required = Required.Always)] ImmutableArray<ModHealthCapacity> Capacities,
+    [property: JsonProperty("omissions", Order = 14, Required = Required.Always)] ImmutableArray<ModHealthOmission> Omissions,
+    [property: JsonProperty("privacy", Order = 15, Required = Required.Always)] ModHealthPrivacy Privacy,
+    [property: JsonProperty("limitations", Order = 16, Required = Required.Always)] ImmutableArray<string> Limitations
 );
 
 [JsonObject(MemberSerialization.OptIn)]
@@ -48,13 +52,14 @@ internal sealed record ModHealthEnvironment(
     [property: JsonProperty("gameVersion", Order = 2, Required = Required.Always)] string GameVersion,
     [property: JsonProperty("runtimeVersion", Order = 3, Required = Required.Always)] string RuntimeVersion,
     [property: JsonProperty("processArchitecture", Order = 4, Required = Required.Always)] string ProcessArchitecture,
-    [property: JsonProperty("linuxDistribution", Order = 5)] string? LinuxDistribution,
-    [property: JsonProperty("kernel", Order = 6)] string? Kernel,
-    [property: JsonProperty("sessionType", Order = 7, Required = Required.Always)] string SessionType,
-    [property: JsonProperty("locale", Order = 8, Required = Required.Always)] string Locale,
-    [property: JsonProperty("logicalProcessorCount", Order = 9, Required = Required.Always)] int LogicalProcessorCount,
-    [property: JsonProperty("multiplayerRole", Order = 10, Required = Required.Always)] string MultiplayerRole,
-    [property: JsonProperty("splitScreenCount", Order = 11, Required = Required.Always)] int SplitScreenCount
+    [property: JsonProperty("processBitness", Order = 5, Required = Required.Always)] int ProcessBitness,
+    [property: JsonProperty("linuxDistribution", Order = 6)] string? LinuxDistribution,
+    [property: JsonProperty("kernel", Order = 7)] string? Kernel,
+    [property: JsonProperty("sessionType", Order = 8, Required = Required.Always)] string SessionType,
+    [property: JsonProperty("locale", Order = 9, Required = Required.Always)] string Locale,
+    [property: JsonProperty("logicalProcessorCount", Order = 10, Required = Required.Always)] int LogicalProcessorCount,
+    [property: JsonProperty("multiplayerRole", Order = 11, Required = Required.Always)] string MultiplayerRole,
+    [property: JsonProperty("splitScreenCount", Order = 12, Required = Required.Always)] int SplitScreenCount
 );
 
 [JsonObject(MemberSerialization.OptIn)]
@@ -123,12 +128,13 @@ internal sealed record ModHealthCallback(
     [property: JsonProperty("modName", Order = 1, Required = Required.Always)] string ModName,
     [property: JsonProperty("phase", Order = 2, Required = Required.Always)] ModHealthExecutionPhase Phase,
     [property: JsonProperty("operation", Order = 3, Required = Required.Always)] ModHealthOperationKind Operation,
-    [property: JsonProperty("callback", Order = 4, Required = Required.Always)] string Callback,
-    [property: JsonProperty("onBehalfOfModId", Order = 5)] string? OnBehalfOfModId,
-    [property: JsonProperty("callCount", Order = 6, Required = Required.Always)] long CallCount,
-    [property: JsonProperty("totalMilliseconds", Order = 7, Required = Required.Always)] double TotalMilliseconds,
-    [property: JsonProperty("maximumMilliseconds", Order = 8, Required = Required.Always)] double MaximumMilliseconds,
-    [property: JsonProperty("failureCount", Order = 9, Required = Required.Always)] long FailureCount
+    [property: JsonProperty("event", Order = 4, Required = Required.Always)] string Event,
+    [property: JsonProperty("callback", Order = 5, Required = Required.Always)] string Callback,
+    [property: JsonProperty("onBehalfOfModId", Order = 6)] string? OnBehalfOfModId,
+    [property: JsonProperty("callCount", Order = 7, Required = Required.Always)] long CallCount,
+    [property: JsonProperty("totalMilliseconds", Order = 8, Required = Required.Always)] double TotalMilliseconds,
+    [property: JsonProperty("maximumMilliseconds", Order = 9, Required = Required.Always)] double MaximumMilliseconds,
+    [property: JsonProperty("failureCount", Order = 10, Required = Required.Always)] long FailureCount
 );
 
 [JsonObject(MemberSerialization.OptIn)]
@@ -177,27 +183,108 @@ internal sealed record ModHealthMod(
     [property: JsonProperty("parentId", Order = 4)] string? ParentId,
     [property: JsonProperty("status", Order = 5, Required = Required.Always)] ModHealthModStatus Status,
     [property: JsonProperty("failureCategory", Order = 6)] string? FailureCategory,
-    [property: JsonProperty("dependencies", Order = 7, Required = Required.Always)] ImmutableArray<string> Dependencies,
-    [property: JsonProperty("suggestedUpdateVersion", Order = 8)] string? SuggestedUpdateVersion,
-    [property: JsonProperty("sessionWarningCount", Order = 9, Required = Required.Always)] long SessionWarningCount,
-    [property: JsonProperty("sessionErrorCount", Order = 10, Required = Required.Always)] long SessionErrorCount,
-    [property: JsonProperty("captureErrorCount", Order = 11, Required = Required.Always)] long CaptureErrorCount,
-    [property: JsonProperty("callbackFailureCount", Order = 12, Required = Required.Always)] long CallbackFailureCount,
-    [property: JsonProperty("peakMessagesPerSecond", Order = 13, Required = Required.Always)] long PeakMessagesPerSecond,
-    [property: JsonProperty("peakCharactersPerSecond", Order = 14, Required = Required.Always)] long PeakCharactersPerSecond
+    [property: JsonProperty("warningFlags", Order = 7, Required = Required.Always)] ImmutableArray<string> WarningFlags,
+    [property: JsonProperty("dependencies", Order = 8, Required = Required.Always)] ImmutableArray<string> Dependencies,
+    [property: JsonProperty("updateStatus", Order = 9, Required = Required.Always)] ModHealthReportUpdateStatus UpdateStatus,
+    [property: JsonProperty("suggestedUpdateVersion", Order = 10)] string? SuggestedUpdateVersion,
+    [property: JsonProperty("sessionWarningCount", Order = 11, Required = Required.Always)] long SessionWarningCount,
+    [property: JsonProperty("sessionErrorCount", Order = 12, Required = Required.Always)] long SessionErrorCount,
+    [property: JsonProperty("captureErrorCount", Order = 13, Required = Required.Always)] long CaptureErrorCount,
+    [property: JsonProperty("callbackFailureCount", Order = 14, Required = Required.Always)] long CallbackFailureCount,
+    [property: JsonProperty("observedCallbackMilliseconds", Order = 15, Required = Required.Always)] double ObservedCallbackMilliseconds,
+    [property: JsonProperty("observedCallbackPeakMilliseconds", Order = 16, Required = Required.Always)] double ObservedCallbackPeakMilliseconds,
+    [property: JsonProperty("observedCallbackCount", Order = 17, Required = Required.Always)] long ObservedCallbackCount,
+    [property: JsonProperty("observedCallbackFailureCount", Order = 18, Required = Required.Always)] long ObservedCallbackFailureCount,
+    [property: JsonProperty("slowUpdateParticipationCount", Order = 19, Required = Required.Always)] long SlowUpdateParticipationCount,
+    [property: JsonProperty("instrumentedTimeShare", Order = 20, Required = Required.Always)] double InstrumentedTimeShare,
+    [property: JsonProperty("peakMessagesPerSecond", Order = 21, Required = Required.Always)] long PeakMessagesPerSecond,
+    [property: JsonProperty("peakCharactersPerSecond", Order = 22, Required = Required.Always)] long PeakCharactersPerSecond
+);
+
+[JsonObject(MemberSerialization.OptIn)]
+internal sealed record ModHealthModInventorySummary(
+    [property: JsonProperty("totalDiscovered", Order = 0, Required = Required.Always)] long TotalDiscovered,
+    [property: JsonProperty("discovered", Order = 1, Required = Required.Always)] long Discovered,
+    [property: JsonProperty("loaded", Order = 2, Required = Required.Always)] long Loaded,
+    [property: JsonProperty("skipped", Order = 3, Required = Required.Always)] long Skipped,
+    [property: JsonProperty("ignored", Order = 4, Required = Required.Always)] long Ignored,
+    [property: JsonProperty("invalid", Order = 5, Required = Required.Always)] long Invalid,
+    [property: JsonProperty("failed", Order = 6, Required = Required.Always)] long Failed,
+    [property: JsonProperty("retained", Order = 7, Required = Required.Always)] int Retained
 );
 
 [JsonObject(MemberSerialization.OptIn)]
 internal sealed record ModHealthLogSummary(
     [property: JsonProperty("source", Order = 0, Required = Required.Always)] string Source,
-    [property: JsonProperty("traceCount", Order = 1, Required = Required.Always)] long TraceCount,
-    [property: JsonProperty("debugCount", Order = 2, Required = Required.Always)] long DebugCount,
-    [property: JsonProperty("infoCount", Order = 3, Required = Required.Always)] long InfoCount,
-    [property: JsonProperty("warningCount", Order = 4, Required = Required.Always)] long WarningCount,
-    [property: JsonProperty("errorCount", Order = 5, Required = Required.Always)] long ErrorCount,
-    [property: JsonProperty("characterCount", Order = 6, Required = Required.Always)] long CharacterCount,
-    [property: JsonProperty("firstOffsetMilliseconds", Order = 7)] double? FirstOffsetMilliseconds,
-    [property: JsonProperty("lastOffsetMilliseconds", Order = 8)] double? LastOffsetMilliseconds
+    [property: JsonProperty("sourceCategory", Order = 1, Required = Required.Always)] ModHealthReportLogSourceCategory SourceCategory,
+    [property: JsonProperty("sinceLedgerStart", Order = 2, Required = Required.Always)] ModHealthLogSeveritySummary SinceLedgerStart,
+    [property: JsonProperty("duringCapture", Order = 3, Required = Required.Always)] ModHealthLogSeveritySummary DuringCapture,
+    [property: JsonProperty("peakMessagesPerSecond", Order = 4, Required = Required.Always)] long PeakMessagesPerSecond,
+    [property: JsonProperty("peakCharactersPerSecond", Order = 5, Required = Required.Always)] long PeakCharactersPerSecond,
+    [property: JsonProperty("firstOffsetMilliseconds", Order = 6)] double? FirstOffsetMilliseconds,
+    [property: JsonProperty("lastOffsetMilliseconds", Order = 7)] double? LastOffsetMilliseconds
+);
+
+[JsonObject(MemberSerialization.OptIn)]
+internal sealed record ModHealthLogSeveritySummary(
+    [property: JsonProperty("traceMessages", Order = 0, Required = Required.Always)] long TraceMessages,
+    [property: JsonProperty("traceCharacters", Order = 1, Required = Required.Always)] long TraceCharacters,
+    [property: JsonProperty("debugMessages", Order = 2, Required = Required.Always)] long DebugMessages,
+    [property: JsonProperty("debugCharacters", Order = 3, Required = Required.Always)] long DebugCharacters,
+    [property: JsonProperty("infoMessages", Order = 4, Required = Required.Always)] long InfoMessages,
+    [property: JsonProperty("infoCharacters", Order = 5, Required = Required.Always)] long InfoCharacters,
+    [property: JsonProperty("warningMessages", Order = 6, Required = Required.Always)] long WarningMessages,
+    [property: JsonProperty("warningCharacters", Order = 7, Required = Required.Always)] long WarningCharacters,
+    [property: JsonProperty("errorMessages", Order = 8, Required = Required.Always)] long ErrorMessages,
+    [property: JsonProperty("errorCharacters", Order = 9, Required = Required.Always)] long ErrorCharacters,
+    [property: JsonProperty("alertMessages", Order = 10, Required = Required.Always)] long AlertMessages,
+    [property: JsonProperty("alertCharacters", Order = 11, Required = Required.Always)] long AlertCharacters
+)
+{
+    [JsonIgnore]
+    public long TotalMessages => Sum(this.TraceMessages, this.DebugMessages, this.InfoMessages, this.WarningMessages, this.ErrorMessages, this.AlertMessages);
+
+    [JsonIgnore]
+    public long TotalCharacters => Sum(this.TraceCharacters, this.DebugCharacters, this.InfoCharacters, this.WarningCharacters, this.ErrorCharacters, this.AlertCharacters);
+
+    private static long Sum(params long[] values)
+    {
+        long total = 0;
+        foreach (long value in values)
+        {
+            if (value > 0 && total > long.MaxValue - value)
+                return long.MaxValue;
+            total += Math.Max(0, value);
+        }
+        return total;
+    }
+}
+
+[JsonObject(MemberSerialization.OptIn)]
+internal sealed record ModHealthLogTotals(
+    [property: JsonProperty("sinceLedgerStart", Order = 0, Required = Required.Always)] ModHealthLogSeveritySummary SinceLedgerStart,
+    [property: JsonProperty("duringCapture", Order = 1, Required = Required.Always)] ModHealthLogSeveritySummary DuringCapture
+);
+
+[JsonObject(MemberSerialization.OptIn)]
+internal sealed record ModHealthCallbackFailure(
+    [property: JsonProperty("modId", Order = 0, Required = Required.Always)] string ModId,
+    [property: JsonProperty("modName", Order = 1, Required = Required.Always)] string ModName,
+    [property: JsonProperty("phase", Order = 2, Required = Required.Always)] ModHealthExecutionPhase Phase,
+    [property: JsonProperty("operation", Order = 3, Required = Required.Always)] ModHealthOperationKind Operation,
+    [property: JsonProperty("callback", Order = 4, Required = Required.Always)] string Callback,
+    [property: JsonProperty("exceptionType", Order = 5, Required = Required.Always)] string ExceptionType,
+    [property: JsonProperty("onBehalfOfModId", Order = 6)] string? OnBehalfOfModId,
+    [property: JsonProperty("sessionCount", Order = 7, Required = Required.Always)] long SessionCount,
+    [property: JsonProperty("captureCount", Order = 8, Required = Required.Always)] long CaptureCount,
+    [property: JsonProperty("firstOffsetMilliseconds", Order = 9, Required = Required.Always)] double FirstOffsetMilliseconds,
+    [property: JsonProperty("lastOffsetMilliseconds", Order = 10, Required = Required.Always)] double LastOffsetMilliseconds
+);
+
+[JsonObject(MemberSerialization.OptIn)]
+internal sealed record ModHealthCallbackFailureTotals(
+    [property: JsonProperty("sinceLedgerStart", Order = 0, Required = Required.Always)] long SinceLedgerStart,
+    [property: JsonProperty("duringCapture", Order = 1, Required = Required.Always)] long DuringCapture
 );
 
 [JsonObject(MemberSerialization.OptIn)]
@@ -317,6 +404,36 @@ internal enum ModHealthModStatus
     Invalid,
     [EnumMember(Value = "failed")]
     Failed
+}
+
+[JsonConverter(typeof(StringEnumConverter))]
+internal enum ModHealthReportUpdateStatus
+{
+    [EnumMember(Value = "unknown")]
+    Unknown,
+    [EnumMember(Value = "pending")]
+    Pending,
+    [EnumMember(Value = "up-to-date")]
+    UpToDate,
+    [EnumMember(Value = "update-available")]
+    UpdateAvailable,
+    [EnumMember(Value = "disabled")]
+    Disabled,
+    [EnumMember(Value = "suppressed")]
+    Suppressed,
+    [EnumMember(Value = "unavailable")]
+    Unavailable
+}
+
+[JsonConverter(typeof(StringEnumConverter))]
+internal enum ModHealthReportLogSourceCategory
+{
+    [EnumMember(Value = "mod")]
+    Mod,
+    [EnumMember(Value = "smapi")]
+    Smapi,
+    [EnumMember(Value = "game")]
+    Game
 }
 
 [JsonConverter(typeof(StringEnumConverter))]

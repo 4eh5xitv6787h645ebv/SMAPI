@@ -9,12 +9,14 @@ internal static class ModHealthReportLimits
     public const int MaxDependenciesPerMod = 256;
     public const int MaxMods = 4096;
     public const int MaxCallbacks = 500;
+    public const int MaxCallbackFailures = 1024;
     public const int MaxRecentUpdates = 600;
     public const int MaxWorstUpdates = 100;
     public const int MaxEpisodes = 50;
     public const int MaxContributorsPerUpdate = 5;
     public const int MaxFindings = 100;
     public const int MaxMarks = 100;
+    public const int MaxHistogramThresholds = 16;
     public const int MaxOutputBytes = 5 * 1024 * 1024;
 
     public const double SlowUpdateMilliseconds = 33.333;
