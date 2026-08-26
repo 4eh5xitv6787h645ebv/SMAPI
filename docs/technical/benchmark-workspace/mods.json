@@ -1,0 +1,3647 @@
+{
+  "generated": "2026-08-26",
+  "modsFolderEntries": null,
+  "mods": [
+    {
+      "folder": "(CP) HxW Farmers Market Furniture - Wildflour Set/[CP] H&W Farmers Market - Wildflour Set",
+      "name": "[CP] HXW Farmers Market Wildflour Set",
+      "id": "HXW.FM_Wildflour_Pack",
+      "version": "1.0.2",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "nexus:21767"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "(SF) HxW Romantic Fountains and Arches/[SF] Romantic Fountains and Arches",
+      "name": "[SF] HXW's Romantic Fountains and Arches",
+      "id": "himewildflour.romanticsetforSF",
+      "version": "1.1",
+      "author": "HimeTarts and Wildflourmods",
+      "updateKeys": [
+        "nexus:17606"
+      ],
+      "contentPackFor": "PeacefulEnd.SolidFoundations",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Additional Farm Cave/[MFM] Additional Farm Cave",
+      "name": "[MFM] Additional Farm Cave",
+      "id": "Tikamin557.MFM.AdditionalFarmCave",
+      "version": "1.0",
+      "author": "Tikamin557",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "DIGUS.MailFrameworkMod",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Additional Farm Cave/[FTM] Additional Farm Cave",
+      "name": "[FTM] Additional Farm Cave",
+      "id": "Tikamin557.FTM.AdditionalFarmCave",
+      "version": "1.0",
+      "author": "Tikamin557",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Additional Farm Cave/[CP] Additional Farm Cave",
+      "name": "[CP] Additional Farm Cave",
+      "id": "Tikamin557.CP.AdditionalFarmCave",
+      "version": "3.6",
+      "author": "Tikamin557",
+      "updateKeys": [
+        "Nexus:14109"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Alternative Textures/AlternativeTextures",
+      "name": "Alternative Textures",
+      "id": "PeacefulEnd.AlternativeTextures",
+      "version": "8.1.1",
+      "author": "PeacefulEnd",
+      "updateKeys": [
+        "Nexus:9246"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Always Raining in the Valley SBV/[CC] Maximum",
+      "name": "ARV- Maximum",
+      "id": "Himetarts.ARVCC",
+      "version": "1.5.1",
+      "author": "Hime Tarts",
+      "updateKeys": [],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Always Raining in the Valley SBV/[CP] Always Raining in the Valley",
+      "name": "Always Raining in the Valley",
+      "id": "Himetarts.ARV.CP",
+      "version": "1.5.1",
+      "author": "Hime Tarts",
+      "updateKeys": [
+        "Nexus:9999"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "AnimalDropsFinder",
+      "name": "Animal Drops Finder",
+      "id": "alex.AnimalDropsFinder",
+      "version": "0.4.1",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "AntiSocialNPCs",
+      "name": "AntiSocial NPCs",
+      "id": "SuperAardvark.AntiSocial",
+      "version": "1.0.6",
+      "author": "Super Aardvark",
+      "updateKeys": [
+        "Nexus:5371"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "AutoFillPetBowl",
+      "name": "AutoFillPetBowl",
+      "id": "Siweipancc.AutoFillPetBowl",
+      "version": "0.0.3",
+      "author": "Siweipancc",
+      "updateKeys": [
+        "Nexus:20667"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "AutoLoadSave",
+      "name": "Auto Load Save",
+      "id": "alex.AutoLoadSave",
+      "version": "1.0.0",
+      "author": "Alex (local)",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Automate",
+      "name": "Automate",
+      "id": "Pathoschild.Automate",
+      "version": "2.6.1",
+      "author": "Pathoschild (v2 performance fork maintained locally)",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BETAS",
+      "name": "Button's Extra Trigger Action Stuff",
+      "id": "Spiderbuttons.BETAS",
+      "version": "3.3.4",
+      "author": "Spiderbuttons",
+      "updateKeys": [
+        "Nexus:27100"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BGIFAnimalSpritePreloadFix",
+      "name": "BGIF Animal Sprite Preload Fix",
+      "id": "alex.BGIFAnimalSpritePreloadFix",
+      "version": "1.2.0",
+      "author": "Alex (local fix)",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Bear Family Custom NPCs",
+      "name": "Bear Family - Custom NPCs",
+      "id": "MadDog.HashtagBearFam",
+      "version": "1.1.1",
+      "author": "Mad Dog",
+      "updateKeys": [
+        "Nexus:16197"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "BetterBeehouses",
+      "name": "Better Beehouses",
+      "id": "tlitookilakin.BetterBeehouses",
+      "version": "2.1.3",
+      "author": "Tlitookilakin",
+      "updateKeys": [
+        "GitHub:tlitookilakin/BetterBeehouses",
+        "Nexus:10996",
+        "ModDrop:1105633"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BetterChests",
+      "name": "Better Chests",
+      "id": "furyx639.BetterChests",
+      "version": "2.18.6",
+      "author": "LeFauxMatt",
+      "updateKeys": [
+        "Nexus:9791@SMAPI"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BetterCrafting",
+      "name": "Better Crafting",
+      "id": "leclair.bettercrafting",
+      "version": "2.18.0",
+      "author": "Khloe Leclair",
+      "updateKeys": [
+        "Nexus:11115@Main",
+        "ModDrop:1115749@Main"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BetterHoneyMead",
+      "name": "Better Honey Mead",
+      "id": "NCarigon.BetterHoneyMead",
+      "version": "1.1.0",
+      "author": "NCarigon",
+      "updateKeys": [
+        "nexus:22848"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BetterRanching",
+      "name": "Better Ranching",
+      "id": "BetterRanching",
+      "version": "2.0.5",
+      "author": "Urbanyeti",
+      "updateKeys": [
+        "Nexus:859"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BetterSigns",
+      "name": "Better Signs",
+      "id": "stebaker92.bettersigns",
+      "version": "4.0.0",
+      "author": "stebaker92",
+      "updateKeys": [
+        "Nexus:7482"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BetterTruffles",
+      "name": "Better Truffles",
+      "id": "tem696969696969.BetterTruffles",
+      "version": "1.0.5",
+      "author": "temisthem",
+      "updateKeys": [
+        "Nexus:23228"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BiggerBackpack",
+      "name": "Bigger Backpack",
+      "id": "spacechase0.BiggerBackpack",
+      "version": "7.3",
+      "author": "spacechase0, yoseiri, bcmpinc",
+      "updateKeys": [
+        "Nexus:1845",
+        "Chucklefish:5191"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Buildable Ginger Island Farm",
+      "name": "Buildable Ginger Island Farm",
+      "id": "mouahrara.BuildableGingerIslandFarm",
+      "version": "1.1.4",
+      "author": "mouahrara",
+      "updateKeys": [
+        "Nexus:20600"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "BusLocations/[BL] Desert",
+      "name": "[BL] Desert",
+      "id": "hootless.BLDesert",
+      "version": "1.2.0",
+      "author": "Hootless",
+      "updateKeys": [
+        "N"
+      ],
+      "contentPackFor": "hootless.BusLocations",
+      "isCodeMod": false
+    },
+    {
+      "folder": "BusLocations.1.2.2-unofficial.1-Xytronix/BusLocations",
+      "name": "Bus Locations ( fix by Sean)",
+      "id": "hootless.BusLocations",
+      "version": "1.2.2",
+      "author": "nanzington",
+      "updateKeys": [
+        "Nexus:2905"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Bush Bloom Mod/BushBloomMod",
+      "name": "Bush Bloom Mod",
+      "id": "NCarigon.BushBloomMod",
+      "version": "1.2.4",
+      "author": "NCarigon",
+      "updateKeys": [
+        "nexus:15792"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Bush Bloom Mod/[CP] Basic Bush Bloom Example",
+      "name": "[CP] Basic Bush Bloom Example",
+      "id": "NCarigon.CPBasicExampleBBM",
+      "version": "1.0.0",
+      "author": "NCarigon",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Bush Bloom Mod/[CP] Advanced Bush Bloom Example",
+      "name": "[CP] Advanced Bush Bloom Example",
+      "id": "NCarigon.CPAdvancedExampleBBM",
+      "version": "1.0.0",
+      "author": "NCarigon",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Bush Bloom Mod/[BBM] Bush Bloom Example",
+      "name": "[BBM] Bush Blom Example",
+      "id": "NCarigon.ExampleBBM",
+      "version": "1.0.0",
+      "author": "NCarigon",
+      "updateKeys": [],
+      "contentPackFor": "NCarigon.BushBloomMod",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Calcifer",
+      "name": "Calcifer",
+      "id": "sophie.Calcifer",
+      "version": "0.1.0",
+      "author": "sophie",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Cape Stardew 1.6/(FTM) Cape Stardew",
+      "name": "AnnettesRetreat [Farm Type Manager component]",
+      "id": "dreamygloom.AnnettaFTM",
+      "version": "7.0.8",
+      "author": "Arony/DreamyGloom",
+      "updateKeys": [
+        "Nexus:14635"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Cape Stardew 1.6/Cape Stardew",
+      "name": "CapeStardew",
+      "id": "dreamy.kickitspot",
+      "version": "7.0.8",
+      "author": "Arony/DreamyGloom",
+      "updateKeys": [
+        "Nexus:14635"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Cape Stardew 1.6/CapeStardewCode",
+      "name": "CapeStardewCode",
+      "id": "dreamygloom.CapeStardewCode",
+      "version": "7.0.8",
+      "author": "dreamygloom",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Cape Stardew 1.6/[CP]Annetta",
+      "name": "AnnettaNPC",
+      "id": "dreamygloom.AnnettaNPC",
+      "version": "7.0.8",
+      "author": "Arony/DreamyGloom",
+      "updateKeys": [
+        "Nexus:14635"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Cape Stardew 1.6/(CP)OrbOfTheTides",
+      "name": "OrbOfTheTidesCP",
+      "id": "dreamy.ORb",
+      "version": "7.0.8",
+      "author": "DreamyGloom",
+      "updateKeys": [
+        "Nexus:14635"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Cauldron/Cauldron Translations DO NOT REMOVE",
+      "name": "[CP] Atelier Cauldron English Translation Pack",
+      "id": "wildflour.AtelierEnglish.CP",
+      "version": "2.0",
+      "author": "wildflourmods and kedi",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Cauldron/Cauldron",
+      "name": "Cauldron",
+      "id": "Atelier.Cauldron",
+      "version": "2.2.1",
+      "author": "Kedi and sophie",
+      "updateKeys": [
+        "Nexus:22926"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "CentralStation/[CP] CentralStation",
+      "name": "Central Station content",
+      "id": "Pathoschild.CentralStation.Content",
+      "version": "1.6.2",
+      "author": "Pathoschild",
+      "updateKeys": [
+        "Nexus:8000"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "CentralStation/CentralStation",
+      "name": "Central Station",
+      "id": "Pathoschild.CentralStation",
+      "version": "1.6.2",
+      "author": "Pathoschild",
+      "updateKeys": [
+        "Nexus:8000"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Chatter",
+      "name": "Chatter",
+      "id": "Jboss.Chatter",
+      "version": "1.3.1",
+      "author": "Jboss",
+      "updateKeys": [
+        "Nexus:16559"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ChestsAnywhere",
+      "name": "Chests Anywhere",
+      "id": "Pathoschild.ChestsAnywhere",
+      "version": "1.30.0",
+      "author": "Pathoschild",
+      "updateKeys": [
+        "Nexus:518"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ConsoleCommands",
+      "name": "Console Commands",
+      "id": "?",
+      "version": "4.5.1",
+      "author": "SMAPI",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ContentPatcher",
+      "name": "Content Patcher",
+      "id": "Pathoschild.ContentPatcher",
+      "version": "2.9.0",
+      "author": "Pathoschild",
+      "updateKeys": [
+        "Nexus:1915"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ContentPatcherAnimations",
+      "name": "Content Patcher Animations",
+      "id": "spacechase0.ContentPatcherAnimations",
+      "version": "1.2.4",
+      "author": "spacechase0",
+      "updateKeys": [
+        "Nexus:3853"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ConvenientInventory",
+      "name": "Convenient Inventory",
+      "id": "gaussfire.ConvenientInventory",
+      "version": "1.5.6",
+      "author": "gaussfire",
+      "updateKeys": [
+        "Nexus:10384"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Custom Spouse Room Locations/(PSR) Custom Spouse Room Locations",
+      "name": "[PSR] Custom Spouse Room Locations",
+      "id": "kevinkidwell.csrlocations_psr",
+      "version": "2.0.1",
+      "author": "kevinkidwell",
+      "updateKeys": [
+        "Nexus:21525"
+      ],
+      "contentPackFor": "ApryllForever.PolyamorySweetRooms",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Custom Spouse Room Locations/(CP) Custom Spouse Room Locations",
+      "name": "[CP] Custom Spouse Room Locations",
+      "id": "kevinkidwell.csrlocations_cp",
+      "version": "2.0.1",
+      "author": "kevinkidwell",
+      "updateKeys": [
+        "Nexus:21525"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "CustomBackpackFramework",
+      "name": "The Return of Custom Backpack Framework",
+      "id": "platinummyr.CustomBackpackFramework",
+      "version": "1.1.0",
+      "author": "platinummyr",
+      "updateKeys": [
+        "Nexus:21588"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "CustomCompanions",
+      "name": "Custom Companions",
+      "id": "PeacefulEnd.CustomCompanions",
+      "version": "5.1.0",
+      "author": "PeacefulEnd",
+      "updateKeys": [
+        "Nexus:8626"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "CustomMuseumFramework",
+      "name": "Custom Museum Framework",
+      "id": "Spiderbuttons.CMF",
+      "version": "1.6.2",
+      "author": "Spiderbuttons",
+      "updateKeys": [
+        "Nexus:34530"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "CustomNPCExclusions",
+      "name": "Custom NPC Exclusions",
+      "id": "Esca.CustomNPCExclusions",
+      "version": "1.6.0",
+      "author": "Esca",
+      "updateKeys": [
+        "Nexus:7089",
+        "GitHub:Esca-MMC/CustomNPCExclusions",
+        "ModDrop:847997"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "CustomSpouseRooms",
+      "name": "Custom Spouse Rooms",
+      "id": "aedenthorn.CustomSpouseRooms",
+      "version": "0.9.4",
+      "author": "aedenthorn",
+      "updateKeys": [
+        "Nexus:10029"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "DDs Greenhouse",
+      "name": "DDs Greenhouse",
+      "id": "DevilishDemigod.DDGreenhouse",
+      "version": "1.1.0",
+      "author": "DevilishDemigod",
+      "updateKeys": [
+        "Nexus:24984"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "DaisyNiko's Tilesheets/[CP] DaisyNiko's Tilesheets",
+      "name": "DaisyNiko's Tilesheets",
+      "id": "DaisyNiko.Tilesheets",
+      "version": "1.12",
+      "author": "DaisyNiko",
+      "updateKeys": [
+        "Nexus:4736"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "DestroyableBushes",
+      "name": "Destroyable Bushes",
+      "id": "Esca.DestroyableBushes",
+      "version": "1.5.2",
+      "author": "Esca",
+      "updateKeys": [
+        "Nexus:6304",
+        "GitHub:Esca-MMC/DestroyableBushes",
+        "ModDrop:798245"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Downtown-Zuzu-main/[BL] Downtown Zuzu",
+      "name": "[BL] Downtown Zuzu",
+      "id": "DTZ.DowntownZuzuBL",
+      "version": "0.9.4",
+      "author": "Zuzu Development Team",
+      "updateKeys": [
+        "Nexus:8587"
+      ],
+      "contentPackFor": "hootless.BusLocations",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Downtown-Zuzu-main/[CC] Downtown Zuzu",
+      "name": "[CC] Downtown Zuzu",
+      "id": "DTZ.DowntownZuzuCC",
+      "version": "0.9.4",
+      "author": "Zuzu Development Team",
+      "updateKeys": [
+        "Nexus:8587"
+      ],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Downtown-Zuzu-main/[CP] Downtown Zuzu",
+      "name": "[CP] Downtown Zuzu",
+      "id": "DTZ.DowntownZuzuCP",
+      "version": "0.9.4",
+      "author": "Zuzu Development Team",
+      "updateKeys": [
+        "Nexus:8587"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Downtown-Zuzu-main/[DLL] Downtown Zuzu",
+      "name": "[DLL] Downtown Zuzu",
+      "id": "DTZ.DowntownZuzuDLL",
+      "version": "0.9.4",
+      "author": "Zuzu Development Team",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Downtown-Zuzu-main/[FTM] Downtown Zuzu",
+      "name": "[FTM] Downtown Zuzu",
+      "id": "DTZ.DowntownZuzuFTM",
+      "version": "0.9.4",
+      "author": "Zuzu Development Team",
+      "updateKeys": [
+        "Nexus:8587"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Downtown-Zuzu-main/[MFM] Downtown Zuzu",
+      "name": "[MFM] Downtown Zuzu",
+      "id": "DTZ.DowntownZuzuMFM",
+      "version": "0.9.4",
+      "author": "Zuzu Development Team",
+      "updateKeys": [
+        "Nexus:8587"
+      ],
+      "contentPackFor": "DIGUS.MailFrameworkMod",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Downtown-Zuzu-main/[TS] Downtown Zuzu",
+      "name": "[TS] Downtown Zuzu",
+      "id": "DTZ.DowntownZuzuTS",
+      "version": "0.9.4",
+      "author": "Zuzu Development Team",
+      "updateKeys": [
+        "Nexus:8587"
+      ],
+      "contentPackFor": "Cherry.TrainStation",
+      "isCodeMod": false
+    },
+    {
+      "folder": "East Scarp REMASTERED/East Scarp C#",
+      "name": "East Scarp: C#",
+      "id": "atravita.EastScarp",
+      "version": "3.0.6",
+      "author": "atravita",
+      "updateKeys": [
+        "-1"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "East Scarp REMASTERED/East Scarp Core",
+      "name": "East Scarp: Locations",
+      "id": "Lemurkat.EastScarp",
+      "version": "3.0.6",
+      "author": "LemurKat",
+      "updateKeys": [
+        "Nexus:????"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "East Scarp REMASTERED/East Scarp FTM",
+      "name": "Forage Settings East Scarp",
+      "id": "Lemurkat.EastScarpe.FTM",
+      "version": "3.0.6",
+      "author": "Lemurkat",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "East Scarp REMASTERED/East Scarp NPCs",
+      "name": "East Scarp: NPCs",
+      "id": "Lemurkat.EastScarpNPCs",
+      "version": "3.0.6",
+      "author": "Lemurkat",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "East Scarp REMASTERED/ESBarberShop",
+      "name": "East Scarp: Barber Shop",
+      "id": "ES.BarberShop",
+      "version": "3.0.6",
+      "author": "mushymato",
+      "updateKeys": [
+        "GitHub:Mushymato/ESBarberShop"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "EscasModdingPlugins",
+      "name": "Esca's Modding Plugins (EMP)",
+      "id": "Esca.EMP",
+      "version": "1.7.2",
+      "author": "Esca",
+      "updateKeys": [
+        "Nexus:9296",
+        "GitHub:Esca-MMC/EscasModdingPlugins",
+        "ModDrop:1005443"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "EventLimiter",
+      "name": "Event Limiter",
+      "id": "TheMightyAmondee.EventLimiter",
+      "version": "1.3.1",
+      "author": "TheMightyAmondee",
+      "updateKeys": [
+        "Nexus:10735"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "EventLookup",
+      "name": "Event Lookup",
+      "id": "shekurika.EventLookup",
+      "version": "0.2.9",
+      "author": "shekurika",
+      "updateKeys": [
+        "Nexus:8505"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Expanded Preconditions Utility/ExpandedPreconditionsUtility",
+      "name": "Expanded Preconditions Utility",
+      "id": "Cherry.ExpandedPreconditionsUtility",
+      "version": "1.1.1",
+      "author": "Cherry",
+      "updateKeys": [
+        "Nexus:6529"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ExtraMachineConfig",
+      "name": "ExtraMachineConfig",
+      "id": "selph.ExtraMachineConfig",
+      "version": "1.17.9",
+      "author": "selph",
+      "updateKeys": [
+        "Nexus:22256"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "FarmTypeManager",
+      "name": "Farm Type Manager (FTM)",
+      "id": "Esca.FarmTypeManager",
+      "version": "1.26.1",
+      "author": "Esca",
+      "updateKeys": [
+        "Nexus:3231",
+        "GitHub:Esca-MMC/FarmTypeManager",
+        "ModDrop:598755"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "FashionSense",
+      "name": "Fashion Sense",
+      "id": "PeacefulEnd.FashionSense",
+      "version": "7.4.0",
+      "author": "PeacefulEnd",
+      "updateKeys": [
+        "Nexus:9969"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "FasterPathSpeed",
+      "name": "Faster Path Speed",
+      "id": "gaussfire.FasterPathSpeed",
+      "version": "1.3.1",
+      "author": "gaussfire",
+      "updateKeys": [
+        "Nexus:9344"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "FauxCore",
+      "name": "FauxCore",
+      "id": "furyx639.FauxCore",
+      "version": "1.2.2",
+      "author": "LeFauxMatt",
+      "updateKeys": [
+        "Nexus:20618"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Forager's Nooks and Crannies/[CC] Forager's Nooks and Crannies",
+      "name": "Custom Companions for Nooks and Crannies",
+      "id": "Wildflour.NooksCranniesCC",
+      "version": "2.2",
+      "author": "wildflourmods",
+      "updateKeys": [],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Forager's Nooks and Crannies/[CP] Forager's Nooks and Crannies",
+      "name": "Forager's Nooks and Crannies - New Maps for Stardew Valley",
+      "id": "Wildflour.NooksCrannies",
+      "version": "2.2.1",
+      "author": "wildflourmods",
+      "updateKeys": [
+        "Nexus:23468"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Forager's Nooks and Crannies - New Maps for Stardew Valley/[FTM] Forager's Nooks and Crannies",
+      "name": "[FTM] Forager's Nooks and Crannies",
+      "id": "Wildflour.NooksCranniesFTM",
+      "version": "2.0.1",
+      "author": "wildflourmods",
+      "updateKeys": [],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "FriendsForever",
+      "name": "Friends Forever",
+      "id": "IsaacS.FriendsForever",
+      "version": "1.2.3",
+      "author": "Isaac S.",
+      "updateKeys": [
+        "Nexus:1738"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Frontier Farm/[FTM] Frontier Farm",
+      "name": "Frontier Farm Forage Locations",
+      "id": "FlashShifter.FrontierFarmFTM",
+      "version": "1.15.9",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Frontier Farm/[CP] Frontier Farm",
+      "name": "Frontier Farm",
+      "id": "flashshifter.FrontierFarm",
+      "version": "1.15.9",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:3753@FF"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "FullInventoryLagFix",
+      "name": "Full Inventory Lag Fix",
+      "id": "Alex.FullInventoryLagFix",
+      "version": "1.0.0",
+      "author": "Alex & Claude",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "GMCM Options/GMCMOptions",
+      "name": "GMCM Options",
+      "id": "jltaylor-us.GMCMOptions",
+      "version": "2.1.0",
+      "author": "Jamie Taylor",
+      "updateKeys": [
+        "Nexus:10505",
+        "GitHub:jltaylor-us/StardewGMCMOptions"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "GardenPotAutomate",
+      "name": "Garden Pot - Automate",
+      "id": "NCarigon.GardenPotAutomate",
+      "version": "1.1.1",
+      "author": "NCarigon",
+      "updateKeys": [
+        "nexus:15212"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "GardenPotOptions",
+      "name": "Garden Pot Options",
+      "id": "NCarigon.GardenPotOptions",
+      "version": "2.0.3",
+      "author": "NCarigon",
+      "updateKeys": [
+        "nexus:21608"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "GenericModConfigMenu",
+      "name": "Generic Mod Config Menu",
+      "id": "spacechase0.GenericModConfigMenu",
+      "version": "1.16.0",
+      "author": "kittycatcasey",
+      "updateKeys": [
+        "Nexus:5098"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Gigantic Coop and Barn/GiganticCoopAndBarn",
+      "name": "Gigantic Coop and Barn",
+      "id": "bobkalonger.GigaCB_code",
+      "version": "1.2.9",
+      "author": "bobkalonger",
+      "updateKeys": [
+        "Nexus:33727"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Gigantic Coop and Barn/[CP] Gigantic Coop and Barn",
+      "name": "Gigantic Coop and Barn",
+      "id": "bobkalonger.gigacoopnbarn",
+      "version": "1.2.9",
+      "author": "bobkalonger",
+      "updateKeys": [
+        "Nexus:33727"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "GrampletonFields",
+      "name": "Grampleton Fields",
+      "id": "flashshifter.GrampletonFields",
+      "version": "1.15",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Grandpa's Farm/[CP] Grandpa's Farm",
+      "name": "Grandpa's Farm",
+      "id": "flashshifter.GrandpasFarm",
+      "version": "1.15.9",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:3753@GF"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Grandpa's Farm/[FTM] Grandpa's Farm",
+      "name": "Grandpa's Farm Forage Locations",
+      "id": "FlashShifter.GrandpasFarmFTM",
+      "version": "1.15.9",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HappyHomeDesigner",
+      "name": "Happy Home Designer",
+      "id": "tlitookilakin.HappyHomeDesigner",
+      "version": "2.5.4",
+      "author": "tlitookilakin",
+      "updateKeys": [
+        "Nexus:19675",
+        "GitHub:tlitookilakin/HappyHomeDesigner"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Hay Bales as Silos/HayBalesAsSilos",
+      "name": "Hay Bales as Silos",
+      "id": "Cherry.HayBalesSilo",
+      "version": "1.2.1",
+      "author": "Cherry",
+      "updateKeys": [
+        "Nexus:5151"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "HxW Bathroom Furniture/[CP] H&W Bathroom Furniture",
+      "name": "[CP] H&W Bathroom Furniture",
+      "id": "HXW.BathroomFurniture",
+      "version": "2.0.3",
+      "author": "HimeTarts and Wildflourmods",
+      "updateKeys": [
+        "Nexus:17665"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Fairy Fountain Furniture/[CP] H&W Fairy Fountains",
+      "name": "[CP] H&W Fairy Fountains",
+      "id": "HXW.FairyFountains",
+      "version": "2.0.1",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "Nexus:16718"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Fairy Garden Furniture Indoors/[CP] H&W Fairy Garden Indoor Furniture",
+      "name": "[CP] H&W Fairy Garden Indoor Furniture",
+      "id": "HXW.FairyGardenIndoor",
+      "version": "1.0.3",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "nexus:9989"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Farmer's Market Furniture - Core/[CP] H&W Farmers Market",
+      "name": "[CP] H&W Farmers Market Core Set",
+      "id": "HXW.FMCore",
+      "version": "2.2",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "Nexus:18814"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Greenhouse Furniture/[CP] H&W Greenhouse Furniture",
+      "name": "[CP] H&W Greenhouse Furniture",
+      "id": "HXW.GreenhouseFurniture",
+      "version": "3.0.1",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "Nexus:17488"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Greenhouse Furniture/[AT] HxW Greenhouse Variations Light",
+      "name": "[AT] H&W Greenhouse Furniture Variants Light Wood",
+      "id": "HXW.GreenhouseFurniVariantsLightAT",
+      "version": "1.0",
+      "author": "HimeTarts & wildflourmods",
+      "updateKeys": [
+        ""
+      ],
+      "contentPackFor": "PeacefulEnd.AlternativeTextures",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Greenhouse Furniture/[AT] HxW Greenhouse Variations Dark",
+      "name": "[AT] H&W Greenhouse Furniture Variants Dark Wood",
+      "id": "HXW.GreenhouseFurniVariantsDarkAT",
+      "version": "1.0",
+      "author": "HimeTarts & wildflourmods",
+      "updateKeys": [
+        ""
+      ],
+      "contentPackFor": "PeacefulEnd.AlternativeTextures",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Greenhouse Furniture/[AT] HxW Greenhouse Variations",
+      "name": "[AT] H&W Greenhouse Furniture Variants",
+      "id": "HXW.GreenhouseFurniVariantsAT",
+      "version": "1.0",
+      "author": "HimeTarts & wildflourmods",
+      "updateKeys": [
+        ""
+      ],
+      "contentPackFor": "PeacefulEnd.AlternativeTextures",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Kitchen Lovers - Pantry and Clutter Furniture/[CP] H&W Grandma's Pantry Furniture",
+      "name": "[CP] H&W Grandma's Pantry Furniture Set",
+      "id": "HXW.GrandmasPantryFurni",
+      "version": "1.0.1",
+      "author": "HimeTarts and Wildflourmods",
+      "updateKeys": [
+        "nexus:31807"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Outdoor Furniture/[CP] H&W Outdoor Furniture",
+      "name": "[CP] H&W Outdoor Furniture",
+      "id": "HXW.OutdoorFurniture",
+      "version": "2.0.5",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "Nexus:16693"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Plant Lovers Furniture/[CP] H&W Plant Lovers Furniture",
+      "name": "[CP] H&W Plant Lovers Furniture",
+      "id": "HXW.PlantLoversFurni",
+      "version": "1.0.2",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "nexus:27124"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Romantic Furniture/[CP] H&W Romantic Furniture",
+      "name": "[CP] H&W Romantic Furniture Set",
+      "id": "HXW.RomanticFurniture",
+      "version": "2.0.3",
+      "author": "HimeTarts and Wildflourmods",
+      "updateKeys": [
+        "Nexus:17577"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HxW Tilesheets/[CP] HxW Tilesheets",
+      "name": "HxW Tilesheets",
+      "id": "hxw.tilesheets",
+      "version": "2.0.0",
+      "author": "HimeTarts",
+      "updateKeys": [
+        "Nexus:20139"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "HybridCropEngine",
+      "name": "Hybrid Crop Engine",
+      "id": "spacechase0.HybridCropEngine",
+      "version": "1.1.5",
+      "author": "spacechase0",
+      "updateKeys": [
+        "Nexus:6577"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "IMFIPOIIWT",
+      "name": "It's My Farm, I Can Pass Out If I Want To!",
+      "id": "apprehentice.IMFIPOIIWT",
+      "version": "1.0.1",
+      "author": "Apprehentice",
+      "updateKeys": [
+        "Nexus:25188"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "IdleAutoPause",
+      "name": "Idle Auto-Pause",
+      "id": "Alex.IdleAutoPause",
+      "version": "1.0.0",
+      "author": "Alex & Claude",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Immersive Farm 2 Remastered/[CP] Immersive Farm 2 Remastered",
+      "name": "Immersive Farm 2 Remastered",
+      "id": "flashshifter.immersivefarm2remastered",
+      "version": "1.15.11",
+      "author": "FlashShifter (Original Author: zanderb14)",
+      "updateKeys": [
+        "Nexus:3753@IF2R"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Immersive Farm 2 Remastered/[FTM] Immersive Farm 2 Remastered",
+      "name": "Stardew Valley Expanded Forage Locations - Immersive Farm 2",
+      "id": "FlashShifter.SVE-IF2R-FTM",
+      "version": "1.15.11",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Integrated Minecarts/IntegratedMinecarts",
+      "name": "Integrated Minecarts (SMAPI Component)",
+      "id": "jibb.minecarts.C",
+      "version": "4.5.16",
+      "author": "Jibb",
+      "updateKeys": [
+        "Nexus:11881"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Integrated Minecarts/[CP] Integrated Minecarts",
+      "name": "Integrated Minecarts (CP Component)",
+      "id": "jibb.minecarts",
+      "version": "4.5.16",
+      "author": "Jibb",
+      "updateKeys": [
+        "Nexus:11881",
+        "CurseForge:988762"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Item Extensions/ItemExtensions",
+      "name": "Item extensions",
+      "id": "mistyspring.ItemExtensions",
+      "version": "1.16.0",
+      "author": "mistyspring",
+      "updateKeys": [
+        "nexus:20357"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "JsonAssets",
+      "name": "Json Assets",
+      "id": "spacechase0.JsonAssets",
+      "version": "1.11.11",
+      "author": "kittycatcasey",
+      "updateKeys": [
+        "Nexus:1720"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Lilybrook/[CC] Lilybrook",
+      "name": "Lilybrook Custom Companions",
+      "id": "8BitAlien.LilybrookCC",
+      "version": "1.0",
+      "author": "8BitAlien",
+      "updateKeys": [],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Lilybrook/[CP] Lilybrook",
+      "name": "Lilybrook",
+      "id": "8BitAlien.Lilybrook",
+      "version": "1.3",
+      "author": "8BitAlien",
+      "updateKeys": [
+        "Nexus:34390"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Lilybrook/[FTM] Lilybrook",
+      "name": "[FTM] Lilybrook",
+      "id": "8BitAlien.Lilybrook.FTM",
+      "version": "1.0.0",
+      "author": "8BitAlien",
+      "updateKeys": [],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "LivestockBazaar",
+      "name": "Livestock Bazaar",
+      "id": "mushymato.LivestockBazaar",
+      "version": "1.5.5",
+      "author": "mushymato",
+      "updateKeys": [
+        "Nexus:29997",
+        "GitHub:Mushymato/LivestockBazaar"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "LookupAnything",
+      "name": "Lookup Anything",
+      "id": "Pathoschild.LookupAnything",
+      "version": "1.54.0",
+      "author": "Pathoschild",
+      "updateKeys": [
+        "Nexus:541"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Lumisteria Serene Meadow/[FTM] Lumisteria Serene Meadow Spawn",
+      "name": "Lumisteria Serene Meadow Spawn",
+      "id": "Lumisteria.SereneMeadowSpawn",
+      "version": "1.1.2",
+      "author": "Lumisteria",
+      "updateKeys": [
+        "Nexus:7110"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Lumisteria Serene Meadow/[CP] Lumisteria Serene Meadow",
+      "name": "Lumisteria Serene Meadow",
+      "id": "Lumisteria.SereneMeadow",
+      "version": "1.1.2",
+      "author": "Lumisteria",
+      "updateKeys": [
+        "Nexus:20598"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Lumisteria Tilesheets - Indoor/[CP] Lumisteria Tilesheets - Indoor",
+      "name": "Lumisteria Tilesheets - Indoor",
+      "id": "Lumisteria.LumiTilesheetsIndoor",
+      "version": "1.4.0",
+      "author": "Lumisteria",
+      "updateKeys": [
+        "Nexus:9599"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "LunnaAstray_3.4.14/[CP] Lunna",
+      "name": "Lunna - Astray in StardewValley",
+      "id": "Rafseazz.LunnaCP",
+      "version": "3.4.14",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:6626"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "LunnaAstray_3.4.14/[FTM] Lunna",
+      "name": "LASV Forage",
+      "id": "Rafseazz.LunnaFTM",
+      "version": "3.4.14",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Lurking in the Dark",
+      "name": "Lurking in the Dark",
+      "id": "7thAxis.LitD.CP",
+      "version": "3.0.11",
+      "author": "7thAxis",
+      "updateKeys": [
+        "Nexus:10770"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "MachineControlPanel",
+      "name": "Machine Control Panel",
+      "id": "mushymato.MachineControlPanel",
+      "version": "2.1.1",
+      "author": "mushymato",
+      "updateKeys": [
+        "nexus:28261"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "MailFrameworkMod",
+      "name": "Mail Framework Mod",
+      "id": "DIGUS.MailFrameworkMod",
+      "version": "1.20.0",
+      "author": "Digus",
+      "updateKeys": [
+        "Nexus:1536"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "MailServicesMod",
+      "name": "Mail Services Mod",
+      "id": "Digus.MailServicesMod",
+      "version": "1.6.2",
+      "author": "Digus",
+      "updateKeys": [
+        "Nexus:7842"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "MappingExtensionsAndExtraProperties",
+      "name": "Mapping Extensions and Extra Properties (MEEP)",
+      "id": "DecidedlyHuman.MappingExtensionsAndExtraProperties",
+      "version": "2.5.3",
+      "author": "DecidedlyHuman",
+      "updateKeys": [
+        "Nexus:14493"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "MasteryExtended",
+      "name": "Mastery Extended",
+      "id": "AlanBF.MasteryExtended",
+      "version": "2.2.1",
+      "author": "AlanBF",
+      "updateKeys": [
+        "Nexus:23697"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "MetalGoesCottage-1.1.2/[NPC] Metalcore Goes Cottagecore/[CC] Jupiter",
+      "name": "MGC - Pets",
+      "id": "Squeaks.MGCCC",
+      "version": "1.0.0",
+      "author": "ottersqueaks",
+      "updateKeys": [],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "MetalGoesCottage-1.1.2/[NPC] Metalcore Goes Cottagecore/[CP] Metalcore Goes Cottagecore",
+      "name": "Metalcore Goes Cottagecore",
+      "id": "Squeaks.MGC.CP",
+      "version": "1.1.2",
+      "author": "ottersqueaks",
+      "updateKeys": [
+        "Nexus:29995"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "MoreBackpackUpgrades",
+      "name": "[CP] The Return of More Backpack Upgrades",
+      "id": "platinummyr.CPMoreBackpacks",
+      "version": "1.0.2",
+      "author": "platinummyr",
+      "updateKeys": [
+        "Nexus:21591"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "MoreGrass",
+      "name": "More Grass",
+      "id": "EpicBellyFlop45.MoreGrass",
+      "version": "1.2.2",
+      "author": "Sonozuki",
+      "updateKeys": [
+        "Nexus:5398"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "NPCMapLocations",
+      "name": "NPC Map Locations",
+      "id": "Bouhm.NPCMapLocations",
+      "version": "3.5.0",
+      "author": "Bouhm",
+      "updateKeys": [
+        "Nexus:239"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "NPCRouteAnimGuard",
+      "name": "NPC Route Animation Guard",
+      "id": "alex.NPCRouteAnimGuard",
+      "version": "1.0.0",
+      "author": "Alex (local fix)",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Nature In The Valley (Catchable Creatures)/[CP]NatureInTheValley",
+      "name": "NatureInValleyContent",
+      "id": "Nature.NatureInValleyContent",
+      "version": "1.3.3",
+      "author": "Nature",
+      "updateKeys": [
+        "Nexus:30138"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Nature In The Valley (Catchable Creatures)/NatureInTheValley",
+      "name": "NatureIntheValley",
+      "id": "Nature.NatureInTheValley",
+      "version": "1.3.3",
+      "author": "Nature",
+      "updateKeys": [
+        "Nexus:30138"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Night Market Expansion",
+      "name": "NightMarketExpansion",
+      "id": "chocolatte12.NightMarketExpansion",
+      "version": "1.1.1",
+      "author": "chocolatte12",
+      "updateKeys": [
+        "Nexus:33400"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "No Fence Decay - Redux",
+      "name": "No Fence Decay Redux",
+      "id": "EnderTedi.NoFenceDecayRedux",
+      "version": "1.2.0",
+      "author": "EnderTedi",
+      "updateKeys": [
+        "Nexus:20802"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "NoWorldLoadingScreens",
+      "name": "No World Loading Screens",
+      "id": "Jake.NoWorldLoadingScreens",
+      "version": "1.0.0",
+      "author": "Jake",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "NoclipMode",
+      "name": "Noclip Mode",
+      "id": "Pathoschild.NoclipMode",
+      "version": "1.3.19",
+      "author": "Pathoschild",
+      "updateKeys": [
+        "Nexus:3900"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Northwest Coast by MK215/[FTM] Northwestcoast Forage",
+      "name": "Northwestcoast Forage",
+      "id": "MK215.Northwestcoast_Forage",
+      "version": "1.0.0",
+      "author": "MK215",
+      "updateKeys": [
+        "Nexus:?????"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Northwest Coast by MK215/[CP] Northwestcoast",
+      "name": "Northwestcoast",
+      "id": "MK215.Northwestcoast",
+      "version": "1.0.0",
+      "author": "MK215",
+      "updateKeys": [
+        "Nexus:29376"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "OffscreenCharacterThrottle",
+      "name": "Offscreen Character Throttle",
+      "id": "alex.OffscreenCharacterThrottle",
+      "version": "1.0.0",
+      "author": "Alex (local fix)",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PC's Industrial Furniture/PC's Industrial Furniture - No Catalogue",
+      "name": "PC's Industrial Furniture",
+      "id": "PC.IFurnitureNoCatalogue",
+      "version": "2.0.0",
+      "author": "PlatinumCats",
+      "updateKeys": [
+        "Nexus:33602"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "PC's Old World Furniture/PC's Old World Furniture - No Catalogue",
+      "name": "PC's Old World Furniture",
+      "id": "PC.OWFurnitureNoCatalogue",
+      "version": "2.0.1",
+      "author": "PlatinumCats",
+      "updateKeys": [
+        "Nexus:33247"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "PCs Rattan Furniture/PC's Rattan Furniture - No Catalogue",
+      "name": "PC's Rattan Furniture",
+      "id": "PC.RattanFurnitureNoCatalogue",
+      "version": "2.0.0",
+      "author": "PlatinumCats",
+      "updateKeys": [
+        "Nexus:27047"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "PFMAutomate",
+      "name": "PFMAutomate",
+      "id": "Digus.PFMAutomate",
+      "version": "1.5.0",
+      "author": "Digus",
+      "updateKeys": [
+        "Nexus:5038"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PartOfTheCommunity",
+      "name": "Part of the Community",
+      "id": "SpaceBaby.PartOfTheCommunity",
+      "version": "1.3.0",
+      "author": "Brandon Marquis Markail Green (Space Baby), 1.6 update by Nikki864, GMCM menu by MickeyMik (Eela11)",
+      "updateKeys": [
+        "Nexus:923"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Passable Crops/PassableCrops",
+      "name": "Passable Crops",
+      "id": "NCarigon.PassableCrops",
+      "version": "1.2.3",
+      "author": "NCarigon",
+      "updateKeys": [
+        "nexus:15223"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PersistentQiBeans_1.0.2",
+      "name": " Persistent Qi Beans and Qi Fruit and Calico Eggs",
+      "id": "Dragoon23.PersistentQiBeans",
+      "version": "1.0.2",
+      "author": "Dragoon23",
+      "updateKeys": [
+        "Nexus:24719"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PlatinumCats Paintings/[CP] PlatinumCats' Painting",
+      "name": "PlatinumCats' Paintings",
+      "id": "PC.Paintings",
+      "version": "1.1.0",
+      "author": "PlatinumCats",
+      "updateKeys": [
+        "Nexus:26858"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "PolyamorySweet/[CP] Polyamory Sweet",
+      "name": "[CP] Polyamory Sweet!",
+      "id": "ApryllForever.CPPolyamorySweet",
+      "version": "1.5.9",
+      "author": "ApryllForever",
+      "updateKeys": [
+        "Nexus: 20599"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "PolyamorySweet/PolyamorySweetBed",
+      "name": "Polyamory Sweet Bed",
+      "id": "ApryllForever.PolyamorySweetBed",
+      "version": "1.5.9",
+      "author": "ApryllForever",
+      "updateKeys": [
+        "Nexus: 20599"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PolyamorySweet/PolyamorySweetKiss",
+      "name": "PolyamorySweet Kiss",
+      "id": "ApryllForever.PolyamorySweetKiss",
+      "version": "1.5.9",
+      "author": "ApryllForever",
+      "updateKeys": [
+        "Nexus: 20599"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PolyamorySweet/PolyamorySweetLove",
+      "name": "Polyamory Sweet Love",
+      "id": "ApryllForever.PolyamorySweetLove",
+      "version": "1.5.9",
+      "author": "ApryllForever",
+      "updateKeys": [
+        "Nexus: 20599"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PolyamorySweet/PolyamorySweetRooms",
+      "name": "PolyamorySweet Rooms",
+      "id": "ApryllForever.PolyamorySweetRooms",
+      "version": "1.5.9",
+      "author": "ApryllForever",
+      "updateKeys": [
+        "Nexus:20599"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PolyamorySweet/PolyamorySweetWedding",
+      "name": "Polyamory Sweet Wedding",
+      "id": "ApryllForever.PolyamorySweetWedding",
+      "version": "1.5.9",
+      "author": "ApryllForever",
+      "updateKeys": [
+        "Nexus:20599"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PonyWeightLossProgram",
+      "name": "Pony Weight Loss Program",
+      "id": "BadNetCode.PonyWeightLossProgram",
+      "version": "1.0.0",
+      "author": "BadNetCode",
+      "updateKeys": [
+        "Nexus:1232",
+        "Moddrop:130159"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PoohCore",
+      "name": "PoohCore",
+      "id": "poohnhi.PoohCore",
+      "version": "1.0.1",
+      "author": "Pooh",
+      "updateKeys": [
+        "Nexus:22941"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Portraits for Vendors/OldMarinerDialogue",
+      "name": "TDIT - Dialogue Box for Mariner",
+      "id": "DolphINaF.Kedi.MarinerDialogue",
+      "version": "2.0.0",
+      "author": "KediDili [Commissioned by Dolphin Is Not a Fish]",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": false
+    },
+    {
+      "folder": "PotAnyTree",
+      "name": "Pot Any Tree",
+      "id": "Alex.PotAnyTree",
+      "version": "1.0.0",
+      "author": "Alex & Claude",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "PreciseFurniture",
+      "name": "Precise Furniture",
+      "id": "Espy.PreciseFurniture",
+      "version": "1.1.1",
+      "author": "Espy",
+      "updateKeys": [
+        "Nexus:23488"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ProducerFrameworkMod",
+      "name": "Producer Framework Mod",
+      "id": "Digus.ProducerFrameworkMod",
+      "version": "1.9.8",
+      "author": "Digus",
+      "updateKeys": [
+        "Nexus:4970"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "QuickSave",
+      "name": "QuickSave",
+      "id": "DLX.QuickSave",
+      "version": "1.5.0",
+      "author": "DeLiXx",
+      "updateKeys": [
+        "Nexus:26194"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Red Panda Bazaar/Red Panda Bazaar Code",
+      "name": "Red Panda Bazaar Code",
+      "id": "WhaleK233.RedPandaBazaarCode",
+      "version": "1.0.7",
+      "author": "WhaleK233",
+      "updateKeys": [
+        "Nexus:30982"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Red Panda Bazaar/[CP]Red Panda Bazaar",
+      "name": "Red Panda Bazaar",
+      "id": "Lilaoliu.RedPandaBazaar",
+      "version": "1.0.7",
+      "author": "Lilaoliu",
+      "updateKeys": [
+        "Nexus:30982"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Relocate Buildings And Farm Animals",
+      "name": "Relocate Buildings And Farm Animals",
+      "id": "mouahrara.RelocateBuildingsAndFarmAnimals",
+      "version": "1.0.3",
+      "author": "mouahrara",
+      "updateKeys": [
+        "Nexus:20606"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Return to Mineral Town/MineralTown",
+      "name": "Welcome to Mineral Town [SMAPI component]",
+      "id": "Rexstrife20.MineralTown",
+      "version": "1.1.5",
+      "author": "Rexstrife20",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Return to Mineral Town/[CC] Mineral Town",
+      "name": "Mineral Town [Custom Companions component]",
+      "id": "Rexstrife20.MineralTownCC",
+      "version": "1.1.5",
+      "author": "Rexstrife20",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Return to Mineral Town/[CP] Mineral Town",
+      "name": "Mineral Town",
+      "id": "Rexstrife20.MineralTownCP",
+      "version": "1.1.5",
+      "author": "Rexstrife20",
+      "updateKeys": [
+        "Nexus:13996"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Return to Mineral Town/[FTM] Mineral Town",
+      "name": "Mineral Town - Forage Settings",
+      "id": "Rexstrife20.MineralTownFTM",
+      "version": "1.1.5",
+      "author": "Rexstrife20",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Ridgeside Village/RidgesideVillage",
+      "name": "Ridgeside Village [SMAPI component]",
+      "id": "Rafseazz.RidgesideVillage",
+      "version": "2.5.17",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Ridgeside Village/[FTM] Ridgeside Village",
+      "name": "Ridgeside Village [Farm Type Manager component]",
+      "id": "Rafseazz.RSVFTM",
+      "version": "2.5.17",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Ridgeside Village/[CP] Ridgeside Village",
+      "name": "Ridgeside Village [Content Patcher component]",
+      "id": "Rafseazz.RSVCP",
+      "version": "2.5.17",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:7286"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Ridgeside Village/[CC] Ridgeside Village",
+      "name": "Ridgeside Village [Custom Companions component]",
+      "id": "Rafseazz.RSVCC",
+      "version": "2.5.17",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Ripley the Farmer - Custom NPC for Sunberry Village/[CP] Ripley",
+      "name": "Ripley",
+      "id": "Clara.Ripley",
+      "version": "1.0.9",
+      "author": "Clara",
+      "updateKeys": [
+        "Nexus:32660"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Ripley the Farmer - Custom NPC for Sunberry Village/[CC] Ripley",
+      "name": "Ripley's Farm Animals",
+      "id": "Clara.RipleyCC",
+      "version": "1.0.9",
+      "author": "Clara",
+      "updateKeys": [],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Rose and the Alchemist/[CP] Rose and the Alchemist",
+      "name": "Rose and the Alchemist - NPCs for Sunberry Village",
+      "id": "Wildflour.SASS",
+      "version": "2.0.1",
+      "author": "wildflourmods",
+      "updateKeys": [
+        "nexus:32385"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Rose and the Alchemist/[FTM] Rose and the Alchemist",
+      "name": "[FTM] Rose and the Alchemist",
+      "id": "Wildflour.SASS.FTM",
+      "version": "2.0.1",
+      "author": "wildflourmods",
+      "updateKeys": [],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "SMAPIHealthBarMod",
+      "name": "Health Bars",
+      "id": "Speeder.HealthBars",
+      "version": "1.10.0",
+      "author": "Maur\u00edcio Gomes (Speeder)",
+      "updateKeys": [
+        "Nexus:193",
+        "Chuckklefish:3529"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "SatisfyingAnimalsPetting/[CP] SatisfyingAnimalsPetting",
+      "name": "Satisfying Animals Petting",
+      "id": "ItsBenter.SatisfyingAnimalsPetting.CP",
+      "version": "1.1.3",
+      "author": "ItsBenter",
+      "updateKeys": [
+        "Nexus:19798"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "SatisfyingAnimalsPetting/[CP] SatisfyingAnimalsPetting_ModdedAnimals",
+      "name": "Satisfying Animals Petting - Modded Animals",
+      "id": "ItsBenter.SatisfyingAnimalsPetting_ModdedAnimals.CP",
+      "version": "1.1.3",
+      "author": "ItsBenter",
+      "updateKeys": [
+        "Nexus:19798"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "SaveBackup",
+      "name": "Save Backup",
+      "id": "?",
+      "version": "4.5.1",
+      "author": "SMAPI",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ScheduleViewer",
+      "name": "Schedule Viewer",
+      "id": "BinaryLip.ScheduleViewer",
+      "version": "3.5.0",
+      "author": "BinaryLip",
+      "updateKeys": [
+        "Nexus:19305",
+        "CurseForge:1020728"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ScheduleViewer-SVE-AddOn",
+      "name": "Schedule Viewer - SVE Add-on",
+      "id": "BinaryLip.SVEAddOn",
+      "version": "1.1.0",
+      "author": "BinaryLip",
+      "updateKeys": [
+        "Nexus:19305@SVEAddOn"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Secret Woods Extra Area/[CP] Secret Woods Extra Area",
+      "name": "[CP] Secret Woods Extra Area",
+      "id": "Tikamin557.CP.SecretWoodsExtraArea",
+      "version": "3.2",
+      "author": "Tikamin557",
+      "updateKeys": [
+        "Nexus:15041"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Secret Woods Extra Area/[FTM] Secret Woods Extra Area",
+      "name": "[FTM] Secret Woods Extra Area",
+      "id": "Tikamin557.FTM.SecretWoodsExtraArea",
+      "version": "1.0",
+      "author": "Tikamin557",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "SecretNoteFramework",
+      "name": "Secret Note Framework",
+      "id": "ichortower.SecretNoteFramework",
+      "version": "1.2.1",
+      "author": "ichortower",
+      "updateKeys": [
+        "Nexus:25055",
+        "GitHub:ichortower/SecretNoteFramework"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Shed Expand/[CP] Shed Expand",
+      "name": "Shed Expansion",
+      "id": "Tsabhira.ShedExpansion",
+      "version": "2.0",
+      "author": "Tsabhira",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Shop Tile Framework/ShopTileFramework",
+      "name": "Shop Tile Framework",
+      "id": "Cherry.ShopTileFramework",
+      "version": "1.0.12",
+      "author": "Cherry",
+      "updateKeys": [
+        "Nexus:5005"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ShowItemQuality",
+      "name": "Show Item Quality (1.6 Unofficial)",
+      "id": "Jonqora.ShowItemQuality",
+      "version": "1.1.3-unofficial.1-bungus",
+      "author": "Jonqora & Bungus",
+      "updateKeys": [
+        "Nexus:22275"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "SitForStaminaMod",
+      "name": "Sit For Stamina",
+      "id": "Entoarox.SitForStamina",
+      "version": "1.0.1",
+      "author": "Entoarox",
+      "updateKeys": [
+        "nexus:7334"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "SkullCavernElevator",
+      "name": "SkullCavernElevator",
+      "id": "SkullCavernElevator",
+      "version": "1.6.2",
+      "author": "lestoph",
+      "updateKeys": [
+        "Nexus:963"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "SocialPageOrderRedux",
+      "name": "Social Page Order Redux",
+      "id": "FlyingTNT.SocialPageOrderRedux",
+      "version": "1.3.1",
+      "author": "aedenthorn, FlyingTNT",
+      "updateKeys": [
+        "Nexus:23374"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Solid Foundations/SolidFoundations",
+      "name": "Solid Foundations",
+      "id": "PeacefulEnd.SolidFoundations",
+      "version": "3.0.0",
+      "author": "PeacefulEnd",
+      "updateKeys": [
+        "Nexus:12311"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "SpaceCore",
+      "name": "SpaceCore",
+      "id": "spacechase0.SpaceCore",
+      "version": "1.28.4",
+      "author": "kittycatcasey",
+      "updateKeys": [
+        "Nexus:1348"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "StarBridge",
+      "name": "StarBridge",
+      "id": "Alex.StarBridge",
+      "version": "1.0.0",
+      "author": "Alex & Claude",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Stardew Valley Expanded/Stardew Valley Expanded Code",
+      "name": "Stardew Valley Expanded",
+      "id": "FlashShifter.SVECode",
+      "version": "1.15.11",
+      "author": "FlashShifter, Esca, and kittycatcasey",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Stardew Valley Expanded/[CP] Stardew Valley Expanded",
+      "name": "Stardew Valley Expanded",
+      "id": "FlashShifter.StardewValleyExpandedCP",
+      "version": "1.15.11",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Stardew Valley Expanded/[FTM] Stardew Valley Expanded",
+      "name": "Stardew Valley Expanded Farm Type Manager",
+      "id": "FlashShifter.SVE-FTM",
+      "version": "1.15.11",
+      "author": "FlashShifter",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "StardewAquarium/StardewAquarium",
+      "name": "Stardew Aquarium Code",
+      "id": "Cherry.StardewAquarium",
+      "version": "2.3.0",
+      "author": "Cherry",
+      "updateKeys": [
+        "Nexus:6372"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "StardewAquarium/[CC] Stardew Aquarium",
+      "name": "Stardew Aquarium Custom Companions",
+      "id": "Gervig91.StardewAquariumCC",
+      "version": "2.3.0",
+      "author": "Gervig91",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "StardewAquarium/[CP] Stardew Aquarium",
+      "name": "Stardew Aquarium [CP]",
+      "id": "Gervig91.StardewAquariumCP",
+      "version": "2.3.0",
+      "author": "Gervig91",
+      "updateKeys": [
+        "Nexus:6372"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "StardewHack",
+      "name": "StardewHack",
+      "id": "bcmpinc.StardewHack",
+      "version": "7.4",
+      "author": "bcmpinc",
+      "updateKeys": [
+        "Nexus:3213"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "StardewProgress",
+      "name": "Stardew Progress",
+      "id": "seeinggreen.StardewProgress",
+      "version": "2.2.2",
+      "author": "seeinggreen",
+      "updateKeys": [
+        "Nexus:9786"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "StardewUI",
+      "name": "StardewUI",
+      "id": "focustense.StardewUI",
+      "version": "0.6.1",
+      "author": "focustense",
+      "updateKeys": [
+        "Nexus:28870",
+        "GitHub:focustense/StardewUI"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Sunberry Village/[FTM] Sunberry Village",
+      "name": "Sunberry Village - Farm Type Manager",
+      "id": "skellady.SBVFTM",
+      "version": "1.1.2",
+      "author": "skellady",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Sunberry Village/[CC] Sunberry Village",
+      "name": "Sunberry Village - Custom Companions",
+      "id": "skellady.SBVCC",
+      "version": "1.1.2",
+      "author": "skellady",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Sunberry Village/[C#] Sunberry Village",
+      "name": "[C#] Sunberry Village",
+      "id": "SunberryTeam.SBVSMAPI",
+      "version": "1.1.2",
+      "author": "Sunberry Team",
+      "updateKeys": [
+        "Nexus:-1"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Sunberry Village/[CP] Sunberry Village",
+      "name": "Sunberry Village - Content Patcher",
+      "id": "skellady.SBVCP",
+      "version": "1.1.2",
+      "author": "skellady",
+      "updateKeys": [
+        "Nexus:11111"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Sword & Sorcery/[CP] Sword & Sorcery",
+      "name": "Sword & Sorcery [CP]",
+      "id": "DN.SnS",
+      "version": "2.3.10",
+      "author": "DestyNova",
+      "updateKeys": [
+        "Nexus:12369"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Sword & Sorcery/[SMAPI] Sword & Sorcery",
+      "name": "Sword and Sorcery (SMAPI Component)",
+      "id": "KCC.SnS",
+      "version": "2.3.10",
+      "author": "EnderTedi, 7thAxis, KittyCatCasey",
+      "updateKeys": [],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "TDIT - Portraits for Vendors",
+      "name": "TDIT - Portraits for Vendors",
+      "id": "DolphINaF.VendorPortraits",
+      "version": "1.10.2",
+      "author": "Dolphin Is Not a Fish",
+      "updateKeys": [
+        "Nexus:20414"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "TimeSpeed",
+      "name": "TimeSpeed",
+      "id": "cantorsdust.TimeSpeed",
+      "version": "3.1.0",
+      "author": "cantorsdust and Pathoschild",
+      "updateKeys": [
+        "Nexus:169"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Tiny Totem Statue Obelisks/[CP] Tiny Totem Statue Obelisks",
+      "name": "Tiny Totem Statue Obelisks",
+      "id": "jennajuffuffles.Obelisk",
+      "version": "2.1.1",
+      "author": "JennaJuffuffles",
+      "updateKeys": [
+        "Nexus:23118"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "ToDew",
+      "name": "To-Dew",
+      "id": "jltaylor-us.ToDew",
+      "version": "2.5.0",
+      "author": "Jamie Taylor",
+      "updateKeys": [
+        "Nexus:7409",
+        "GitHub:jltaylor-us/StardewToDew"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Train Station/TrainStation",
+      "name": "Train Station",
+      "id": "Cherry.TrainStation",
+      "version": "2.2.1",
+      "author": "Cherry",
+      "updateKeys": [
+        "Nexus:6183"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "TreeOverhaul",
+      "name": "Tree Overhaul - A Tappers Dream",
+      "id": "Goldenrevolver.ATappersDream",
+      "version": "4.0.2",
+      "author": "Goldenrevolver",
+      "updateKeys": [
+        "Nexus:260"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "UIInfoSuite2",
+      "name": "UI Info Suite 2",
+      "id": "Annosz.UiInfoSuite2",
+      "version": "2.3.7",
+      "author": "Annosz",
+      "updateKeys": [
+        "GitHub:Annosz/UIInfoSuite2",
+        "Nexus:7098"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Ultimate Coop and Barn/[CP] Ultimate Coop and Barn",
+      "name": "Ultimate Coop and Barn",
+      "id": "bobkalonger.UltimateCoopAndBarnCP",
+      "version": "1.8.22",
+      "author": "bobkalonger",
+      "updateKeys": [
+        "Nexus:44285"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Ultimate Coop and Barn/Ultimate Coop and Barn",
+      "name": "Ultimate Coop and Barn",
+      "id": "bobkalonger.UltCB_code",
+      "version": "1.8.22",
+      "author": "bobkalonger",
+      "updateKeys": [
+        "Nexus:44285"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "UnlimitedIncubatorHatches",
+      "name": "UnlimitedIncubatorHatches",
+      "id": "bobkalonger.UnlimitedIncubatorHatches",
+      "version": "1.0.1",
+      "author": "bobkalonger",
+      "updateKeys": [
+        "Nexus:45689"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Unlockable Bundles",
+      "name": "Unlockable Bundles",
+      "id": "DLX.Bundles",
+      "version": "4.3.0",
+      "author": "DeLiXx",
+      "updateKeys": [
+        "Nexus:17265@MAIN"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "VPP Farm Animals Compat",
+      "name": "VPP compat animals artisan goods preserve quality",
+      "id": "JackHero06.AnimalsVPPCompat",
+      "version": "1.1.0",
+      "author": "",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Vanilla Plus Professions/VanillaPlusProfessions",
+      "name": "Vanilla Plus Professions",
+      "id": "KediDili.VanillaPlusProfessions",
+      "version": "1.1.1",
+      "author": "KediDili",
+      "updateKeys": [
+        "Nexus:20054"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": false
+    },
+    {
+      "folder": "Vanilla Plus Professions/[CP] VPP Data",
+      "name": "[CP] VPP Data",
+      "id": "KediDili.VPPData.CP",
+      "version": "1.1.1",
+      "author": "KediDili",
+      "updateKeys": [
+        "Nexus:20054"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Victorian Furniture - Swan Set/Victorian Furniture - Swan Set",
+      "name": "Victorian Furniture - Swan Set",
+      "id": "VF.SwanFurniture",
+      "version": "1.0.0",
+      "author": "PlatinumCats",
+      "updateKeys": [
+        "Nexus:35529"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Visit Mount Vapius/[CP] Lumisteria Mt Vapius",
+      "name": "Lumisteria - Visit Mount Vapius",
+      "id": "Lumisteria.MtVapius",
+      "version": "2.0.0",
+      "author": "Lumisteria",
+      "updateKeys": [
+        "Nexus:9600"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Visit Mount Vapius/[FTM] Lumisteria Mt Vapius Spawn",
+      "name": "Lumisteria Mt Vapius Spawn",
+      "id": "Lumisteria.MtVapius.FTM",
+      "version": "2.0.0",
+      "author": "Lumisteria",
+      "updateKeys": [
+        "Nexus:9600"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Visit Mount Vapius/VisitMountVapius",
+      "name": "VisitMountVapius",
+      "id": "lumisteria.visitmountvapius.code",
+      "version": "2.0.0",
+      "author": "",
+      "updateKeys": [
+        "Nexus:9600"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Walk to the Desert Redux 1.3.3/[CP] WTDR",
+      "name": "[CP] Walk to the Desert Redux",
+      "id": "Tarniyar.CP.WalkToDesert",
+      "version": "1.3.3",
+      "author": "Tarniyar & Aeywoo",
+      "updateKeys": [
+        "Nexus:8630",
+        "ModDrop:980591",
+        "CurseForge:499736",
+        "GitHub:Aeywoo/WTDR"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Walk to the Desert Redux 1.3.3/[FTM] WTDR",
+      "name": "[FTM] Walk to the Desert Redux",
+      "id": "Tarniyar.FTM.WalkToDesert",
+      "version": "1.3.3",
+      "author": "Tarniyar & Aeywoo",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "WearMoreRings",
+      "name": "Wear More Rings",
+      "id": "bcmpinc.WearMoreRings",
+      "version": "7.9",
+      "author": "bcmpinc",
+      "updateKeys": [
+        "Nexus:3214"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "Wildflour's Atelier Goods/[CP] WAG 2.0",
+      "name": "Wildflour's Atelier Goods",
+      "id": "Wildflour.AtelierGoods",
+      "version": "2.1.2",
+      "author": "wildflourmods",
+      "updateKeys": [
+        "nexus:27049"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "Wildflour's Atelier Goods/[FTM] WAG 2.0",
+      "name": "[FTM] Wildflour's Atelier Goods",
+      "id": "Wildflour.AtelierGoodsFTM",
+      "version": "2.1.2",
+      "author": "wildflourmods",
+      "updateKeys": [],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "WorldMaps",
+      "name": "World Maps",
+      "id": "shekurika.worldMaps",
+      "version": "1.0.3",
+      "author": "shekurika",
+      "updateKeys": [
+        "Nexus:24210"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "ZoomLevel",
+      "name": "Zoom Level",
+      "id": "thespbgamer.ZoomLevel",
+      "version": "4.5.1",
+      "author": "thespbgamer",
+      "updateKeys": [
+        "GitHub:thespbgamer/ZoomLevel",
+        "Nexus:7363",
+        "CurseForge:714275"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "[AT] Slime Recipe Book",
+      "name": "[AT] Slime Potions",
+      "id": "Glacial.Slime.AT",
+      "version": "4.0.1",
+      "author": "GlacialGalaxies",
+      "updateKeys": [
+        22973
+      ],
+      "contentPackFor": "PeacefulEnd.AlternativeTextures",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP-A] Animated Clothes",
+      "name": "Animated Clothes",
+      "id": "Gervig91.AnimatedClothes",
+      "version": "1.2.0",
+      "author": "Gervig91",
+      "updateKeys": [
+        "Nexus:6117"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP-A] Animated Ridgeside Village Fish",
+      "name": "Animated Ridgeside Village Fish",
+      "id": "Gervig91.AnimatedRSVFish",
+      "version": "1.3.1",
+      "author": "Gervig91",
+      "updateKeys": [
+        "Nexus:6974"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP-SC] AnimatedGemstones",
+      "name": "AnimatedGemstones",
+      "id": "Undare.AnimatedGemstones",
+      "version": "1.1.8",
+      "author": "Undare ~zBGEdit/CPA2SC",
+      "updateKeys": [
+        "Nexus:4986"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Add Berry Seasons to Calendar",
+      "name": "Add Berry Seasons to Calendar",
+      "id": "Inmognito.BerryCalendar",
+      "version": "1.1.0",
+      "author": "Inmognito",
+      "updateKeys": [
+        "Nexus:10477"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Animated East Scarp Fish",
+      "name": "Animated East Scarp Fish",
+      "id": "Gervig91.AnimatedESFish",
+      "version": "1.3.2",
+      "author": "Gervig91 ~zBGEdit/CPA2SC",
+      "updateKeys": [
+        "Nexus:10913"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Animated Fish",
+      "name": "Animated Fish",
+      "id": "Gervig91.AnimatedFish",
+      "version": "1.4.0",
+      "author": "Gervig91 ~zBGEdit/CPA2SC",
+      "updateKeys": [
+        "Nexus:5735"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Animated Fish SVE",
+      "name": "Animated Fish SVE",
+      "id": "Gervig91.AnimatedFishSVE",
+      "version": "1.9.0",
+      "author": "Gervig91 ~zBGEdit/CPA2SC",
+      "updateKeys": [
+        "Nexus:6089"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Animated Food and Drinks",
+      "name": "Animated Food and Drinks",
+      "id": "Gervig91.AnimatedFood",
+      "version": "3.5.0",
+      "author": "Gervig91 ~zBGEdit/CPA2SC",
+      "updateKeys": [
+        "Nexus:5607"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Animated Furniture and Stuff",
+      "name": "Animated Furniture and Stuff",
+      "id": "Gervig91.AnimatedFurnitureAndStuff",
+      "version": "1.2.0",
+      "author": "Gervig91 ~zBGEdit/CPA2SC",
+      "updateKeys": [
+        "Nexus:5662"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Animated Slime Eggs and Loot",
+      "name": "Animated Slime Eggs and Loot",
+      "id": "Gervig91.AnimatedSlimeEggandLoot",
+      "version": "2.2.0",
+      "author": "Gervig91 ~zBGEdit/CPA2SC",
+      "updateKeys": [
+        "Nexus:5642"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Better Honey Mead",
+      "name": "[CP] Better Honey Mead",
+      "id": "NCarigon.BetterHoneyMeadCP",
+      "version": "1.1.0",
+      "author": "NCarigon",
+      "updateKeys": [
+        "nexus:22848"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Chocobo Valley",
+      "name": "[CP] Chocobo Valley",
+      "id": "Kitsutsune.Chocobovalley",
+      "version": "1.0.3",
+      "author": "Kitsutsune",
+      "updateKeys": [
+        "Nexus:22226"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Clint Reforged",
+      "name": "[CP] Clint Reforged",
+      "id": "SoftPandaBoi.ClintReforged",
+      "version": "1.2.1",
+      "author": "SoftPandaBoi",
+      "updateKeys": [
+        "Nexus:18345"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Community Center",
+      "name": "Community Center",
+      "id": "LemurKat.CommunityCenter.CP",
+      "version": "1.3.2",
+      "author": "LemurKat",
+      "updateKeys": [
+        "Nexus:6966"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Donkeys",
+      "name": "Donkeys",
+      "id": "birdb.CP.Donkey",
+      "version": "2.4",
+      "author": "birdb",
+      "updateKeys": [
+        "Nexus:8410"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Fippsie's Tidy Pam",
+      "name": "Tidy Pam",
+      "id": "Fippsie.TinyPam",
+      "version": "3.0",
+      "author": "Fippsie",
+      "updateKeys": [
+        "Nexus:2306"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Foxbloom Seeds",
+      "name": "Foxbloom Seeds",
+      "id": "CrypticHaze.FoxbloomSeeds",
+      "version": "1.0",
+      "author": "CrypticHaze",
+      "updateKeys": [
+        "Nexus:27065"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] H&W Decorative Plants Furniture",
+      "name": "[CP] H&W Decorative Plants Furniture Set",
+      "id": "HXW.DecoPlants",
+      "version": "1.0.2",
+      "author": "HimeTarts and wildflourmods",
+      "updateKeys": [
+        "nexus:27174"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Jonghyuk",
+      "name": "Sunberry NPC - Jonghyuk",
+      "id": "Arknir.Jonghyuk",
+      "version": "1.1.0",
+      "author": "Arknir27",
+      "updateKeys": [
+        "Nexus:???"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Keep Glass Shards Fix",
+      "name": "Keep Glass Shards Fix",
+      "id": "Alex.KeepGlassShardsFix",
+      "version": "1.0.0",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Lumisteria Tilesheets - Outdoor",
+      "name": "Lumisteria Tilesheets - Outdoor",
+      "id": "Lumisteria.TtilesheetsOutdoor",
+      "version": "1.4.0",
+      "author": "Lumisteria",
+      "updateKeys": [
+        "Nexus:10448"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Lunna Dianna Social Fix",
+      "name": "Lunna Dianna Social Fix",
+      "id": "alex.LunnaDiannaSocialFix",
+      "version": "1.0.0",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Mahogany Shake Items Automate Fix",
+      "name": "Mahogany Shake Items - Automate Fix",
+      "id": "Alex.MahoganyShakeItemsAutomateFix",
+      "version": "1.0.0",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Marnie Deserves Better",
+      "name": "[CP] Marnie Deserves Better",
+      "id": "IMS.CP.MarnieDeservesBetter",
+      "version": "1.0.1",
+      "author": "IllogicalMoodSwing",
+      "updateKeys": [
+        "Nexus:7686"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Mizu's Quail",
+      "name": "Mizu's Quail",
+      "id": "Mizu.Quail",
+      "version": "1.3.1",
+      "author": "MizuJakkaru",
+      "updateKeys": [
+        "Nexus:25028"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Mizu's Turkey",
+      "name": "Mizu's Turkey",
+      "id": "Mizu.Turkey",
+      "version": "1.0.2",
+      "author": "MizuJakkaru",
+      "updateKeys": [
+        "Nexus:25071"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Music of Ridgeside Village",
+      "name": "Ridgeside Village - Extra Music",
+      "id": "Rafseazz.RSVSAATExtra",
+      "version": "2.5.9",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:7286@RSVFullMusic"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] PC's Tilesheets",
+      "name": "PlatinumCats' Tilesheets",
+      "id": "PC.Tilesheets",
+      "version": "1.1.0",
+      "author": "PlatinumCats",
+      "updateKeys": [
+        "Nexus:38116"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Passerby Tree Fruit Automate Fix",
+      "name": "Passerby Tree Fruit - Automate Fix",
+      "id": "Alex.PasserbyTreeFruitAutomateFix",
+      "version": "1.0.0",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] PasserbyCemetery/[FTM] PC",
+      "name": "PC FTM",
+      "id": "Fellowclown.PCFTM",
+      "version": "2.75.0",
+      "author": "Fellowclown",
+      "updateKeys": [
+        "Nexus:22600"
+      ],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] PasserbyCemetery/ClownSharp",
+      "name": "Clown Sharp",
+      "id": "DecidedlyHuman.ClownSharp",
+      "version": "2.75.0",
+      "author": "DecidedlyHuman",
+      "updateKeys": [
+        "Nexus:22600"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "[CP] PasserbyCemetery/[CP] PC Content",
+      "name": "Passerby Cemetery",
+      "id": "Fellowclown.PC",
+      "version": "2.75.0",
+      "author": "Fellowclown",
+      "updateKeys": [
+        "Nexus:22600"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] RSV Seasonal Outfits",
+      "name": "Ridgeside Village Seasonal Outfits",
+      "id": "Rafseazz.RSVSeasonalOutfits",
+      "version": "1.1.3",
+      "author": "Rafseazz",
+      "updateKeys": [
+        "Nexus:18202"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] ResourceChickens",
+      "name": "Resource Chickens",
+      "id": "UncleArya.ResourceChickens",
+      "version": "1.0.1",
+      "author": "UncleArya",
+      "updateKeys": [
+        "Nexus:21800"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Rodney O'Brien",
+      "name": "[NPC] Rodney O'Brien",
+      "id": "TheFrenchDodo.RodneyOBrien",
+      "version": "3.2.6",
+      "author": "TheFrenchDodo",
+      "updateKeys": [
+        "Nexus:13437"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] SASS Propagation Station Restore",
+      "name": "[CP] SASS Propagation Station Restore",
+      "id": "Jacob.SASSPropagationStationRestore",
+      "version": "1.0.0",
+      "author": "local restore",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Seasonal Vanilla UI",
+      "name": "(CP) Seasonal Vanilla UI",
+      "id": "GalaxyRobot.SeasonalVanillaUI",
+      "version": "3.0.0",
+      "author": "GalaxyRobotMods",
+      "updateKeys": [
+        "Nexus:17272"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Slime Potions",
+      "name": "[CP] Slime Potion Brewing",
+      "id": "Glacial.Slime",
+      "version": "4.0.1",
+      "author": "GlacialGalaxies",
+      "updateKeys": [
+        22973
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Solarium Plantable Fix",
+      "name": "Solarium Greenhouse Plantable Fix",
+      "id": "Alex.SolariumPlantableFix",
+      "version": "1.0.0",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] SolariumSpa",
+      "name": "SolariumSpa",
+      "id": "BBR.SolariumSpa",
+      "version": "1.0.5",
+      "author": "BBR",
+      "updateKeys": [
+        "Nexus:10548"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] The Bear Family's Bear-y Sweet Portraits",
+      "name": "The Bear Family's Bear-y Sweet Portraits",
+      "id": "Heart.BearFamilyBearySweetPortraits",
+      "version": "1.0.0",
+      "author": "Heart",
+      "updateKeys": [
+        38775
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Trent's New Animals",
+      "name": "Trent's BFAV Animals",
+      "id": "Trent.NewAnimals",
+      "version": "2.6.0",
+      "author": "Trent",
+      "updateKeys": [
+        "Nexus:3634"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] VPP Mahogany Sap Fix",
+      "name": "VPP Mahogany Sap Fix",
+      "id": "Alex.VPPMahoganySapFix",
+      "version": "1.0.0",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Void Tree Automate Fix",
+      "name": "Void Tree - Automate Fix",
+      "id": "Alex.VoidTreeAutomateFix",
+      "version": "1.0.0",
+      "author": "Alex",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Woolly Bison",
+      "name": "Arryn's Woolly Bison",
+      "id": "Arryn.WoollyBison",
+      "version": "1.1",
+      "author": "Arryn",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Woolly Goat",
+      "name": "Arryn's Woolly Goat",
+      "id": "Arryn.WoollyGoat",
+      "version": "1.2",
+      "author": "Arryn",
+      "updateKeys": [],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP] Yagisan - Custom NPCs for NPC Map Locations",
+      "name": "[CP] Yagisan - Custom NPCs for NPC Map Locations",
+      "id": "Yagisan.NPCMapLocationsForNPCs",
+      "version": "1.2.1",
+      "author": "Yagisan",
+      "updateKeys": [
+        "Nexus:8174"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP]AppaloosaHorse",
+      "name": "[CP]AppaloosaHorse",
+      "id": "AppaloosaHorse",
+      "version": "1.0",
+      "author": "GimmeTheZzz",
+      "updateKeys": [
+        "Nexus:36573"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[CP]SummerFlamingo",
+      "name": "SummerFlamingo",
+      "id": "SummerFlamingo",
+      "version": "2.0",
+      "author": "GimmeTheZzz",
+      "updateKeys": [
+        "Nexus:36681"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[FS] ClownfitOverhaul",
+      "name": "(FS) ClownFitOverhaul",
+      "id": "Fellowclown.CO",
+      "version": "1.0.0",
+      "author": "Fellowclown",
+      "updateKeys": [
+        "Nexus:@CFO"
+      ],
+      "contentPackFor": "PeacefulEnd.FashionSense",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[FTM] ResourceChickens",
+      "name": "[FTM] Resource Chickens",
+      "id": "UncleArya.ResourceChickensFTM",
+      "version": "0.4.0",
+      "author": "UncleArya",
+      "updateKeys": [],
+      "contentPackFor": "Esca.FarmTypeManager",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[MFM] Chocobo Valley",
+      "name": "[MFM] Chocobo Valley",
+      "id": "Kitsutsune.Chocobovalley.MFM",
+      "version": "1.0.3",
+      "author": "Kitsutsune",
+      "updateKeys": [
+        "Nexus:22226"
+      ],
+      "contentPackFor": "DIGUS.MailFrameworkMod",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[MG] Lumisteria Short Flowery Grass",
+      "name": "[MG] Lumisteria Short Flowery Grass",
+      "id": "lumisteria.shortflowerygrass",
+      "version": "1.0.0",
+      "author": "Lumisteria",
+      "updateKeys": [
+        "Nexus:8676"
+      ],
+      "contentPackFor": "EpicBellyFlop45.MoreGrass",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Dao",
+      "name": "Sunberry NPC - Dao",
+      "id": "Airyn.Dao.CP",
+      "version": "1.0.3",
+      "author": "Airyn",
+      "updateKeys": [
+        "Nexus:33615"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Eli and Dylan/NovaNPCTest",
+      "name": "Eli and Dylan Code",
+      "id": "atravita.NovaNPCTest",
+      "version": "1.4.4",
+      "author": "atravita",
+      "updateKeys": [
+        "-1"
+      ],
+      "contentPackFor": null,
+      "isCodeMod": true
+    },
+    {
+      "folder": "[NPC] Eli and Dylan/[CC] Soot",
+      "name": "Eli & Dylan- Soot",
+      "id": "TenebrousNova.EliDylanCC",
+      "version": "1.4.4",
+      "author": "Tenebrous Nova",
+      "updateKeys": [
+        "Nexus:?????"
+      ],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Eli and Dylan/[CP] Eli and Dylan",
+      "name": "Eli & Dylan",
+      "id": "TenebrousNova.EliDylan.CP",
+      "version": "1.4.4",
+      "author": "Tenebrous Nova",
+      "updateKeys": [
+        "Nexus:13883"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Lani/[CP] Custom NPC Lani",
+      "name": "Sunberry NPC - Lani",
+      "id": "atelier99.SBV.NPCLani",
+      "version": "1.1.7",
+      "author": "atelier99",
+      "updateKeys": [
+        "Nexus:32689"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Lani/[CC] Sammy",
+      "name": "Lani CC - Sammy",
+      "id": "atelier99.LaniCC",
+      "version": "1.1.7",
+      "author": "atelier99",
+      "updateKeys": [
+        "Nexus:32689"
+      ],
+      "contentPackFor": "PeacefulEnd.CustomCompanions",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Leilani",
+      "name": "Leilani",
+      "id": "ZoeDoll.NPCLeilani",
+      "version": "1.5.0",
+      "author": "ZoeDoll",
+      "updateKeys": [
+        "Nexus:9375"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Nora the Herpetologist v.2.9.2 ESR/[CP] The Herpetologist",
+      "name": "Nora The Herpetologist",
+      "id": "Bagi.Nora.CP",
+      "version": "2.9.2",
+      "author": "Bagi",
+      "updateKeys": [
+        "Nexus:18176"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[NPC] Wren",
+      "name": "Wren the Plumber - Custom NPC",
+      "id": "tiakall.wren",
+      "version": "1.0.4",
+      "author": "tiakall",
+      "updateKeys": [
+        "Nexus:14286"
+      ],
+      "contentPackFor": "Pathoschild.ContentPatcher",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[PFM] Produce to Sapling - Fresh Meat",
+      "name": "[PFM] Produce to Sapling - Fresh Meat",
+      "id": "metalax.ProduceToSaplingFreshMeat",
+      "version": "1.0.0",
+      "author": "metalax",
+      "updateKeys": [
+        "Nexus: 5079"
+      ],
+      "contentPackFor": "Digus.ProducerFrameworkMod",
+      "isCodeMod": false
+    },
+    {
+      "folder": "[PFM]RiceVinegar",
+      "name": "PFM Rice Vinegar",
+      "id": "LuckyPicks.RiceVinegar",
+      "version": "1.0.0",
+      "author": "LuckyPicks",
+      "updateKeys": [
+        "Nexus:12679"
+      ],
+      "contentPackFor": "DIGUS.ProducerFrameworkMod",
+      "isCodeMod": false
+    }
+  ],
+  "disabledFolders": []
+}
