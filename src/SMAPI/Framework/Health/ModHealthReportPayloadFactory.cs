@@ -47,7 +47,7 @@ internal sealed class ModHealthReportPayloadFactory
                 break;
         }
 
-MinimalFallback:
+    MinimalFallback:
         candidate = this.Pruner.CreateMinimalFallback(candidate);
         ModHealthReportPayload fallback = this.Format(candidate);
         if (fallback.TextByteCount <= this.MaximumBytes && fallback.JsonByteCount <= this.MaximumBytes)

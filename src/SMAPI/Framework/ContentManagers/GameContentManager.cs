@@ -229,7 +229,7 @@ internal class GameContentManager : BaseContentManager
                 mod,
                 "Content.Load",
                 $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}",
-                GetExecutionPhase(),
+                this.GetExecutionPhase(),
                 ModHealthOperationKind.ContentLoad,
                 GetSafeModId(loader.OnBehalfOf)
             )
@@ -248,7 +248,7 @@ internal class GameContentManager : BaseContentManager
             failed = true;
             this.Coordinator.HealthObserver?.ObserveCallbackFailure(
                 mod,
-                GetExecutionPhase(),
+                this.GetExecutionPhase(),
                 ModHealthOperationKind.ContentLoad,
                 $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}",
                 ex,
@@ -302,7 +302,7 @@ internal class GameContentManager : BaseContentManager
                     editor.Mod,
                     "Content.Edit",
                     $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}",
-                    GetExecutionPhase(),
+                    this.GetExecutionPhase(),
                     ModHealthOperationKind.ContentEdit,
                     GetSafeModId(editor.OnBehalfOf)
                 )
@@ -321,7 +321,7 @@ internal class GameContentManager : BaseContentManager
                 failed = true;
                 this.Coordinator.HealthObserver?.ObserveCallbackFailure(
                     mod,
-                    GetExecutionPhase(),
+                    this.GetExecutionPhase(),
                     ModHealthOperationKind.ContentEdit,
                     $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}",
                     ex,
