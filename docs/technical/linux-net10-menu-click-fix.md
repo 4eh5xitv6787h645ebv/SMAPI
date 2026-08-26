@@ -44,4 +44,4 @@ The normal mode starts after a save is loaded. `StartAtTitle` provides a fast in
 | Trusted PR #158 modpack plus fresh Blossom save, 120 physical clicks held for 40 ms | .NET 10.0.11 before buffering | 116, then 109 activations in repeated runs |
 | Same trusted full workload after buffering | .NET 10.0.11 | 120 presses / 120 releases / 120 activations, with 12 update gaps of at least 50 ms |
 
-The final full SMAPI Release test run passed 1,679 tests with 3 platform skips and no failures.
+The final full SMAPI Release test run passed 1,680 tests with 3 platform skips and no failures.
