@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Toolkit;
 using StardewModdingAPI.Toolkit.Framework;
 using StardewModdingAPI.Toolkit.Framework.BundledModData;
@@ -18,8 +19,22 @@ namespace StardewModdingAPI.Framework.ModLoading;
 internal class ModResolver
 {
     /*********
+    ** Fields
+    *********/
+    /// <summary>Copies privacy-safe mod discovery and metadata changes to the health ledger, if enabled.</summary>
+    private readonly ModHealthRuntimeObserver? HealthObserver;
+
+
+    /*********
     ** Public methods
     *********/
+    /// <summary>Construct an instance.</summary>
+    /// <param name="healthObserver">Copies privacy-safe mod discovery and metadata changes to the health ledger, if enabled.</param>
+    public ModResolver(ModHealthRuntimeObserver? healthObserver = null)
+    {
+        this.HealthObserver = healthObserver;
+    }
+
     /// <summary>Get manifest metadata for each folder in the given root path.</summary>
     /// <param name="toolkit">The mod toolkit.</param>
     /// <param name="rootPath">The root path to search for mods.</param>
@@ -55,7 +70,7 @@ internal class ModResolver
 
             // build metadata
             bool shouldIgnore = folder.Type == ModType.Ignored;
-            IModMetadata metadata = new ModMetadata(folder.DisplayName, folder.Directory.FullName, rootPath, manifest, dataRecord, isIgnored: shouldIgnore);
+            IModMetadata metadata = new ModMetadata(folder.DisplayName, folder.Directory.FullName, rootPath, manifest, dataRecord, isIgnored: shouldIgnore, healthObserver: this.HealthObserver);
             if (blacklistEntry != null)
                 metadata.SetStatus(ModMetadataStatus.Failed, ModFailReason.Malicious, blacklistEntry.Message);
             else if (shouldIgnore)

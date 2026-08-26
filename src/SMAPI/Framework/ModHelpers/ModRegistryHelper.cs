@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Internal;
+using StardewValley;
 
 namespace StardewModdingAPI.Framework.ModHelpers;
 
@@ -23,6 +25,9 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
     /// <summary>Generates proxy classes to access mod APIs through an arbitrary interface.</summary>
     private readonly IInterfaceProxyFactory ProxyFactory;
 
+    /// <summary>Collects privacy-safe structured callback failures, if enabled.</summary>
+    private readonly ModHealthRuntimeObserver? HealthObserver;
+
 
     /*********
     ** Public methods
@@ -32,12 +37,14 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
     /// <param name="registry">The underlying mod registry.</param>
     /// <param name="proxyFactory">Generates proxy classes to access mod APIs through an arbitrary interface.</param>
     /// <param name="monitor">Encapsulates monitoring and logging for the mod.</param>
-    public ModRegistryHelper(IModMetadata mod, ModRegistry registry, IInterfaceProxyFactory proxyFactory, IMonitor monitor)
+    /// <param name="healthObserver">Collects privacy-safe structured callback failures, if enabled.</param>
+    public ModRegistryHelper(IModMetadata mod, ModRegistry registry, IInterfaceProxyFactory proxyFactory, IMonitor monitor, ModHealthRuntimeObserver? healthObserver = null)
         : base(mod)
     {
         this.Registry = registry;
         this.ProxyFactory = proxyFactory;
         this.Monitor = monitor;
+        this.HealthObserver = healthObserver;
     }
 
     /// <inheritdoc />
@@ -130,6 +137,13 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
                 }
                 catch (Exception ex)
                 {
+                    this.HealthObserver?.ObserveCallbackFailure(
+                        mod,
+                        Game1.IsOnMainThread() ? ModHealthExecutionPhase.Update : ModHealthExecutionPhase.Background,
+                        ModHealthOperationKind.GetApi,
+                        $"{mod.Mod?.GetType().FullName}.{nameof(IMod.GetApi)}",
+                        ex
+                    );
                     this.Monitor.Log($"Failed loading the per-mod API instance from {mod.DisplayName}. Integrations with other mods may not work. Error: {ex.GetLogSummary()}", LogLevel.Error);
                     api = null;
                 }

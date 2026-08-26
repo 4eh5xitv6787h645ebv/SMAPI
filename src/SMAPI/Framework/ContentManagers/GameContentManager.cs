@@ -10,6 +10,7 @@ using StardewModdingAPI.Events;
 using StardewModdingAPI.Framework.Content;
 using StardewModdingAPI.Framework.Exceptions;
 using StardewModdingAPI.Framework.Extensions;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Framework.Utilities;
@@ -224,7 +225,14 @@ internal class GameContentManager : BaseContentManager
         Context.HeuristicModsRunningCode.Push(loader.Mod);
         bool profile = this.Coordinator.PerformanceManager.IsTracking;
         HandlerTimingToken timing = profile
-            ? this.Coordinator.PerformanceManager.BeginHandler(mod, "Content.Load", $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}")
+            ? this.Coordinator.PerformanceManager.BeginHandler(
+                mod,
+                "Content.Load",
+                $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}",
+                GetExecutionPhase(),
+                ModHealthOperationKind.ContentLoad,
+                GetSafeModId(loader.OnBehalfOf)
+            )
             : default;
         bool failed = false;
         try
@@ -238,6 +246,14 @@ internal class GameContentManager : BaseContentManager
         catch (Exception ex)
         {
             failed = true;
+            this.Coordinator.HealthObserver?.ObserveCallbackFailure(
+                mod,
+                GetExecutionPhase(),
+                ModHealthOperationKind.ContentLoad,
+                $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}",
+                ex,
+                loader.OnBehalfOf
+            );
             mod.LogAsMod($"Mod crashed when loading asset '{info.Name}'{this.GetOnBehalfOfLabel(loader.OnBehalfOf)}. SMAPI will use the default asset instead. Error details:\n{ex.GetLogSummary()}", LogLevel.Error);
             data = default;
             return false;
@@ -282,7 +298,14 @@ internal class GameContentManager : BaseContentManager
             Context.HeuristicModsRunningCode.Push(editor.Mod);
             bool profile = this.Coordinator.PerformanceManager.IsTracking;
             HandlerTimingToken timing = profile
-                ? this.Coordinator.PerformanceManager.BeginHandler(editor.Mod, "Content.Edit", $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}")
+                ? this.Coordinator.PerformanceManager.BeginHandler(
+                    editor.Mod,
+                    "Content.Edit",
+                    $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}",
+                    GetExecutionPhase(),
+                    ModHealthOperationKind.ContentEdit,
+                    GetSafeModId(editor.OnBehalfOf)
+                )
                 : default;
             bool failed = false;
             try
@@ -296,6 +319,14 @@ internal class GameContentManager : BaseContentManager
             catch (Exception ex)
             {
                 failed = true;
+                this.Coordinator.HealthObserver?.ObserveCallbackFailure(
+                    mod,
+                    GetExecutionPhase(),
+                    ModHealthOperationKind.ContentEdit,
+                    $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}",
+                    ex,
+                    editor.OnBehalfOf
+                );
                 mod.LogAsMod($"Mod crashed when editing asset '{info.Name}'{this.GetOnBehalfOfLabel(editor.OnBehalfOf)}, which may cause errors in-game. Error details:\n{ex.GetLogSummary()}", LogLevel.Error);
             }
             finally
@@ -338,6 +369,20 @@ internal class GameContentManager : BaseContentManager
                 return (ApplyEditorsDelegate)method.CreateDelegate(typeof(ApplyEditorsDelegate));
             }
         );
+    }
+
+    /// <summary>Get the broad execution phase without retaining game or asset state.</summary>
+    private static ModHealthExecutionPhase GetExecutionPhase()
+    {
+        return Game1.IsOnMainThread()
+            ? ModHealthExecutionPhase.Update
+            : ModHealthExecutionPhase.Background;
+    }
+
+    /// <summary>Get a content pack's safe manifest identity, if available.</summary>
+    private static string? GetSafeModId(IModMetadata? mod)
+    {
+        return mod?.HasId() is true ? mod.Manifest.UniqueID : null;
     }
 
     /// <summary>Assert that at most one loader will be applied to an asset.</summary>

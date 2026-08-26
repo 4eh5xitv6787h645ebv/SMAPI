@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.ModHelpers;
 using StardewModdingAPI.Toolkit.Framework.BundledModData;
 using StardewModdingAPI.Toolkit.Framework.Clients.WebApi;
@@ -22,6 +23,9 @@ internal class ModMetadata : IModMetadata
 
     /// <summary>The mod IDs which are listed as a requirement by this mod. The value for each pair indicates whether the dependency is required (i.e. not an optional dependency).</summary>
     private readonly Lazy<IDictionary<string, bool>> Dependencies;
+
+    /// <summary>Copies privacy-safe metadata changes to the session health ledger, if enabled.</summary>
+    private readonly ModHealthRuntimeObserver? HealthObserver;
 
 
     /*********
@@ -100,7 +104,8 @@ internal class ModMetadata : IModMetadata
     /// <param name="manifest">The mod manifest.</param>
     /// <param name="dataRecord">Metadata about the mod from SMAPI's internal data (if any).</param>
     /// <param name="isIgnored">Whether the mod folder should be ignored. This should be <c>true</c> if it was found within a folder whose name starts with a dot.</param>
-    public ModMetadata(string displayName, string directoryPath, string rootPath, IManifest? manifest, ModDataRecordVersionedFields? dataRecord, bool isIgnored)
+    /// <param name="healthObserver">Copies privacy-safe metadata changes to the session health ledger, if enabled.</param>
+    public ModMetadata(string displayName, string directoryPath, string rootPath, IManifest? manifest, ModDataRecordVersionedFields? dataRecord, bool isIgnored, ModHealthRuntimeObserver? healthObserver = null)
     {
         this.DisplayName = displayName;
         this.DirectoryPath = directoryPath;
@@ -109,39 +114,51 @@ internal class ModMetadata : IModMetadata
         this.Manifest = manifest!; // manifest may be null in low-level SMAPI code, but won't be null once it's received by mods via IModInfo
         this.DataRecord = dataRecord;
         this.IsIgnored = isIgnored;
+        this.HealthObserver = healthObserver;
 
         this.Dependencies = new Lazy<IDictionary<string, bool>>(this.ExtractDependencies);
+        this.HealthObserver?.ObserveDiscovery(this);
     }
 
     /// <inheritdoc />
     public IModMetadata SetStatusFound()
     {
-        this.SetStatus(ModMetadataStatus.Found, ModFailReason.Incompatible, null);
+        ModHealthLedgerModStatus? previousStatus = this.GetHealthStatus();
+        this.Status = ModMetadataStatus.Found;
         this.FailReason = null;
+        this.Error = null;
+        this.ErrorDetails = null;
+        this.NotifyHealthChanged(previousStatus);
         return this;
     }
 
     /// <inheritdoc />
     public IModMetadata SetStatus(ModMetadataStatus status, ModFailReason reason, string? error, string? errorDetails = null)
     {
+        ModHealthLedgerModStatus? previousStatus = this.GetHealthStatus();
         this.Status = status;
         this.FailReason = reason;
         this.Error = error;
         this.ErrorDetails = errorDetails;
+        this.NotifyHealthChanged(previousStatus);
         return this;
     }
 
     /// <inheritdoc />
     public IModMetadata SetWarning(ModWarning warning)
     {
+        ModHealthLedgerModStatus? previousStatus = this.GetHealthStatus();
         this.ActualWarnings |= warning;
+        this.NotifyHealthChanged(previousStatus);
         return this;
     }
 
     /// <inheritdoc />
     public IModMetadata RemoveWarning(ModWarning warning)
     {
+        ModHealthLedgerModStatus? previousStatus = this.GetHealthStatus();
         this.ActualWarnings &= ~warning;
+        this.NotifyHealthChanged(previousStatus);
         return this;
     }
 
@@ -151,9 +168,11 @@ internal class ModMetadata : IModMetadata
         if (this.ContentPack != null)
             throw new InvalidOperationException("A mod can't be both an assembly mod and content pack.");
 
+        ModHealthLedgerModStatus? previousStatus = this.GetHealthStatus();
         this.Mod = mod;
         this.Monitor = mod.Monitor;
         this.Translations = translations;
+        this.NotifyHealthChanged(previousStatus);
         return this;
     }
 
@@ -163,9 +182,11 @@ internal class ModMetadata : IModMetadata
         if (this.Mod != null)
             throw new InvalidOperationException("A mod can't be both an assembly mod and content pack.");
 
+        ModHealthLedgerModStatus? previousStatus = this.GetHealthStatus();
         this.ContentPack = contentPack;
         this.Monitor = monitor;
         this.Translations = translations;
+        this.NotifyHealthChanged(previousStatus);
         return this;
     }
 
@@ -179,7 +200,9 @@ internal class ModMetadata : IModMetadata
     /// <inheritdoc />
     public IModMetadata SetUpdateData(ModEntryModel data)
     {
+        ModHealthLedgerModStatus? previousStatus = this.GetHealthStatus();
         this.UpdateCheckData = data;
+        this.NotifyHealthChanged(previousStatus);
         return this;
     }
 
@@ -286,6 +309,19 @@ internal class ModMetadata : IModMetadata
     /*********
     ** Private methods
     *********/
+    /// <summary>Get the current health-ledger status before mutating metadata.</summary>
+    private ModHealthLedgerModStatus? GetHealthStatus()
+    {
+        return this.HealthObserver?.GetStatus(this);
+    }
+
+    /// <summary>Copy the current authoritative metadata into the health ledger.</summary>
+    private void NotifyHealthChanged(ModHealthLedgerModStatus? previousStatus)
+    {
+        if (previousStatus.HasValue)
+            this.HealthObserver!.ObserveMetadataChanged(this, previousStatus.Value);
+    }
+
     /// <summary>Extract mod IDs from the manifest that must be installed to load this mod.</summary>
     /// <returns>Returns a dictionary of mod ID => is required (i.e. not an optional dependency).</returns>
     public IDictionary<string, bool> ExtractDependencies()
