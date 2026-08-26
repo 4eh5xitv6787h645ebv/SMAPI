@@ -2,10 +2,10 @@ using System;
 using System.IO;
 using FluentAssertions;
 using NUnit.Framework;
+using SMAPI.Tests.Framework.Health;
 using StardewModdingAPI;
 using StardewModdingAPI.Framework;
 using StardewModdingAPI.Framework.Health;
-using SMAPI.Tests.Framework.Health;
 
 namespace SMAPI.Tests.Core;
 
