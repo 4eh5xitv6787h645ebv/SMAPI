@@ -41,6 +41,21 @@ internal sealed class ModHealthReportPayloadFactoryTests
     }
 
     [Test]
+    public void TryPrune_SaturatesExistingOmissionCount()
+    {
+        ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical();
+        report = report with
+        {
+            Performance = report.Performance with { RecentUpdates = ImmutableArray.Create(report.Performance.WorstUpdates[0]) },
+            Omissions = ImmutableArray.Create(new ModHealthOmission("recentUpdates", long.MaxValue))
+        };
+
+        new ModHealthReportPruner().TryPrune(report, out ModHealthReport pruned).Should().BeTrue();
+
+        pruned.Omissions.Should().ContainSingle(omission => omission.Section == "recentUpdates" && omission.Count == long.MaxValue);
+    }
+
+    [Test]
     public void CreateMinimalFallback_RetainsBoundedProblemFirstInventory()
     {
         ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical();

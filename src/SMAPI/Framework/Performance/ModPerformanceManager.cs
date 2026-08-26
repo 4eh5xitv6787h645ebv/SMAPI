@@ -115,6 +115,12 @@ internal sealed class ModPerformanceManager
     /// <summary>The timestamp when the current sample began.</summary>
     private long SampleStartTimestamp;
 
+    /// <summary>The frozen timestamp when the current sample stopped.</summary>
+    private long SampleEndTimestamp;
+
+    /// <summary>Whether <see cref="SampleEndTimestamp"/> contains a frozen stop boundary.</summary>
+    private bool HasSampleEndTimestamp;
+
     /// <summary>A monotonically increasing identity for the current sample.</summary>
     private long SampleGeneration;
 
@@ -308,16 +314,18 @@ internal sealed class ModPerformanceManager
     /// <summary>Stop performance sampling while retaining the current results.</summary>
     public void Stop()
     {
-        bool wasTracking = Interlocked.Exchange(ref this.TrackingEnabled, 0) != 0;
         lock (this.SyncRoot)
         {
-            this.CloseOpenSlowEpisode();
-            if (wasTracking && !this.HasSampleEndGcCollections)
+            bool wasTracking = Interlocked.Exchange(ref this.TrackingEnabled, 0) != 0;
+            if (wasTracking && !this.HasSampleEndTimestamp)
             {
+                this.SampleEndTimestamp = Math.Max(this.SampleStartTimestamp, this.GetTimestamp());
+                this.HasSampleEndTimestamp = true;
                 for (int generation = 0; generation < this.SampleEndGcCollections.Length; generation++)
                     this.SampleEndGcCollections[generation] = this.GetGcCollectionCount(generation);
                 this.HasSampleEndGcCollections = true;
             }
+            this.CloseOpenSlowEpisode();
             this.IsTickOpen = false;
             this.IsGameUpdateOpen = false;
             this.CurrentTickThreadId = 0;
@@ -943,12 +951,14 @@ internal sealed class ModPerformanceManager
                 captureGcCollectionDataIsValid = false;
         }
 
-        long now = this.GetTimestamp();
+        long endTimestamp = this.HasSampleEndTimestamp
+            ? this.SampleEndTimestamp
+            : this.GetTimestamp();
         return new RawPerformanceSnapshot
         {
             IsTracking = this.IsTracking,
             StartedUtc = this.SampleStartedUtc,
-            ElapsedTimestampTicks = Math.Max(0, now - this.SampleStartTimestamp),
+            ElapsedTimestampTicks = Math.Max(0, endTimestamp - this.SampleStartTimestamp),
             CompletedTicks = this.CompletedTicks,
             Handlers = handlers,
             Logs = logs,
@@ -1425,6 +1435,8 @@ internal sealed class ModPerformanceManager
         this.InvalidHistogramUpdates = 0;
         this.SampleStartedUtc = DateTime.UtcNow;
         this.SampleStartTimestamp = timestamp;
+        this.SampleEndTimestamp = 0;
+        this.HasSampleEndTimestamp = false;
         for (int generation = 0; generation < this.SampleStartGcCollections.Length; generation++)
             this.SampleStartGcCollections[generation] = this.GetGcCollectionCount(generation);
         this.HasSampleEndGcCollections = false;

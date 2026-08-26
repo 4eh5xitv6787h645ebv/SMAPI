@@ -138,6 +138,32 @@ internal sealed class ModHealthInsightAnalyzerTests
         findings.Should().NotContain(finding => finding.RuleId == "observed-mod-dominance");
     }
 
+    [Test]
+    public void Analyze_DominanceIsSuppressedWhenWorstUpdateCapacityOmitsQualifyingEvidence()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ImmutableArray<ModHealthUpdate> retainedWorst = Enumerable.Range(1, ModHealthReportLimits.MaxWorstUpdates)
+            .Select(index => CreateSlowUpdate((uint)index) with
+            {
+                ObservedModMilliseconds = 100,
+                Contributors = ImmutableArray.Create(new ModHealthContributor("Example.Mod", 100))
+            })
+            .ToImmutableArray();
+        ModHealthReport report = baseReport with
+        {
+            Performance = baseReport.Performance with
+            {
+                SlowUpdateCount = ModHealthReportLimits.MaxWorstUpdates + 1,
+                WorstUpdates = retainedWorst
+            },
+            Omissions = baseReport.Omissions.Add(new ModHealthOmission("worstUpdates", 1))
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        findings.Should().NotContain(finding => finding.RuleId == "observed-mod-dominance");
+    }
+
     private static ModHealthUpdate CreateSlowUpdate(uint tick)
     {
         return new(tick, tick * 20, 100, 80, 10, 5, true, 5, true, "gameplay", true, 0, 0, 0, 0, 0, 0, 0, true, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 10)), null);

@@ -204,6 +204,10 @@ internal sealed class ModHealthReportPruner
         if (index < 0)
             return omissions.Add(new ModHealthOmission(section, count));
 
-        return omissions.SetItem(index, omissions[index] with { Count = omissions[index].Count + count });
+        long existing = Math.Max(0, omissions[index].Count);
+        long combined = existing > long.MaxValue - count
+            ? long.MaxValue
+            : existing + count;
+        return omissions.SetItem(index, omissions[index] with { Count = combined });
     }
 }

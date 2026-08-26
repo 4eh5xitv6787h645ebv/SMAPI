@@ -212,6 +212,11 @@ internal sealed class ModHealthInsightAnalyzer
         if (validSlowUpdates.Length < ModHealthReportLimits.RepeatedSlowUpdateCount)
             return;
 
+        // Dominance is a whole-capture conclusion, so don't infer it from the bounded worst-update subset.
+        // A mismatch also conservatively covers invalid timing rows whose contributor evidence can't be used.
+        if (validSlowUpdates.LongLength != report.Performance.SlowUpdateCount)
+            return;
+
         var leading = validSlowUpdates
             .Where(update => update.Contributors.Length > 0)
             .Select(update => update.Contributors.OrderByDescending(contributor => contributor.Milliseconds).ThenBy(contributor => contributor.ModId, StringComparer.OrdinalIgnoreCase).First())

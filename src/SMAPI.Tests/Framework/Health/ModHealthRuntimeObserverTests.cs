@@ -9,6 +9,7 @@ using StardewModdingAPI.Framework;
 using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.ModHelpers;
 using StardewModdingAPI.Framework.ModLoading;
+using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Toolkit;
 using StardewModdingAPI.Toolkit.Framework.BundledModData;
@@ -204,6 +205,40 @@ internal sealed class ModHealthRuntimeObserverTests
         failure.CallbackIdentity.Should().EndWith(".GetApi");
         failure.ExceptionType.Should().Be(typeof(InvalidOperationException).FullName);
         failure.CallbackIdentity.Should().NotContain("private");
+    }
+
+    [Test]
+    public void PerModApi_InheritsAmbientPhaseAndRecordsTimedFailure()
+    {
+        ModHealthLedger ledger = new();
+        ModHealthRuntimeObserver observer = new(ledger);
+        ModPerformanceManager performance = new(timestampFrequency: 1000, getTimestamp: static () => 0, getGcCollectionCount: _ => 0);
+        performance.Start();
+        Mock<IModMetadata> requestingMod = new();
+        Mock<IManifest> manifest = new();
+        manifest.SetupGet(instance => instance.UniqueID).Returns("Target.Mod");
+        manifest.SetupGet(instance => instance.Name).Returns("Target Mod");
+        Mock<IMod> targetInstance = new();
+        targetInstance.Setup(instance => instance.GetApi(requestingMod.Object)).Throws(new InvalidOperationException("private API detail"));
+        Mock<IModMetadata> targetMod = new();
+        targetMod.Setup(instance => instance.HasId()).Returns(true);
+        targetMod.Setup(instance => instance.HasManifest()).Returns(true);
+        targetMod.SetupGet(instance => instance.Manifest).Returns(manifest.Object);
+        targetMod.SetupGet(instance => instance.Mod).Returns(targetInstance.Object);
+        ModRegistry registry = new() { AreAllModsInitialized = true };
+        registry.Add(targetMod.Object);
+        ModRegistryHelper helper = new(requestingMod.Object, registry, Mock.Of<IInterfaceProxyFactory>(), Mock.Of<IMonitor>(), observer, performance);
+        HandlerTimingToken outer = performance.BeginHandler("Outer.Mod", "Outer", "Display.Rendering", "Outer.Draw", ModHealthExecutionPhase.Draw, ModHealthOperationKind.Event, null);
+
+        helper.GetApi("Target.Mod").Should().BeNull();
+        performance.EndHandler(outer, failed: false);
+
+        ModHealthCallbackPerformanceSnapshot callback = performance.GetSnapshot().Health!.Callbacks.Single(entry => entry.ModId == "Target.Mod");
+        callback.Operation.Should().Be(ModHealthOperationKind.GetApi);
+        callback.Phase.Should().Be(ModHealthExecutionPhase.Draw);
+        callback.CallCount.Should().Be(1);
+        callback.FailureCount.Should().Be(1);
+        ledger.GetSnapshot().CallbackFailures.Should().ContainSingle().Which.Phase.Should().Be(ModHealthExecutionPhase.Draw);
     }
 
     private ModMetadata CreateMetadata(ModHealthRuntimeObserver observer)

@@ -2611,7 +2611,7 @@ internal class SCore : IDisposable
                     );
                     IDataHelper dataHelper = new DataHelper(mod, mod.DirectoryPath, jsonHelper);
                     IReflectionHelper reflectionHelper = new ReflectionHelper(mod, mod.DisplayName, this.Reflection);
-                    IModRegistry modRegistryHelper = new ModRegistryHelper(mod, this.ModRegistry, proxyFactory, monitor, this.ModHealthRuntimeObserver);
+                    IModRegistry modRegistryHelper = new ModRegistryHelper(mod, this.ModRegistry, proxyFactory, monitor, healthObserver: this.ModHealthRuntimeObserver, performanceManager: this.ModPerformanceManager);
                     IMultiplayerHelper multiplayerHelper = new MultiplayerHelper(mod, this.Multiplayer);
 
                     modHelper = new ModHelper(mod, mod.DirectoryPath, () => this.GetCurrentGameInstance().Input, events, gameContentHelper, modContentHelper, contentPackHelper, commandHelper, dataHelper, modRegistryHelper, reflectionHelper, multiplayerHelper, translationHelper);

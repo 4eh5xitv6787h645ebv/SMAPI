@@ -420,6 +420,25 @@ internal sealed class ModPerformanceManagerTests
     }
 
     [Test]
+    public void Stop_FreezesElapsedAtTheSameCaptureBoundary()
+    {
+        long timestamp = 100;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        timestamp = 150;
+        manager.Stop();
+
+        timestamp = 500;
+        ModPerformanceSnapshot first = manager.GetSnapshot();
+        timestamp = 900;
+        ModPerformanceSnapshot second = manager.GetSnapshot();
+
+        first.IsTracking.Should().BeFalse();
+        first.Elapsed.Should().Be(TimeSpan.FromMilliseconds(50));
+        second.Elapsed.Should().Be(first.Elapsed);
+    }
+
+    [Test]
     public void DisabledManager_DoesNotCreateHandlerCounters()
     {
         ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);

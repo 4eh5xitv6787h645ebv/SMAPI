@@ -160,8 +160,10 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
                 this.PendingIsRetry = false;
             }
             this.CompleteDrainIfIdle();
+            // Signal before releasing the state lock. The worker must acquire this same lock to
+            // observe DisposeRequested and exit, so it can't dispose the event before this Set.
+            this.WorkAvailable.Set();
         }
-        this.WorkAvailable.Set();
         this.Worker.Join(this.ShutdownTimeout);
     }
 

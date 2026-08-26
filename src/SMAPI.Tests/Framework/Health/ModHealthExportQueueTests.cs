@@ -149,6 +149,21 @@ internal sealed class ModHealthExportQueueTests
     }
 
     [Test]
+    public void Dispose_RepeatedWriterExitCannotRaceShutdownSignalCleanup()
+    {
+        for (int i = 0; i < 32; i++)
+        {
+            CancellationPublisher publisher = new();
+            ModHealthExportQueue queue = CreateQueue(publisher);
+            queue.Enqueue(CreateRequest(isFinal: true));
+            publisher.Started.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+            FluentActions.Invoking(queue.Dispose).Should().NotThrow();
+            publisher.Cancelled.Should().BeTrue();
+        }
+    }
+
+    [Test]
     public async Task CompletionCallback_ReceivesCommittedRelativePaths()
     {
         DisposablePublisher publisher = new();

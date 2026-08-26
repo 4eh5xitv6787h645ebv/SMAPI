@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using StardewModdingAPI.Framework.Health;
+using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Framework.Reflection;
 using StardewModdingAPI.Internal;
 using StardewValley;
@@ -28,6 +29,9 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
     /// <summary>Collects privacy-safe structured callback failures, if enabled.</summary>
     private readonly ModHealthRuntimeObserver? HealthObserver;
 
+    /// <summary>Collects mod-owned callback timing, if available.</summary>
+    private readonly ModPerformanceManager? PerformanceManager;
+
 
     /*********
     ** Public methods
@@ -38,13 +42,15 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
     /// <param name="proxyFactory">Generates proxy classes to access mod APIs through an arbitrary interface.</param>
     /// <param name="monitor">Encapsulates monitoring and logging for the mod.</param>
     /// <param name="healthObserver">Collects privacy-safe structured callback failures, if enabled.</param>
-    public ModRegistryHelper(IModMetadata mod, ModRegistry registry, IInterfaceProxyFactory proxyFactory, IMonitor monitor, ModHealthRuntimeObserver? healthObserver = null)
+    /// <param name="performanceManager">Collects mod-owned callback timing, if available.</param>
+    public ModRegistryHelper(IModMetadata mod, ModRegistry registry, IInterfaceProxyFactory proxyFactory, IMonitor monitor, ModHealthRuntimeObserver? healthObserver = null, ModPerformanceManager? performanceManager = null)
         : base(mod)
     {
         this.Registry = registry;
         this.ProxyFactory = proxyFactory;
         this.Monitor = monitor;
         this.HealthObserver = healthObserver;
+        this.PerformanceManager = performanceManager;
     }
 
     /// <inheritdoc />
@@ -126,6 +132,13 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
             // else try to get a per-mod API
             else
             {
+                ModHealthExecutionPhase phase = this.GetExecutionPhase();
+                string callbackIdentity = $"{mod.Mod?.GetType().FullName}.{nameof(IMod.GetApi)}";
+                bool profile = this.PerformanceManager?.IsTracking is true;
+                HandlerTimingToken timing = profile
+                    ? this.PerformanceManager!.BeginHandler(mod, "ModLifecycle.GetApi", callbackIdentity, phase, ModHealthOperationKind.GetApi, onBehalfOfModId: null)
+                    : default;
+                bool failed = false;
                 try
                 {
                     api = mod.Mod?.GetApi(this.Mod);
@@ -137,15 +150,21 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
                 }
                 catch (Exception ex)
                 {
+                    failed = true;
                     this.HealthObserver?.ObserveCallbackFailure(
                         mod,
-                        Game1.IsOnMainThread() ? ModHealthExecutionPhase.Update : ModHealthExecutionPhase.Background,
+                        phase,
                         ModHealthOperationKind.GetApi,
-                        $"{mod.Mod?.GetType().FullName}.{nameof(IMod.GetApi)}",
+                        callbackIdentity,
                         ex
                     );
                     this.Monitor.Log($"Failed loading the per-mod API instance from {mod.DisplayName}. Integrations with other mods may not work. Error: {ex.GetLogSummary()}", LogLevel.Error);
                     api = null;
+                }
+                finally
+                {
+                    if (profile)
+                        this.PerformanceManager!.EndHandler(timing, failed);
                 }
             }
 
@@ -156,6 +175,16 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
         }
 
         return api;
+    }
+
+    /// <summary>Get the current broad execution phase, inheriting a surrounding observed callback when possible.</summary>
+    private ModHealthExecutionPhase GetExecutionPhase()
+    {
+        if (this.PerformanceManager?.GetActiveExecutionPhase() is { } inheritedPhase)
+            return inheritedPhase;
+        return Game1.IsOnMainThread()
+            ? ModHealthExecutionPhase.Update
+            : ModHealthExecutionPhase.Background;
     }
 
     /// <inheritdoc />

@@ -14,6 +14,15 @@ namespace SMAPI.Tests.Framework.Commands;
 internal sealed class PerformanceCommandTests
 {
     [Test]
+    public void Description_DoesNotClaimUnavailableSmapiOtherTimingIsMeasured()
+    {
+        PerformanceCommand command = new(new ModPerformanceManager(timestampFrequency: 1000, getTimestamp: () => 0));
+
+        command.Description.Should().Contain("SMAPI/other update timing is unavailable");
+        command.Description.Should().NotContain("SMAPI dispatch & other time");
+    }
+
+    [Test]
     public void Start_WithThreshold_EnablesSamplingAndTickLogging()
     {
         ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0);
