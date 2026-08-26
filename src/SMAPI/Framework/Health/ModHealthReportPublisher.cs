@@ -35,7 +35,7 @@ internal interface IModHealthReportFileSystem : IDisposable
 }
 
 /// <summary>Atomically publishes bounded report pairs into a private Linux directory.</summary>
-internal sealed class ModHealthReportPublisher : IModHealthReportPublisher
+internal sealed class ModHealthReportPublisher : IModHealthReportPublisher, IDisposable
 {
     private const int MaximumRetainedPairs = 5;
     private static readonly TimeSpan MaximumAge = TimeSpan.FromDays(30);
@@ -141,6 +141,12 @@ internal sealed class ModHealthReportPublisher : IModHealthReportPublisher
         }
 
         throw new IOException("Could not allocate a unique mod health report filename.");
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        this.FileSystem.Dispose();
     }
 
     private void TryMaintainReports(string newlyPublishedStem)

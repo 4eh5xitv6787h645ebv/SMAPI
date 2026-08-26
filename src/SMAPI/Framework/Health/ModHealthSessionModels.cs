@@ -79,7 +79,8 @@ internal sealed record ModHealthExportRequest(
     ModHealthLedgerSnapshot Ledger,
     ImmutableArray<ModHealthMark> Marks,
     double SlowUpdateThresholdMilliseconds,
-    bool IsFinal
+    bool IsFinal,
+    ModHealthEnvironmentSnapshot? Environment = null
 );
 
 /// <summary>The current result for one export request.</summary>

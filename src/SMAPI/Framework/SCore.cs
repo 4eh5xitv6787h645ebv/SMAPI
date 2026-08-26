@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
@@ -28,6 +29,7 @@ using StardewModdingAPI.Framework.Deprecations;
 using StardewModdingAPI.Framework.Events;
 using StardewModdingAPI.Framework.Exceptions;
 using StardewModdingAPI.Framework.Extensions;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Input;
 using StardewModdingAPI.Framework.Logging;
 using StardewModdingAPI.Framework.Models;
@@ -103,6 +105,18 @@ internal class SCore : IDisposable
 
     /// <summary>Collects bounded mod-owned performance and error diagnostics.</summary>
     private readonly ModPerformanceManager ModPerformanceManager;
+
+    /// <summary>Collects the low-cost session evidence used by Linux desktop health reports.</summary>
+    private readonly ModHealthLedger? ModHealthLedger;
+
+    /// <summary>Copies structured runtime outcomes into the Linux desktop session ledger.</summary>
+    private readonly ModHealthRuntimeObserver? ModHealthRuntimeObserver;
+
+    /// <summary>Coordinates the Linux desktop health and advanced performance workflows.</summary>
+    private readonly ModHealthSessionCoordinator? ModHealthSessionCoordinator;
+
+    /// <summary>Builds and publishes Linux desktop reports away from the update thread.</summary>
+    private readonly ModHealthExportQueue? ModHealthExportQueue;
 
     /// <summary>The underlying game instance.</summary>
     private SGameRunner Game = null!; // initialized very early
@@ -206,12 +220,41 @@ internal class SCore : IDisposable
         this.ReloadSettings();
 
         // init basics
+        bool enableHealthReports = Constants.Platform == Platform.Linux;
         this.ModPerformanceManager = new ModPerformanceManager();
-        this.ModPerformanceManager.ApplySettings(this.Settings.EnableModPerformanceTracking, this.Settings.LogModPerformanceTicks, this.Settings.ModPerformanceTickThresholdMilliseconds);
-        this.LogManager = new LogManager(logPath: logPath, colorSchemeId: this.Settings.ConsoleColorScheme, colorConfig: this.Settings.ConsoleColorSchemes, writeToConsole: writeToConsole, verboseLogging: this.Settings.VerboseLogging, isDeveloperMode: this.Settings.DeveloperMode, getScreenIdForLog: this.GetScreenIdForLog, onLog: this.ModPerformanceManager.RecordLog);
+        this.ModHealthLedger = enableHealthReports ? new ModHealthLedger() : null;
+        this.ModHealthRuntimeObserver = this.ModHealthLedger is not null ? new ModHealthRuntimeObserver(this.ModHealthLedger) : null;
+        this.LogManager = new LogManager(logPath: logPath, colorSchemeId: this.Settings.ConsoleColorScheme, colorConfig: this.Settings.ConsoleColorSchemes, writeToConsole: writeToConsole, verboseLogging: this.Settings.VerboseLogging, isDeveloperMode: this.Settings.DeveloperMode, getScreenIdForLog: this.GetScreenIdForLog, onLog: this.ModPerformanceManager.RecordLog, healthLogSink: this.ModHealthLedger);
         this.CommandManager = new CommandManager(this.Monitor);
-        this.CommandManager.Add(new PerformanceCommand(this.ModPerformanceManager), this.Monitor);
-        this.EventManager = new EventManager(this.ModRegistry, this.ModPerformanceManager);
+        if (enableHealthReports)
+        {
+            ModHealthReportBuilder reportBuilder = new();
+            LinuxModHealthReportPublisher reportPublisher = new(Path.Combine(Constants.LogDir, "HealthReports"));
+            this.ModHealthExportQueue = new ModHealthExportQueue(
+                request => reportBuilder.BuildPayload(request, request.Environment ?? throw new InvalidOperationException("A frozen Linux health environment snapshot is required.")),
+                reportPublisher,
+                shutdownTimeout: TimeSpan.Zero,
+                onCompleted: this.OnModHealthExportCompleted
+            );
+            this.ModHealthSessionCoordinator = new ModHealthSessionCoordinator(
+                this.ModPerformanceManager,
+                this.ModHealthLedger!,
+                this.ModHealthExportQueue,
+                getEnvironment: this.GetModHealthEnvironmentSnapshot,
+                isLifecycleTimingAvailable: () => !Context.IsGameLaunched
+            );
+            this.ModHealthSessionCoordinator.ApplySettings(this.GetModHealthDiagnosticSettings(this.Settings), initialLoad: true);
+            this.CommandManager.Add(new PerformanceCommand(this.ModHealthSessionCoordinator), this.Monitor);
+            this.CommandManager.Add(new HealthCommand(this.ModHealthSessionCoordinator), this.Monitor);
+        }
+        else
+        {
+            this.ModHealthExportQueue = null;
+            this.ModHealthSessionCoordinator = null;
+            this.ModPerformanceManager.ApplySettings(this.Settings.EnableModPerformanceTracking, this.Settings.LogModPerformanceTicks, this.Settings.ModPerformanceTickThresholdMilliseconds);
+            this.CommandManager.Add(new PerformanceCommand(this.ModPerformanceManager), this.Monitor);
+        }
+        this.EventManager = new EventManager(this.ModRegistry, this.ModPerformanceManager, this.ModHealthRuntimeObserver);
         SCore.DeprecationManager = new DeprecationManager(this.Monitor, this.ModRegistry);
         SDate.Translations = this.Translator;
 
@@ -383,8 +426,33 @@ internal class SCore : IDisposable
         this.IsGameRunning = false;
         if (this.ExitState == ExitState.None || isError)
             this.ExitState = isError ? ExitState.Crash : ExitState.GameExit;
+
+        // Freeze the game-thread environment and final health-on-launch capture while game state
+        // is still available. The immutable export can continue while core components dispose.
+        if (!isError && this.ModHealthExportQueue is not null)
+        {
+            using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
+            ModHealthCoordinatorResult? result = this.ModHealthSessionCoordinator?.FinalizeNormalShutdown();
+            if (result?.IsError == true)
+                this.Monitor.Log(result.Message, LogLevel.Warn);
+        }
+
         this.ContentCore?.Dispose();
         this.Game?.Dispose();
+
+        // A normal Linux desktop exit freezes health-on-launch evidence, then gives the bounded
+        // writer at most two seconds before it and its private directory handles are disposed.
+        if (this.ModHealthExportQueue is not null)
+        {
+            if (!isError)
+            {
+                using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
+                bool drained = this.ModHealthExportQueue.DrainAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+                if (!drained)
+                    this.Monitor.Log("The mod health report did not finish within the two-second shutdown limit, so no completed report should be assumed. Record another sample next session if needed.", LogLevel.Warn);
+            }
+            this.ModHealthExportQueue.Dispose();
+        }
         this.LogManager.Dispose(); // dispose last to allow for any last-second log messages
 
         // clean up SDK
@@ -469,7 +537,7 @@ internal class SCore : IDisposable
         // load mods
         {
             this.Monitor.Log("Loading mod metadata...", LogLevel.Debug);
-            ModResolver resolver = new();
+            ModResolver resolver = new(this.ModHealthRuntimeObserver);
 
             // log loose files
             {
@@ -576,6 +644,109 @@ internal class SCore : IDisposable
 #endif
     }
 
+    /// <summary>Get privacy-safe game context for one timed update tick.</summary>
+    private ModHealthTickContext GetModHealthTickContext()
+    {
+        bool isLoadingOrSaving = Context.IsSaving()
+            || Game1.gameMode == Game1.loadingMode
+            || Context.LoadStage is not (LoadStage.None or LoadStage.Ready);
+        ModHealthTickPhase phase = isLoadingOrSaving
+            ? ModHealthTickPhase.LoadingSaving
+            : Game1.activeClickableMenu is TitleMenu || !Context.IsWorldReady
+                ? ModHealthTickPhase.Title
+                : Game1.eventUp || Game1.currentMinigame is not null
+                    ? ModHealthTickPhase.Cutscene
+                    : Game1.activeClickableMenu is not null
+                        ? ModHealthTickPhase.Menu
+                        : Context.IsWorldReady
+                            ? ModHealthTickPhase.Gameplay
+                            : ModHealthTickPhase.Unknown;
+
+        return new ModHealthTickContext(phase, this.Game.IsActive, Context.ScreenId);
+    }
+
+    /// <summary>Log an asynchronous health-report result without feeding reporter output back into the ledger.</summary>
+    private void OnModHealthExportCompleted(ModHealthExportStatus status)
+    {
+        using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
+        if (status.State == ModHealthExportState.Succeeded && status.TextPath is not null && status.JsonPath is not null)
+            this.Monitor.Log($"Mod health report saved as {status.TextPath} and {status.JsonPath}. Reports are kept in private local storage until you choose to share them.", LogLevel.Info);
+        else if (status.State == ModHealthExportState.Failed)
+            this.Monitor.Log($"{status.Error ?? "The mod health report could not be written."} Enter 'health retry' to retry the exact frozen report.", LogLevel.Error);
+    }
+
+    /// <summary>Capture only allowlisted, non-identifying environment and game state on the game thread.</summary>
+    private ModHealthEnvironmentSnapshot GetModHealthEnvironmentSnapshot()
+    {
+        string sessionType = this.GetModHealthSessionType();
+        string? gameLocale = this.ContentCore?.GetLocale();
+        string locale = !string.IsNullOrWhiteSpace(gameLocale) ? gameLocale : Thread.CurrentThread.CurrentUICulture.Name;
+        string multiplayerRole = !Context.IsMultiplayer
+            ? "single-player"
+            : Context.IsMainPlayer
+                ? "host"
+                : "client";
+
+        return new ModHealthEnvironmentSnapshot(
+            SmapiVersion: Constants.ApiVersion.ToString(),
+            SmapiCommit: this.GetInformationalCommit(),
+            GameVersion: Constants.GameVersion.ToString(),
+            RuntimeVersion: RuntimeInformation.FrameworkDescription,
+            ProcessArchitecture: RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(),
+            ProcessBitness: Environment.Is64BitProcess ? 64 : 32,
+            LinuxDistribution: RuntimeInformation.OSDescription,
+            Kernel: Environment.OSVersion.Version.ToString(),
+            SessionType: sessionType,
+            Locale: locale,
+            LogicalProcessorCount: Math.Max(1, Environment.ProcessorCount),
+            MultiplayerRole: multiplayerRole,
+            SplitScreenCount: Math.Max(1, Context.ActiveScreenIds.Count),
+            StartupObserved: false,
+            LifecycleTimingObserved: false
+        );
+    }
+
+    /// <summary>Normalize the relevant desktop-session variables without retaining their arbitrary values.</summary>
+    private string GetModHealthSessionType()
+    {
+        string? session = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE")?.Trim();
+        bool hasWaylandDisplay = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"));
+        bool hasXDisplay = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"));
+        if (session?.Equals("xwayland", StringComparison.OrdinalIgnoreCase) == true)
+            return "xwayland";
+        if (session?.Equals("wayland", StringComparison.OrdinalIgnoreCase) == true)
+            return "wayland";
+        if (session?.Equals("x11", StringComparison.OrdinalIgnoreCase) == true)
+            return "x11";
+        if (hasWaylandDisplay)
+            return "wayland";
+        if (hasXDisplay)
+            return "x11";
+        return "unknown";
+    }
+
+    /// <summary>Get only a hexadecimal source revision from informational assembly metadata, if present.</summary>
+    private string? GetInformationalCommit()
+    {
+        string? version = typeof(SCore).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        int separator = version?.LastIndexOf('+') ?? -1;
+        string? revision = separator >= 0 ? version![(separator + 1)..] : null;
+        return revision is { Length: >= 7 and <= 64 } && revision.All(Uri.IsHexDigit)
+            ? revision.ToLowerInvariant()
+            : null;
+    }
+
+    /// <summary>Project persistent configuration into the coordinator's atomic settings model.</summary>
+    private ModHealthDiagnosticSettings GetModHealthDiagnosticSettings(SConfig settings)
+    {
+        return new ModHealthDiagnosticSettings(
+            EnableHealthOnLaunch: Constants.Platform == Platform.Linux && settings.EnableModHealthReportOnLaunch,
+            settings.EnableModPerformanceTracking,
+            settings.LogModPerformanceTicks,
+            settings.ModPerformanceTickThresholdMilliseconds
+        );
+    }
+
     /// <summary>Raised when the game is updating its state (roughly 60 times per second).</summary>
     /// <param name="gameTime">A snapshot of the game timing state.</param>
     /// <param name="runGameUpdate">Invoke the game's update logic for the given timing state.</param>
@@ -585,7 +756,7 @@ internal class SCore : IDisposable
         if (profileTick)
         {
             long performanceTickStart = Stopwatch.GetTimestamp();
-            this.ModPerformanceManager.BeginTick(SCore.TicksElapsed, performanceTickStart);
+            this.ModPerformanceManager.BeginTick(SCore.TicksElapsed, performanceTickStart, this.GetModHealthTickContext());
         }
 
         try
@@ -721,7 +892,7 @@ internal class SCore : IDisposable
                 {
                     bool profile = command.Mod != null && this.ModPerformanceManager.IsTracking;
                     HandlerTimingToken timing = profile
-                        ? this.ModPerformanceManager.BeginHandler(command.Mod!, $"ConsoleCommand.{command.Name}", $"{command.Callback.Method.DeclaringType?.FullName}.{command.Callback.Method.Name}")
+                        ? this.ModPerformanceManager.BeginHandler(command.Mod!, $"ConsoleCommand.{command.Name}", $"{command.Callback.Method.DeclaringType?.FullName}.{command.Callback.Method.Name}", ModHealthExecutionPhase.Update, ModHealthOperationKind.Console, onBehalfOfModId: null)
                         : default;
                     bool failed = false;
                     try
@@ -732,7 +903,16 @@ internal class SCore : IDisposable
                     {
                         failed = true;
                         if (command.Mod != null)
+                        {
+                            this.ModHealthRuntimeObserver?.ObserveCallbackFailure(
+                                command.Mod,
+                                ModHealthExecutionPhase.Update,
+                                ModHealthOperationKind.Console,
+                                $"{command.Callback.Method.DeclaringType?.FullName}.{command.Callback.Method.Name}",
+                                ex
+                            );
                             command.Mod.LogAsMod($"Mod failed handling that command:\n{ex.GetLogSummary()}", LogLevel.Error);
+                        }
                         else
                             this.Monitor.Log($"Failed handling that command:\n{ex.GetLogSummary()}", LogLevel.Error);
                     }
@@ -1527,9 +1707,22 @@ internal class SCore : IDisposable
         // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
         this.LogManager?.ApplySettings(settings.ConsoleColorScheme, settings.ConsoleColorSchemes, settings.VerboseLogging, this.OverrideDeveloperMode ?? settings.DeveloperMode);
 
-        // update performance diagnostics if already initialized
+        // Route Linux desktop diagnostic ownership changes through the shared coordinator.
         // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
-        this.ModPerformanceManager?.ApplySettings(settings.EnableModPerformanceTracking, settings.LogModPerformanceTicks, settings.ModPerformanceTickThresholdMilliseconds);
+        if (this.ModHealthSessionCoordinator is not null)
+        {
+            ModHealthCoordinatorResult result = this.ModHealthSessionCoordinator.ApplySettings(this.GetModHealthDiagnosticSettings(settings), initialLoad: false);
+            if (result.Code == ModHealthCoordinatorResultCode.SettingsPending)
+            {
+                using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
+                this.Monitor.Log(result.Message, LogLevel.Info);
+            }
+        }
+        else
+        {
+            // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
+            this.ModPerformanceManager?.ApplySettings(settings.EnableModPerformanceTracking, settings.LogModPerformanceTicks, settings.ModPerformanceTickThresholdMilliseconds);
+        }
     }
 
     /// <summary>Get the load/edit operations to apply to an asset by querying registered <see cref="IContentEvents.AssetRequested"/> event handlers.</summary>
@@ -1669,7 +1862,8 @@ internal class SCore : IDisposable
                 onAssetLoaded: this.OnAssetLoaded,
                 onAssetsInvalidated: this.OnAssetsInvalidated,
                 getFileLookup: this.GetFileLookup,
-                requestAssetOperations: this.RequestAssetOperations
+                requestAssetOperations: this.RequestAssetOperations,
+                healthObserver: this.ModHealthRuntimeObserver
             );
             if (this.ContentCore.Language != this.Translator.LocaleEnum)
                 this.Translator.SetLocale(this.ContentCore.GetLocale(), this.ContentCore.Language);
@@ -1772,7 +1966,36 @@ internal class SCore : IDisposable
         // discussion: https://discord.com/channels/137344473976799233/1394409970153427157
         //
 
-        if (this.Settings.CheckForUpdates)
+        bool shouldCheckForUpdates = this.Settings.CheckForUpdates;
+        HashSet<string> suppressedUpdateCheckIds = this.ModHealthRuntimeObserver is null
+            ? this.Settings.SuppressUpdateChecks
+            : new HashSet<string>(this.Settings.SuppressUpdateChecks, StringComparer.OrdinalIgnoreCase);
+        List<IModMetadata> pendingHealthUpdateChecks = [];
+        if (!shouldCheckForUpdates)
+        {
+            if (this.ModHealthRuntimeObserver is not null)
+            {
+                foreach (IModMetadata mod in mods)
+                    this.ModHealthRuntimeObserver.ObserveUpdateStatus(mod, ModHealthUpdateStatus.Disabled);
+            }
+        }
+        else if (this.ModHealthRuntimeObserver is not null)
+        {
+            foreach (IModMetadata mod in mods)
+            {
+                if (!mod.HasId())
+                    this.ModHealthRuntimeObserver.ObserveUpdateStatus(mod, ModHealthUpdateStatus.Unavailable);
+                else if (suppressedUpdateCheckIds.Contains(mod.Manifest.UniqueID))
+                    this.ModHealthRuntimeObserver.ObserveUpdateStatus(mod, ModHealthUpdateStatus.Suppressed);
+                else
+                {
+                    this.ModHealthRuntimeObserver.ObserveUpdateStatus(mod, ModHealthUpdateStatus.Pending);
+                    pendingHealthUpdateChecks.Add(mod);
+                }
+            }
+        }
+
+        if (shouldCheckForUpdates)
         {
             try
             {
@@ -1829,13 +2052,11 @@ internal class SCore : IDisposable
                 {
                     try
                     {
-                        HashSet<string> suppressUpdateChecks = this.Settings.SuppressUpdateChecks;
-
                         // prepare search model
                         List<ModSearchEntryModel> searchMods = [];
                         foreach (IModMetadata mod in mods)
                         {
-                            if (!mod.HasId() || suppressUpdateChecks.Contains(mod.Manifest.UniqueID))
+                            if (!mod.HasId() || suppressedUpdateCheckIds.Contains(mod.Manifest.UniqueID))
                                 continue;
 
                             string[] updateKeys = mod
@@ -1858,6 +2079,7 @@ internal class SCore : IDisposable
                             if (!mod.HasId() || !results.TryGetValue(mod.Manifest.UniqueID, out ModEntryModel? result))
                                 continue;
                             mod.SetUpdateData(result);
+                            pendingHealthUpdateChecks.Remove(mod);
 
                             // handle errors
                             if (result.Errors.Any())
@@ -1907,6 +2129,11 @@ internal class SCore : IDisposable
                 );
             }
         }
+
+        // Anything which was eligible but never received an immutable result is explicitly unavailable.
+        // This includes whole-request failures and IDs omitted from an otherwise successful response.
+        foreach (IModMetadata mod in pendingHealthUpdateChecks)
+            this.ModHealthRuntimeObserver?.ObserveUpdateStatus(mod, ModHealthUpdateStatus.Unavailable);
 
         if (this.Settings.CheckForBlacklistUpdates)
         {
@@ -2121,7 +2348,7 @@ internal class SCore : IDisposable
                 // call entry method
                 bool profileEntry = this.ModPerformanceManager.IsTracking;
                 HandlerTimingToken entryTiming = profileEntry
-                    ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.Entry", $"{mod.GetType().FullName}.{nameof(Mod.Entry)}")
+                    ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.Entry", $"{mod.GetType().FullName}.{nameof(Mod.Entry)}", ModHealthExecutionPhase.Startup, ModHealthOperationKind.Entry, onBehalfOfModId: null)
                     : default;
                 bool entryFailed = false;
                 try
@@ -2131,6 +2358,7 @@ internal class SCore : IDisposable
                 catch (Exception ex)
                 {
                     entryFailed = true;
+                    this.ModHealthRuntimeObserver?.ObserveCallbackFailure(metadata, ModHealthExecutionPhase.Startup, ModHealthOperationKind.Entry, $"{mod.GetType().FullName}.{nameof(Mod.Entry)}", ex);
                     metadata.LogAsMod($"Mod crashed on entry and might not work correctly. Technical details:\n{ex.GetLogSummary()}", LogLevel.Error);
                 }
                 finally
@@ -2142,7 +2370,7 @@ internal class SCore : IDisposable
                 // get mod API
                 bool profileApi = this.ModPerformanceManager.IsTracking;
                 HandlerTimingToken apiTiming = profileApi
-                    ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.GetApi", $"{mod.GetType().FullName}.{nameof(Mod.GetApi)}")
+                    ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.GetApi", $"{mod.GetType().FullName}.{nameof(Mod.GetApi)}", ModHealthExecutionPhase.Startup, ModHealthOperationKind.GetApi, onBehalfOfModId: null)
                     : default;
                 bool apiFailed = false;
                 try
@@ -2161,6 +2389,7 @@ internal class SCore : IDisposable
                 catch (Exception ex)
                 {
                     apiFailed = true;
+                    this.ModHealthRuntimeObserver?.ObserveCallbackFailure(metadata, ModHealthExecutionPhase.Startup, ModHealthOperationKind.GetApi, $"{mod.GetType().FullName}.{nameof(Mod.GetApi)}", ex);
                     this.Monitor.Log($"Failed loading mod-provided API for {metadata.DisplayName}. Integrations with other mods may not work. Error: {ex.GetLogSummary()}", LogLevel.Error);
                 }
                 finally
@@ -2351,7 +2580,7 @@ internal class SCore : IDisposable
                     );
                     IDataHelper dataHelper = new DataHelper(mod, mod.DirectoryPath, jsonHelper);
                     IReflectionHelper reflectionHelper = new ReflectionHelper(mod, mod.DisplayName, this.Reflection);
-                    IModRegistry modRegistryHelper = new ModRegistryHelper(mod, this.ModRegistry, proxyFactory, monitor);
+                    IModRegistry modRegistryHelper = new ModRegistryHelper(mod, this.ModRegistry, proxyFactory, monitor, this.ModHealthRuntimeObserver);
                     IMultiplayerHelper multiplayerHelper = new MultiplayerHelper(mod, this.Multiplayer);
 
                     modHelper = new ModHelper(mod, mod.DirectoryPath, () => this.GetCurrentGameInstance().Input, events, gameContentHelper, modContentHelper, contentPackHelper, commandHelper, dataHelper, modRegistryHelper, reflectionHelper, multiplayerHelper, translationHelper);
@@ -2420,7 +2649,8 @@ internal class SCore : IDisposable
             rootPath: Constants.ModsPath,
             manifest: packManifest,
             dataRecord: null,
-            isIgnored: false
+            isIgnored: false,
+            healthObserver: this.ModHealthRuntimeObserver
         );
 
         // create mod helpers

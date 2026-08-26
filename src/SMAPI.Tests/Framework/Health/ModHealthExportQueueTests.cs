@@ -79,6 +79,38 @@ internal sealed class ModHealthExportQueueTests
         publisher.Cancelled.Should().BeTrue();
     }
 
+    [Test]
+    public async Task CompletionCallback_ReceivesCommittedRelativePaths()
+    {
+        DisposablePublisher publisher = new();
+        ConcurrentQueue<ModHealthExportStatus> completed = new();
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        using ModHealthExportQueue queue = new(_ => payload, publisher, onCompleted: completed.Enqueue);
+
+        queue.Enqueue(CreateRequest(isFinal: true));
+        (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+
+        completed.Should().ContainSingle();
+        completed.Single().Should().Be(new ModHealthExportStatus(
+            ModHealthExportState.Succeeded,
+            completed.Single().RequestId,
+            IsFinal: true,
+            "ErrorLogs/HealthReports/report.txt",
+            "ErrorLogs/HealthReports/report.json"
+        ));
+    }
+
+    [Test]
+    public void Dispose_DisposesPublisherAfterWorkerStops()
+    {
+        DisposablePublisher publisher = new();
+        ModHealthExportQueue queue = CreateQueue(publisher);
+
+        queue.Dispose();
+
+        publisher.IsDisposed.Should().BeTrue();
+    }
+
     private static ModHealthExportQueue CreateQueue(IModHealthReportPublisher publisher)
     {
         ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
@@ -148,6 +180,21 @@ internal sealed class ModHealthExportQueueTests
                 throw;
             }
             throw new InvalidOperationException("Cancellation was not observed.");
+        }
+    }
+
+    private sealed class DisposablePublisher : IModHealthReportPublisher, IDisposable
+    {
+        public bool IsDisposed { get; private set; }
+
+        public ModHealthPublishedReport Publish(ModHealthExportRequest request, ModHealthReportPayload payload, CancellationToken cancellationToken)
+        {
+            return new("ErrorLogs/HealthReports/report.txt", "ErrorLogs/HealthReports/report.json");
+        }
+
+        public void Dispose()
+        {
+            this.IsDisposed = true;
         }
     }
 }

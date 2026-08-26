@@ -12,6 +12,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     private readonly CancellationTokenSource Cancellation = new();
     private readonly Func<ModHealthExportRequest, ModHealthReportPayload> BuildPayload;
     private readonly IModHealthReportPublisher Publisher;
+    private readonly Action<ModHealthExportStatus>? OnCompleted;
     private readonly Thread Worker;
     private readonly TimeSpan ShutdownTimeout;
 
@@ -24,10 +25,11 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     private TaskCompletionSource<bool> Drained = ModHealthExportQueue.CreateCompletionSource(completed: true);
     private bool DisposeRequested;
 
-    public ModHealthExportQueue(Func<ModHealthExportRequest, ModHealthReportPayload> buildPayload, IModHealthReportPublisher publisher, string workerName = "SMAPI mod health report writer", TimeSpan? shutdownTimeout = null)
+    public ModHealthExportQueue(Func<ModHealthExportRequest, ModHealthReportPayload> buildPayload, IModHealthReportPublisher publisher, string workerName = "SMAPI mod health report writer", TimeSpan? shutdownTimeout = null, Action<ModHealthExportStatus>? onCompleted = null)
     {
         this.BuildPayload = buildPayload ?? throw new ArgumentNullException(nameof(buildPayload));
         this.Publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
+        this.OnCompleted = onCompleted;
         this.ShutdownTimeout = shutdownTimeout ?? TimeSpan.FromSeconds(2);
         if (this.ShutdownTimeout < TimeSpan.Zero && this.ShutdownTimeout != Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(shutdownTimeout));
@@ -156,6 +158,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
         this.WorkAvailable.Set();
         if (this.Worker.Join(this.ShutdownTimeout))
         {
+            (this.Publisher as IDisposable)?.Dispose();
             this.WorkAvailable.Dispose();
             this.Cancellation.Dispose();
         }
@@ -166,6 +169,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
         while (true)
         {
             ModHealthExportRequest? request;
+            bool notify;
             lock (this.SyncRoot)
             {
                 if (this.DisposeRequested && this.PendingRequest is null)
@@ -218,8 +222,23 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
                     this.RetryableRequest = null;
                     this.RetryScheduled = false;
                 }
-                this.CompleteDrainIfIdle();
+                notify = !this.DisposeRequested;
             }
+
+            if (notify && this.OnCompleted is not null)
+            {
+                try
+                {
+                    this.OnCompleted(result);
+                }
+                catch
+                {
+                    // Completion notifications are informational and must never stop the writer.
+                }
+            }
+
+            lock (this.SyncRoot)
+                this.CompleteDrainIfIdle();
         }
     }
 

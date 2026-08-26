@@ -13,6 +13,8 @@ internal sealed class ModHealthSessionCoordinator
     private readonly ModHealthLedger Ledger;
     private readonly IModHealthExportQueue ExportQueue;
     private readonly Func<DateTimeOffset> GetUtcNow;
+    private readonly Func<ModHealthEnvironmentSnapshot>? GetEnvironment;
+    private readonly Func<bool>? IsLifecycleTimingAvailable;
 
     private ModHealthCaptureState State;
     private ModHealthCaptureOwner Owner;
@@ -22,14 +24,17 @@ internal sealed class ModHealthSessionCoordinator
     private ImmutableArray<ModHealthMark> Marks = ImmutableArray<ModHealthMark>.Empty;
     private double SlowUpdateThresholdMilliseconds;
     private ModHealthDiagnosticSettings? PendingSettings;
+    private bool LifecycleTimingObserved;
 
     /// <summary>Construct a coordinator.</summary>
-    public ModHealthSessionCoordinator(ModPerformanceManager performanceManager, ModHealthLedger ledger, IModHealthExportQueue exportQueue, Func<DateTimeOffset>? getUtcNow = null)
+    public ModHealthSessionCoordinator(ModPerformanceManager performanceManager, ModHealthLedger ledger, IModHealthExportQueue exportQueue, Func<DateTimeOffset>? getUtcNow = null, Func<ModHealthEnvironmentSnapshot>? getEnvironment = null, Func<bool>? isLifecycleTimingAvailable = null)
     {
         this.PerformanceManager = performanceManager;
         this.Ledger = ledger;
         this.ExportQueue = exportQueue;
         this.GetUtcNow = getUtcNow ?? (() => DateTimeOffset.UtcNow);
+        this.GetEnvironment = getEnvironment;
+        this.IsLifecycleTimingAvailable = isLifecycleTimingAvailable;
     }
 
     /// <summary>Start a fresh user-facing health capture.</summary>
@@ -367,6 +372,8 @@ internal sealed class ModHealthSessionCoordinator
         this.CaptureBaseline = this.Ledger.CreateCaptureBaseline();
         this.RetainedCapture = null;
         this.Marks = ImmutableArray<ModHealthMark>.Empty;
+        this.LifecycleTimingObserved = this.IsLifecycleTimingAvailable?.Invoke()
+            ?? origin is ModHealthCaptureOrigin.Configuration or ModHealthCaptureOrigin.HealthOnLaunch;
     }
 
     private void FreezeActiveCapture(ModHealthCompletionReason completionReason)
@@ -399,7 +406,17 @@ internal sealed class ModHealthSessionCoordinator
 
     private ModHealthExportRequest CreateRequest(ModHealthCaptureOwner owner, ModHealthCaptureOrigin? origin, ModHealthCompletionReason completionReason, ModPerformanceSnapshot? performance, ModHealthLedgerSnapshot ledger, ImmutableArray<ModHealthMark> marks, bool isFinal)
     {
-        return new ModHealthExportRequest(Guid.NewGuid(), this.GetUtcNow().ToUniversalTime(), owner, origin, completionReason, performance, ledger, marks, this.SlowUpdateThresholdMilliseconds > 0 ? this.SlowUpdateThresholdMilliseconds : ModHealthReportLimits.SlowUpdateMilliseconds, isFinal);
+        ModHealthEnvironmentSnapshot? environment = this.GetEnvironment?.Invoke();
+        if (environment is not null)
+        {
+            bool lifecycleObserved = performance is not null && this.LifecycleTimingObserved;
+            environment = environment with
+            {
+                StartupObserved = true,
+                LifecycleTimingObserved = lifecycleObserved
+            };
+        }
+        return new ModHealthExportRequest(Guid.NewGuid(), this.GetUtcNow().ToUniversalTime(), owner, origin, completionReason, performance, ledger, marks, this.SlowUpdateThresholdMilliseconds > 0 ? this.SlowUpdateThresholdMilliseconds : ModHealthReportLimits.SlowUpdateMilliseconds, isFinal, environment);
     }
 
     private ModHealthCoordinatorResult Enqueue(ModHealthExportRequest request, string queuedMessage)
@@ -484,6 +501,7 @@ internal sealed class ModHealthSessionCoordinator
         this.RetainedCapture = null;
         this.Marks = ImmutableArray<ModHealthMark>.Empty;
         this.SlowUpdateThresholdMilliseconds = 0;
+        this.LifecycleTimingObserved = false;
     }
 
     private static ModPerformanceSnapshot FreezeSnapshot(ModPerformanceSnapshot snapshot)

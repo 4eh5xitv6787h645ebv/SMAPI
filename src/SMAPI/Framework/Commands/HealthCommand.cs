@@ -52,6 +52,7 @@ internal sealed class HealthCommand : IInternalCommand
     /// <inheritdoc />
     public void HandleCommand(string[] args, IMonitor monitor)
     {
+        using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
         string action = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
         switch (action)
         {

@@ -71,6 +71,7 @@ internal sealed class PerformanceCommand : IInternalCommand
     /// <inheritdoc />
     public void HandleCommand(string[] args, IMonitor monitor)
     {
+        using IDisposable? reporterScope = this.Coordinator is not null ? ModHealthReporterLogScope.Enter() : null;
         string action = args.Length > 0 ? args[0].ToLowerInvariant() : "report";
         switch (action)
         {

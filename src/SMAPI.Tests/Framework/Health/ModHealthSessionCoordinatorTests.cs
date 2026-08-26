@@ -354,6 +354,38 @@ internal sealed class ModHealthSessionCoordinatorTests
         manual.Queue.LastRequest!.CompletionReason.Should().Be(ModHealthCompletionReason.NormalShutdown);
     }
 
+    [Test]
+    public void ExportRequest_CapturesEnvironmentAndLifecycleCompletenessBeforeBackgroundBuild()
+    {
+        Context configured = new();
+        configured.Coordinator.ApplySettings(new(true, false, false, 0), initialLoad: true);
+        configured.Coordinator.StopHealth();
+
+        configured.Queue.LastRequest!.Environment.Should().NotBeNull();
+        configured.Queue.LastRequest.Environment!.StartupObserved.Should().BeTrue();
+        configured.Queue.LastRequest.Environment.LifecycleTimingObserved.Should().BeTrue();
+
+        Context manual = new();
+        manual.Coordinator.StartHealth();
+        manual.Coordinator.StopHealth();
+        manual.Queue.LastRequest!.Environment!.StartupObserved.Should().BeTrue();
+        manual.Queue.LastRequest.Environment.LifecycleTimingObserved.Should().BeFalse();
+    }
+
+    [Test]
+    public void ConfigurationCapture_OnlyClaimsLifecycleTimingWhenStartedBeforeLifecycleCallbacks()
+    {
+        Context startup = new(isLifecycleTimingAvailable: true);
+        startup.Coordinator.ApplySettings(new(true, false, false, 0), initialLoad: true);
+        startup.Coordinator.StopHealth();
+        startup.Queue.LastRequest!.Environment!.LifecycleTimingObserved.Should().BeTrue();
+
+        Context reload = new(isLifecycleTimingAvailable: false);
+        reload.Coordinator.ApplySettings(new(true, false, false, 0), initialLoad: false);
+        reload.Coordinator.StopHealth();
+        reload.Queue.LastRequest!.Environment!.LifecycleTimingObserved.Should().BeFalse();
+    }
+
     private sealed class Context
     {
         public long Timestamp = 0;
@@ -362,11 +394,18 @@ internal sealed class ModHealthSessionCoordinatorTests
         public FakeExportQueue Queue { get; } = new();
         public ModHealthSessionCoordinator Coordinator { get; }
 
-        public Context()
+        public Context(bool? isLifecycleTimingAvailable = null)
         {
             this.Manager = new ModPerformanceManager(timestampFrequency: 1000, getTimestamp: () => this.Timestamp, getGcCollectionCount: _ => 0);
             this.Ledger = new ModHealthLedger(timestampFrequency: 1000, getTimestamp: () => this.Timestamp);
-            this.Coordinator = new ModHealthSessionCoordinator(this.Manager, this.Ledger, this.Queue, () => new DateTimeOffset(2026, 8, 26, 0, 0, 0, TimeSpan.Zero));
+            this.Coordinator = new ModHealthSessionCoordinator(
+                this.Manager,
+                this.Ledger,
+                this.Queue,
+                getUtcNow: () => new DateTimeOffset(2026, 8, 26, 0, 0, 0, TimeSpan.Zero),
+                getEnvironment: () => new ModHealthEnvironmentSnapshot("4.5.2", "abcdef0", "1.6.15", ".NET 10", "x64", 64, "Linux", "6.0", "wayland", "en", 8, "single-player", 1, false, false),
+                isLifecycleTimingAvailable: isLifecycleTimingAvailable.HasValue ? () => isLifecycleTimingAvailable.Value : null
+            );
         }
     }
 
