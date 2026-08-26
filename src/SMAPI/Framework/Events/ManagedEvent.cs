@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Framework.Extensions;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Performance;
 using StardewModdingAPI.Internal;
+using StardewValley;
 
 namespace StardewModdingAPI.Framework.Events;
 
@@ -28,6 +30,9 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
 
     /// <summary>Collects mod-owned handler timing and failure diagnostics.</summary>
     private readonly ModPerformanceManager? PerformanceManager;
+
+    /// <summary>Collects privacy-safe structured callback failures.</summary>
+    private readonly ModHealthRuntimeObserver? HealthObserver;
 
     /// <summary>The underlying event handlers.</summary>
     private readonly List<ManagedEventHandler<TEventArgs>> Handlers = [];
@@ -62,11 +67,13 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     /// <param name="eventName">A human-readable name for the event.</param>
     /// <param name="modRegistry">The mod registry with which to identify mods.</param>
     /// <param name="performanceManager">Collects mod-owned handler performance diagnostics, if enabled.</param>
-    public ManagedEvent(string eventName, ModRegistry modRegistry, ModPerformanceManager? performanceManager = null)
+    /// <param name="healthObserver">Collects privacy-safe structured callback failures, if enabled.</param>
+    public ManagedEvent(string eventName, ModRegistry modRegistry, ModPerformanceManager? performanceManager = null, ModHealthRuntimeObserver? healthObserver = null)
     {
         this.EventName = eventName;
         this.ModRegistry = modRegistry;
         this.PerformanceManager = performanceManager;
+        this.HealthObserver = healthObserver;
     }
 
     /// <summary>Add an event handler.</summary>
@@ -241,7 +248,14 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     private HandlerTimingToken BeginPerformance(ManagedEventHandler<TEventArgs> handler)
     {
         IModMetadata mod = handler.SourceMod;
-        return this.PerformanceManager!.BeginHandler(mod, this.EventName, handler.HandlerName);
+        return this.PerformanceManager!.BeginHandler(
+            mod,
+            this.EventName,
+            handler.HandlerName,
+            this.GetExecutionPhase(),
+            ModHealthOperationKind.Event,
+            onBehalfOfModId: null
+        );
     }
 
     /// <summary>Log an exception from an event handler.</summary>
@@ -249,7 +263,28 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
     /// <param name="ex">The exception that was raised.</param>
     private void LogError(ManagedEventHandler<TEventArgs> handler, Exception ex)
     {
+        this.HealthObserver?.ObserveCallbackFailure(
+            handler.SourceMod,
+            this.GetExecutionPhase(),
+            ModHealthOperationKind.Event,
+            handler.HandlerName,
+            ex
+        );
         handler.SourceMod.LogAsMod($"This mod failed in the {this.EventName} event. Technical details: \n{ex.GetLogSummary()}", LogLevel.Error);
+    }
+
+    /// <summary>Classify this invocation without retaining event arguments or game state.</summary>
+    private ModHealthExecutionPhase GetExecutionPhase()
+    {
+        if (this.EventName == "GameLoop.GameLaunched")
+            return ModHealthExecutionPhase.Startup;
+        if (this.EventName.StartsWith("Display.Rendering", StringComparison.Ordinal) || this.EventName.StartsWith("Display.Rendered", StringComparison.Ordinal))
+            return ModHealthExecutionPhase.Draw;
+        if (this.PerformanceManager?.GetActiveExecutionPhase() is { } inheritedPhase)
+            return inheritedPhase;
+        return Game1.IsOnMainThread()
+            ? ModHealthExecutionPhase.Update
+            : ModHealthExecutionPhase.Background;
     }
 
     /// <summary>Get cached copy of the sorted handlers to invoke.</summary>

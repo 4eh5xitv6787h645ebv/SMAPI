@@ -1,4 +1,5 @@
 using StardewModdingAPI.Events;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Performance;
 
 namespace StardewModdingAPI.Framework.Events;
@@ -203,12 +204,13 @@ internal class EventManager
     /// <summary>Construct an instance.</summary>
     /// <param name="modRegistry">The mod registry with which to identify mods.</param>
     /// <param name="performanceManager">Collects mod-owned handler performance diagnostics, if enabled.</param>
-    public EventManager(ModRegistry modRegistry, ModPerformanceManager? performanceManager = null)
+    /// <param name="healthObserver">Collects privacy-safe structured callback failures, if enabled.</param>
+    public EventManager(ModRegistry modRegistry, ModPerformanceManager? performanceManager = null, ModHealthRuntimeObserver? healthObserver = null)
     {
         // create shortcut initializers
         ManagedEvent<TEventArgs> ManageEventOf<TEventArgs>(string typeName, string eventName)
         {
-            return new ManagedEvent<TEventArgs>($"{typeName}.{eventName}", modRegistry, performanceManager);
+            return new ManagedEvent<TEventArgs>($"{typeName}.{eventName}", modRegistry, performanceManager, healthObserver);
         }
 
         // init events

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Logging;
 using StardewModdingAPI.Internal.ConsoleWriting;
 
@@ -37,6 +38,9 @@ internal class Monitor : IMonitor
 
     /// <summary>Receives warning/error metadata for diagnostics, if any.</summary>
     private readonly Action<string, string, LogLevel>? OnLog;
+
+    /// <summary>The pre-registered allocation-free health counter, if enabled.</summary>
+    private readonly IModHealthLogCounter? HealthLogCounter;
 
 
     /*********
@@ -84,7 +88,8 @@ internal class Monitor : IMonitor
     /// <param name="consoleWriter">Handles writing text to the console.</param>
     /// <param name="getScreenIdForLog">Get the screen ID that should be logged to distinguish between players in split-screen mode, if any.</param>
     /// <param name="onLog">Receives log metadata for diagnostics, if any.</param>
-    public Monitor(string modId, string source, LogFileManager logFile, IConsoleWriter consoleWriter, Func<int?> getScreenIdForLog, Action<string, string, LogLevel>? onLog = null)
+    /// <param name="healthLogCounter">The pre-registered health counter, if enabled.</param>
+    public Monitor(string modId, string source, LogFileManager logFile, IConsoleWriter consoleWriter, Func<int?> getScreenIdForLog, Action<string, string, LogLevel>? onLog = null, IModHealthLogCounter? healthLogCounter = null)
     {
         // validate
         if (string.IsNullOrWhiteSpace(source))
@@ -97,6 +102,7 @@ internal class Monitor : IMonitor
         this.ConsoleWriter = consoleWriter ?? throw new ArgumentNullException(nameof(consoleWriter), "The console writer cannot be null.");
         this.GetScreenIdForLog = getScreenIdForLog;
         this.OnLog = onLog;
+        this.HealthLogCounter = healthLogCounter;
     }
 
     /// <inheritdoc />
@@ -191,15 +197,18 @@ internal class Monitor : IMonitor
     /// <param name="level">The log level.</param>
     private void LogImpl(string source, string message, ConsoleLogLevel level)
     {
-        this.OnLog?.Invoke(
-            this.ModId,
-            source,
-            level switch
-            {
-                ConsoleLogLevel.Critical => LogLevel.Error,
-                ConsoleLogLevel.Success => LogLevel.Info,
-                _ => (LogLevel)level
-            }
+        LogLevel normalizedLevel = level switch
+        {
+            ConsoleLogLevel.Critical => LogLevel.Error,
+            ConsoleLogLevel.Success => LogLevel.Info,
+            _ => (LogLevel)level
+        };
+        this.OnLog?.Invoke(this.ModId, source, normalizedLevel);
+        this.HealthLogCounter?.Record(
+            normalizedLevel,
+            message.Length,
+            Environment.CurrentManagedThreadId,
+            ModHealthReporterLogScope.IsActive ? ModHealthLogObservationCategory.Reporter : ModHealthLogObservationCategory.Normal
         );
 
         DateTime timestamp = DateTime.Now;

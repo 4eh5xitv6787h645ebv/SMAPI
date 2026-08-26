@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smapi.io/schemas/mod-health-report-v1.json",
+  "title": "SMAPI Mod Health Report v1",
+  "$comment": "This is the pre-release schema-v1 contract. Warning/update state, ranked observed-mod aggregates, per-severity session/capture log counters, and structured callback failures were added before the first supported release; consumers should ignore unknown future fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "header", "completeness", "environment", "capture", "findings", "performance", "modInventory", "mods", "logTotals", "logs", "callbackFailureTotals", "callbackFailures", "capacities", "omissions", "privacy", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "header": { "$ref": "#/$defs/header" },
+    "completeness": { "$ref": "#/$defs/completeness" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "capture": { "$ref": "#/$defs/capture" },
+    "findings": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/finding" } },
+    "performance": { "$ref": "#/$defs/performance" },
+    "modInventory": { "$ref": "#/$defs/modInventory" },
+    "mods": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/mod" } },
+    "logTotals": { "$ref": "#/$defs/logTotals" },
+    "logs": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/log" } },
+    "callbackFailureTotals": { "$ref": "#/$defs/callbackFailureTotals" },
+    "callbackFailures": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/callbackFailure" } },
+    "capacities": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/capacity" } },
+    "omissions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/omission" } },
+    "privacy": { "$ref": "#/$defs/privacy" },
+    "limitations": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/identity" } }
+  },
+  "$defs": {
+    "identity": { "type": "string", "maxLength": 256 },
+    "callbackName": { "type": "string", "maxLength": 1024 },
+    "nonnegativeInteger": { "type": "integer", "minimum": 0 },
+    "nonnegativeNumber": { "type": "number", "minimum": 0 },
+    "nullableIdentity": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
+    "nullableNumber": { "oneOf": [{ "$ref": "#/$defs/nonnegativeNumber" }, { "type": "null" }] },
+    "header": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reportId", "generatedUtc", "isTruncated", "isMinimalFallback", "writeRetry"],
+      "properties": {
+        "reportId": { "type": "string", "pattern": "^[a-z0-9-]{6,64}$" },
+        "generatedUtc": { "type": "string", "format": "date-time" },
+        "isTruncated": { "type": "boolean" },
+        "isMinimalFallback": { "type": "boolean" },
+        "writeRetry": { "type": "boolean" }
+      }
+    },
+    "completeness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ledgerStartedUtc", "boundary", "startupObserved", "lifecycleTimingObserved"],
+      "properties": {
+        "ledgerStartedUtc": { "type": "string", "format": "date-time" },
+        "boundary": { "$ref": "#/$defs/identity" },
+        "startupObserved": { "type": "boolean" },
+        "lifecycleTimingObserved": { "type": "boolean" }
+      }
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["smapiVersion", "smapiCommit", "gameVersion", "runtimeVersion", "processArchitecture", "processBitness", "linuxDistribution", "kernel", "sessionType", "locale", "logicalProcessorCount", "multiplayerRole", "splitScreenCount"],
+      "properties": {
+        "smapiVersion": { "$ref": "#/$defs/identity" }, "smapiCommit": { "$ref": "#/$defs/nullableIdentity" },
+        "gameVersion": { "$ref": "#/$defs/identity" }, "runtimeVersion": { "$ref": "#/$defs/identity" },
+        "processArchitecture": { "$ref": "#/$defs/identity" }, "processBitness": { "enum": [0, 32, 64] }, "linuxDistribution": { "$ref": "#/$defs/nullableIdentity" },
+        "kernel": { "$ref": "#/$defs/nullableIdentity" }, "sessionType": { "$ref": "#/$defs/identity" },
+        "locale": { "$ref": "#/$defs/identity" }, "logicalProcessorCount": { "type": "integer", "minimum": 1 },
+        "multiplayerRole": { "$ref": "#/$defs/identity" }, "splitScreenCount": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "completionReason", "startedUtc", "endedUtc", "durationMilliseconds", "completedUpdateCount", "slowUpdateThresholdMilliseconds", "isShortSample", "timingValid", "marks"],
+      "properties": {
+        "mode": { "enum": ["ledger-only", "health", "performance"] },
+        "completionReason": { "enum": ["not-stopped", "user-stop", "performance-stop", "normal-shutdown", "interim-report"] },
+        "startedUtc": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "endedUtc": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "durationMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "completedUpdateCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "slowUpdateThresholdMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "isShortSample": { "type": "boolean" }, "timingValid": { "type": "boolean" },
+        "marks": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/mark" } }
+      }
+    },
+    "mark": {
+      "type": "object", "additionalProperties": false, "required": ["number", "updateTick", "offsetMilliseconds"],
+      "properties": { "number": { "type": "integer", "minimum": 1 }, "updateTick": { "$ref": "#/$defs/nonnegativeInteger" }, "offsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" } }
+    },
+    "performance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["histogram", "totalObservedModMilliseconds", "totalBaseGameExclusiveMilliseconds", "totalSmapiOtherMilliseconds", "smapiOtherTimingAvailable", "totalResidualMilliseconds", "slowUpdateCount", "callbacks", "worstUpdates", "recentUpdates", "episodes", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid"],
+      "properties": {
+        "histogram": { "$ref": "#/$defs/histogram" },
+        "totalObservedModMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "totalBaseGameExclusiveMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "totalSmapiOtherMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "smapiOtherTimingAvailable": { "type": "boolean" },
+        "totalResidualMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "slowUpdateCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "callbacks": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/callback" } },
+        "worstUpdates": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/update" } },
+        "recentUpdates": { "type": "array", "maxItems": 600, "items": { "$ref": "#/$defs/update" } },
+        "episodes": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/episode" } },
+        "gen0Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen1Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen2Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gcCollectionDataValid": { "type": "boolean" }
+      }
+    },
+    "histogram": {
+      "type": "object", "additionalProperties": false,
+      "required": ["count", "sumMilliseconds", "minimumMilliseconds", "maximumMilliseconds", "p50Milliseconds", "p95Milliseconds", "p99Milliseconds", "percentilesApproximate", "maximumRelativeBucketError", "underflowCount", "overflowCount", "thresholds"],
+      "properties": {
+        "count": { "$ref": "#/$defs/nonnegativeInteger" }, "sumMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "minimumMilliseconds": { "$ref": "#/$defs/nullableNumber" }, "maximumMilliseconds": { "$ref": "#/$defs/nullableNumber" },
+        "p50Milliseconds": { "$ref": "#/$defs/nullableNumber" }, "p95Milliseconds": { "$ref": "#/$defs/nullableNumber" }, "p99Milliseconds": { "$ref": "#/$defs/nullableNumber" },
+        "percentilesApproximate": { "type": "boolean" }, "maximumRelativeBucketError": { "$ref": "#/$defs/nonnegativeNumber" },
+        "underflowCount": { "$ref": "#/$defs/nonnegativeInteger" }, "overflowCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "thresholds": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/threshold" } }
+      }
+    },
+    "threshold": {
+      "type": "object", "additionalProperties": false, "required": ["milliseconds", "count"],
+      "properties": { "milliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "count": { "$ref": "#/$defs/nonnegativeInteger" } }
+    },
+    "callback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["modId", "modName", "phase", "operation", "event", "callback", "onBehalfOfModId", "callCount", "totalMilliseconds", "maximumMilliseconds", "failureCount"],
+      "properties": {
+        "modId": { "$ref": "#/$defs/identity" }, "modName": { "$ref": "#/$defs/identity" },
+        "phase": { "enum": ["startup", "update", "draw", "background", "unscoped"] },
+        "operation": { "enum": ["event", "content-load", "content-edit", "console", "entry", "get-api", "other"] },
+        "event": { "$ref": "#/$defs/callbackName" }, "callback": { "$ref": "#/$defs/callbackName" }, "onBehalfOfModId": { "$ref": "#/$defs/nullableIdentity" },
+        "callCount": { "$ref": "#/$defs/nonnegativeInteger" }, "totalMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "maximumMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "failureCount": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "update": {
+      "type": "object", "additionalProperties": false,
+      "required": ["updateTick", "offsetMilliseconds", "totalMilliseconds", "baseGameExclusiveMilliseconds", "observedModMilliseconds", "smapiOtherMilliseconds", "smapiOtherTimingAvailable", "residualMilliseconds", "timingValid", "phase", "focused", "screen", "warningCount", "errorCount", "callbackFailureCount", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid", "contributors", "nearbyMark"],
+      "properties": {
+        "updateTick": { "$ref": "#/$defs/nonnegativeInteger" }, "offsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "totalMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "baseGameExclusiveMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "observedModMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "smapiOtherMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "smapiOtherTimingAvailable": { "type": "boolean" }, "residualMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "timingValid": { "type": "boolean" }, "phase": { "$ref": "#/$defs/identity" }, "focused": { "type": "boolean" }, "screen": { "$ref": "#/$defs/nonnegativeInteger" },
+        "warningCount": { "$ref": "#/$defs/nonnegativeInteger" }, "errorCount": { "$ref": "#/$defs/nonnegativeInteger" }, "callbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "gen0Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen1Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen2Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gcCollectionDataValid": { "type": "boolean" },
+        "contributors": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/contributor" } }, "nearbyMark": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] }
+      }
+    },
+    "contributor": {
+      "type": "object", "additionalProperties": false, "required": ["modId", "milliseconds"],
+      "properties": { "modId": { "$ref": "#/$defs/identity" }, "milliseconds": { "$ref": "#/$defs/nonnegativeNumber" } }
+    },
+    "episode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["firstUpdateTick", "lastUpdateTick", "qualifyingUpdateCount", "maximumMilliseconds", "summedQualifyingMilliseconds", "representativeUpdateTick", "nearbyMark"],
+      "properties": {
+        "firstUpdateTick": { "$ref": "#/$defs/nonnegativeInteger" }, "lastUpdateTick": { "$ref": "#/$defs/nonnegativeInteger" }, "qualifyingUpdateCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "maximumMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "summedQualifyingMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "representativeUpdateTick": { "$ref": "#/$defs/nonnegativeInteger" },
+        "nearbyMark": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] }
+      }
+    },
+    "mod": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "version", "kind", "parentId", "status", "failureCategory", "warningFlags", "dependencies", "updateStatus", "suggestedUpdateVersion", "sessionWarningCount", "sessionErrorCount", "captureErrorCount", "callbackFailureCount", "observedCallbackMilliseconds", "observedCallbackPeakMilliseconds", "observedCallbackCount", "observedCallbackFailureCount", "slowUpdateParticipationCount", "instrumentedTimeShare", "peakMessagesPerSecond", "peakCharactersPerSecond"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identity" }, "name": { "$ref": "#/$defs/identity" }, "version": { "$ref": "#/$defs/identity" },
+        "kind": { "enum": ["code-mod", "content-pack", "invalid"] }, "parentId": { "$ref": "#/$defs/nullableIdentity" },
+        "status": { "enum": ["discovered", "loaded", "skipped", "ignored", "invalid", "failed"] }, "failureCategory": { "$ref": "#/$defs/nullableIdentity" },
+        "warningFlags": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/identity" } },
+        "dependencies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/identity" } },
+        "updateStatus": { "enum": ["unknown", "pending", "up-to-date", "update-available", "disabled", "suppressed", "unavailable"] }, "suggestedUpdateVersion": { "$ref": "#/$defs/nullableIdentity" },
+        "sessionWarningCount": { "$ref": "#/$defs/nonnegativeInteger" }, "sessionErrorCount": { "$ref": "#/$defs/nonnegativeInteger" }, "captureErrorCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "callbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "observedCallbackMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "observedCallbackPeakMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "observedCallbackCount": { "$ref": "#/$defs/nonnegativeInteger" }, "observedCallbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "slowUpdateParticipationCount": { "$ref": "#/$defs/nonnegativeInteger" }, "instrumentedTimeShare": { "type": "number", "minimum": 0, "maximum": 1 },
+        "peakMessagesPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }, "peakCharactersPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "modInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["totalDiscovered", "discovered", "loaded", "skipped", "ignored", "invalid", "failed", "retained"],
+      "properties": {
+        "totalDiscovered": { "$ref": "#/$defs/nonnegativeInteger" }, "discovered": { "$ref": "#/$defs/nonnegativeInteger" },
+        "loaded": { "$ref": "#/$defs/nonnegativeInteger" }, "skipped": { "$ref": "#/$defs/nonnegativeInteger" },
+        "ignored": { "$ref": "#/$defs/nonnegativeInteger" }, "invalid": { "$ref": "#/$defs/nonnegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonnegativeInteger" }, "retained": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "log": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "sourceCategory", "sinceLedgerStart", "duringCapture", "peakMessagesPerSecond", "peakCharactersPerSecond", "firstOffsetMilliseconds", "lastOffsetMilliseconds"],
+      "properties": {
+        "source": { "$ref": "#/$defs/identity" }, "sourceCategory": { "enum": ["mod", "smapi", "game"] },
+        "sinceLedgerStart": { "$ref": "#/$defs/logSeverity" }, "duringCapture": { "$ref": "#/$defs/logSeverity" },
+        "peakMessagesPerSecond": { "$ref": "#/$defs/nonnegativeInteger" }, "peakCharactersPerSecond": { "$ref": "#/$defs/nonnegativeInteger" },
+        "firstOffsetMilliseconds": { "$ref": "#/$defs/nullableNumber" }, "lastOffsetMilliseconds": { "$ref": "#/$defs/nullableNumber" }
+      }
+    },
+    "logSeverity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["traceMessages", "traceCharacters", "debugMessages", "debugCharacters", "infoMessages", "infoCharacters", "warningMessages", "warningCharacters", "errorMessages", "errorCharacters", "alertMessages", "alertCharacters"],
+      "properties": {
+        "traceMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "traceCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "debugMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "debugCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "infoMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "infoCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "warningMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "warningCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "errorMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "errorCharacters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "alertMessages": { "$ref": "#/$defs/nonnegativeInteger" }, "alertCharacters": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "logTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sinceLedgerStart", "duringCapture"],
+      "properties": { "sinceLedgerStart": { "$ref": "#/$defs/logSeverity" }, "duringCapture": { "$ref": "#/$defs/logSeverity" } }
+    },
+    "callbackFailure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["modId", "modName", "phase", "operation", "callback", "exceptionType", "onBehalfOfModId", "sessionCount", "captureCount", "firstOffsetMilliseconds", "lastOffsetMilliseconds"],
+      "properties": {
+        "modId": { "$ref": "#/$defs/identity" }, "modName": { "$ref": "#/$defs/identity" },
+        "phase": { "enum": ["startup", "update", "draw", "background", "unscoped"] },
+        "operation": { "enum": ["event", "content-load", "content-edit", "console", "entry", "get-api", "other"] },
+        "callback": { "$ref": "#/$defs/callbackName" }, "exceptionType": { "$ref": "#/$defs/callbackName" }, "onBehalfOfModId": { "$ref": "#/$defs/nullableIdentity" },
+        "sessionCount": { "$ref": "#/$defs/nonnegativeInteger" }, "captureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "firstOffsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "lastOffsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }
+      }
+    },
+    "callbackFailureTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sinceLedgerStart", "duringCapture"],
+      "properties": { "sinceLedgerStart": { "$ref": "#/$defs/nonnegativeInteger" }, "duringCapture": { "$ref": "#/$defs/nonnegativeInteger" } }
+    },
+    "finding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ruleId", "severity", "confidence", "modId", "summary", "evidence", "suggestedAction", "limitation"],
+      "properties": {
+        "ruleId": { "$ref": "#/$defs/identity" }, "severity": { "enum": ["action-needed", "performance", "check", "info"] },
+        "confidence": { "enum": ["factual", "likely", "possible", "limited"] }, "modId": { "$ref": "#/$defs/nullableIdentity" },
+        "summary": { "$ref": "#/$defs/identity" }, "evidence": { "type": "string", "maxLength": 1024 }, "suggestedAction": { "type": "string", "maxLength": 1024 }, "limitation": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "capacity": {
+      "type": "object", "additionalProperties": false, "required": ["name", "limit", "reached"],
+      "properties": { "name": { "$ref": "#/$defs/identity" }, "limit": { "$ref": "#/$defs/nonnegativeInteger" }, "reached": { "type": "boolean" } }
+    },
+    "omission": {
+      "type": "object", "additionalProperties": false, "required": ["section", "count"],
+      "properties": { "section": { "$ref": "#/$defs/identity" }, "count": { "$ref": "#/$defs/nonnegativeInteger" } }
+    },
+    "privacy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["inspectBeforeSharing", "automaticUpload", "includedIdentityFields", "excludedSources"],
+      "properties": {
+        "inspectBeforeSharing": { "const": true }, "automaticUpload": { "const": false },
+        "includedIdentityFields": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/identity" } },
+        "excludedSources": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/identity" } }
+      }
+    }
+  }
+}

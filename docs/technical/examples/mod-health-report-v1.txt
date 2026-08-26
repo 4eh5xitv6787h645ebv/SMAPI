@@ -1,0 +1,70 @@
+SMAPI Mod Health Report
+Report ID: sample-a1b2c3
+Generated UTC: 2026-08-26T12:34:56.000Z
+
+Privacy notice
+This report contains installed mod names, IDs, versions, and statuses. Inspect it before sharing. It was not uploaded automatically.
+The normal SMAPI log is still needed for detailed exceptions. The standalone health report is not currently parsed by smapi.io/log.
+
+What SMAPI observed
+[INFO] No findings were generated.
+
+Suggested next steps
+- After inspecting both for private information, share this health .txt report and the normal SMAPI log. Provide the health .json only when requested.
+
+Capture quality and scope
+Mode: health
+Completion: user-stop
+Duration: 60000.0 ms
+Completed update ticks: 3600
+Timing data: valid
+Ledger boundary: SMAPI core initialized before LogManager; earlier launcher/native failures are unavailable.
+
+Slow update overview
+Definitions: a callback is mod-owned code observed at a named SMAPI boundary; unattributed time is work outside those measured boundaries and is not assigned to a cause.
+Slow update threshold: 33.333 ms
+Slow update ticks: 3
+Observed mod callbacks: 12 ms
+Base-game update (exclusive): 60300.0 ms
+Separately measured SMAPI/other update work: unavailable; no owned measurement boundary was active.
+Remaining unattributed time: 168.0 ms
+Mean update duration: 16.8 ms
+Update distribution: p50 16.75 ms, p95 18 ms, p99 35 ms (approximate bucket upper bounds)
+Process-wide GC collections during capture: 2 gen0, 0 gen1, 0 gen2 (correlation only, not mod attribution).
+
+Mods needing attention
+None recorded.
+
+Top observed mods and callbacks
+- Mod total: Example Mod (Example.Mod): 12 ms exclusive observed time, 0.08 ms peak, 3600 calls, 1 retained slow updates
+- Example Mod (Example.Mod) | update/event | Example.Mod.OnUpdate [UpdateTicked]: 12 ms total, 0.08 ms peak, 0.003 ms average, 3600 calls
+
+Slow episodes and worst updates
+- Episode ticks 1200-1202: 41.2 ms maximum
+- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 38 ms base-game exclusive; SMAPI/other not separately measured; 3 ms remaining unattributed; GC 2/0/0 process-wide
+
+Errors, failures, and logging volume
+A failed callback may also emit an error; do not sum those columns as unique incidents.
+Session totals: 0 warnings, 0 alerts, 0 errors, 0 failed callbacks.
+Capture totals: 0 warnings, 0 alerts, 0 errors, 0 failed callbacks.
+- Example.Mod [mod]: 0 warnings, 0 errors, approximately 120 characters since ledger start; 0 errors during capture
+
+Installed mod and content-pack inventory
+Discovered: 1 total; 1 loaded, 0 skipped, 0 ignored, 0 invalid, 0 failed, 0 unresolved.
+- Example Mod (Example.Mod) 1.2.3 — code-mod, loaded, update up-to-date
+
+Environment
+SMAPI: 4.5.2-fork
+Game: 1.6.15
+Runtime: .NET 6.0.36 (x64, 64-bit)
+Linux/session: Linux / wayland
+Locale: en-AU
+Multiplayer/split screen: single-player / 1
+
+Omissions and capacities
+
+Attribution and privacy limitations
+- SMAPI observes only named callback boundaries.
+- Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.
+- Allowed mod identity text is length-capped and structurally sanitized, but arbitrary author-chosen text cannot be semantically guaranteed private.
+- No report was transmitted automatically.

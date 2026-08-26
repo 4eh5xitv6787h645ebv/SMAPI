@@ -1,7 +1,9 @@
 using System;
+using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Performance;
 
 namespace SMAPI.Tests.Framework.Performance;
@@ -14,7 +16,7 @@ internal sealed class ModPerformanceManagerTests
     public void RecordHandler_AggregatesHandlerTickAndLogData()
     {
         long timestamp = 0;
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
         manager.Start();
         manager.BeginTick(tick: 42, startTimestamp: 100);
 
@@ -40,7 +42,7 @@ internal sealed class ModPerformanceManagerTests
     [Test]
     public void TickHistory_IsBoundedAndKeepsNewestTicks()
     {
-        ModPerformanceManager manager = new(tickHistoryCapacity: 2, timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(tickHistoryCapacity: 2, timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.Start(logIndividualTicks: true, tickLogThresholdMilliseconds: 0);
 
         for (uint tick = 1; tick <= 3; tick++)
@@ -60,7 +62,7 @@ internal sealed class ModPerformanceManagerTests
     [Test]
     public void HandlerCapacity_DoesNotLosePerTickAttribution()
     {
-        ModPerformanceManager manager = new(handlerCapacity: 1, timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(handlerCapacity: 1, timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.Start();
         manager.BeginTick(7, 0);
         manager.RecordHandler("First.Mod", "First", "Event.One", "First.Handler", 3, failed: false);
@@ -77,7 +79,7 @@ internal sealed class ModPerformanceManagerTests
     public void NestedHandlers_RecordExclusiveTimeWithoutDoubleCounting()
     {
         long timestamp = 0;
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
         manager.Start();
         manager.BeginTick(1, 0);
 
@@ -100,7 +102,7 @@ internal sealed class ModPerformanceManagerTests
     [Test]
     public void CompleteTick_OnlyReturnsTicksAtConfiguredThreshold()
     {
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.Start(logIndividualTicks: true, tickLogThresholdMilliseconds: 16.667);
 
         manager.BeginTick(1, 0);
@@ -113,9 +115,333 @@ internal sealed class ModPerformanceManagerTests
     }
 
     [Test]
+    public void GameUpdate_SplitsTickAttribution()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        timestamp = 2;
+        manager.BeginGameUpdate();
+        manager.RecordHandler("During.Mod", "During Mod", "GameLoop.UpdateTicked", "During.Mod.OnTicked", elapsedTimestampTicks: 3, failed: false);
+        timestamp = 12;
+        manager.EndGameUpdate();
+        manager.RecordHandler("Outside.Mod", "Outside Mod", "Display.Rendered", "Outside.Mod.OnRendered", elapsedTimestampTicks: 4, failed: false);
+        manager.CompleteTick(endTimestamp: 20);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        TickPerformanceSnapshot tick = snapshot.RecentTicks.Should().ContainSingle().Subject;
+        tick.TotalMilliseconds.Should().Be(20);
+        tick.InstrumentedModMilliseconds.Should().Be(7);
+        tick.GameUpdateMilliseconds.Should().Be(10);
+        tick.InstrumentedDuringGameUpdateMilliseconds.Should().Be(3);
+        tick.GameUpdateExclusiveMilliseconds.Should().Be(7);
+        tick.OutsideGameUpdateMilliseconds.Should().Be(6);
+
+        snapshot.TickTotalMilliseconds.Should().Be(20);
+        snapshot.GameUpdateMilliseconds.Should().Be(10);
+        snapshot.TickInstrumentedMilliseconds.Should().Be(7);
+        snapshot.InstrumentedDuringGameUpdateMilliseconds.Should().Be(3);
+        snapshot.GameUpdateExclusiveMilliseconds.Should().Be(7);
+        snapshot.OutsideGameUpdateMilliseconds.Should().Be(6);
+    }
+
+    [Test]
+    public void TickAttribution_ExcludesOverlappingBackgroundCallbacksAndErrors()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        timestamp = 2;
+        manager.BeginGameUpdate();
+
+        Task.Run(() =>
+        {
+            manager.RecordHandler("Background.Mod", "Background Mod", "Background", "Background.Run", elapsedTimestampTicks: 50, failed: false);
+            manager.RecordLog("Background.Mod", "Background Mod", LogLevel.Error);
+        }).GetAwaiter().GetResult();
+
+        manager.RecordHandler("Main.Mod", "Main Mod", "GameLoop.UpdateTicked", "Main.Mod.OnTicked", elapsedTimestampTicks: 3, failed: false);
+        timestamp = 12;
+        manager.EndGameUpdate();
+        manager.CompleteTick(endTimestamp: 20);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        snapshot.Handlers.Should().Contain(entry => entry.ModId == "Background.Mod" && entry.TotalMilliseconds == 50);
+        snapshot.ModLogs.Should().Contain(entry => entry.ModId == "Background.Mod" && entry.ErrorCount == 1);
+        snapshot.RecentTicks.Should().ContainSingle().Which.Should().Match<TickPerformanceSnapshot>(tick =>
+            tick.InstrumentedModMilliseconds == 3
+            && tick.InstrumentedDuringGameUpdateMilliseconds == 3
+            && tick.ErrorCount == 0
+            && tick.SlowestModId == "Main.Mod"
+            && tick.TimingPartitionIsValid
+        );
+    }
+
+    [Test]
+    public void GameUpdate_AccumulatesMultipleSequentialWindows()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        timestamp = 2;
+        manager.BeginGameUpdate();
+        timestamp = 7;
+        manager.EndGameUpdate();
+        timestamp = 10;
+        manager.BeginGameUpdate();
+        manager.RecordHandler("Second.Mod", "Second Mod", "GameLoop.UpdateTicked", "Second.Mod.OnTicked", elapsedTimestampTicks: 2, failed: false);
+        timestamp = 16;
+        manager.EndGameUpdate();
+        manager.CompleteTick(endTimestamp: 20);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.GameUpdateMilliseconds.Should().Be(11);
+        tick.InstrumentedDuringGameUpdateMilliseconds.Should().Be(2);
+        tick.GameUpdateExclusiveMilliseconds.Should().Be(9);
+        tick.OutsideGameUpdateMilliseconds.Should().Be(9);
+        tick.TimingPartitionIsValid.Should().BeTrue();
+    }
+
+    [Test]
+    public void GameUpdateBoundary_RejectsWrongThread()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        Task.Run(() =>
+        {
+            manager.BeginGameUpdate();
+            manager.EndGameUpdate();
+        }).GetAwaiter().GetResult();
+        manager.CompleteTick(endTimestamp: 10);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.GameUpdateMilliseconds.Should().Be(0);
+        tick.TimingPartitionIsValid.Should().BeFalse();
+    }
+
+    [Test]
+    public void GameUpdateBoundary_CanBeClosedInFinallyAfterException()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        Action run = () =>
+        {
+            timestamp = 2;
+            manager.BeginGameUpdate();
+            try
+            {
+                throw new InvalidOperationException("test");
+            }
+            finally
+            {
+                timestamp = 8;
+                manager.EndGameUpdate();
+            }
+        };
+        run.Should().Throw<InvalidOperationException>();
+        manager.CompleteTick(endTimestamp: 10);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.GameUpdateMilliseconds.Should().Be(6);
+        tick.TimingPartitionIsValid.Should().BeTrue();
+    }
+
+    [Test]
+    public void CompleteTick_PreservesInvalidRawPartitionAndFlagsIt()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        manager.RecordHandler("Impossible.Mod", "Impossible Mod", "Event", "Handler", elapsedTimestampTicks: 15, failed: false);
+        manager.CompleteTick(endTimestamp: 10);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        TickPerformanceSnapshot tick = snapshot.RecentTicks.Should().ContainSingle().Subject;
+        tick.TimingPartitionIsValid.Should().BeFalse();
+        tick.OutsideGameUpdateMilliseconds.Should().Be(-5);
+        snapshot.TimingPartitionIsValid.Should().BeFalse();
+        snapshot.InvalidTimingPartitionTickCount.Should().Be(1);
+        snapshot.OutsideGameUpdateMilliseconds.Should().Be(-5);
+    }
+
+    [Test]
+    public void EndHandler_DoesNotRecordInvocationFromPreviousSampleGeneration()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        HandlerTimingToken stale = manager.BeginHandler("Stale.Mod", "Stale Mod", "Event", "Handler");
+
+        timestamp = 5;
+        manager.Start();
+        timestamp = 10;
+        manager.EndHandler(stale, failed: false);
+
+        manager.GetSnapshot().Handlers.Should().BeEmpty();
+    }
+
+    [Test]
+    public void BeginHandler_RemovesAbandonedFramesFromPreviousGeneration()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginHandler("Stale.Mod", "Stale", "Event", "Stale.Handler");
+
+        manager.Start();
+        HandlerTimingToken current = manager.BeginHandler("Current.Mod", "Current", "Event", "Current.Handler");
+        current.Depth.Should().Be(0);
+        manager.EndHandler(current, failed: false);
+
+        manager.GetSnapshot().Handlers.Should().ContainSingle().Which.ModId.Should().Be("Current.Mod");
+    }
+
+    [Test]
+    public void RecordHandler_SanitizesAndCapsCollectorIdentitiesAtIngress()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        string oversized = new('x', ModHealthReportLimits.MaxCallbackNameLength + 1000);
+        manager.RecordHandler("\u001b[31m/path/private/mod\u001b[0m", "Bad\nName", oversized, oversized, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, "/home/private/pack", 1, failed: false);
+
+        ModHealthCallbackPerformanceSnapshot callback = manager.GetSnapshot().Health!.Callbacks.Should().ContainSingle().Subject;
+        callback.ModId.Should().NotContain("\u001b").And.NotContain("private");
+        callback.ModName.Should().Be("Bad Name");
+        callback.EventName.Should().HaveLength(ModHealthReportLimits.MaxCallbackNameLength);
+        callback.CallbackName.Should().HaveLength(ModHealthReportLimits.MaxCallbackNameLength);
+        callback.OnBehalfOfModId.Should().Be("[path]");
+    }
+
+    [Test]
+    public void DisabledHandlerIngress_WithHostileIdentitiesDoesNotAllocateAfterWarmup()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        string hostile = "\u001b[31m/home/private/" + new string('x', 4096);
+        manager.BeginHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile);
+        manager.RecordHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile, 1, failed: false);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++)
+        {
+            manager.BeginHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile);
+            manager.RecordHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile, 1, failed: false);
+        }
+
+        (GC.GetAllocatedBytesForCurrentThread() - before).Should().Be(0);
+    }
+
+    [Test]
+    public void GameUpdateBoundary_DoesNotAllocateAfterWarmup()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        manager.BeginGameUpdate();
+        manager.EndGameUpdate();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 1000; i++)
+        {
+            manager.BeginGameUpdate();
+            manager.EndGameUpdate();
+        }
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        allocated.Should().Be(0);
+    }
+
+    [Test]
+    public void GcCollections_AreCountedPerTickAndSample()
+    {
+        int[] collections = [0, 0, 0];
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: generation => collections[generation]);
+        manager.Start();
+
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        collections = [2, 1, 0];
+        manager.CompleteTick(endTimestamp: 10);
+
+        manager.BeginTick(tick: 2, startTimestamp: 10);
+        collections = [3, 1, 1];
+        manager.CompleteTick(endTimestamp: 20);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        snapshot.RecentTicks.Should().SatisfyRespectively(
+            first =>
+            {
+                first.Gen0Collections.Should().Be(2);
+                first.Gen1Collections.Should().Be(1);
+                first.Gen2Collections.Should().Be(0);
+            },
+            second =>
+            {
+                second.Gen0Collections.Should().Be(1);
+                second.Gen1Collections.Should().Be(0);
+                second.Gen2Collections.Should().Be(1);
+            }
+        );
+        snapshot.Gen0Collections.Should().Be(3);
+        snapshot.Gen1Collections.Should().Be(1);
+        snapshot.Gen2Collections.Should().Be(1);
+        snapshot.CaptureGen0Collections.Should().Be(3);
+        snapshot.CaptureGen1Collections.Should().Be(1);
+        snapshot.CaptureGen2Collections.Should().Be(1);
+        snapshot.CaptureGcCollectionDataIsValid.Should().BeTrue();
+        snapshot.Health!.RecentUpdates.Should().SatisfyRespectively(
+            first => first.Should().Match<ModHealthUpdatePerformanceSnapshot>(update => update.Gen0Collections == 2 && update.Gen1Collections == 1 && update.Gen2Collections == 0 && update.GcCollectionDataIsValid),
+            second => second.Should().Match<ModHealthUpdatePerformanceSnapshot>(update => update.Gen0Collections == 1 && update.Gen1Collections == 0 && update.Gen2Collections == 1 && update.GcCollectionDataIsValid)
+        );
+    }
+
+    [Test]
+    public void GcCollections_StopFreezesCaptureDelta()
+    {
+        int[] collections = [0, 0, 0];
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: generation => collections[generation]);
+        manager.Start();
+        collections = [5, 2, 1];
+        manager.Stop();
+        collections = [9, 4, 3];
+        manager.Stop();
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        snapshot.CaptureGen0Collections.Should().Be(5);
+        snapshot.CaptureGen1Collections.Should().Be(2);
+        snapshot.CaptureGen2Collections.Should().Be(1);
+    }
+
+    [Test]
+    public void Stop_FreezesElapsedAtTheSameCaptureBoundary()
+    {
+        long timestamp = 100;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        timestamp = 150;
+        manager.Stop();
+
+        timestamp = 500;
+        ModPerformanceSnapshot first = manager.GetSnapshot();
+        timestamp = 900;
+        ModPerformanceSnapshot second = manager.GetSnapshot();
+
+        first.IsTracking.Should().BeFalse();
+        first.Elapsed.Should().Be(TimeSpan.FromMilliseconds(50));
+        second.Elapsed.Should().Be(first.Elapsed);
+    }
+
+    [Test]
     public void DisabledManager_DoesNotCreateHandlerCounters()
     {
-        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0);
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         manager.RecordHandler("Example.Mod", "Example", "Event", "Handler", 10, failed: true);
         manager.RecordLog("Example.Mod", "Example", LogLevel.Error);
         manager.RecordLog("SMAPI", "SMAPI", LogLevel.Error);
