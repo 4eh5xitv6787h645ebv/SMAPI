@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using FluentAssertions;
+using HarmonyLib;
 using MonoMod.Utils;
 using NUnit.Framework;
 
@@ -12,6 +14,44 @@ namespace SMAPI.Tests.Framework;
 [TestFixture]
 internal class MiniMonoModHotfixTests
 {
+    [Test]
+    [NonParallelizable]
+    public void PreservesReferenceArgumentsAcrossSharedGenericInstantiations()
+    {
+        if (!OperatingSystem.IsLinux() || Environment.Version.Major < 10)
+            Assert.Ignore("The generic-detour regression is specific to the Linux .NET 10 host.");
+
+        Harmony harmony = new($"SMAPI.Tests.{nameof(PreservesReferenceArgumentsAcrossSharedGenericInstantiations)}");
+        try
+        {
+            MethodInfo createDynamicMethod = typeof(Harmony).Assembly
+                .GetType("HarmonyLib.MethodPatcherTools", throwOnError: true)!
+                .GetMethod("CreateDynamicMethod", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!;
+            harmony.Patch(
+                original: createDynamicMethod,
+                postfix: new HarmonyMethod(typeof(MiniMonoModHotfix), nameof(MiniMonoModHotfix.CanonicalizeLinuxNet10GenericPatchSignature))
+            );
+
+            for (int i = 0; i < 100; i++)
+                _ = MiniMonoModHotfixTests.GetGenericDetourSnapshot();
+
+            MethodInfo original = typeof(GenericDetourTarget<string>).GetMethod(nameof(GenericDetourTarget<string>.Describe))!;
+            MethodInfo postfix = typeof(MiniMonoModHotfixTests).GetMethod(nameof(AppendPatchMarker), BindingFlags.NonPublic | BindingFlags.Static)!;
+            harmony.Patch(original, postfix: new HarmonyMethod(postfix));
+
+            MiniMonoModHotfixTests.GetGenericDetourSnapshot().Should().Equal(
+                "String:String|patched",
+                "String:Object|patched",
+                "String:ReferenceA|patched",
+                "String:ReferenceB|patched"
+            );
+        }
+        finally
+        {
+            harmony.UnpatchAll(harmony.Id);
+        }
+    }
+
     [Test]
     public void CanonicalizesReferenceParametersAndReturnsFromGenericType()
     {
@@ -65,6 +105,20 @@ internal class MiniMonoModHotfixTests
         return new DynamicMethodDefinition($"{method.Name}_Patch", method.ReturnType, [.. parameterTypes]);
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string[] GetGenericDetourSnapshot() =>
+    [
+        new GenericDetourTarget<string>().Describe("value"),
+        new GenericDetourTarget<object>().Describe(new object()),
+        new GenericDetourTarget<ReferenceA>().Describe(new ReferenceA()),
+        new GenericDetourTarget<ReferenceB>().Describe(new ReferenceB())
+    ];
+
+    private static void AppendPatchMarker(ref string __result)
+    {
+        __result += "|patched";
+    }
+
     private sealed class GenericType<T>
     {
         public T Echo(T value) => value;
@@ -76,4 +130,14 @@ internal class MiniMonoModHotfixTests
     {
         public static T Echo<T>(T value) => value;
     }
+
+    private sealed class GenericDetourTarget<T>
+    {
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public string Describe(T value) => $"{typeof(T).Name}:{value!.GetType().Name}";
+    }
+
+    private sealed class ReferenceA;
+
+    private sealed class ReferenceB;
 }

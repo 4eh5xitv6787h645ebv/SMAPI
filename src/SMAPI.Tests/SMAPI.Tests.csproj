@@ -24,6 +24,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="..\..\build\0Harmony.dll" />
     <Reference Include="Stardew Valley" HintPath="$(GamePath)\Stardew Valley.dll" Private="True" />
     <Reference Include="StardewValley.GameData" HintPath="$(GamePath)\StardewValley.GameData.dll" Private="True" />
     <Reference Include="MonoGame.Framework" HintPath="$(GamePath)\MonoGame.Framework.dll" Private="True" />
