@@ -18,6 +18,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="Moq" />
     <PackageReference Include="Newtonsoft.Json" />
+    <PackageReference Include="Newtonsoft.Json.Schema" />
     <PackageReference Include="NUnit" />
     <PackageReference Include="NUnit3TestAdapter" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
   </ItemGroup>
@@ -31,6 +32,9 @@
 
   <ItemGroup>
     <None Include="..\SMAPI.Installer\assets\smapi-runtime-dispatcher.sh" Link="TestAssets\smapi-runtime-dispatcher.sh" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\technical\mod-health-report-schema-v1.json" Link="TestAssets\ModHealthReport\mod-health-report-schema-v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\technical\examples\mod-health-report-v1.json" Link="TestAssets\ModHealthReport\mod-health-report-v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\technical\examples\mod-health-report-v1.txt" Link="TestAssets\ModHealthReport\mod-health-report-v1.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

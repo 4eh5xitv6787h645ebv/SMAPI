@@ -1,0 +1,63 @@
+SMAPI Mod Health Report
+Report ID: sample-a1b2c3
+Generated UTC: 2026-08-26T12:34:56.000Z
+
+Privacy notice
+This report contains installed mod names, IDs, versions, and statuses. Inspect it before sharing. It was not uploaded automatically.
+The normal SMAPI log is still needed for detailed exceptions. The standalone health report is not currently parsed by smapi.io/log.
+
+What SMAPI observed
+[INFO] No findings were generated.
+
+Suggested next steps
+- After inspecting both for private information, share this health .txt report and the normal SMAPI log. Provide the health .json only when requested.
+
+Capture quality and scope
+Mode: health
+Completion: user-stop
+Duration: 60000.0 ms
+Completed update ticks: 3600
+Timing data: valid
+Ledger boundary: SMAPI core initialized before LogManager; earlier launcher/native failures are unavailable.
+
+Slow update overview
+Slow update threshold: 33.333 ms
+Slow update ticks: 3
+Observed mod callbacks: 12 ms
+Base-game update (exclusive): 60300.0 ms
+SMAPI/other update work: 120.0 ms
+Remaining unattributed time: 48 ms
+Update distribution: p50 16.75 ms, p95 18 ms, p99 35 ms (approximate bucket upper bounds)
+
+Mods needing attention
+None recorded.
+
+Top observed mods and callbacks
+- Example Mod (Example.Mod) | update/event | Example.Mod.OnUpdate: 12 ms total, 0.08 ms peak, 3600 calls
+
+Slow episodes and worst updates
+- Episode ticks 1200-1202: 41.2 ms maximum
+- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 1 ms remaining unattributed
+
+Errors, failures, and logging volume
+A failed callback may also emit an error; do not sum those columns as unique incidents.
+- Example.Mod: 0 warnings, 0 errors, approximately 120 characters
+
+Installed mod and content-pack inventory
+- Example Mod (Example.Mod) 1.2.3 — code-mod, loaded
+
+Environment
+SMAPI: 4.5.2-fork
+Game: 1.6.15
+Runtime: .NET 6.0.36 (x64)
+Linux/session: Linux / wayland
+Locale: en-AU
+Multiplayer/split screen: single-player / 1
+
+Omissions and capacities
+
+Attribution and privacy limitations
+- SMAPI observes only named callback boundaries.
+- Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.
+- Allowed mod identity text is length-capped and structurally sanitized, but arbitrary author-chosen text cannot be semantically guaranteed private.
+- No report was transmitted automatically.

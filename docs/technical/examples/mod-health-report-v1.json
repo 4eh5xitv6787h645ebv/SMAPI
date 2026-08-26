@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "header": {
+    "reportId": "sample-a1b2c3",
+    "generatedUtc": "2026-08-26T12:34:56+00:00",
+    "isTruncated": false,
+    "isMinimalFallback": false,
+    "writeRetry": false
+  },
+  "completeness": {
+    "ledgerStartedUtc": "2026-08-26T12:32:56+00:00",
+    "boundary": "SMAPI core initialized before LogManager; earlier launcher/native failures are unavailable.",
+    "startupObserved": true,
+    "lifecycleTimingObserved": true
+  },
+  "environment": {
+    "smapiVersion": "4.5.2-fork",
+    "smapiCommit": "abc1234",
+    "gameVersion": "1.6.15",
+    "runtimeVersion": ".NET 6.0.36",
+    "processArchitecture": "x64",
+    "linuxDistribution": "Linux",
+    "kernel": "6.12",
+    "sessionType": "wayland",
+    "locale": "en-AU",
+    "logicalProcessorCount": 8,
+    "multiplayerRole": "single-player",
+    "splitScreenCount": 1
+  },
+  "capture": {
+    "mode": "health",
+    "completionReason": "user-stop",
+    "startedUtc": "2026-08-26T12:33:56+00:00",
+    "endedUtc": "2026-08-26T12:34:56+00:00",
+    "durationMilliseconds": 60000.0,
+    "completedUpdateCount": 3600,
+    "slowUpdateThresholdMilliseconds": 33.333,
+    "isShortSample": false,
+    "timingValid": true,
+    "marks": [
+      { "number": 1, "updateTick": 1200, "offsetMilliseconds": 20000.0 }
+    ]
+  },
+  "findings": [],
+  "performance": {
+    "histogram": {
+      "count": 3600,
+      "sumMilliseconds": 60480.0,
+      "minimumMilliseconds": 15.2,
+      "maximumMilliseconds": 41.2,
+      "p50Milliseconds": 16.75,
+      "p95Milliseconds": 18.0,
+      "p99Milliseconds": 35.0,
+      "percentilesApproximate": true,
+      "maximumRelativeBucketError": 0.044,
+      "underflowCount": 0,
+      "overflowCount": 0,
+      "thresholds": [
+        { "milliseconds": 33.333, "count": 3 }
+      ]
+    },
+    "totalObservedModMilliseconds": 12.0,
+    "totalBaseGameExclusiveMilliseconds": 60300.0,
+    "totalSmapiOtherMilliseconds": 120.0,
+    "totalResidualMilliseconds": 48.0,
+    "slowUpdateCount": 3,
+    "callbacks": [
+      {
+        "modId": "Example.Mod",
+        "modName": "Example Mod",
+        "phase": "update",
+        "operation": "event",
+        "callback": "Example.Mod.OnUpdate",
+        "onBehalfOfModId": null,
+        "callCount": 3600,
+        "totalMilliseconds": 12.0,
+        "maximumMilliseconds": 0.08,
+        "failureCount": 0
+      }
+    ],
+    "worstUpdates": [
+      {
+        "updateTick": 1200,
+        "offsetMilliseconds": 20000.0,
+        "totalMilliseconds": 41.2,
+        "baseGameExclusiveMilliseconds": 38.0,
+        "observedModMilliseconds": 0.2,
+        "smapiOtherMilliseconds": 2.0,
+        "residualMilliseconds": 1.0,
+        "timingValid": true,
+        "phase": "gameplay",
+        "focused": true,
+        "screen": 0,
+        "warningCount": 0,
+        "errorCount": 0,
+        "callbackFailureCount": 0,
+        "contributors": [
+          { "modId": "Example.Mod", "milliseconds": 0.2 }
+        ],
+        "nearbyMark": 1
+      }
+    ],
+    "recentUpdates": [],
+    "episodes": [
+      {
+        "firstUpdateTick": 1200,
+        "lastUpdateTick": 1202,
+        "qualifyingUpdateCount": 3,
+        "maximumMilliseconds": 41.2,
+        "summedQualifyingMilliseconds": 119.4,
+        "representativeUpdateTick": 1200,
+        "nearbyMark": 1
+      }
+    ],
+    "gen0Collections": 2,
+    "gen1Collections": 0,
+    "gen2Collections": 0
+  },
+  "mods": [
+    {
+      "id": "Example.Mod",
+      "name": "Example Mod",
+      "version": "1.2.3",
+      "kind": "code-mod",
+      "parentId": null,
+      "status": "loaded",
+      "failureCategory": null,
+      "dependencies": [],
+      "suggestedUpdateVersion": null,
+      "sessionWarningCount": 0,
+      "sessionErrorCount": 0,
+      "captureErrorCount": 0,
+      "callbackFailureCount": 0,
+      "peakMessagesPerSecond": 3,
+      "peakCharactersPerSecond": 120
+    }
+  ],
+  "logs": [
+    {
+      "source": "Example.Mod",
+      "traceCount": 3,
+      "debugCount": 0,
+      "infoCount": 0,
+      "warningCount": 0,
+      "errorCount": 0,
+      "characterCount": 120,
+      "firstOffsetMilliseconds": 100.0,
+      "lastOffsetMilliseconds": 59000.0
+    }
+  ],
+  "capacities": [
+    { "name": "callbacks", "limit": 500, "reached": false }
+  ],
+  "omissions": [
+    { "section": "callbacks", "count": 0 }
+  ],
+  "privacy": {
+    "inspectBeforeSharing": true,
+    "automaticUpload": false,
+    "includedIdentityFields": ["mod names", "mod IDs", "versions", "statuses"],
+    "excludedSources": ["raw logs", "stack traces", "paths", "save data", "configuration"]
+  },
+  "limitations": [
+    "SMAPI observes only named callback boundaries.",
+    "Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed."
+  ]
+}

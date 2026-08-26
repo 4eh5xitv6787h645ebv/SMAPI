@@ -35,6 +35,9 @@
     <File Path="../docs/release-notes.md" />
   </Folder>
   <Folder Name="/.root/docs/technical/">
+    <File Path="../docs/technical/mod-health-report-schema-v1.json" />
+    <File Path="../docs/technical/examples/mod-health-report-v1.json" />
+    <File Path="../docs/technical/examples/mod-health-report-v1.txt" />
     <File Path="../docs/technical/mod-package-release-notes.md" />
     <File Path="../docs/technical/mod-package.md" />
     <File Path="../docs/technical/smapi.md" />

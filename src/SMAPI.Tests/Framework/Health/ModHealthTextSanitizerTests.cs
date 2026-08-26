@@ -1,0 +1,30 @@
+using FluentAssertions;
+using NUnit.Framework;
+using StardewModdingAPI.Framework.Health;
+
+namespace SMAPI.Tests.Framework.Health;
+
+[TestFixture]
+internal sealed class ModHealthTextSanitizerTests
+{
+    [Test]
+    public void SanitizeIdentity_RemovesPathsControlsAnsiAndLineBreaks()
+    {
+        string actual = ModHealthTextSanitizer.SanitizeIdentity("Example\u001b[31m\r\n/home/private-user/Mods/Test\tC:\\Users\\private-user\\Mods\\Test\u0001", 80);
+
+        actual.Should().Be("Example [path] [path]");
+        actual.Should().NotContain("private-user").And.NotContain("\u001b").And.NotContain("\r").And.NotContain("\n").And.NotContain("\t");
+    }
+
+    [Test]
+    public void SanitizeIdentity_EnforcesMaximumLength()
+    {
+        ModHealthTextSanitizer.SanitizeIdentity(new string('x', 20), 8).Should().Be("xxxxxxxx");
+    }
+
+    [Test]
+    public void SanitizeIdentity_PreservesValidUnicode()
+    {
+        ModHealthTextSanitizer.SanitizeIdentity("Café 🌻 Mod").Should().Be("Café 🌻 Mod");
+    }
+}
