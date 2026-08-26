@@ -285,9 +285,14 @@ internal sealed class ModHealthPerformanceManagerTests
     public void DisabledHealthTimingHotPath_DoesNotAllocateAfterWarmup()
     {
         ModPerformanceManager manager = CreateManager();
-        manager.BeginTick(1, 0, new ModHealthTickContext(ModHealthTickPhase.Gameplay, true, 0));
-        manager.BeginHandler("Example.Mod", "Example", "Event", "Handler", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, null);
-        manager.RecordHandler("Example.Mod", "Example", "Event", "Handler", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, null, 1, failed: false);
+
+        // Cross the runtime's tiered-compilation threshold before measuring steady-state allocations.
+        for (int i = 0; i < 10_000; i++)
+        {
+            manager.BeginTick(1, 0, new ModHealthTickContext(ModHealthTickPhase.Gameplay, true, 0));
+            manager.BeginHandler("Example.Mod", "Example", "Event", "Handler", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, null);
+            manager.RecordHandler("Example.Mod", "Example", "Event", "Handler", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, null, 1, failed: false);
+        }
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 10_000; i++)

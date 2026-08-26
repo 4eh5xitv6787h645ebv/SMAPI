@@ -10,6 +10,15 @@ namespace StardewModdingAPI.Framework.Input;
 /// <summary>Manages the game's input state.</summary>
 internal sealed class SInputState : InputState
 {
+    /// <summary>Synchronizes one-time initialization of the Linux native click buffer.</summary>
+    private static readonly object LinuxMouseClickBufferInitLock = new();
+
+    /// <summary>The Linux native click buffer, if supported by the current host.</summary>
+    private static LinuxMouseClickBuffer? NativeMouseClickBuffer;
+
+    /// <summary>Whether SMAPI has attempted to initialize the Linux native click buffer.</summary>
+    private static bool HasInitializedLinuxMouseClickBuffer;
+
     /*********
     ** Accessors
     *********/
@@ -103,6 +112,8 @@ internal sealed class SInputState : InputState
     /// <summary>Update the current button states for the given tick.</summary>
     public void TrueUpdate()
     {
+        LinuxMouseClickBuffer? linuxMouseClickBuffer = SInputState.GetLinuxMouseClickBuffer();
+
         // update base state
         base.Update();
 
@@ -124,6 +135,7 @@ internal sealed class SInputState : InputState
             controller.Reset(base.GetGamePadState());
             keyboard.Reset(base.GetKeyboardState());
             mouse.Reset(base.GetMouseState());
+            linuxMouseClickBuffer?.Apply(mouse);
             Vector2 cursorAbsolutePos = new((mouse.X * zoomMultiplier) + Game1.viewport.X, (mouse.Y * zoomMultiplier) + Game1.viewport.Y);
             Vector2? playerTilePos = Context.IsPlayerFree ? Game1.player.Tile : null;
 
@@ -265,6 +277,25 @@ internal sealed class SInputState : InputState
     /*********
     ** Private methods
     *********/
+    /// <summary>Get the Linux native click buffer, initializing it once on the first real input update.</summary>
+    private static LinuxMouseClickBuffer? GetLinuxMouseClickBuffer()
+    {
+        if (SInputState.HasInitializedLinuxMouseClickBuffer)
+            return SInputState.NativeMouseClickBuffer;
+
+        lock (SInputState.LinuxMouseClickBufferInitLock)
+        {
+            if (!SInputState.HasInitializedLinuxMouseClickBuffer)
+            {
+                if (OperatingSystem.IsLinux() && Environment.Version.Major >= 10)
+                    SInputState.NativeMouseClickBuffer = LinuxMouseClickBuffer.TryCreate();
+                SInputState.HasInitializedLinuxMouseClickBuffer = true;
+            }
+        }
+
+        return SInputState.NativeMouseClickBuffer;
+    }
+
     /// <summary>Update the cursor data without materializing an API snapshot until it's requested.</summary>
     /// <param name="mouseState">The current mouse state.</param>
     /// <param name="absolutePixels">The absolute pixel position relative to the map, adjusted for pixel zoom.</param>

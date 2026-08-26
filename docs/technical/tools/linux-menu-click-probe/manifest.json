@@ -1,0 +1,9 @@
+{
+  "Name": "Linux Menu Click Probe",
+  "Author": "SMAPI",
+  "Version": "1.0.0",
+  "Description": "Disposable Linux desktop integration probe for short physical menu clicks.",
+  "UniqueID": "SMAPI.Diagnostics.LinuxMenuClickProbe",
+  "EntryDll": "LinuxMenuClickProbe.dll",
+  "MinimumApiVersion": "4.5.2"
+}
