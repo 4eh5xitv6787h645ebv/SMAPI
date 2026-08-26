@@ -35,6 +35,42 @@ internal sealed class ModHealthExportQueueTests
     }
 
     [Test]
+    public async Task Completion_PreservesPendingAsLatestAndCompletedRequestAsPrevious()
+    {
+        TwoWritePublisher publisher = new();
+        ManualResetEventSlim callbackStarted = new(false);
+        ManualResetEventSlim releaseCallback = new(false);
+        ModHealthExportRequest first = CreateRequest(isFinal: false);
+        ModHealthExportRequest second = CreateRequest(isFinal: true);
+        using ModHealthExportQueue queue = new(
+            (_, _) => new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical()),
+            publisher,
+            onCompleted: status =>
+            {
+                if (status.RequestId == first.RequestId)
+                {
+                    callbackStarted.Set();
+                    releaseCallback.Wait();
+                }
+            }
+        );
+
+        queue.Enqueue(first);
+        publisher.FirstStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        queue.Enqueue(second).Disposition.Should().Be(ModHealthExportDisposition.Pending);
+        publisher.ReleaseFirst.Set();
+        callbackStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        queue.GetStatus().Should().BeEquivalentTo(new ModHealthExportStatus(ModHealthExportState.Queued, second.RequestId, IsFinal: true));
+        queue.GetStatus(first.RequestId).State.Should().Be(ModHealthExportState.Succeeded);
+
+        releaseCallback.Set();
+        publisher.SecondStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        publisher.ReleaseSecond.Set();
+        (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+    }
+
+    [Test]
     public async Task Retry_ReusesExactFrozenRequestAfterFailure()
     {
         FailingOncePublisher publisher = new();
@@ -163,6 +199,52 @@ internal sealed class ModHealthExportQueueTests
         publisher.IsDisposed.Should().BeTrue();
     }
 
+    [Test]
+    public void Dispose_SuppressesCompletionWhichHasNotClaimedCallbackBoundary()
+    {
+        UncooperativePublisher publisher = new();
+        ConcurrentQueue<ModHealthExportStatus> completed = new();
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        ModHealthExportQueue queue = new((_, _) => payload, publisher, shutdownTimeout: TimeSpan.Zero, onCompleted: completed.Enqueue);
+        queue.Enqueue(CreateRequest(isFinal: true));
+        publisher.Started.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        queue.Dispose();
+        publisher.Release.Set();
+
+        publisher.Disposed.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        completed.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task Dispose_WaitsForCompletionWhichAlreadyClaimedCallbackBoundary()
+    {
+        DisposablePublisher publisher = new();
+        ManualResetEventSlim callbackStarted = new(false);
+        ManualResetEventSlim releaseCallback = new(false);
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        ModHealthExportQueue queue = new(
+            (_, _) => payload,
+            publisher,
+            shutdownTimeout: TimeSpan.FromSeconds(5),
+            onCompleted: _ =>
+            {
+                callbackStarted.Set();
+                releaseCallback.Wait();
+            }
+        );
+        queue.Enqueue(CreateRequest(isFinal: true));
+        callbackStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        Task dispose = Task.Run(queue.Dispose);
+        await Task.Delay(20);
+        dispose.IsCompleted.Should().BeFalse();
+        releaseCallback.Set();
+
+        await dispose;
+        publisher.IsDisposed.Should().BeTrue();
+    }
+
     private static ModHealthExportQueue CreateQueue(IModHealthReportPublisher publisher)
     {
         ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
@@ -232,6 +314,30 @@ internal sealed class ModHealthExportQueueTests
             this.WriteRetryValues.Enqueue(payload.Model.Header.WriteRetry);
             if (this.Requests.Count == 1)
                 throw new InvalidOperationException("injected");
+            return new("ErrorLogs/HealthReports/report.txt", "ErrorLogs/HealthReports/report.json");
+        }
+    }
+
+    private sealed class TwoWritePublisher : IModHealthReportPublisher
+    {
+        private int Attempts;
+        public ManualResetEventSlim FirstStarted { get; } = new(false);
+        public ManualResetEventSlim ReleaseFirst { get; } = new(false);
+        public ManualResetEventSlim SecondStarted { get; } = new(false);
+        public ManualResetEventSlim ReleaseSecond { get; } = new(false);
+
+        public ModHealthPublishedReport Publish(ModHealthExportRequest request, ModHealthReportPayload payload, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref this.Attempts) == 1)
+            {
+                this.FirstStarted.Set();
+                this.ReleaseFirst.Wait(cancellationToken);
+            }
+            else
+            {
+                this.SecondStarted.Set();
+                this.ReleaseSecond.Wait(cancellationToken);
+            }
             return new("ErrorLogs/HealthReports/report.txt", "ErrorLogs/HealthReports/report.json");
         }
     }

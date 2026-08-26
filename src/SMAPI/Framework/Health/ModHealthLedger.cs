@@ -27,6 +27,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
     private readonly Func<long> GetTimestamp;
     private readonly long TimestampFrequency;
     private readonly long StartedTimestamp;
+    private readonly Action? OnSnapshotLocksReleased;
     private readonly int ModCapacity;
     private readonly int LogIdentityCapacity;
     private readonly int FailureCapacity;
@@ -72,7 +73,8 @@ internal sealed class ModHealthLedger : IModHealthLogSink
         int dependencyCapacity = 256,
         DateTime? startedUtc = null,
         long? timestampFrequency = null,
-        Func<long>? getTimestamp = null
+        Func<long>? getTimestamp = null,
+        Action? onSnapshotLocksReleased = null
     )
     {
         if (modCapacity <= 0)
@@ -92,6 +94,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
         this.Completeness = ModHealthLedgerCompleteness.ManagedCoreInitialization;
         this.TimestampFrequency = timestampFrequency ?? Stopwatch.Frequency;
         this.GetTimestamp = getTimestamp ?? Stopwatch.GetTimestamp;
+        this.OnSnapshotLocksReleased = onSnapshotLocksReleased;
         if (this.TimestampFrequency <= 0)
             throw new ArgumentOutOfRangeException(nameof(timestampFrequency));
         this.StartedTimestamp = this.GetTimestamp();
@@ -228,6 +231,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
     /// <summary>Create an immutable, deterministically ordered snapshot at a precise completed-observation cutoff.</summary>
     public ModHealthLedgerSnapshot GetSnapshot(ModHealthLedgerBaseline? captureBaseline = null)
     {
+        FrozenLedgerState frozen;
         lock (this.SnapshotRoot)
         {
             this.FreezeLogs();
@@ -235,103 +239,155 @@ internal sealed class ModHealthLedger : IModHealthLogSink
             {
                 lock (this.SyncRoot)
                 {
-                    ModHealthModSnapshot[] mods = this.Mods.Values
-                        .OrderBy(record => GetModPriority(record.Status))
-                        .ThenBy(record => record.UniqueId, StringComparer.OrdinalIgnoreCase)
-                        .ThenBy(record => record.UniqueId, StringComparer.Ordinal)
-                        .ThenBy(record => record.DisplayName, StringComparer.OrdinalIgnoreCase)
-                        .ThenBy(record => record.DisplayName, StringComparer.Ordinal)
-                        .ThenBy(record => record.Key.Value)
-                        .Select(record => record.ToSnapshot())
-                        .ToArray();
+                    FrozenLogRecord[] logs = new FrozenLogRecord[this.Logs.Count];
+                    int logIndex = 0;
+                    foreach (MutableLogRecord record in this.Logs.Values)
+                    {
+                        logs[logIndex++] = new FrozenLogRecord(
+                            record.Identity,
+                            ReadCounts(record.Counts),
+                            Volatile.Read(ref record.FirstSequence),
+                            Volatile.Read(ref record.LastSequence),
+                            Volatile.Read(ref record.FirstTimestamp),
+                            Volatile.Read(ref record.LastTimestamp),
+                            Volatile.Read(ref record.LastManagedThreadId),
+                            Volatile.Read(ref record.PeakMessagesPerSecond),
+                            Volatile.Read(ref record.PeakCharactersPerSecond)
+                        );
+                    }
 
-                    ModHealthLogSourceSnapshot[] logs = this.Logs.Values
-                        .Where(record => Volatile.Read(ref record.FirstSequence) > 0)
-                        .OrderBy(record => record.Identity.SourceCategory)
-                        .ThenBy(record => record.Identity.ModId, StringComparer.OrdinalIgnoreCase)
-                        .ThenBy(record => record.Identity.ModId, StringComparer.Ordinal)
-                        .ThenBy(record => record.Identity.ModName, StringComparer.Ordinal)
-                        .Select(record =>
-                        {
-                            long[] counts = ReadCounts(record.Counts);
-                            long[] during = SubtractCounts(counts, captureBaseline, record.Identity);
-                            return new ModHealthLogSourceSnapshot(
-                                record.Identity.ModId,
-                                record.Identity.ModName,
-                                record.Identity.SourceCategory,
-                                CreateSeveritySnapshot(counts),
-                                CreateSeveritySnapshot(during),
-                                Volatile.Read(ref record.FirstSequence),
-                                Volatile.Read(ref record.LastSequence),
-                                this.ToOffset(Volatile.Read(ref record.FirstTimestamp)),
-                                this.ToOffset(Volatile.Read(ref record.LastTimestamp)),
-                                Volatile.Read(ref record.LastManagedThreadId),
-                                Volatile.Read(ref record.PeakMessagesPerSecond),
-                                Volatile.Read(ref record.PeakCharactersPerSecond)
-                            );
-                        })
-                        .ToArray();
+                    FrozenFailureRecord[] failures = new FrozenFailureRecord[this.Failures.Count];
+                    int failureIndex = 0;
+                    foreach (MutableFailureRecord record in this.Failures.Values)
+                    {
+                        failures[failureIndex++] = new FrozenFailureRecord(
+                            record.Identity,
+                            record.Count,
+                            record.FirstSequence,
+                            record.LastSequence,
+                            record.FirstTimestamp,
+                            record.LastTimestamp,
+                            record.LastManagedThreadId
+                        );
+                    }
 
-                    ModHealthCallbackFailureSnapshot[] failures = this.Failures.Values
-                        .OrderBy(record => record.Identity.ModId, StringComparer.OrdinalIgnoreCase)
-                        .ThenBy(record => record.Identity.ModId, StringComparer.Ordinal)
-                        .ThenBy(record => record.Identity.Operation)
-                        .ThenBy(record => record.Identity.CallbackIdentity, StringComparer.Ordinal)
-                        .ThenBy(record => record.Identity.ExceptionType, StringComparer.Ordinal)
-                        .Select(record =>
-                        {
-                            long baseline = captureBaseline?.GetFailureCount(record.Identity) ?? 0;
-                            return new ModHealthCallbackFailureSnapshot(
-                                record.Identity.ModId,
-                                record.Identity.ModName,
-                                record.Identity.Phase,
-                                record.Identity.Operation,
-                                record.Identity.CallbackIdentity,
-                                record.Identity.ExceptionType,
-                                record.Identity.OnBehalfOfModId,
-                                record.Count,
-                                SaturatingSubtract(record.Count, baseline),
-                                record.FirstSequence,
-                                record.LastSequence,
-                                this.ToOffset(record.FirstTimestamp),
-                                this.ToOffset(record.LastTimestamp),
-                                record.LastManagedThreadId
-                            );
-                        })
-                        .ToArray();
+                    FrozenModRecord[] frozenMods = new FrozenModRecord[this.Mods.Count];
+                    int modIndex = 0;
+                    foreach (MutableModRecord record in this.Mods.Values)
+                        frozenMods[modIndex++] = new FrozenModRecord(record);
 
-                    var statusTotals = new Dictionary<ModHealthLedgerModStatus, long>();
-                    foreach (ModHealthLedgerModStatus status in Enum.GetValues<ModHealthLedgerModStatus>())
-                        statusTotals[status] = this.ModStatusTotals[(int)status];
-
-                    long[] totalCounts = ReadCounts(this.TotalLogCounts);
-                    long[] totalDuring = SubtractCounts(totalCounts, captureBaseline);
-                    return new ModHealthLedgerSnapshot(
-                        this.StartedUtc,
-                        this.Completeness,
+                    frozen = new FrozenLedgerState(
                         Volatile.Read(ref this.Sequence),
-                        captureBaseline?.Sequence,
+                        frozenMods,
+                        logs,
+                        failures,
+                        ReadCounts(this.ModStatusTotals),
+                        ReadCounts(this.TotalLogCounts),
                         this.TotalDiscoveredMods,
-                        new ReadOnlyDictionary<ModHealthLedgerModStatus, long>(statusTotals),
-                        Array.AsReadOnly(mods),
-                        CreateSeveritySnapshot(totalCounts),
-                        CreateSeveritySnapshot(totalDuring),
-                        Array.AsReadOnly(logs),
                         this.TotalFailureCount,
-                        SaturatingSubtract(this.TotalFailureCount, captureBaseline?.TotalFailureCount ?? 0),
-                        Array.AsReadOnly(failures),
-                        this.Capacities,
-                        new ModHealthLedgerOmissions(
-                            SaturatingSubtract(this.TotalDiscoveredMods, this.Mods.Count),
-                            Volatile.Read(ref this.LogIdentityObservationsOmitted),
-                            this.FailureObservationsOmitted,
-                            this.DependenciesOmitted
-                        )
+                        this.Mods.Count,
+                        Volatile.Read(ref this.LogIdentityObservationsOmitted),
+                        this.FailureObservationsOmitted,
+                        this.DependenciesOmitted
                     );
                 }
             }
             finally { this.UnfreezeLogs(); }
         }
+
+        this.OnSnapshotLocksReleased?.Invoke();
+
+        ModHealthModSnapshot[] mods = frozen.Mods
+            .OrderBy(record => GetModPriority(record.Status))
+            .ThenBy(record => record.UniqueId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(record => record.UniqueId, StringComparer.Ordinal)
+            .ThenBy(record => record.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(record => record.DisplayName, StringComparer.Ordinal)
+            .ThenBy(record => record.Key.Value)
+            .Select(record => record.ToSnapshot())
+            .ToArray();
+
+        ModHealthLogSourceSnapshot[] projectedLogs = frozen.Logs
+            .Where(record => record.FirstSequence > 0)
+            .OrderBy(record => record.Identity.SourceCategory)
+            .ThenBy(record => record.Identity.ModId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(record => record.Identity.ModId, StringComparer.Ordinal)
+            .ThenBy(record => record.Identity.ModName, StringComparer.Ordinal)
+            .Select(record =>
+            {
+                long[] during = SubtractCounts(record.Counts, captureBaseline, record.Identity);
+                return new ModHealthLogSourceSnapshot(
+                    record.Identity.ModId,
+                    record.Identity.ModName,
+                    record.Identity.SourceCategory,
+                    CreateSeveritySnapshot(record.Counts),
+                    CreateSeveritySnapshot(during),
+                    record.FirstSequence,
+                    record.LastSequence,
+                    this.ToOffset(record.FirstTimestamp),
+                    this.ToOffset(record.LastTimestamp),
+                    record.LastManagedThreadId,
+                    record.PeakMessagesPerSecond,
+                    record.PeakCharactersPerSecond
+                );
+            })
+            .ToArray();
+
+        ModHealthCallbackFailureSnapshot[] projectedFailures = frozen.Failures
+            .OrderBy(record => record.Identity.ModId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(record => record.Identity.ModId, StringComparer.Ordinal)
+            .ThenBy(record => record.Identity.Operation)
+            .ThenBy(record => record.Identity.CallbackIdentity, StringComparer.Ordinal)
+            .ThenBy(record => record.Identity.ExceptionType, StringComparer.Ordinal)
+            .Select(record =>
+            {
+                long baseline = captureBaseline?.GetFailureCount(record.Identity) ?? 0;
+                return new ModHealthCallbackFailureSnapshot(
+                    record.Identity.ModId,
+                    record.Identity.ModName,
+                    record.Identity.Phase,
+                    record.Identity.Operation,
+                    record.Identity.CallbackIdentity,
+                    record.Identity.ExceptionType,
+                    record.Identity.OnBehalfOfModId,
+                    record.Count,
+                    SaturatingSubtract(record.Count, baseline),
+                    record.FirstSequence,
+                    record.LastSequence,
+                    this.ToOffset(record.FirstTimestamp),
+                    this.ToOffset(record.LastTimestamp),
+                    record.LastManagedThreadId
+                );
+            })
+            .ToArray();
+
+        var statusTotals = new Dictionary<ModHealthLedgerModStatus, long>();
+        foreach (ModHealthLedgerModStatus status in Enum.GetValues<ModHealthLedgerModStatus>())
+            statusTotals[status] = frozen.ModStatusTotals[(int)status];
+
+        long[] totalDuring = SubtractCounts(frozen.TotalLogCounts, captureBaseline);
+        return new ModHealthLedgerSnapshot(
+            this.StartedUtc,
+            this.Completeness,
+            frozen.CutoffSequence,
+            captureBaseline?.Sequence,
+            frozen.TotalDiscoveredMods,
+            new ReadOnlyDictionary<ModHealthLedgerModStatus, long>(statusTotals),
+            Array.AsReadOnly(mods),
+            CreateSeveritySnapshot(frozen.TotalLogCounts),
+            CreateSeveritySnapshot(totalDuring),
+            Array.AsReadOnly(projectedLogs),
+            frozen.TotalFailureCount,
+            SaturatingSubtract(frozen.TotalFailureCount, captureBaseline?.TotalFailureCount ?? 0),
+            Array.AsReadOnly(projectedFailures),
+            this.Capacities,
+            new ModHealthLedgerOmissions(
+                SaturatingSubtract(frozen.TotalDiscoveredMods, frozen.RetainedModCount),
+                frozen.LogIdentityObservationsOmitted,
+                frozen.FailureObservationsOmitted,
+                frozen.DependenciesOmitted
+            )
+        );
     }
 
 
@@ -684,6 +740,98 @@ internal sealed class ModHealthLedger : IModHealthLogSink
     /*********
     ** Private models
     *********/
+    private sealed record FrozenLedgerState(
+        long CutoffSequence,
+        FrozenModRecord[] Mods,
+        FrozenLogRecord[] Logs,
+        FrozenFailureRecord[] Failures,
+        long[] ModStatusTotals,
+        long[] TotalLogCounts,
+        long TotalDiscoveredMods,
+        long TotalFailureCount,
+        int RetainedModCount,
+        long LogIdentityObservationsOmitted,
+        long FailureObservationsOmitted,
+        long DependenciesOmitted
+    );
+
+    private readonly record struct FrozenModRecord(
+        ModHealthModKey Key,
+        string UniqueId,
+        string DisplayName,
+        string? Version,
+        ModHealthLedgerModKind Kind,
+        string? ParentId,
+        string[] DependencyIds,
+        ModHealthLedgerModStatus Status,
+        ModHealthModFailureReason FailureReason,
+        ulong WarningFlags,
+        ModHealthUpdateStatus UpdateStatus,
+        string? SuggestedUpdateVersion,
+        bool UsesGeneratedInvalidIdentity
+    )
+    {
+        public FrozenModRecord(MutableModRecord record)
+            : this(
+                record.Key,
+                record.UniqueId,
+                record.DisplayName,
+                record.Version,
+                record.Kind,
+                record.ParentId,
+                record.DependencyIds,
+                record.Status,
+                record.FailureReason,
+                record.WarningFlags,
+                record.UpdateStatus,
+                record.SuggestedUpdateVersion,
+                record.UsesGeneratedInvalidIdentity
+            )
+        {
+        }
+
+        public ModHealthModSnapshot ToSnapshot()
+        {
+            return new ModHealthModSnapshot(
+                this.Key,
+                this.UniqueId,
+                this.DisplayName,
+                this.Version,
+                this.Kind,
+                this.ParentId,
+                Array.AsReadOnly((string[])this.DependencyIds.Clone()),
+                this.Status,
+                this.FailureReason,
+                this.WarningFlags,
+                this.UpdateStatus,
+                this.SuggestedUpdateVersion,
+                this.UsesGeneratedInvalidIdentity
+            );
+        }
+    }
+
+    private readonly record struct FrozenLogRecord(
+        ModHealthLogIdentity Identity,
+        long[] Counts,
+        long FirstSequence,
+        long LastSequence,
+        long FirstTimestamp,
+        long LastTimestamp,
+        int LastManagedThreadId,
+        long PeakMessagesPerSecond,
+        long PeakCharactersPerSecond
+    );
+
+    private readonly record struct FrozenFailureRecord(
+        ModHealthFailureIdentity Identity,
+        long Count,
+        long FirstSequence,
+        long LastSequence,
+        long FirstTimestamp,
+        long LastTimestamp,
+        int LastManagedThreadId
+    );
+
     private sealed class MutableModRecord
     {
         public ModHealthModKey Key { get; }
@@ -720,24 +868,6 @@ internal sealed class ModHealthLedger : IModHealthLogSink
             this.UsesGeneratedInvalidIdentity = usesGeneratedInvalidIdentity;
         }
 
-        public ModHealthModSnapshot ToSnapshot()
-        {
-            return new ModHealthModSnapshot(
-                this.Key,
-                this.UniqueId,
-                this.DisplayName,
-                this.Version,
-                this.Kind,
-                this.ParentId,
-                Array.AsReadOnly((string[])this.DependencyIds.Clone()),
-                this.Status,
-                this.FailureReason,
-                this.WarningFlags,
-                this.UpdateStatus,
-                this.SuggestedUpdateVersion,
-                this.UsesGeneratedInvalidIdentity
-            );
-        }
     }
 
     private sealed class MutableLogRecord(ModHealthLogIdentity identity)

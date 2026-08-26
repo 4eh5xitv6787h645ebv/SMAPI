@@ -377,6 +377,52 @@ internal sealed class ModHealthLedgerTests
     }
 
     [Test]
+    public async Task GetSnapshot_ReleasesIngestionBeforeProjectionAndPreservesCutoff()
+    {
+        using ManualResetEventSlim locksReleased = new();
+        using ManualResetEventSlim allowProjection = new();
+        ModHealthLedger ledger = new(
+            timestampFrequency: 1000,
+            getTimestamp: static () => 0,
+            onSnapshotLocksReleased: () =>
+            {
+                locksReleased.Set();
+                allowProjection.Wait();
+            }
+        );
+        IModHealthLogCounter counter = ledger.RegisterLogSource("example.mod", "Example Mod", ModHealthLogSourceCategory.Mod);
+        counter.Record(LogLevel.Info, 5, 1, ModHealthLogObservationCategory.Normal);
+
+        Task<ModHealthLedgerSnapshot> snapshotTask = Task.Run(() => ledger.GetSnapshot());
+        try
+        {
+            locksReleased.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+            Task logIngressTask = Task.Run(() => counter.Record(LogLevel.Error, 7, 2, ModHealthLogObservationCategory.Normal));
+            Task modIngressTask = Task.Run(() => ledger.RegisterMod(CreateMod("late.mod", ModHealthLedgerModStatus.Loaded)));
+            Task failureIngressTask = Task.Run(() => ledger.ObserveCallbackFailure(CreateFailure("late.mod", "Late.Callback")));
+            await Task.WhenAll(logIngressTask, modIngressTask, failureIngressTask).WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            allowProjection.Set();
+        }
+
+        ModHealthLedgerSnapshot snapshot = await snapshotTask.WaitAsync(TimeSpan.FromSeconds(5));
+        snapshot.CutoffSequence.Should().Be(1);
+        snapshot.Mods.Should().BeEmpty();
+        snapshot.LogTotalsSinceLedgerStart.GetMessages(LogLevel.Info).Should().Be(1);
+        snapshot.LogTotalsSinceLedgerStart.GetMessages(LogLevel.Error).Should().Be(0);
+        snapshot.CallbackFailuresSinceLedgerStart.Should().Be(0);
+
+        ModHealthLedgerSnapshot nextSnapshot = ledger.GetSnapshot();
+        nextSnapshot.CutoffSequence.Should().Be(4);
+        nextSnapshot.Mods.Should().ContainSingle().Which.UniqueId.Should().Be("late.mod");
+        nextSnapshot.LogTotalsSinceLedgerStart.GetMessages(LogLevel.Error).Should().Be(1);
+        nextSnapshot.CallbackFailuresSinceLedgerStart.Should().Be(1);
+    }
+
+    [Test]
     public void Snapshot_DoesNotExposeMutableLedgerCollections()
     {
         ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: () => 0);

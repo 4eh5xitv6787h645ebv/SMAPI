@@ -62,8 +62,8 @@
     },
     "totalObservedModMilliseconds": 12.0,
     "totalBaseGameExclusiveMilliseconds": 60300.0,
-    "totalSmapiOtherMilliseconds": 120.0,
-    "totalResidualMilliseconds": 48.0,
+    "totalSmapiOtherMilliseconds": 0.0,
+    "totalResidualMilliseconds": 168.0,
     "slowUpdateCount": 3,
     "callbacks": [
       {
@@ -87,8 +87,8 @@
         "totalMilliseconds": 41.2,
         "baseGameExclusiveMilliseconds": 38.0,
         "observedModMilliseconds": 0.2,
-        "smapiOtherMilliseconds": 2.0,
-        "residualMilliseconds": 1.0,
+        "smapiOtherMilliseconds": 0.0,
+        "residualMilliseconds": 3.0,
         "timingValid": true,
         "phase": "gameplay",
         "focused": true,
@@ -120,7 +120,8 @@
     ],
     "gen0Collections": 2,
     "gen1Collections": 0,
-    "gen2Collections": 0
+    "gen2Collections": 0,
+    "gcCollectionDataValid": true
   },
   "modInventory": {
     "totalDiscovered": 1,

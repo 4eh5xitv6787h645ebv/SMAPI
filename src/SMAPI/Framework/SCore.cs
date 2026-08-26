@@ -118,6 +118,9 @@ internal class SCore : IDisposable
     /// <summary>Builds and publishes Linux desktop reports away from the update thread.</summary>
     private readonly ModHealthExportQueue? ModHealthExportQueue;
 
+    /// <summary>Prevents an export completion callback from crossing the final log-manager disposal boundary.</summary>
+    private readonly object ModHealthExportCompletionSync = new();
+
     /// <summary>The underlying game instance.</summary>
     private SGameRunner Game = null!; // initialized very early
 
@@ -405,9 +408,12 @@ internal class SCore : IDisposable
     public void Dispose(bool isError)
     {
         // skip if already disposed
-        if (this.IsDisposed)
-            return;
-        this.IsDisposed = true;
+        lock (this.ModHealthExportCompletionSync)
+        {
+            if (this.IsDisposed)
+                return;
+            this.IsDisposed = true;
+        }
         this.Monitor.Log("Disposing...");
 
         // dispose mod data
@@ -454,7 +460,8 @@ internal class SCore : IDisposable
             }
             this.ModHealthExportQueue.Dispose();
         }
-        this.LogManager.Dispose(); // dispose last to allow for any last-second log messages
+        lock (this.ModHealthExportCompletionSync)
+            this.LogManager.Dispose(); // dispose last to allow for any last-second log messages
 
         // clean up SDK
         // This avoids Steam connection errors when it exits unexpectedly. The game avoids this
@@ -669,11 +676,17 @@ internal class SCore : IDisposable
     /// <summary>Log an asynchronous health-report result without feeding reporter output back into the ledger.</summary>
     private void OnModHealthExportCompleted(ModHealthExportStatus status)
     {
-        this.ModHealthSessionCoordinator?.HandleExportCompleted(status);
-        using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
-        (string Message, LogLevel Level)? message = SCore.GetModHealthExportCompletionMessage(status, ModHealthCompletionSummaryFormatter.GetTerminalWidth());
-        if (message.HasValue)
-            this.Monitor.Log(message.Value.Message, message.Value.Level);
+        lock (this.ModHealthExportCompletionSync)
+        {
+            if (this.IsDisposed)
+                return;
+
+            this.ModHealthSessionCoordinator?.HandleExportCompleted(status);
+            using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
+            (string Message, LogLevel Level)? message = SCore.GetModHealthExportCompletionMessage(status, ModHealthCompletionSummaryFormatter.GetTerminalWidth());
+            if (message.HasValue)
+                this.Monitor.Log(message.Value.Message, message.Value.Level);
+        }
     }
 
     /// <summary>Format one asynchronous health-export result for safe console presentation.</summary>

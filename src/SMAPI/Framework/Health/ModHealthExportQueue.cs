@@ -25,6 +25,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     private ModHealthExportStatus? PreviousStatus;
     private TaskCompletionSource<bool> Drained = ModHealthExportQueue.CreateCompletionSource(completed: true);
     private bool DisposeRequested;
+    private bool CompletionCallbackInProgress;
 
     public ModHealthExportQueue(Func<ModHealthExportRequest, bool, ModHealthReportPayload> buildPayload, IModHealthReportPublisher publisher, string workerName = "SMAPI mod health report writer", TimeSpan? shutdownTimeout = null, Action<ModHealthExportStatus>? onCompleted = null)
     {
@@ -191,7 +192,6 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
         {
             ModHealthExportRequest? request;
             bool isRetry = false;
-            bool notify;
             lock (this.SyncRoot)
             {
                 if (this.DisposeRequested && this.PendingRequest is null)
@@ -241,8 +241,13 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
             lock (this.SyncRoot)
             {
                 this.WritingRequest = null;
-                this.PreviousStatus = this.LatestStatus;
-                this.LatestStatus = result;
+                if (this.PendingRequest is not null)
+                {
+                    this.PreviousStatus = result;
+                    this.LatestStatus = CreateQueuedStatus(this.PendingRequest);
+                }
+                else
+                    this.LatestStatus = result;
                 if (result.State == ModHealthExportState.Failed && !this.DisposeRequested)
                 {
                     this.RetryableRequest = request;
@@ -253,20 +258,9 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
                     this.RetryableRequest = null;
                     this.RetryScheduled = false;
                 }
-                notify = !this.DisposeRequested;
             }
 
-            if (notify && this.OnCompleted is not null)
-            {
-                try
-                {
-                    this.OnCompleted(result);
-                }
-                catch
-                {
-                    // Completion notifications are informational and must never stop the writer.
-                }
-            }
+            this.NotifyCompleted(result);
 
             lock (this.SyncRoot)
                 this.CompleteDrainIfIdle();
@@ -300,8 +294,36 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
 
     private void CompleteDrainIfIdle()
     {
-        if (this.WritingRequest is null && this.PendingRequest is null)
+        if (this.WritingRequest is null && this.PendingRequest is null && !this.CompletionCallbackInProgress)
             this.Drained.TrySetResult(true);
+    }
+
+    /// <summary>Notify the consumer unless shutdown claimed the callback boundary first.</summary>
+    private void NotifyCompleted(ModHealthExportStatus result)
+    {
+        if (this.OnCompleted is null)
+            return;
+
+        lock (this.SyncRoot)
+        {
+            if (this.DisposeRequested)
+                return;
+            this.CompletionCallbackInProgress = true;
+        }
+
+        try
+        {
+            this.OnCompleted(result);
+        }
+        catch
+        {
+            // Completion notifications are informational and must never stop the writer.
+        }
+        finally
+        {
+            lock (this.SyncRoot)
+                this.CompletionCallbackInProgress = false;
+        }
     }
 
     private void ThrowIfDisposed()

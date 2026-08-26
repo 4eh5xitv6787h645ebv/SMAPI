@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -211,24 +212,48 @@ internal sealed class ModHealthPerformanceManagerTests
         update.GcCollectionDataIsValid.Should().BeTrue();
         update.InstrumentedModMilliseconds.Should().Be(20);
         update.Contributors.Select(entry => entry.ModId).Should().Equal("C.Mod", "A.Mod");
-        update.OmittedContributors.Should().Be(1);
+        update.OmittedContributorIdentities.Should().Be(1);
+        update.OmittedContributorObservations.Should().Be(0);
     }
 
     [Test]
-    public void ContributorIdentityCapacity_OmitsIdentityButPreservesTickTotal()
+    public void ContributorIdentityCapacity_CountsDroppedObservationsWithoutClaimingDistinctIdentities()
     {
         ModPerformanceManager manager = CreateManager(slowTickContributorCapacity: 5, tickContributorIdentityCapacity: 1);
         manager.Start(logIndividualTicks: false, tickLogThresholdMilliseconds: 10);
         manager.BeginTick(1, 0);
         manager.RecordHandler("A.Mod", "A", "Event", "A.Run", 6, failed: false);
         manager.RecordHandler("B.Mod", "B", "Event", "B.Run", 6, failed: false);
+        manager.RecordHandler("B.Mod", "B", "Event", "B.Run", 6, failed: false);
         manager.CompleteTick(40);
 
         ModHealthPerformanceSnapshot health = manager.GetSnapshot().Health!;
-        health.RecentUpdates[0].InstrumentedModMilliseconds.Should().Be(12);
+        health.RecentUpdates[0].InstrumentedModMilliseconds.Should().Be(18);
         health.RecentUpdates[0].Contributors.Should().ContainSingle().Which.ModId.Should().Be("A.Mod");
-        health.RecentUpdates[0].OmittedContributors.Should().Be(1);
-        health.Omissions.ContributorIdentities.Should().Be(1);
+        health.RecentUpdates[0].OmittedContributorIdentities.Should().Be(0);
+        health.RecentUpdates[0].OmittedContributorObservations.Should().Be(2);
+        health.Omissions.ContributorObservations.Should().Be(2);
+        health.Omissions.SlowUpdateContributorIdentities.Should().Be(0);
+    }
+
+    [Test]
+    public void Snapshot_DeepCopiesAndReadOnlyWrapsNestedContributorCollections()
+    {
+        ModPerformanceManager manager = CreateManager();
+        manager.Start();
+        manager.BeginTick(1, 0);
+        manager.RecordHandler("A.Mod", "A", "Event", "A.Run", 10, failed: false);
+        manager.CompleteTick(40);
+
+        ModHealthPerformanceSnapshot health = manager.GetSnapshot().Health!;
+        IList<ModHealthTickContributorSnapshot> contributors = (IList<ModHealthTickContributorSnapshot>)health.RecentUpdates[0].Contributors;
+        Action mutate = () => contributors[0] = new ModHealthTickContributorSnapshot("Changed.Mod", "Changed", 999);
+
+        health.RecentUpdates.Should().NotBeAssignableTo<ModHealthUpdatePerformanceSnapshot[]>();
+        health.WorstUpdates.Should().NotBeAssignableTo<ModHealthUpdatePerformanceSnapshot[]>();
+        health.Histogram.Buckets.Should().NotBeAssignableTo<long[]>();
+        mutate.Should().Throw<NotSupportedException>();
+        manager.GetSnapshot().Health!.RecentUpdates[0].Contributors.Should().ContainSingle().Which.ModId.Should().Be("A.Mod");
     }
 
     [Test]

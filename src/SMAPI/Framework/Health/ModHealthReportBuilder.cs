@@ -370,13 +370,13 @@ internal sealed class ModHealthReportBuilder
         bool validPartition = performance.TimingPartitionIsValid
             && IsValidPartition(performance.TickTotalMilliseconds, performance.GameUpdateMilliseconds, performance.TickInstrumentedMilliseconds, performance.InstrumentedDuringGameUpdateMilliseconds);
         double baseGame = validPartition ? NonnegativeFinite(performance.GameUpdateExclusiveMilliseconds) : 0;
-        double smapiOther = validPartition ? NonnegativeFinite(performance.OutsideGameUpdateMilliseconds) : 0;
+        double residual = validPartition ? NonnegativeFinite(performance.OutsideGameUpdateMilliseconds) : 0;
         return new ModHealthPerformance(
             histogram,
             validPartition ? NonnegativeFinite(performance.TickInstrumentedMilliseconds) : 0,
             baseGame,
-            smapiOther,
             0,
+            residual,
             Math.Max(0, health.SlowUpdateCount),
             callbacks,
             worst,
@@ -384,7 +384,8 @@ internal sealed class ModHealthReportBuilder
             episodes,
             performance.CaptureGcCollectionDataIsValid ? Math.Max(0, performance.CaptureGen0Collections) : 0,
             performance.CaptureGcCollectionDataIsValid ? Math.Max(0, performance.CaptureGen1Collections) : 0,
-            performance.CaptureGcCollectionDataIsValid ? Math.Max(0, performance.CaptureGen2Collections) : 0
+            performance.CaptureGcCollectionDataIsValid ? Math.Max(0, performance.CaptureGen2Collections) : 0,
+            performance.CaptureGcCollectionDataIsValid
         );
     }
 
@@ -394,15 +395,15 @@ internal sealed class ModHealthReportBuilder
         double total = NonnegativeFinite(source.TotalMilliseconds);
         double baseGame = valid ? NonnegativeFinite(source.GameUpdateExclusiveMilliseconds) : 0;
         double observed = valid ? NonnegativeFinite(source.InstrumentedModMilliseconds) : 0;
-        double smapiOther = valid ? NonnegativeFinite(source.ResidualMilliseconds) : 0;
+        double residual = valid ? NonnegativeFinite(source.ResidualMilliseconds) : 0;
         return new ModHealthUpdate(
             source.Tick,
             NonnegativeFinite(source.OffsetMilliseconds),
             total,
             baseGame,
             observed,
-            smapiOther,
             0,
+            residual,
             valid,
             GetTickPhase(source.Context.Phase),
             source.Context.IsFocused,
@@ -441,8 +442,8 @@ internal sealed class ModHealthReportBuilder
             result.Add(new("recentUpdates", health.Capacities.RecentUpdates, health.Omissions.RecentUpdates > 0));
             result.Add(new("worstUpdates", health.Capacities.WorstUpdates, health.Omissions.WorstUpdates > 0));
             result.Add(new("slowEpisodes", health.Capacities.SlowEpisodes, health.Omissions.SlowEpisodes > 0));
-            result.Add(new("contributorsPerSlowUpdate", health.Capacities.ContributorsPerSlowUpdate, health.Omissions.ContributorsFromRetainedSlowUpdates > 0));
-            result.Add(new("contributorIdentitiesPerUpdate", health.Capacities.ContributorIdentitiesPerUpdate, health.Omissions.ContributorIdentities > 0));
+            result.Add(new("contributorsPerSlowUpdate", health.Capacities.ContributorsPerSlowUpdate, health.Omissions.SlowUpdateContributorIdentities > 0));
+            result.Add(new("contributorIdentitiesPerUpdate", health.Capacities.ContributorIdentitiesPerUpdate, health.Omissions.ContributorObservations > 0));
             result.Add(new("histogramThresholds", ModHealthReportLimits.MaxHistogramThresholds, health.Histogram.Thresholds.Count > ModHealthReportLimits.MaxHistogramThresholds));
         }
         return result.OrderBy(entry => entry.Name, StringComparer.Ordinal).ToImmutableArray();
@@ -465,8 +466,8 @@ internal sealed class ModHealthReportBuilder
             counts["recentUpdates"] = SaturatingAdd(health.Omissions.RecentUpdates, Math.Max(0, health.RecentUpdates.Count - ModHealthReportLimits.MaxRecentUpdates));
             counts["worstUpdates"] = SaturatingAdd(health.Omissions.WorstUpdates, Math.Max(0, health.WorstUpdates.Count - ModHealthReportLimits.MaxWorstUpdates));
             counts["slowEpisodes"] = SaturatingAdd(health.Omissions.SlowEpisodes, Math.Max(0, health.Episodes.Count - ModHealthReportLimits.MaxEpisodes));
-            counts["contributorIdentities"] = health.Omissions.ContributorIdentities;
-            counts["contributorsFromRetainedSlowUpdates"] = health.Omissions.ContributorsFromRetainedSlowUpdates;
+            counts["contributorObservations"] = health.Omissions.ContributorObservations;
+            counts["slowUpdateContributorIdentities"] = health.Omissions.SlowUpdateContributorIdentities;
             counts["invalidHistogramUpdates"] = health.Omissions.InvalidHistogramUpdates;
             counts["histogramThresholds"] = Math.Max(0, health.Histogram.Thresholds.Count - ModHealthReportLimits.MaxHistogramThresholds);
         }
@@ -482,7 +483,7 @@ internal sealed class ModHealthReportBuilder
     private static ModHealthPerformance EmptyPerformance()
     {
         ModHealthHistogram histogram = new(0, 0, null, null, null, null, null, false, 0, 0, 0, ImmutableArray<ModHealthThresholdCount>.Empty);
-        return new ModHealthPerformance(histogram, 0, 0, 0, 0, 0, ImmutableArray<ModHealthCallback>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthEpisode>.Empty, 0, 0, 0);
+        return new ModHealthPerformance(histogram, 0, 0, 0, 0, 0, ImmutableArray<ModHealthCallback>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthEpisode>.Empty, 0, 0, 0, false);
     }
 
     private static ModHealthLogSeveritySummary BuildSeverity(ModHealthSeverityCountsSnapshot source)

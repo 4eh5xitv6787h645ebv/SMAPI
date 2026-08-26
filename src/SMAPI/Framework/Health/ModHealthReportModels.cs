@@ -97,7 +97,8 @@ internal sealed record ModHealthPerformance(
     [property: JsonProperty("episodes", Order = 9, Required = Required.Always)] ImmutableArray<ModHealthEpisode> Episodes,
     [property: JsonProperty("gen0Collections", Order = 10, Required = Required.Always)] long Gen0Collections,
     [property: JsonProperty("gen1Collections", Order = 11, Required = Required.Always)] long Gen1Collections,
-    [property: JsonProperty("gen2Collections", Order = 12, Required = Required.Always)] long Gen2Collections
+    [property: JsonProperty("gen2Collections", Order = 12, Required = Required.Always)] long Gen2Collections,
+    [property: JsonProperty("gcCollectionDataValid", Order = 13, Required = Required.Always)] bool GcCollectionDataValid
 );
 
 [JsonObject(MemberSerialization.OptIn)]

@@ -79,12 +79,20 @@ internal sealed class ModHealthReportBuilderTests
         report.Performance.Callbacks.Should().ContainSingle().Which.Should().Match<ModHealthCallback>(callback => callback.Event == "AssetRequested" && callback.OnBehalfOfModId == "Pack.Mod");
         report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(update =>
             update.NearbyMark == 1
-            && update.SmapiOtherMilliseconds == 10
-            && update.ResidualMilliseconds == 0
+            && update.SmapiOtherMilliseconds == 0
+            && update.ResidualMilliseconds == 10
             && update.Gen0Collections == 2
             && update.Gen1Collections == 1
             && update.Gen2Collections == 0
             && update.GcCollectionDataValid
+        );
+        report.Performance.Should().Match<ModHealthPerformance>(timing =>
+            timing.TotalObservedModMilliseconds == 15
+            && timing.TotalBaseGameExclusiveMilliseconds == 25
+            && timing.TotalSmapiOtherMilliseconds == 0
+            && timing.TotalResidualMilliseconds == 10
+            && timing.TotalObservedModMilliseconds + timing.TotalBaseGameExclusiveMilliseconds + timing.TotalSmapiOtherMilliseconds + timing.TotalResidualMilliseconds == 50
+            && timing.GcCollectionDataValid
         );
         report.Performance.Episodes.Should().ContainSingle().Which.NearbyMark.Should().Be(1, "the earlier mark wins an equal-distance tie");
         report.Capacities.Select(capacity => capacity.Name).Should().BeInAscendingOrder(StringComparer.Ordinal);
@@ -133,7 +141,11 @@ internal sealed class ModHealthReportBuilderTests
             TimingPartitionIsValid = false,
             TickTotalMilliseconds = 10,
             GameUpdateMilliseconds = 20,
-            TickInstrumentedMilliseconds = double.NaN
+            TickInstrumentedMilliseconds = double.NaN,
+            CaptureGen0Collections = 99,
+            CaptureGen1Collections = 99,
+            CaptureGen2Collections = 99,
+            CaptureGcCollectionDataIsValid = false
         };
         ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 0);
         ModHealthExportRequest request = new(Guid.NewGuid(), DateTimeOffset.UtcNow, ModHealthCaptureOwner.Performance, ModHealthCaptureOrigin.Manual, ModHealthCompletionReason.InterimReport, invalid, ledger.GetSnapshot(ledger.CreateCaptureBaseline()), ImmutableArray<ModHealthMark>.Empty, double.NaN, false);
@@ -146,10 +158,14 @@ internal sealed class ModHealthReportBuilderTests
         payload.Model.Performance.TotalObservedModMilliseconds.Should().Be(0);
         payload.Model.Performance.TotalBaseGameExclusiveMilliseconds.Should().Be(0);
         payload.Model.Performance.TotalSmapiOtherMilliseconds.Should().Be(0);
+        payload.Model.Performance.TotalResidualMilliseconds.Should().Be(0);
+        payload.Model.Performance.GcCollectionDataValid.Should().BeFalse();
+        payload.Model.Performance.Gen0Collections.Should().Be(0);
         payload.Model.Environment.SmapiCommit.Should().Be("[path]");
         payload.Model.Environment.SessionType.Should().Be("unknown");
         payload.Model.Environment.MultiplayerRole.Should().Be("unknown");
         payload.Json.Should().NotContain("/home/private").And.NotContain("secret-session").And.NotContain("private-role");
+        payload.Text.Should().Contain("Process-wide GC collections during capture: unavailable");
     }
 
     [Test]
@@ -217,7 +233,8 @@ internal sealed class ModHealthReportBuilderTests
             Gen2Collections: 0,
             GcCollectionDataIsValid: true,
             Contributors: Array.AsReadOnly(new[] { new ModHealthTickContributorSnapshot("Example.Mod", "Example Mod", 15) }),
-            OmittedContributors: 0
+            OmittedContributorIdentities: 0,
+            OmittedContributorObservations: 0
         );
         ModHealthPerformanceSnapshot health = new(
             33.333,

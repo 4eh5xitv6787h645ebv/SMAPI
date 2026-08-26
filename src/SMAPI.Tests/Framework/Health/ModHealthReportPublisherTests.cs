@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Framework.Health;
@@ -45,13 +47,71 @@ internal sealed class ModHealthReportPublisherTests
         ModHealthExportRequest request = CreateRequest();
         string stem = $"SMAPI-health-20260826-123456-{CreatePayload().Model.Header.ReportId}";
         fileSystem.Files[$"{stem}.txt"] = Encoding.UTF8.GetBytes("existing");
-        ModHealthReportPublisher publisher = new(fileSystem);
+        DateTimeOffset now = new(2026, 8, 26, 13, 0, 0, TimeSpan.Zero);
+        fileSystem.Timestamps[$"{stem}.txt"] = now;
+        ModHealthReportPublisher publisher = new(fileSystem, () => now);
 
         ModHealthPublishedReport result = publisher.Publish(request, CreatePayload(), CancellationToken.None);
 
         Encoding.UTF8.GetString(fileSystem.Files[$"{stem}.txt"]).Should().Be("existing");
         result.TextPath.Should().EndWith("-2.txt");
         fileSystem.PublicationOrder.TakeLast(3).Select(name => Path.GetExtension(name)).Should().Equal(".txt", ".json", ".complete");
+    }
+
+    [Test]
+    public async Task Publish_ConcurrentLinuxHandlesWithSameFrozenRequestUseDistinctCollisionSafePairs()
+    {
+        if (!OperatingSystem.IsLinux())
+            Assert.Ignore("Linux-only publisher test.");
+        using TestDirectory directory = new();
+        string output = Path.Combine(directory.Path, "HealthReports");
+        ModHealthExportRequest request = CreateRequest();
+        ModHealthReportPayload payload = CreatePayload();
+        using Barrier start = new(participantCount: 2);
+
+        Task<ModHealthPublishedReport> first = Task.Run(() => PublishFromIndependentHandle());
+        Task<ModHealthPublishedReport> second = Task.Run(() => PublishFromIndependentHandle());
+        ModHealthPublishedReport[] published = await Task.WhenAll(first, second);
+
+        published.Select(result => result.TextPath).Should().OnlyHaveUniqueItems();
+        published.Select(result => result.JsonPath).Should().OnlyHaveUniqueItems();
+        Directory.GetFiles(output, "*.complete").Should().HaveCount(2);
+        foreach (ModHealthPublishedReport result in published)
+        {
+            string markerPath = Path.Combine(output, Path.ChangeExtension(Path.GetFileName(result.TextPath), ".complete"));
+            File.ReadAllLines(markerPath).Should().Equal(Path.GetFileName(result.TextPath), Path.GetFileName(result.JsonPath));
+        }
+
+        ModHealthPublishedReport PublishFromIndependentHandle()
+        {
+            using LinuxModHealthReportFileSystem fileSystem = new(output);
+            start.SignalAndWait(TimeSpan.FromSeconds(30)).Should().BeTrue();
+            return new ModHealthReportPublisher(fileSystem).Publish(request, payload, CancellationToken.None);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void Publish_PermissiveUmaskStillCreatesOwnerOnlyDirectoryAndFiles()
+    {
+        if (!OperatingSystem.IsLinux())
+            Assert.Ignore("Linux-only publisher test.");
+        using TestDirectory directory = new();
+        string output = Path.Combine(directory.Path, "HealthReports");
+        uint previousUmask = ModHealthReportPublisherTests.umask(0);
+        try
+        {
+            using LinuxModHealthReportFileSystem fileSystem = new(output);
+            new ModHealthReportPublisher(fileSystem).Publish(CreateRequest(), CreatePayload(), CancellationToken.None);
+        }
+        finally
+        {
+            ModHealthReportPublisherTests.umask(previousUmask);
+        }
+
+        File.GetUnixFileMode(output).Should().Be(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        foreach (string path in Directory.GetFiles(output))
+            File.GetUnixFileMode(path).Should().Be(UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
     [Test]
@@ -79,6 +139,52 @@ internal sealed class ModHealthReportPublisherTests
         fileSystem.Files.Keys.Should().NotContain(name => name.EndsWith(".txt") || name.EndsWith(".json") || name.EndsWith(".complete") || name.Contains(".tmp-"));
     }
 
+    [TestCase(1, false)]
+    [TestCase(2, false)]
+    [TestCase(3, false)]
+    [TestCase(1, true)]
+    public void Publish_WriteOrPermissionFailureLeavesNoVisiblePairOrTemporaryFile(int failWriteCall, bool permissionFailure)
+    {
+        using InMemoryFileSystem fileSystem = new()
+        {
+            FailWriteCall = failWriteCall,
+            WriteFailure = permissionFailure ? new UnauthorizedAccessException("injected permission failure") : new IOException("injected write failure")
+        };
+
+        Action publish = () => new ModHealthReportPublisher(fileSystem).Publish(CreateRequest(), CreatePayload(), CancellationToken.None);
+        if (permissionFailure)
+            publish.Should().Throw<UnauthorizedAccessException>();
+        else
+            publish.Should().Throw<IOException>();
+
+        AssertNoGeneratedArtifacts(fileSystem);
+    }
+
+    [TestCase(1)]
+    [TestCase(2)]
+    [TestCase(3)]
+    public void Publish_PayloadOrMarkerPublicationFailureLeavesNoVisiblePairOrTemporaryFile(int failPublicationCall)
+    {
+        using InMemoryFileSystem fileSystem = new() { FailPublicationCall = failPublicationCall };
+
+        FluentActions.Invoking(() => new ModHealthReportPublisher(fileSystem).Publish(CreateRequest(), CreatePayload(), CancellationToken.None))
+            .Should().Throw<IOException>();
+
+        AssertNoGeneratedArtifacts(fileSystem);
+    }
+
+    [TestCase(1)]
+    [TestCase(2)]
+    public void Publish_DirectorySyncFailureLeavesNoVisiblePairOrTemporaryFile(int failDirectorySyncCall)
+    {
+        using InMemoryFileSystem fileSystem = new() { FailDirectorySyncCall = failDirectorySyncCall };
+
+        FluentActions.Invoking(() => new ModHealthReportPublisher(fileSystem).Publish(CreateRequest(), CreatePayload(), CancellationToken.None))
+            .Should().Throw<IOException>();
+
+        AssertNoGeneratedArtifacts(fileSystem);
+    }
+
     [Test]
     public void Publish_RetainsOnlyFiveCompletePairsAndUnrelatedFiles()
     {
@@ -97,6 +203,22 @@ internal sealed class ModHealthReportPublisherTests
     }
 
     [Test]
+    public void Publish_RemovesCompletePairsOlderThanThirtyDaysOnlyAfterNewPairSucceeds()
+    {
+        DateTimeOffset now = new(2026, 8, 26, 13, 0, 0, TimeSpan.Zero);
+        using InMemoryFileSystem fileSystem = new();
+        AddCompletePair(fileSystem, "SMAPI-health-20260725-120000-report-aaaaaaaaaaaaaaaa", now.AddDays(-31));
+        AddCompletePair(fileSystem, "SMAPI-health-20260728-120000-report-bbbbbbbbbbbbbbbb", now.AddDays(-29));
+        ModHealthReportPublisher publisher = new(fileSystem, () => now);
+
+        publisher.Publish(CreateRequest(), CreatePayload(), CancellationToken.None);
+
+        fileSystem.Files.Keys.Should().NotContain(name => name.Contains("report-aaaaaaaaaaaaaaaa", StringComparison.Ordinal));
+        fileSystem.Files.Keys.Should().Contain(name => name.Contains("report-bbbbbbbbbbbbbbbb", StringComparison.Ordinal));
+        fileSystem.Files.Keys.Count(name => name.EndsWith(".complete", StringComparison.Ordinal)).Should().Be(2);
+    }
+
+    [Test]
     public void Publish_CleansStaleIncompleteButPreservesFreshIncomplete()
     {
         using InMemoryFileSystem fileSystem = new();
@@ -109,6 +231,23 @@ internal sealed class ModHealthReportPublisherTests
         ModHealthReportPublisher publisher = new(fileSystem, () => new DateTimeOffset(2026, 8, 26, 13, 0, 0, TimeSpan.Zero));
 
         publisher.Publish(CreateRequest(), CreatePayload(), CancellationToken.None);
+
+        fileSystem.Files.Should().NotContainKey(stale).And.ContainKey(fresh);
+    }
+
+    [Test]
+    public void Publish_CleansStaleTemporaryFilesButPreservesFreshTemporaryFiles()
+    {
+        DateTimeOffset now = new(2026, 8, 26, 13, 0, 0, TimeSpan.Zero);
+        using InMemoryFileSystem fileSystem = new();
+        string stale = ".SMAPI-health-20260826-120000-report-1111111111111111.txt.tmp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        string fresh = ".SMAPI-health-20260826-120001-report-2222222222222222.json.tmp-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        fileSystem.Files[stale] = [1];
+        fileSystem.Files[fresh] = [2];
+        fileSystem.Timestamps[stale] = now.AddMinutes(-11);
+        fileSystem.Timestamps[fresh] = now.AddMinutes(-9);
+
+        new ModHealthReportPublisher(fileSystem, () => now).Publish(CreateRequest(), CreatePayload(), CancellationToken.None);
 
         fileSystem.Files.Should().NotContainKey(stale).And.ContainKey(fresh);
     }
@@ -201,6 +340,26 @@ internal sealed class ModHealthReportPublisherTests
         );
     }
 
+    private static void AddCompletePair(InMemoryFileSystem fileSystem, string stem, DateTimeOffset timestamp)
+    {
+        foreach (string extension in new[] { ".txt", ".json", ".complete" })
+        {
+            string name = stem + extension;
+            fileSystem.Files[name] = [1];
+            fileSystem.Timestamps[name] = timestamp;
+        }
+    }
+
+    private static void AssertNoGeneratedArtifacts(InMemoryFileSystem fileSystem)
+    {
+        fileSystem.Files.Keys.Should().NotContain(name =>
+            name.EndsWith(".txt", StringComparison.Ordinal)
+            || name.EndsWith(".json", StringComparison.Ordinal)
+            || name.EndsWith(".complete", StringComparison.Ordinal)
+            || name.Contains(".tmp-", StringComparison.Ordinal)
+        );
+    }
+
     private sealed class TestDirectory : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "smapi-health-publisher-tests", Guid.NewGuid().ToString("N"));
@@ -223,18 +382,27 @@ internal sealed class ModHealthReportPublisherTests
         public Dictionary<string, DateTimeOffset> Timestamps { get; } = new(StringComparer.Ordinal);
         public List<string> PublicationOrder { get; } = [];
         public bool FailMarkerPublication { get; init; }
+        public int? FailWriteCall { get; init; }
+        public Exception? WriteFailure { get; init; }
+        public int? FailPublicationCall { get; init; }
         public int? FailDirectorySyncCall { get; init; }
         public bool MaintenanceLockAvailable { get; init; } = true;
+        private int WriteCalls;
+        private int PublicationCalls;
         private int DirectorySyncCalls;
 
         public void WritePrivateFile(string name, ReadOnlySpan<byte> contents)
         {
+            if (++this.WriteCalls == this.FailWriteCall)
+                throw this.WriteFailure ?? new IOException("injected write failure");
             this.Files.Add(name, contents.ToArray());
             this.Timestamps[name] = new DateTimeOffset(2026, 8, 26, 13, 0, 0, TimeSpan.Zero);
         }
 
         public bool TryPublishNoReplace(string temporaryName, string finalName)
         {
+            if (++this.PublicationCalls == this.FailPublicationCall)
+                throw new IOException("injected publication failure");
             if (this.FailMarkerPublication && finalName.EndsWith(".complete", StringComparison.Ordinal))
                 throw new IOException("injected marker failure");
             if (this.Files.ContainsKey(finalName))
@@ -271,4 +439,7 @@ internal sealed class ModHealthReportPublisherTests
             public void Dispose() { }
         }
     }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern uint umask(uint mask);
 }

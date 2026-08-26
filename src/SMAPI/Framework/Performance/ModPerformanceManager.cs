@@ -97,11 +97,11 @@ internal sealed class ModPerformanceManager
     /// <summary>The number of distinct handlers omitted after reaching <see cref="HandlerCapacity"/>.</summary>
     private long OmittedHandlerInvocations;
 
-    /// <summary>The number of update contributors omitted after the per-update identity cap was reached.</summary>
-    private long OmittedTickContributorIdentities;
+    /// <summary>The number of callback observations omitted from per-update contributor attribution after its identity cap was reached.</summary>
+    private long OmittedTickContributorObservations;
 
-    /// <summary>The total number of contributors omitted from retained slow-update top lists.</summary>
-    private long OmittedRetainedSlowTickContributors;
+    /// <summary>The total number of tracked contributor identities omitted from generated slow-update top lists.</summary>
+    private long OmittedSlowTickContributorIdentities;
 
     /// <summary>The number of completed slow episodes omitted from the ranked bounded list.</summary>
     private long OmittedSlowEpisodes;
@@ -151,8 +151,8 @@ internal sealed class ModPerformanceManager
     /// <summary>The safe coarse context sampled at the beginning of the current update tick.</summary>
     private ModHealthTickContext CurrentTickContext;
 
-    /// <summary>The number of contributor identities omitted from the current update.</summary>
-    private long CurrentTickOmittedContributorIdentities;
+    /// <summary>The number of callback observations omitted from the current update's contributor attribution after its identity cap was reached.</summary>
+    private long CurrentTickOmittedContributorObservations;
 
     /// <summary>The instrumented handler time recorded during the current update tick.</summary>
     private long CurrentTickInstrumentedTimestampTicks;
@@ -390,7 +390,7 @@ internal sealed class ModPerformanceManager
             this.CurrentTickWarnings = 0;
             this.CurrentTickCallbackFailures = 0;
             this.CurrentTickContext = context with { ScreenId = Math.Max(0, context.ScreenId) };
-            this.CurrentTickOmittedContributorIdentities = 0;
+            this.CurrentTickOmittedContributorObservations = 0;
             this.CurrentTickMods.Clear();
             this.CurrentTickInstrumentedTimestampTicks = 0;
             this.CurrentTickGameUpdateTimestampTicks = 0;
@@ -517,13 +517,14 @@ internal sealed class ModPerformanceManager
             ModHealthTickContributorSnapshot[] contributors = isSlowUpdate
                 ? this.GetTopCurrentTickContributors()
                 : [];
-            long omittedContributors = isSlowUpdate
-                ? this.CurrentTickOmittedContributorIdentities + Math.Max(0, this.CurrentTickMods.Count - contributors.Length)
+            long omittedContributorIdentities = isSlowUpdate
+                ? Math.Max(0, this.CurrentTickMods.Count - contributors.Length)
                 : 0;
+            long omittedContributorObservations = this.CurrentTickOmittedContributorObservations;
             if (isSlowUpdate)
             {
                 this.SlowUpdateCount++;
-                this.OmittedRetainedSlowTickContributors += omittedContributors;
+                this.OmittedSlowTickContributorIdentities += omittedContributorIdentities;
             }
 
             ModHealthUpdatePerformanceSnapshot healthSample = new(
@@ -544,7 +545,8 @@ internal sealed class ModPerformanceManager
                 Gen2Collections: gcCollections[2],
                 GcCollectionDataIsValid: gcCollectionDataIsValid,
                 Contributors: contributors,
-                OmittedContributors: omittedContributors
+                OmittedContributorIdentities: omittedContributorIdentities,
+                OmittedContributorObservations: omittedContributorObservations
             );
 
             if (hasValidDuration)
@@ -769,8 +771,8 @@ internal sealed class ModPerformanceManager
                     this.CurrentTickMods[modId] = new TickModCounter(modName, elapsedTimestampTicks);
                 else
                 {
-                    this.CurrentTickOmittedContributorIdentities++;
-                    this.OmittedTickContributorIdentities++;
+                    this.CurrentTickOmittedContributorObservations++;
+                    this.OmittedTickContributorObservations++;
                 }
                 this.CurrentTickInstrumentedTimestampTicks += elapsedTimestampTicks;
                 if (this.IsGameUpdateOpen)
@@ -850,9 +852,9 @@ internal sealed class ModPerformanceManager
             StartedUtc: raw.StartedUtc,
             Elapsed: TimeSpan.FromMilliseconds(this.ToMilliseconds(raw.ElapsedTimestampTicks)),
             CompletedTickCount: raw.CompletedTicks,
-            Handlers: handlers,
-            ModLogs: logs,
-            RecentTicks: raw.Ticks,
+            Handlers: Array.AsReadOnly(handlers),
+            ModLogs: Array.AsReadOnly(logs),
+            RecentTicks: Array.AsReadOnly(raw.Ticks),
             OmittedHandlerInvocations: raw.OmittedHandlerInvocations,
             LogIndividualTicks: raw.LogIndividualTicks,
             TickLogThresholdMilliseconds: raw.TickLogThresholdMilliseconds,
@@ -920,10 +922,11 @@ internal sealed class ModPerformanceManager
 
         ModHealthUpdatePerformanceSnapshot[] recent = new ModHealthUpdatePerformanceSnapshot[this.HealthTickHistoryCount];
         for (int i = 0; i < recent.Length; i++)
-            recent[i] = this.HealthTickHistory[(this.HealthTickHistoryStart + i) % this.HealthTickHistory.Length];
+            recent[i] = ModPerformanceManager.FreezeHealthUpdate(this.HealthTickHistory[(this.HealthTickHistoryStart + i) % this.HealthTickHistory.Length]);
 
         ModHealthUpdatePerformanceSnapshot[] worst = new ModHealthUpdatePerformanceSnapshot[this.WorstHealthTickCount];
-        Array.Copy(this.WorstHealthTicks, worst, worst.Length);
+        for (int i = 0; i < worst.Length; i++)
+            worst[i] = ModPerformanceManager.FreezeHealthUpdate(this.WorstHealthTicks[i]);
 
         ModHealthSlowEpisodeSnapshot[] closedEpisodes = new ModHealthSlowEpisodeSnapshot[this.SlowEpisodeCount];
         Array.Copy(this.SlowEpisodes, closedEpisodes, closedEpisodes.Length);
@@ -977,8 +980,8 @@ internal sealed class ModPerformanceManager
             SlowUpdateThresholdMilliseconds = this.SlowUpdateThresholdMilliseconds,
             SlowUpdateCount = this.SlowUpdateCount,
             OmittedSlowEpisodes = this.OmittedSlowEpisodes,
-            OmittedTickContributorIdentities = this.OmittedTickContributorIdentities,
-            OmittedRetainedSlowTickContributors = this.OmittedRetainedSlowTickContributors,
+            OmittedTickContributorObservations = this.OmittedTickContributorObservations,
+            OmittedSlowTickContributorIdentities = this.OmittedSlowTickContributorIdentities,
             InvalidHistogramUpdates = this.InvalidHistogramUpdates
         };
     }
@@ -1053,14 +1056,14 @@ internal sealed class ModPerformanceManager
             thresholds[i] = new ModHealthTimingThresholdSnapshot(HealthHistogramThresholds[i], raw.ThresholdCounts[i]);
 
         ModHealthTimingHistogramSnapshot histogram = new(
-            Buckets: raw.HistogramBuckets,
+            Buckets: Array.AsReadOnly(raw.HistogramBuckets),
             Count: raw.HistogramCount,
             SumMilliseconds: this.ToMilliseconds(raw.HistogramTotalTimestampTicks),
             MinimumMilliseconds: raw.HistogramCount > 0 ? this.ToMilliseconds(raw.HistogramMinimumTimestampTicks) : null,
             MaximumMilliseconds: raw.HistogramCount > 0 ? this.ToMilliseconds(raw.HistogramMaximumTimestampTicks) : null,
             UnderflowCount: raw.HistogramUnderflowCount,
             OverflowCount: raw.HistogramOverflowCount,
-            Thresholds: thresholds,
+            Thresholds: Array.AsReadOnly(thresholds),
             P50Milliseconds: this.GetHealthHistogramPercentile(raw, 0.50),
             P95Milliseconds: this.GetHealthHistogramPercentile(raw, 0.95),
             P99Milliseconds: this.GetHealthHistogramPercentile(raw, 0.99),
@@ -1070,10 +1073,10 @@ internal sealed class ModPerformanceManager
         return new ModHealthPerformanceSnapshot(
             SlowUpdateThresholdMilliseconds: raw.SlowUpdateThresholdMilliseconds,
             SlowUpdateCount: raw.SlowUpdateCount,
-            Callbacks: callbacks,
-            RecentUpdates: raw.RecentHealthTicks,
-            WorstUpdates: raw.WorstHealthTicks,
-            Episodes: episodes,
+            Callbacks: Array.AsReadOnly(callbacks),
+            RecentUpdates: Array.AsReadOnly(raw.RecentHealthTicks),
+            WorstUpdates: Array.AsReadOnly(raw.WorstHealthTicks),
+            Episodes: Array.AsReadOnly(episodes),
             Histogram: histogram,
             Capacities: new ModHealthTimingCapacities(
                 RecentUpdates: this.HealthTickHistory.Length,
@@ -1087,12 +1090,21 @@ internal sealed class ModPerformanceManager
                 RecentUpdates: Math.Max(0, raw.CompletedTicks - raw.RecentHealthTicks.Length),
                 WorstUpdates: Math.Max(0, raw.HistogramCount - raw.WorstHealthTicks.Length),
                 SlowEpisodes: raw.OmittedSlowEpisodes + (openEpisodeOmitted ? 1 : 0),
-                ContributorIdentities: raw.OmittedTickContributorIdentities,
-                ContributorsFromRetainedSlowUpdates: raw.OmittedRetainedSlowTickContributors,
+                ContributorObservations: raw.OmittedTickContributorObservations,
+                SlowUpdateContributorIdentities: raw.OmittedSlowTickContributorIdentities,
                 CallbackInvocations: raw.OmittedHandlerInvocations,
                 InvalidHistogramUpdates: raw.InvalidHistogramUpdates
             )
         );
+    }
+
+    /// <summary>Deep-copy one retained update so its nested contributor list can't mutate collector state.</summary>
+    private static ModHealthUpdatePerformanceSnapshot FreezeHealthUpdate(ModHealthUpdatePerformanceSnapshot update)
+    {
+        ModHealthTickContributorSnapshot[] contributors = new ModHealthTickContributorSnapshot[update.Contributors.Count];
+        for (int i = 0; i < contributors.Length; i++)
+            contributors[i] = update.Contributors[i];
+        return update with { Contributors = Array.AsReadOnly(contributors) };
     }
 
     /// <summary>Add a valid update duration to the fixed histogram.</summary>
@@ -1407,8 +1419,8 @@ internal sealed class ModPerformanceManager
         this.CompletedTicks = 0;
         this.NextHealthTickSequence = 0;
         this.OmittedHandlerInvocations = 0;
-        this.OmittedTickContributorIdentities = 0;
-        this.OmittedRetainedSlowTickContributors = 0;
+        this.OmittedTickContributorObservations = 0;
+        this.OmittedSlowTickContributorIdentities = 0;
         this.OmittedSlowEpisodes = 0;
         this.InvalidHistogramUpdates = 0;
         this.SampleStartedUtc = DateTime.UtcNow;
@@ -1422,7 +1434,7 @@ internal sealed class ModPerformanceManager
         this.CurrentTickWarnings = 0;
         this.CurrentTickCallbackFailures = 0;
         this.CurrentTickContext = default;
-        this.CurrentTickOmittedContributorIdentities = 0;
+        this.CurrentTickOmittedContributorObservations = 0;
         this.CurrentTickInstrumentedTimestampTicks = 0;
         this.CurrentTickGameUpdateTimestampTicks = 0;
         this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
@@ -1550,8 +1562,8 @@ internal sealed class ModPerformanceManager
         public double SlowUpdateThresholdMilliseconds;
         public long SlowUpdateCount;
         public long OmittedSlowEpisodes;
-        public long OmittedTickContributorIdentities;
-        public long OmittedRetainedSlowTickContributors;
+        public long OmittedTickContributorObservations;
+        public long OmittedSlowTickContributorIdentities;
         public long InvalidHistogramUpdates;
     }
 

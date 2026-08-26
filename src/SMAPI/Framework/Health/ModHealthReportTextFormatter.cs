@@ -56,7 +56,7 @@ internal sealed class ModHealthReportTextFormatter
             .Append("Slow update ticks: ").Append(report.Performance.SlowUpdateCount.ToString(CultureInfo.InvariantCulture)).Append('\n')
             .Append("Observed mod callbacks: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalObservedModMilliseconds)).Append(" ms\n")
             .Append("Base-game update (exclusive): ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalBaseGameExclusiveMilliseconds)).Append(" ms\n")
-            .Append("SMAPI/other update work: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalSmapiOtherMilliseconds)).Append(" ms\n")
+            .Append("Separately measured SMAPI/other update work: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalSmapiOtherMilliseconds)).Append(" ms\n")
             .Append("Remaining unattributed time: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalResidualMilliseconds)).Append(" ms\n");
         ModHealthHistogram histogram = report.Performance.Histogram;
         if (histogram.Count > 0)
@@ -67,7 +67,10 @@ internal sealed class ModHealthReportTextFormatter
                 .Append(" ms, p99 ").Append(ModHealthReportTextFormatter.FormatNullableMilliseconds(histogram.P99Milliseconds))
                 .Append(" ms (approximate bucket upper bounds)\n");
         }
-        text.Append("Process-wide GC collections during capture: ").Append(report.Performance.Gen0Collections.ToString(CultureInfo.InvariantCulture)).Append(" gen0, ").Append(report.Performance.Gen1Collections.ToString(CultureInfo.InvariantCulture)).Append(" gen1, ").Append(report.Performance.Gen2Collections.ToString(CultureInfo.InvariantCulture)).Append(" gen2 (correlation only, not mod attribution).\n");
+        if (report.Performance.GcCollectionDataValid)
+            text.Append("Process-wide GC collections during capture: ").Append(report.Performance.Gen0Collections.ToString(CultureInfo.InvariantCulture)).Append(" gen0, ").Append(report.Performance.Gen1Collections.ToString(CultureInfo.InvariantCulture)).Append(" gen1, ").Append(report.Performance.Gen2Collections.ToString(CultureInfo.InvariantCulture)).Append(" gen2 (correlation only, not mod attribution).\n");
+        else
+            text.Append("Process-wide GC collections during capture: unavailable; zero values below are placeholders, not observed counts.\n");
 
         text.Append("\nMods needing attention\n");
         ModHealthMod[] problemMods = report.Mods.Where(ModHealthReportTextFormatter.IsProblemMod).ToArray();

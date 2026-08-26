@@ -235,6 +235,9 @@ internal sealed class ModHealthSessionCoordinator
     {
         lock (this.SyncRoot)
         {
+            ModHealthExportStatus export = this.ExportQueue.GetStatus();
+            if (export.State is ModHealthExportState.Queued or ModHealthExportState.Writing)
+                return Refused("A health report is queued or being written. Wait for it to finish before resetting performance diagnostics.", export);
             if (this.Owner == ModHealthCaptureOwner.Health && this.State != ModHealthCaptureState.Inactive)
                 return Refused("A health-owned sample cannot be discarded by 'performance reset'. Use 'health reset confirm'.");
 
@@ -602,8 +605,8 @@ internal sealed class ModHealthSessionCoordinator
             && (value.RecentUpdates > 0
                 || value.WorstUpdates > 0
                 || value.SlowEpisodes > 0
-                || value.ContributorIdentities > 0
-                || value.ContributorsFromRetainedSlowUpdates > 0
+                || value.ContributorObservations > 0
+                || value.SlowUpdateContributorIdentities > 0
                 || value.CallbackInvocations > 0
                 || value.InvalidHistogramUpdates > 0);
     }

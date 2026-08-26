@@ -65,7 +65,8 @@ internal readonly record struct ModHealthUpdatePerformanceSnapshot(
     int Gen2Collections,
     bool GcCollectionDataIsValid,
     IReadOnlyList<ModHealthTickContributorSnapshot> Contributors,
-    long OmittedContributors
+    long OmittedContributorIdentities,
+    long OmittedContributorObservations
 )
 {
     /// <summary>Base game update time excluding observed callbacks which ran within it.</summary>
@@ -130,8 +131,8 @@ internal readonly record struct ModHealthTimingOmissions(
     long RecentUpdates,
     long WorstUpdates,
     long SlowEpisodes,
-    long ContributorIdentities,
-    long ContributorsFromRetainedSlowUpdates,
+    long ContributorObservations,
+    long SlowUpdateContributorIdentities,
     long CallbackInvocations,
     long InvalidHistogramUpdates
 );

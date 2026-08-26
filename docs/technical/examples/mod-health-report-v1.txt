@@ -26,8 +26,8 @@ Slow update threshold: 33.333 ms
 Slow update ticks: 3
 Observed mod callbacks: 12 ms
 Base-game update (exclusive): 60300.0 ms
-SMAPI/other update work: 120.0 ms
-Remaining unattributed time: 48 ms
+Separately measured SMAPI/other update work: 0 ms
+Remaining unattributed time: 168.0 ms
 Mean update duration: 16.8 ms
 Update distribution: p50 16.75 ms, p95 18 ms, p99 35 ms (approximate bucket upper bounds)
 Process-wide GC collections during capture: 2 gen0, 0 gen1, 0 gen2 (correlation only, not mod attribution).
@@ -41,7 +41,7 @@ Top observed mods and callbacks
 
 Slow episodes and worst updates
 - Episode ticks 1200-1202: 41.2 ms maximum
-- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 38 ms base-game exclusive; 2 ms SMAPI/other; 1 ms remaining unattributed; GC 2/0/0 process-wide
+- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 38 ms base-game exclusive; 0 ms SMAPI/other; 3 ms remaining unattributed; GC 2/0/0 process-wide
 
 Errors, failures, and logging volume
 A failed callback may also emit an error; do not sum those columns as unique incidents.

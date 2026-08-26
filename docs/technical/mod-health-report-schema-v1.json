@@ -86,7 +86,7 @@
     },
     "performance": {
       "type": "object", "additionalProperties": false,
-      "required": ["histogram", "totalObservedModMilliseconds", "totalBaseGameExclusiveMilliseconds", "totalSmapiOtherMilliseconds", "totalResidualMilliseconds", "slowUpdateCount", "callbacks", "worstUpdates", "recentUpdates", "episodes", "gen0Collections", "gen1Collections", "gen2Collections"],
+      "required": ["histogram", "totalObservedModMilliseconds", "totalBaseGameExclusiveMilliseconds", "totalSmapiOtherMilliseconds", "totalResidualMilliseconds", "slowUpdateCount", "callbacks", "worstUpdates", "recentUpdates", "episodes", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid"],
       "properties": {
         "histogram": { "$ref": "#/$defs/histogram" },
         "totalObservedModMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
@@ -98,7 +98,7 @@
         "worstUpdates": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/update" } },
         "recentUpdates": { "type": "array", "maxItems": 600, "items": { "$ref": "#/$defs/update" } },
         "episodes": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/episode" } },
-        "gen0Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen1Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen2Collections": { "$ref": "#/$defs/nonnegativeInteger" }
+        "gen0Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen1Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen2Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gcCollectionDataValid": { "type": "boolean" }
       }
     },
     "histogram": {

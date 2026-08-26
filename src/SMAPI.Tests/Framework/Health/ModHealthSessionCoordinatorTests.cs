@@ -244,6 +244,24 @@ internal sealed class ModHealthSessionCoordinatorTests
         context.Coordinator.ResetHealth().IsError.Should().BeTrue();
     }
 
+    [TestCase(ModHealthExportState.Queued)]
+    [TestCase(ModHealthExportState.Writing)]
+    public void PerformanceReset_RefusesWhileExportIsInFlight(ModHealthExportState state)
+    {
+        Context context = new();
+        context.Coordinator.StartPerformance(false, 0);
+        context.Manager.RecordHandler("example.mod", "Example", "event", "callback", 10, failed: false);
+        context.Coordinator.ReportHealth();
+        context.Queue.SetLastState(state);
+
+        ModHealthCoordinatorResult result = context.Coordinator.ResetPerformance();
+
+        result.IsError.Should().BeTrue();
+        result.Export!.State.Should().Be(state);
+        context.Coordinator.GetStatus().Owner.Should().Be(ModHealthCaptureOwner.Performance);
+        context.Coordinator.GetPerformanceSnapshot().Handlers.Should().ContainSingle();
+    }
+
     [Test]
     public void Retry_DelegatesExactFrozenRequest()
     {
