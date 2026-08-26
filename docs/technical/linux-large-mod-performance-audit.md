@@ -8,6 +8,10 @@ Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, an
 
 ## Runtime mod diagnostics
 
+On Linux desktop, the player-facing workflow is `health start`, reproduce the problem, optionally enter `health mark`, then enter `health stop`. SMAPI writes a matching text and JSON report under `ErrorLogs/HealthReports` without uploading anything or changing any mod. The report contains mod names, IDs, versions, and statuses, so inspect it before sharing it. It deliberately excludes raw log messages, stack traces, paths, save/player/farm names, update URLs and keys, configuration contents, and arbitrary manifest extension data. Keep the normal SMAPI log for full exception details; `smapi.io/log` does not yet parse this standalone report.
+
+Use `health status` to inspect the current state, `health report` for an interim or ledger-only report, `health retry` after a write failure, and `health reset confirm` to explicitly discard retained timed evidence. A health report can attribute only work observed at SMAPI-managed boundaries. Harmony patches, direct calls, native work, operating-system scheduling, and other unobserved work remain unattributed, and update measurements are update ticks rather than frames or FPS.
+
 Enter `performance start` in the SMAPI console, reproduce the slowdown, then enter `performance stop`. The final report ranks mods and individual callbacks by exclusive elapsed time, splits measured tick time between the base game update, instrumented mod callbacks, and SMAPI dispatch & other work, counts garbage collections observed during measured ticks, shows recent slow update ticks, and includes warning, error, and failed-callback counts.
 
 To log individual update ticks while sampling, use `performance start <threshold-ms>`. For example, `performance start 16.667` logs ticks which miss a 60 FPS frame budget, while `performance start 0` logs every tick. Every-tick logging is intentionally opt-in because it creates substantial log traffic. Use `performance ticks off` to stop individual tick messages without ending the aggregate sample.
