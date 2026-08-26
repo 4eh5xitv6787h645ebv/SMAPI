@@ -4,6 +4,7 @@ using Moq;
 using NUnit.Framework;
 using StardewModdingAPI;
 using StardewModdingAPI.Framework.Commands;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Performance;
 
 namespace SMAPI.Tests.Framework.Commands;
@@ -59,5 +60,48 @@ internal sealed class PerformanceCommandTests
 
         manager.IsTracking.Should().BeFalse();
         messages.Should().ContainSingle(message => message.Contains("Example Mod (Example.Mod)"));
+    }
+
+    [Test]
+    public void Start_WithCoordinator_DoesNotReplaceHealthOwnedCapture()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        ModHealthSessionCoordinator coordinator = new(manager, new ModHealthLedger(timestampFrequency: 1000, getTimestamp: () => 0), new NoOpExportQueue());
+        PerformanceCommand command = new(coordinator);
+        Mock<IMonitor> monitor = new();
+        coordinator.StartHealth();
+
+        command.HandleCommand(["start"], monitor.Object);
+
+        coordinator.GetStatus().Owner.Should().Be(ModHealthCaptureOwner.Health);
+        monitor.Verify(instance => instance.Log(It.IsAny<string>(), LogLevel.Error), Times.Once);
+    }
+
+    [Test]
+    public void Reset_WithCoordinator_RefusesHealthOwnedCapture()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        ModHealthSessionCoordinator coordinator = new(manager, new ModHealthLedger(timestampFrequency: 1000, getTimestamp: () => 0), new NoOpExportQueue());
+        PerformanceCommand command = new(coordinator);
+        Mock<IMonitor> monitor = new();
+        coordinator.StartHealth();
+
+        command.HandleCommand(["reset"], monitor.Object);
+
+        coordinator.GetStatus().CaptureState.Should().Be(ModHealthCaptureState.Active);
+        monitor.Verify(instance => instance.Log(It.IsAny<string>(), LogLevel.Error), Times.Once);
+    }
+
+    private sealed class NoOpExportQueue : IModHealthExportQueue
+    {
+        public ModHealthExportQueueResult Enqueue(ModHealthExportRequest request)
+        {
+            ModHealthExportStatus status = new(ModHealthExportState.Queued, request.RequestId, request.IsFinal);
+            return new ModHealthExportQueueResult(ModHealthExportDisposition.Queued, status);
+        }
+
+        public ModHealthExportQueueResult Retry() => new(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
+        public void DiscardRetryable() { }
+        public ModHealthExportStatus GetStatus(System.Guid? requestId = null) => ModHealthExportStatus.None;
     }
 }

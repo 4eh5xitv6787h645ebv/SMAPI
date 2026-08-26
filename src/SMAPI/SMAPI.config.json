@@ -173,6 +173,14 @@ in future SMAPI versions.
     "SuppressHarmonyDebugMode": true,
 
     /**
+     * Whether Linux desktop SMAPI should start a bounded mod health timing sample on launch and
+     * automatically finalize it during a normal shutdown. This is disabled by default and is
+     * mainly useful on systems without an interactive terminal. It can't recover evidence from an
+     * abrupt process kill or failures before managed core initialization.
+     */
+    "EnableModHealthReportOnLaunch": false,
+
+    /**
      * Whether SMAPI should continuously record bounded timing data for mod-owned event handlers.
      * This adds profiler overhead, so it's disabled by default. You can also control it temporarily
      * with the `performance` console command.

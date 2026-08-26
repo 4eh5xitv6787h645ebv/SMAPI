@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Performance;
 
 namespace StardewModdingAPI.Framework.Commands;
@@ -13,6 +14,9 @@ internal sealed class PerformanceCommand : IInternalCommand
     *********/
     /// <summary>Collects mod performance diagnostics.</summary>
     private readonly ModPerformanceManager PerformanceManager;
+
+    /// <summary>Coordinates ownership with the health workflow, if initialized.</summary>
+    private readonly ModHealthSessionCoordinator? Coordinator;
 
 
     /*********
@@ -56,6 +60,14 @@ internal sealed class PerformanceCommand : IInternalCommand
         this.PerformanceManager = performanceManager;
     }
 
+    /// <summary>Construct an instance using the shared health/performance coordinator.</summary>
+    /// <param name="coordinator">Coordinates the single diagnostic timing capture.</param>
+    public PerformanceCommand(ModHealthSessionCoordinator coordinator)
+    {
+        this.Coordinator = coordinator;
+        this.PerformanceManager = null!;
+    }
+
     /// <inheritdoc />
     public void HandleCommand(string[] args, IMonitor monitor)
     {
@@ -72,7 +84,7 @@ internal sealed class PerformanceCommand : IInternalCommand
 
             case "report":
                 if (this.TryGetLimit(args, 1, monitor, out int reportLimit))
-                    monitor.Log(ModPerformanceReportFormatter.Format(this.PerformanceManager.GetSnapshot(), reportLimit), LogLevel.Info);
+                    monitor.Log(ModPerformanceReportFormatter.Format(this.GetSnapshot(), reportLimit), LogLevel.Info);
                 break;
 
             case "status":
@@ -86,16 +98,24 @@ internal sealed class PerformanceCommand : IInternalCommand
                     break;
                 }
 
-                this.PerformanceManager.Reset();
-                monitor.Log("Cleared the mod performance, warning, and error diagnostics.", LogLevel.Info);
+                if (this.Coordinator is null)
+                {
+                    this.PerformanceManager.Reset();
+                    monitor.Log("Cleared the mod performance, warning, and error diagnostics.", LogLevel.Info);
+                }
+                else
+                    this.LogResult(this.Coordinator.ResetPerformance(), monitor);
                 break;
 
             case "stop":
                 if (!this.TryGetLimit(args, 1, monitor, out int stopLimit))
                     break;
 
-                this.PerformanceManager.Stop();
-                monitor.Log(ModPerformanceReportFormatter.Format(this.PerformanceManager.GetSnapshot(), stopLimit), LogLevel.Info);
+                if (this.Coordinator is null)
+                    this.PerformanceManager.Stop();
+                else
+                    this.LogResult(this.Coordinator.StopPerformance(), monitor);
+                monitor.Log(ModPerformanceReportFormatter.Format(this.GetSnapshot(), stopLimit), LogLevel.Info);
                 break;
 
             default:
@@ -124,9 +144,18 @@ internal sealed class PerformanceCommand : IInternalCommand
         if (logTicks && !PerformanceCommand.TryParseThreshold(args[1], monitor, out threshold))
             return;
 
-        this.PerformanceManager.Start(logTicks, threshold);
+        ModHealthCoordinatorResult? result = this.Coordinator?.StartPerformance(logTicks, threshold);
+        if (result?.IsError == true)
+        {
+            this.LogResult(result, monitor);
+            return;
+        }
+        if (this.Coordinator is null)
+            this.PerformanceManager.Start(logTicks, threshold);
         monitor.Log(
-            logTicks
+            result?.Code == ModHealthCoordinatorResultCode.Replaced
+                ? "Started a fresh mod performance sample; the previous advanced sample was reset."
+                : logTicks
                 ? $"Started a fresh mod performance sample. Individual update ticks at or above {threshold.ToString("0.###", CultureInfo.InvariantCulture)}ms will be logged. Use 'performance stop' when the slowdown has occurred."
                 : "Started a fresh mod performance sample. Use 'performance report' at any time or 'performance stop' when the slowdown has occurred.",
             LogLevel.Info
@@ -146,7 +175,7 @@ internal sealed class PerformanceCommand : IInternalCommand
 
         if (args[1].Equals("off", StringComparison.OrdinalIgnoreCase))
         {
-            this.PerformanceManager.ConfigureTickLogging(enabled: false, thresholdMilliseconds: 0);
+            this.ConfigureTickLogging(enabled: false, thresholdMilliseconds: 0);
             monitor.Log("Individual performance tick logging is disabled; aggregate sampling is unchanged.", LogLevel.Info);
             return;
         }
@@ -154,7 +183,7 @@ internal sealed class PerformanceCommand : IInternalCommand
         if (!PerformanceCommand.TryParseThreshold(args[1], monitor, out double threshold))
             return;
 
-        this.PerformanceManager.ConfigureTickLogging(enabled: true, threshold);
+        this.ConfigureTickLogging(enabled: true, threshold);
         monitor.Log($"Individual update ticks at or above {threshold.ToString("0.###", CultureInfo.InvariantCulture)}ms will be logged while performance sampling is active.", LogLevel.Info);
     }
 
@@ -162,7 +191,7 @@ internal sealed class PerformanceCommand : IInternalCommand
     /// <param name="monitor">Writes messages to the console.</param>
     private void LogStatus(IMonitor monitor)
     {
-        ModPerformanceSnapshot snapshot = this.PerformanceManager.GetSnapshot();
+        ModPerformanceSnapshot snapshot = this.GetSnapshot();
         string tickLogging = snapshot.LogIndividualTicks
             ? $"enabled at {snapshot.TickLogThresholdMilliseconds.ToString("0.###", CultureInfo.InvariantCulture)}ms or slower"
             : "disabled";
@@ -195,5 +224,26 @@ internal sealed class PerformanceCommand : IInternalCommand
         }
 
         return true;
+    }
+
+    /// <summary>Get the live or retained performance snapshot.</summary>
+    private ModPerformanceSnapshot GetSnapshot()
+    {
+        return this.Coordinator?.GetPerformanceSnapshot() ?? this.PerformanceManager.GetSnapshot();
+    }
+
+    /// <summary>Configure live tick logging through the coordinator when available.</summary>
+    private void ConfigureTickLogging(bool enabled, double thresholdMilliseconds)
+    {
+        if (this.Coordinator is null)
+            this.PerformanceManager.ConfigureTickLogging(enabled, thresholdMilliseconds);
+        else
+            this.Coordinator.ConfigureTickLogging(enabled, thresholdMilliseconds);
+    }
+
+    /// <summary>Log a typed coordinator result.</summary>
+    private void LogResult(ModHealthCoordinatorResult result, IMonitor monitor)
+    {
+        monitor.Log(result.Message, result.IsError ? LogLevel.Error : LogLevel.Info);
     }
 }

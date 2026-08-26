@@ -30,6 +30,7 @@ internal class SConfig
         [nameof(SConfig.FixHarmony)] = true,
         [nameof(SConfig.UseCaseInsensitivePaths)] = Constants.Platform is Platform.Android or Platform.Linux,
         [nameof(SConfig.SuppressHarmonyDebugMode)] = true,
+        [nameof(SConfig.EnableModHealthReportOnLaunch)] = false,
         [nameof(SConfig.EnableModPerformanceTracking)] = false,
         [nameof(SConfig.LogModPerformanceTicks)] = false,
         [nameof(SConfig.ModPerformanceTickThresholdMilliseconds)] = 16.667
@@ -111,6 +112,9 @@ internal class SConfig
     /// <summary>Whether to prevent mods from enabling Harmony's debug mode, which impacts performance and creates a file on your desktop. Debug mode should never be enabled by a released mod.</summary>
     public bool SuppressHarmonyDebugMode { get; set; }
 
+    /// <summary>Whether Linux desktop SMAPI should start a user-facing mod health capture on launch and finalize it during normal shutdown.</summary>
+    public bool EnableModHealthReportOnLaunch { get; set; }
+
     /// <summary>Whether to continuously record bounded mod event-handler performance diagnostics.</summary>
     public bool EnableModPerformanceTracking { get; set; }
 
@@ -154,6 +158,7 @@ internal class SConfig
     /// <param name="consoleColorScheme"><inheritdoc cref="ConsoleColorScheme" path="/summary" /></param>
     /// <param name="consoleColorSchemes"><inheritdoc cref="ConsoleColorSchemes" path="/summary" /></param>
     /// <param name="suppressHarmonyDebugMode"><inheritdoc cref="SuppressHarmonyDebugMode" path="/summary" /></param>
+    /// <param name="enableModHealthReportOnLaunch"><inheritdoc cref="EnableModHealthReportOnLaunch" path="/summary" /></param>
     /// <param name="enableModPerformanceTracking"><inheritdoc cref="EnableModPerformanceTracking" path="/summary" /></param>
     /// <param name="logModPerformanceTicks"><inheritdoc cref="LogModPerformanceTicks" path="/summary" /></param>
     /// <param name="modPerformanceTickThresholdMilliseconds"><inheritdoc cref="ModPerformanceTickThresholdMilliseconds" path="/summary" /></param>
@@ -181,6 +186,7 @@ internal class SConfig
         MonitorColorScheme consoleColorScheme,
         Dictionary<MonitorColorScheme, Dictionary<ConsoleLogLevel, ConsoleColor>>? consoleColorSchemes,
         bool? suppressHarmonyDebugMode,
+        bool? enableModHealthReportOnLaunch,
         bool? enableModPerformanceTracking,
         bool? logModPerformanceTicks,
         double? modPerformanceTickThresholdMilliseconds,
@@ -209,6 +215,7 @@ internal class SConfig
         this.ConsoleColorScheme = consoleColorScheme;
         this.ConsoleColorSchemes = consoleColorSchemes ?? [];
         this.SuppressHarmonyDebugMode = suppressHarmonyDebugMode ?? (bool)SConfig.DefaultValues[nameof(this.SuppressHarmonyDebugMode)];
+        this.EnableModHealthReportOnLaunch = enableModHealthReportOnLaunch ?? (bool)SConfig.DefaultValues[nameof(this.EnableModHealthReportOnLaunch)];
         this.EnableModPerformanceTracking = enableModPerformanceTracking ?? (bool)SConfig.DefaultValues[nameof(this.EnableModPerformanceTracking)];
         this.LogModPerformanceTicks = logModPerformanceTicks ?? (bool)SConfig.DefaultValues[nameof(this.LogModPerformanceTicks)];
         double tickThreshold = modPerformanceTickThresholdMilliseconds ?? (double)SConfig.DefaultValues[nameof(this.ModPerformanceTickThresholdMilliseconds)];
