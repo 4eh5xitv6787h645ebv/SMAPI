@@ -53,6 +53,44 @@ internal class MiniMonoModHotfixTests
     }
 
     [Test]
+    [NonParallelizable]
+    public void PreservesReferenceReturnsAcrossSharedGenericInstantiations()
+    {
+        if (!OperatingSystem.IsLinux() || Environment.Version.Major < 10)
+            Assert.Ignore("The generic-detour regression is specific to the Linux .NET 10 host.");
+
+        Harmony harmony = new($"SMAPI.Tests.{nameof(PreservesReferenceReturnsAcrossSharedGenericInstantiations)}");
+        try
+        {
+            MethodInfo createDynamicMethod = typeof(Harmony).Assembly
+                .GetType("HarmonyLib.MethodPatcherTools", throwOnError: true)!
+                .GetMethod("CreateDynamicMethod", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!;
+            harmony.Patch(
+                original: createDynamicMethod,
+                postfix: new HarmonyMethod(typeof(MiniMonoModHotfix), nameof(MiniMonoModHotfix.CanonicalizeLinuxNet10GenericPatchSignature))
+            );
+
+            for (int i = 0; i < 100; i++)
+                _ = MiniMonoModHotfixTests.GetGenericReturnSnapshot();
+
+            MethodInfo original = typeof(GenericReturnTarget<string>).GetMethod(nameof(GenericReturnTarget<string>.Echo))!;
+            MethodInfo postfix = typeof(MiniMonoModHotfixTests).GetMethod(nameof(NoOpPostfix), BindingFlags.NonPublic | BindingFlags.Static)!;
+            harmony.Patch(original, postfix: new HarmonyMethod(postfix));
+
+            MiniMonoModHotfixTests.GetGenericReturnSnapshot().Should().Equal(
+                nameof(String),
+                nameof(Object),
+                nameof(ReferenceA),
+                nameof(ReferenceB)
+            );
+        }
+        finally
+        {
+            harmony.UnpatchAll(harmony.Id);
+        }
+    }
+
+    [Test]
     public void CanonicalizesReferenceParametersAndReturnsFromGenericType()
     {
         MethodInfo method = typeof(GenericType<string>).GetMethod(nameof(GenericType<string>.Echo))!;
@@ -119,6 +157,17 @@ internal class MiniMonoModHotfixTests
         __result += "|patched";
     }
 
+    private static void NoOpPostfix() { }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string[] GetGenericReturnSnapshot() =>
+    [
+        new GenericReturnTarget<string>().Echo("value").GetType().Name,
+        new GenericReturnTarget<object>().Echo(new object()).GetType().Name,
+        new GenericReturnTarget<ReferenceA>().Echo(new ReferenceA()).GetType().Name,
+        new GenericReturnTarget<ReferenceB>().Echo(new ReferenceB()).GetType().Name
+    ];
+
     private sealed class GenericType<T>
     {
         public T Echo(T value) => value;
@@ -135,6 +184,12 @@ internal class MiniMonoModHotfixTests
     {
         [MethodImpl(MethodImplOptions.NoInlining)]
         public string Describe(T value) => $"{typeof(T).Name}:{value!.GetType().Name}";
+    }
+
+    private sealed class GenericReturnTarget<T>
+    {
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public T Echo(T value) => value;
     }
 
     private sealed class ReferenceA;
