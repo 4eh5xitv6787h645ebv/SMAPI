@@ -3,12 +3,16 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using StardewModdingAPI.Framework.Health;
 
 namespace StardewModdingAPI.Framework.Performance;
 
 /// <summary>Collects bounded performance and error diagnostics for mod-owned execution observed by SMAPI.</summary>
 internal sealed class ModPerformanceManager
 {
+    private const double DefaultSlowUpdateThresholdMilliseconds = 33.333;
+    private static readonly double[] HealthHistogramThresholds = [16.667, 33.333, 50, 100, 250, 500, 1000];
+
     /// <summary>The nested profiled handlers on the current thread.</summary>
     [ThreadStatic]
     private static List<ActiveHandler>? ActiveHandlers;
@@ -24,6 +28,27 @@ internal sealed class ModPerformanceManager
 
     /// <summary>The retained tick history.</summary>
     private readonly TickPerformanceSnapshot[] TickHistory;
+
+    /// <summary>The retained health-oriented recent update history.</summary>
+    private readonly ModHealthUpdatePerformanceSnapshot[] HealthTickHistory;
+
+    /// <summary>The worst update ticks retained across the whole capture.</summary>
+    private readonly ModHealthUpdatePerformanceSnapshot[] WorstHealthTicks;
+
+    /// <summary>The highest-ranked completed slow-update episodes.</summary>
+    private readonly ModHealthSlowEpisodeSnapshot[] SlowEpisodes;
+
+    /// <summary>The maximum number of contributors retained for a slow update.</summary>
+    private readonly int SlowTickContributorCapacity;
+
+    /// <summary>The maximum number of distinct mod contributors tracked in one update.</summary>
+    private readonly int TickContributorIdentityCapacity;
+
+    /// <summary>The fixed logarithmic update-duration histogram buckets.</summary>
+    private readonly long[] HealthHistogramBuckets = new long[ModHealthTimingHistogramSnapshot.BucketCount];
+
+    /// <summary>Exact counts at the configured update-duration thresholds.</summary>
+    private readonly long[] HealthThresholdCounts = new long[HealthHistogramThresholds.Length];
 
     /// <summary>The timestamp frequency used for elapsed-time conversion.</summary>
     private readonly long TimestampFrequency;
@@ -52,11 +77,38 @@ internal sealed class ModPerformanceManager
     /// <summary>The number of retained tick-history entries.</summary>
     private int TickHistoryCount;
 
+    /// <summary>The first retained health tick-history index.</summary>
+    private int HealthTickHistoryStart;
+
+    /// <summary>The number of retained health tick-history entries.</summary>
+    private int HealthTickHistoryCount;
+
+    /// <summary>The number of retained whole-capture worst updates.</summary>
+    private int WorstHealthTickCount;
+
+    /// <summary>The number of retained completed slow-update episodes.</summary>
+    private int SlowEpisodeCount;
+
     /// <summary>The number of completed update ticks in this sample, including those outside the retained history.</summary>
     private long CompletedTicks;
 
+    /// <summary>The capture-relative sequence assigned to the next completed update.</summary>
+    private long NextHealthTickSequence;
+
     /// <summary>The number of distinct handlers omitted after reaching <see cref="HandlerCapacity"/>.</summary>
     private long OmittedHandlerInvocations;
+
+    /// <summary>The number of update contributors omitted after the per-update identity cap was reached.</summary>
+    private long OmittedTickContributorIdentities;
+
+    /// <summary>The total number of contributors omitted from retained slow-update top lists.</summary>
+    private long OmittedRetainedSlowTickContributors;
+
+    /// <summary>The number of completed slow episodes omitted from the ranked bounded list.</summary>
+    private long OmittedSlowEpisodes;
+
+    /// <summary>The number of invalid update durations omitted from the histogram.</summary>
+    private long InvalidHistogramUpdates;
 
     /// <summary>The UTC time when the current sample began.</summary>
     private DateTime SampleStartedUtc;
@@ -90,6 +142,18 @@ internal sealed class ModPerformanceManager
 
     /// <summary>The number of error messages emitted by mods during the current update tick.</summary>
     private int CurrentTickErrors;
+
+    /// <summary>The number of warning messages emitted on the owning thread during the current update tick.</summary>
+    private int CurrentTickWarnings;
+
+    /// <summary>The number of failed callbacks completed on the owning thread during the current update tick.</summary>
+    private int CurrentTickCallbackFailures;
+
+    /// <summary>The safe coarse context sampled at the beginning of the current update tick.</summary>
+    private ModHealthTickContext CurrentTickContext;
+
+    /// <summary>The number of contributor identities omitted from the current update.</summary>
+    private long CurrentTickOmittedContributorIdentities;
 
     /// <summary>The instrumented handler time recorded during the current update tick.</summary>
     private long CurrentTickInstrumentedTimestampTicks;
@@ -133,6 +197,39 @@ internal sealed class ModPerformanceManager
     /// <summary>The number of completed ticks whose garbage collection delta was invalid.</summary>
     private long InvalidGcCollectionTicks;
 
+    /// <summary>The slow-update threshold used for health retention and episode clustering.</summary>
+    private double SlowUpdateThresholdMilliseconds = DefaultSlowUpdateThresholdMilliseconds;
+
+    /// <summary>The number of completed updates at or above the slow-update threshold.</summary>
+    private long SlowUpdateCount;
+
+    /// <summary>Whether a slow-update episode is currently open.</summary>
+    private bool HasOpenSlowEpisode;
+
+    /// <summary>The currently open slow-update episode.</summary>
+    private MutableSlowEpisode OpenSlowEpisode;
+
+    /// <summary>The number of consecutive below-threshold updates following the open episode.</summary>
+    private int OpenEpisodeTrailingFastUpdates;
+
+    /// <summary>The number of valid durations added to the histogram.</summary>
+    private long HealthHistogramCount;
+
+    /// <summary>The exact sum of valid update durations in timestamp ticks.</summary>
+    private long HealthHistogramTotalTimestampTicks;
+
+    /// <summary>The exact minimum valid update duration in timestamp ticks.</summary>
+    private long HealthHistogramMinimumTimestampTicks;
+
+    /// <summary>The exact maximum valid update duration in timestamp ticks.</summary>
+    private long HealthHistogramMaximumTimestampTicks;
+
+    /// <summary>The number of valid durations below the histogram range.</summary>
+    private long HealthHistogramUnderflowCount;
+
+    /// <summary>The number of valid durations above the histogram range.</summary>
+    private long HealthHistogramOverflowCount;
+
     /// <summary>Whether completed ticks should be logged individually.</summary>
     private bool LogIndividualTicks;
 
@@ -156,15 +253,32 @@ internal sealed class ModPerformanceManager
     /// <param name="timestampFrequency">The timestamp frequency used for elapsed-time conversion.</param>
     /// <param name="getTimestamp">Get a high-resolution timestamp.</param>
     /// <param name="getGcCollectionCount">Get the number of garbage collections for a generation.</param>
-    public ModPerformanceManager(int tickHistoryCapacity = 600, int handlerCapacity = 8192, long? timestampFrequency = null, Func<long>? getTimestamp = null, Func<int, int>? getGcCollectionCount = null)
+    /// <param name="worstTickCapacity">The maximum number of whole-capture worst updates to retain.</param>
+    /// <param name="slowEpisodeCapacity">The maximum number of ranked slow-update episodes to retain.</param>
+    /// <param name="slowTickContributorCapacity">The maximum number of contributors retained for one slow update.</param>
+    /// <param name="tickContributorIdentityCapacity">The maximum number of distinct contributors tracked in one update.</param>
+    public ModPerformanceManager(int tickHistoryCapacity = 600, int handlerCapacity = 8192, long? timestampFrequency = null, Func<long>? getTimestamp = null, Func<int, int>? getGcCollectionCount = null, int worstTickCapacity = 100, int slowEpisodeCapacity = 50, int slowTickContributorCapacity = 5, int tickContributorIdentityCapacity = 4096)
     {
         if (tickHistoryCapacity <= 0)
             throw new ArgumentOutOfRangeException(nameof(tickHistoryCapacity));
         if (handlerCapacity <= 0)
             throw new ArgumentOutOfRangeException(nameof(handlerCapacity));
+        if (worstTickCapacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(worstTickCapacity));
+        if (slowEpisodeCapacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(slowEpisodeCapacity));
+        if (slowTickContributorCapacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(slowTickContributorCapacity));
+        if (tickContributorIdentityCapacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(tickContributorIdentityCapacity));
 
         this.TickHistory = new TickPerformanceSnapshot[tickHistoryCapacity];
+        this.HealthTickHistory = new ModHealthUpdatePerformanceSnapshot[tickHistoryCapacity];
+        this.WorstHealthTicks = new ModHealthUpdatePerformanceSnapshot[worstTickCapacity];
+        this.SlowEpisodes = new ModHealthSlowEpisodeSnapshot[slowEpisodeCapacity];
         this.HandlerCapacity = handlerCapacity;
+        this.SlowTickContributorCapacity = slowTickContributorCapacity;
+        this.TickContributorIdentityCapacity = tickContributorIdentityCapacity;
         this.TimestampFrequency = timestampFrequency ?? Stopwatch.Frequency;
         this.GetTimestamp = getTimestamp ?? Stopwatch.GetTimestamp;
         this.GetGcCollectionCount = getGcCollectionCount ?? GC.CollectionCount;
@@ -187,6 +301,9 @@ internal sealed class ModPerformanceManager
             this.ResetCore(this.GetTimestamp());
             this.LogIndividualTicks = logIndividualTicks;
             this.TickLogThresholdMilliseconds = tickLogThresholdMilliseconds;
+            this.SlowUpdateThresholdMilliseconds = tickLogThresholdMilliseconds > 0
+                ? tickLogThresholdMilliseconds
+                : DefaultSlowUpdateThresholdMilliseconds;
             Volatile.Write(ref this.TrackingEnabled, 1);
         }
     }
@@ -197,6 +314,7 @@ internal sealed class ModPerformanceManager
         bool wasTracking = Interlocked.Exchange(ref this.TrackingEnabled, 0) != 0;
         lock (this.SyncRoot)
         {
+            this.CloseOpenSlowEpisode();
             if (wasTracking && !this.HasSampleEndGcCollections)
             {
                 for (int generation = 0; generation < this.SampleEndGcCollections.Length; generation++)
@@ -253,6 +371,12 @@ internal sealed class ModPerformanceManager
     /// <param name="startTimestamp">The timestamp at which the update began.</param>
     public void BeginTick(uint tick, long startTimestamp)
     {
+        this.BeginTick(tick, startTimestamp, default);
+    }
+
+    /// <summary>Begin measuring an outer game update tick with safe coarse context.</summary>
+    public void BeginTick(uint tick, long startTimestamp, ModHealthTickContext context)
+    {
         if (!this.IsTracking)
             return;
 
@@ -266,11 +390,15 @@ internal sealed class ModPerformanceManager
             this.CurrentTickStartTimestamp = startTimestamp;
             this.CurrentTickThreadId = Environment.CurrentManagedThreadId;
             this.CurrentTickErrors = 0;
+            this.CurrentTickWarnings = 0;
+            this.CurrentTickCallbackFailures = 0;
+            this.CurrentTickContext = context with { ScreenId = Math.Max(0, context.ScreenId) };
+            this.CurrentTickOmittedContributorIdentities = 0;
             this.CurrentTickMods.Clear();
             this.CurrentTickInstrumentedTimestampTicks = 0;
             this.CurrentTickGameUpdateTimestampTicks = 0;
             this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
-            this.CurrentTickTimingPartitionIsInvalid = false;
+            this.CurrentTickTimingPartitionIsInvalid = startTimestamp < this.SampleStartTimestamp;
             this.IsGameUpdateOpen = false;
             for (int generation = 0; generation < this.TickStartGcCollections.Length; generation++)
                 this.TickStartGcCollections[generation] = this.GetGcCollectionCount(generation);
@@ -386,6 +514,48 @@ internal sealed class ModPerformanceManager
                 GcCollectionDataIsValid: gcCollectionDataIsValid
             );
 
+            long captureSequence = this.NextHealthTickSequence++;
+            bool hasValidDuration = totalTimestampTicks >= 0;
+            bool isSlowUpdate = hasValidDuration && this.ToMilliseconds(totalTimestampTicks) >= this.SlowUpdateThresholdMilliseconds;
+            ModHealthTickContributorSnapshot[] contributors = isSlowUpdate
+                ? this.GetTopCurrentTickContributors()
+                : [];
+            long omittedContributors = isSlowUpdate
+                ? this.CurrentTickOmittedContributorIdentities + Math.Max(0, this.CurrentTickMods.Count - contributors.Length)
+                : 0;
+            if (isSlowUpdate)
+            {
+                this.SlowUpdateCount++;
+                this.OmittedRetainedSlowTickContributors += omittedContributors;
+            }
+
+            ModHealthUpdatePerformanceSnapshot healthSample = new(
+                CaptureSequence: captureSequence,
+                Tick: this.CurrentTick,
+                OffsetMilliseconds: this.ToMilliseconds(this.CurrentTickStartTimestamp - this.SampleStartTimestamp),
+                TotalMilliseconds: this.ToMilliseconds(totalTimestampTicks),
+                GameUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickGameUpdateTimestampTicks),
+                InstrumentedModMilliseconds: this.ToMilliseconds(instrumentedTimestampTicks),
+                InstrumentedDuringGameUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickInstrumentedDuringGameUpdateTicks),
+                TimingPartitionIsValid: timingPartitionIsValid,
+                Context: this.CurrentTickContext,
+                WarningCount: this.CurrentTickWarnings,
+                ErrorCount: this.CurrentTickErrors,
+                CallbackFailureCount: this.CurrentTickCallbackFailures,
+                Contributors: contributors,
+                OmittedContributors: omittedContributors
+            );
+
+            if (hasValidDuration)
+            {
+                this.AddHealthHistogramValue(totalTimestampTicks);
+                this.AddWorstHealthTick(healthSample);
+                this.UpdateSlowEpisode(healthSample, isSlowUpdate);
+            }
+            else
+                this.InvalidHistogramUpdates++;
+            this.AddHealthTick(healthSample);
+
             this.TotalTickTimestampTicks += totalTimestampTicks;
             this.TotalGameUpdateTimestampTicks += this.CurrentTickGameUpdateTimestampTicks;
             this.TotalTickInstrumentedTimestampTicks += instrumentedTimestampTicks;
@@ -418,13 +588,19 @@ internal sealed class ModPerformanceManager
     /// <returns>A token used to finish the matching invocation.</returns>
     public HandlerTimingToken BeginHandler(string modId, string modName, string eventName, string handlerName)
     {
+        return this.BeginHandler(modId, modName, eventName, handlerName, ModHealthExecutionPhase.Unscoped, ModPerformanceManager.GetOperationKind(eventName), onBehalfOfModId: null);
+    }
+
+    /// <summary>Begin timing one mod-owned operation with explicit health-report dimensions.</summary>
+    public HandlerTimingToken BeginHandler(string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId)
+    {
         if (!this.IsTracking)
             return default;
 
         long generation = Volatile.Read(ref this.SampleGeneration);
         List<ActiveHandler> handlers = ModPerformanceManager.ActiveHandlers ??= new List<ActiveHandler>(8);
         int depth = handlers.Count;
-        handlers.Add(new ActiveHandler(this, generation, modId, modName, eventName, handlerName, this.GetTimestamp(), 0));
+        handlers.Add(new ActiveHandler(this, generation, modId, modName, eventName, handlerName, phase, operation, onBehalfOfModId, this.GetTimestamp(), 0));
         return new HandlerTimingToken(this, generation, depth);
     }
 
@@ -439,6 +615,16 @@ internal sealed class ModPerformanceManager
             : mod.DisplayName;
 
         return this.BeginHandler(modId, mod.DisplayName, operationName, handlerName);
+    }
+
+    /// <summary>Begin timing one mod-owned operation with explicit health-report dimensions.</summary>
+    public HandlerTimingToken BeginHandler(IModMetadata mod, string operationName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId)
+    {
+        string modId = mod.HasManifest()
+            ? mod.Manifest.UniqueID
+            : mod.DisplayName;
+
+        return this.BeginHandler(modId, mod.DisplayName, operationName, handlerName, phase, operation, onBehalfOfModId);
     }
 
     /// <summary>Finish timing a mod-owned event handler.</summary>
@@ -473,7 +659,7 @@ internal sealed class ModPerformanceManager
             }
         }
 
-        this.RecordHandler(handler.ModId, handler.ModName, handler.EventName, handler.HandlerName, exclusiveTimestampTicks, failed, handler.Generation);
+        this.RecordHandler(handler.ModId, handler.ModName, handler.EventName, handler.HandlerName, handler.Phase, handler.Operation, handler.OnBehalfOfModId, exclusiveTimestampTicks, failed, handler.Generation);
     }
 
     /// <summary>Record one invocation of a mod-owned SMAPI event handler.</summary>
@@ -485,7 +671,22 @@ internal sealed class ModPerformanceManager
     /// <param name="failed">Whether the handler threw an exception.</param>
     public void RecordHandler(string modId, string modName, string eventName, string handlerName, long elapsedTimestampTicks, bool failed)
     {
-        this.RecordHandler(modId, modName, eventName, handlerName, elapsedTimestampTicks, failed, requiredGeneration: null);
+        this.RecordHandler(modId, modName, eventName, handlerName, ModHealthExecutionPhase.Unscoped, ModPerformanceManager.GetOperationKind(eventName), onBehalfOfModId: null, elapsedTimestampTicks, failed, requiredGeneration: null);
+    }
+
+    /// <summary>Record one invocation with explicit health-report dimensions.</summary>
+    /// <param name="modId">The mod's unique ID.</param>
+    /// <param name="modName">The mod's display name.</param>
+    /// <param name="eventName">The managed event name.</param>
+    /// <param name="handlerName">The registered handler method name.</param>
+    /// <param name="phase">The execution phase.</param>
+    /// <param name="operation">The operation kind.</param>
+    /// <param name="onBehalfOfModId">The content-pack identity on whose behalf the callback ran, if known.</param>
+    /// <param name="elapsedTimestampTicks">The elapsed timestamp ticks.</param>
+    /// <param name="failed">Whether the handler threw an exception.</param>
+    public void RecordHandler(string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long elapsedTimestampTicks, bool failed)
+    {
+        this.RecordHandler(modId, modName, eventName, handlerName, phase, operation, onBehalfOfModId, elapsedTimestampTicks, failed, requiredGeneration: null);
     }
 
     /// <summary>Record one invocation of a mod-owned SMAPI event handler.</summary>
@@ -493,16 +694,19 @@ internal sealed class ModPerformanceManager
     /// <param name="modName">The mod's display name.</param>
     /// <param name="eventName">The managed event name.</param>
     /// <param name="handlerName">The registered handler method name.</param>
+    /// <param name="phase">The execution phase.</param>
+    /// <param name="operation">The operation kind.</param>
+    /// <param name="onBehalfOfModId">The content-pack identity on whose behalf the callback ran, if known.</param>
     /// <param name="elapsedTimestampTicks">The elapsed timestamp ticks.</param>
     /// <param name="failed">Whether the handler threw an exception.</param>
     /// <param name="requiredGeneration">The sample generation which must still be active, if any.</param>
-    private void RecordHandler(string modId, string modName, string eventName, string handlerName, long elapsedTimestampTicks, bool failed, long? requiredGeneration)
+    private void RecordHandler(string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long elapsedTimestampTicks, bool failed, long? requiredGeneration)
     {
         if (!this.IsTracking)
             return;
 
         elapsedTimestampTicks = Math.Max(0, elapsedTimestampTicks);
-        HandlerIdentity identity = new(modId, modName, eventName, handlerName);
+        HandlerIdentity identity = new(modId, modName, eventName, handlerName, phase, operation, onBehalfOfModId);
         int currentThreadId = Environment.CurrentManagedThreadId;
 
         lock (this.SyncRoot)
@@ -512,14 +716,23 @@ internal sealed class ModPerformanceManager
 
             if (this.IsTickOpen && currentThreadId == this.CurrentTickThreadId)
             {
-                if (!this.CurrentTickMods.TryGetValue(modId, out TickModCounter tickCounter))
-                    tickCounter = new TickModCounter(modName, 0);
-
-                tickCounter.TimestampTicks += elapsedTimestampTicks;
-                this.CurrentTickMods[modId] = tickCounter;
+                if (this.CurrentTickMods.TryGetValue(modId, out TickModCounter tickCounter))
+                {
+                    tickCounter.TimestampTicks += elapsedTimestampTicks;
+                    this.CurrentTickMods[modId] = tickCounter;
+                }
+                else if (this.CurrentTickMods.Count < this.TickContributorIdentityCapacity)
+                    this.CurrentTickMods[modId] = new TickModCounter(modName, elapsedTimestampTicks);
+                else
+                {
+                    this.CurrentTickOmittedContributorIdentities++;
+                    this.OmittedTickContributorIdentities++;
+                }
                 this.CurrentTickInstrumentedTimestampTicks += elapsedTimestampTicks;
                 if (this.IsGameUpdateOpen)
                     this.CurrentTickInstrumentedDuringGameUpdateTicks += elapsedTimestampTicks;
+                if (failed)
+                    this.CurrentTickCallbackFailures++;
             }
 
             if (!this.HandlerCounters.TryGetValue(identity, out HandlerCounter? counter))
@@ -554,7 +767,11 @@ internal sealed class ModPerformanceManager
                 this.ModLogs[modId] = summary = new MutableModLogSummary(modId, modName);
 
             if (isWarning)
+            {
                 summary.WarningCount++;
+                if (this.IsTickOpen && Environment.CurrentManagedThreadId == this.CurrentTickThreadId)
+                    this.CurrentTickWarnings++;
+            }
             if (isError)
             {
                 summary.ErrorCount++;
@@ -635,7 +852,8 @@ internal sealed class ModPerformanceManager
                 CaptureGen0Collections: captureGcCollections[0],
                 CaptureGen1Collections: captureGcCollections[1],
                 CaptureGen2Collections: captureGcCollections[2],
-                CaptureGcCollectionDataIsValid: captureGcCollectionDataIsValid
+                CaptureGcCollectionDataIsValid: captureGcCollectionDataIsValid,
+                Health: this.GetHealthSnapshot()
             );
         }
     }
@@ -651,6 +869,345 @@ internal sealed class ModPerformanceManager
     /*********
     ** Private methods
     *********/
+    /// <summary>Build the immutable bounded health-oriented timing snapshot. The caller must hold <see cref="SyncRoot"/>.</summary>
+    private ModHealthPerformanceSnapshot GetHealthSnapshot()
+    {
+        ModHealthCallbackPerformanceSnapshot[] callbacks = new ModHealthCallbackPerformanceSnapshot[this.HandlerCounters.Count];
+        int callbackIndex = 0;
+        foreach ((HandlerIdentity identity, HandlerCounter counter) in this.HandlerCounters)
+        {
+            callbacks[callbackIndex++] = new ModHealthCallbackPerformanceSnapshot(
+                identity.ModId,
+                identity.ModName,
+                identity.Phase,
+                identity.Operation,
+                identity.EventName,
+                identity.HandlerName,
+                identity.OnBehalfOfModId,
+                counter.CallCount,
+                this.ToMilliseconds(counter.TotalTimestampTicks),
+                this.ToMilliseconds(counter.MaximumTimestampTicks),
+                counter.FailureCount
+            );
+        }
+        Array.Sort(callbacks, ModHealthCallbackPerformanceSnapshotComparer.Instance);
+
+        ModHealthUpdatePerformanceSnapshot[] recent = new ModHealthUpdatePerformanceSnapshot[this.HealthTickHistoryCount];
+        for (int i = 0; i < recent.Length; i++)
+            recent[i] = this.HealthTickHistory[(this.HealthTickHistoryStart + i) % this.HealthTickHistory.Length];
+
+        ModHealthUpdatePerformanceSnapshot[] worst = new ModHealthUpdatePerformanceSnapshot[this.WorstHealthTickCount];
+        Array.Copy(this.WorstHealthTicks, worst, worst.Length);
+
+        ModHealthSlowEpisodeSnapshot[] episodes = this.GetRankedEpisodesIncludingOpen(out bool openEpisodeOmitted);
+
+        long[] histogramBuckets = (long[])this.HealthHistogramBuckets.Clone();
+        ModHealthTimingThresholdSnapshot[] thresholds = new ModHealthTimingThresholdSnapshot[HealthHistogramThresholds.Length];
+        for (int i = 0; i < thresholds.Length; i++)
+            thresholds[i] = new ModHealthTimingThresholdSnapshot(HealthHistogramThresholds[i], this.HealthThresholdCounts[i]);
+
+        ModHealthTimingHistogramSnapshot histogram = new(
+            Buckets: histogramBuckets,
+            Count: this.HealthHistogramCount,
+            SumMilliseconds: this.ToMilliseconds(this.HealthHistogramTotalTimestampTicks),
+            MinimumMilliseconds: this.HealthHistogramCount > 0 ? this.ToMilliseconds(this.HealthHistogramMinimumTimestampTicks) : null,
+            MaximumMilliseconds: this.HealthHistogramCount > 0 ? this.ToMilliseconds(this.HealthHistogramMaximumTimestampTicks) : null,
+            UnderflowCount: this.HealthHistogramUnderflowCount,
+            OverflowCount: this.HealthHistogramOverflowCount,
+            Thresholds: thresholds,
+            P50Milliseconds: this.GetHealthHistogramPercentile(0.50),
+            P95Milliseconds: this.GetHealthHistogramPercentile(0.95),
+            P99Milliseconds: this.GetHealthHistogramPercentile(0.99),
+            MaximumRelativeBucketError: Math.Pow(2, 1d / ModHealthTimingHistogramSnapshot.SubBucketsPerPowerOfTwo) - 1
+        );
+
+        return new ModHealthPerformanceSnapshot(
+            SlowUpdateThresholdMilliseconds: this.SlowUpdateThresholdMilliseconds,
+            SlowUpdateCount: this.SlowUpdateCount,
+            Callbacks: callbacks,
+            RecentUpdates: recent,
+            WorstUpdates: worst,
+            Episodes: episodes,
+            Histogram: histogram,
+            Capacities: new ModHealthTimingCapacities(
+                RecentUpdates: this.HealthTickHistory.Length,
+                WorstUpdates: this.WorstHealthTicks.Length,
+                SlowEpisodes: this.SlowEpisodes.Length,
+                ContributorsPerSlowUpdate: this.SlowTickContributorCapacity,
+                ContributorIdentitiesPerUpdate: this.TickContributorIdentityCapacity,
+                CallbackIdentities: this.HandlerCapacity
+            ),
+            Omissions: new ModHealthTimingOmissions(
+                RecentUpdates: Math.Max(0, this.CompletedTicks - this.HealthTickHistoryCount),
+                WorstUpdates: Math.Max(0, this.HealthHistogramCount - this.WorstHealthTickCount),
+                SlowEpisodes: this.OmittedSlowEpisodes + (openEpisodeOmitted ? 1 : 0),
+                ContributorIdentities: this.OmittedTickContributorIdentities,
+                ContributorsFromRetainedSlowUpdates: this.OmittedRetainedSlowTickContributors,
+                CallbackInvocations: this.OmittedHandlerInvocations,
+                InvalidHistogramUpdates: this.InvalidHistogramUpdates
+            )
+        );
+    }
+
+    /// <summary>Add a valid update duration to the fixed histogram.</summary>
+    private void AddHealthHistogramValue(long timestampTicks)
+    {
+        double milliseconds = this.ToMilliseconds(timestampTicks);
+        this.HealthHistogramCount++;
+        this.HealthHistogramTotalTimestampTicks += timestampTicks;
+        if (this.HealthHistogramCount == 1)
+            this.HealthHistogramMinimumTimestampTicks = this.HealthHistogramMaximumTimestampTicks = timestampTicks;
+        else
+        {
+            this.HealthHistogramMinimumTimestampTicks = Math.Min(this.HealthHistogramMinimumTimestampTicks, timestampTicks);
+            this.HealthHistogramMaximumTimestampTicks = Math.Max(this.HealthHistogramMaximumTimestampTicks, timestampTicks);
+        }
+
+        for (int i = 0; i < HealthHistogramThresholds.Length; i++)
+        {
+            if (milliseconds >= HealthHistogramThresholds[i])
+                this.HealthThresholdCounts[i]++;
+        }
+
+        if (milliseconds < ModHealthTimingHistogramSnapshot.MinimumBucketMilliseconds)
+        {
+            this.HealthHistogramUnderflowCount++;
+            return;
+        }
+        if (milliseconds > ModHealthTimingHistogramSnapshot.MaximumBucketMilliseconds)
+        {
+            this.HealthHistogramOverflowCount++;
+            return;
+        }
+
+        int bucket = milliseconds == ModHealthTimingHistogramSnapshot.MaximumBucketMilliseconds
+            ? ModHealthTimingHistogramSnapshot.BucketCount - 1
+            : (int)Math.Floor(
+                Math.Log2(milliseconds / ModHealthTimingHistogramSnapshot.MinimumBucketMilliseconds)
+                * ModHealthTimingHistogramSnapshot.SubBucketsPerPowerOfTwo
+            );
+        this.HealthHistogramBuckets[Math.Clamp(bucket, 0, ModHealthTimingHistogramSnapshot.BucketCount - 1)]++;
+    }
+
+    /// <summary>Get an approximate percentile as the selected logarithmic bucket's upper bound.</summary>
+    private double? GetHealthHistogramPercentile(double percentile)
+    {
+        if (this.HealthHistogramCount == 0)
+            return null;
+
+        long rank = (long)Math.Ceiling(percentile * this.HealthHistogramCount);
+        long cumulative = this.HealthHistogramUnderflowCount;
+        if (rank <= cumulative)
+            return ModHealthTimingHistogramSnapshot.MinimumBucketMilliseconds;
+
+        for (int i = 0; i < this.HealthHistogramBuckets.Length; i++)
+        {
+            cumulative += this.HealthHistogramBuckets[i];
+            if (rank <= cumulative)
+            {
+                return ModHealthTimingHistogramSnapshot.MinimumBucketMilliseconds
+                    * Math.Pow(2, (i + 1d) / ModHealthTimingHistogramSnapshot.SubBucketsPerPowerOfTwo);
+            }
+        }
+
+        return this.ToMilliseconds(this.HealthHistogramMaximumTimestampTicks);
+    }
+
+    /// <summary>Retain one update in the recent health ring.</summary>
+    private void AddHealthTick(ModHealthUpdatePerformanceSnapshot sample)
+    {
+        int index;
+        if (this.HealthTickHistoryCount < this.HealthTickHistory.Length)
+        {
+            index = (this.HealthTickHistoryStart + this.HealthTickHistoryCount) % this.HealthTickHistory.Length;
+            this.HealthTickHistoryCount++;
+        }
+        else
+        {
+            index = this.HealthTickHistoryStart;
+            this.HealthTickHistoryStart = (this.HealthTickHistoryStart + 1) % this.HealthTickHistory.Length;
+        }
+        this.HealthTickHistory[index] = sample;
+    }
+
+    /// <summary>Retain one update in the independently ranked whole-capture worst list.</summary>
+    private void AddWorstHealthTick(ModHealthUpdatePerformanceSnapshot sample)
+    {
+        int insertAt = 0;
+        while (insertAt < this.WorstHealthTickCount && ModPerformanceManager.CompareWorstTicks(this.WorstHealthTicks[insertAt], sample) <= 0)
+            insertAt++;
+        if (insertAt >= this.WorstHealthTicks.Length)
+            return;
+
+        int oldCount = this.WorstHealthTickCount;
+        if (this.WorstHealthTickCount < this.WorstHealthTicks.Length)
+            this.WorstHealthTickCount++;
+        int shiftCount = Math.Min(oldCount, this.WorstHealthTicks.Length - 1) - insertAt;
+        if (shiftCount > 0)
+            Array.Copy(this.WorstHealthTicks, insertAt, this.WorstHealthTicks, insertAt + 1, shiftCount);
+        this.WorstHealthTicks[insertAt] = sample;
+    }
+
+    /// <summary>Update the streaming slow-episode state for one completed update.</summary>
+    private void UpdateSlowEpisode(ModHealthUpdatePerformanceSnapshot sample, bool isSlowUpdate)
+    {
+        if (isSlowUpdate)
+        {
+            if (!this.HasOpenSlowEpisode)
+            {
+                this.HasOpenSlowEpisode = true;
+                this.OpenSlowEpisode = new MutableSlowEpisode(sample);
+            }
+            else
+                this.OpenSlowEpisode.Add(sample);
+            this.OpenEpisodeTrailingFastUpdates = 0;
+            return;
+        }
+
+        if (this.HasOpenSlowEpisode && ++this.OpenEpisodeTrailingFastUpdates >= 2)
+            this.CloseOpenSlowEpisode();
+    }
+
+    /// <summary>Close and rank the current slow episode, if any.</summary>
+    private void CloseOpenSlowEpisode()
+    {
+        if (!this.HasOpenSlowEpisode)
+            return;
+
+        this.AddSlowEpisode(this.OpenSlowEpisode.ToSnapshot());
+        this.HasOpenSlowEpisode = false;
+        this.OpenSlowEpisode = default;
+        this.OpenEpisodeTrailingFastUpdates = 0;
+    }
+
+    /// <summary>Add a completed episode to the bounded deterministic ranking.</summary>
+    private void AddSlowEpisode(ModHealthSlowEpisodeSnapshot episode)
+    {
+        int insertAt = 0;
+        while (insertAt < this.SlowEpisodeCount && ModPerformanceManager.CompareEpisodes(this.SlowEpisodes[insertAt], episode) <= 0)
+            insertAt++;
+
+        if (this.SlowEpisodeCount >= this.SlowEpisodes.Length)
+            this.OmittedSlowEpisodes++;
+        if (insertAt >= this.SlowEpisodes.Length)
+            return;
+
+        int oldCount = this.SlowEpisodeCount;
+        if (this.SlowEpisodeCount < this.SlowEpisodes.Length)
+            this.SlowEpisodeCount++;
+        int shiftCount = Math.Min(oldCount, this.SlowEpisodes.Length - 1) - insertAt;
+        if (shiftCount > 0)
+            Array.Copy(this.SlowEpisodes, insertAt, this.SlowEpisodes, insertAt + 1, shiftCount);
+        this.SlowEpisodes[insertAt] = episode;
+    }
+
+    /// <summary>Copy ranked completed episodes and project the open episode without mutating the collector.</summary>
+    private ModHealthSlowEpisodeSnapshot[] GetRankedEpisodesIncludingOpen(out bool openEpisodeOmitted)
+    {
+        openEpisodeOmitted = false;
+        if (!this.HasOpenSlowEpisode)
+        {
+            ModHealthSlowEpisodeSnapshot[] closed = new ModHealthSlowEpisodeSnapshot[this.SlowEpisodeCount];
+            Array.Copy(this.SlowEpisodes, closed, closed.Length);
+            return closed;
+        }
+
+        ModHealthSlowEpisodeSnapshot open = this.OpenSlowEpisode.ToSnapshot();
+        int insertAt = 0;
+        while (insertAt < this.SlowEpisodeCount && ModPerformanceManager.CompareEpisodes(this.SlowEpisodes[insertAt], open) <= 0)
+            insertAt++;
+        if (insertAt >= this.SlowEpisodes.Length)
+        {
+            openEpisodeOmitted = true;
+            ModHealthSlowEpisodeSnapshot[] unchanged = new ModHealthSlowEpisodeSnapshot[this.SlowEpisodeCount];
+            Array.Copy(this.SlowEpisodes, unchanged, unchanged.Length);
+            return unchanged;
+        }
+
+        int count = Math.Min(this.SlowEpisodeCount + 1, this.SlowEpisodes.Length);
+        ModHealthSlowEpisodeSnapshot[] result = new ModHealthSlowEpisodeSnapshot[count];
+        if (insertAt > 0)
+            Array.Copy(this.SlowEpisodes, 0, result, 0, insertAt);
+        result[insertAt] = open;
+        int after = count - insertAt - 1;
+        if (after > 0)
+            Array.Copy(this.SlowEpisodes, insertAt, result, insertAt + 1, after);
+        if (this.SlowEpisodeCount >= this.SlowEpisodes.Length)
+            openEpisodeOmitted = true;
+        return result;
+    }
+
+    /// <summary>Get the deterministic top contributors for the current slow update.</summary>
+    private ModHealthTickContributorSnapshot[] GetTopCurrentTickContributors()
+    {
+        int capacity = Math.Min(this.SlowTickContributorCapacity, this.CurrentTickMods.Count);
+        if (capacity == 0)
+            return [];
+
+        ModHealthTickContributorSnapshot[] result = new ModHealthTickContributorSnapshot[capacity];
+        int count = 0;
+        foreach ((string modId, TickModCounter counter) in this.CurrentTickMods)
+        {
+            ModHealthTickContributorSnapshot candidate = new(modId, counter.DisplayName, this.ToMilliseconds(counter.TimestampTicks));
+            int insertAt = 0;
+            while (insertAt < count && ModPerformanceManager.CompareContributors(result[insertAt], candidate) <= 0)
+                insertAt++;
+            if (insertAt >= capacity)
+                continue;
+
+            int shiftCount = Math.Min(count, capacity - 1) - insertAt;
+            if (shiftCount > 0)
+                Array.Copy(result, insertAt, result, insertAt + 1, shiftCount);
+            result[insertAt] = candidate;
+            if (count < capacity)
+                count++;
+        }
+        return result;
+    }
+
+    /// <summary>Compare worst updates in desired ranking order.</summary>
+    private static int CompareWorstTicks(ModHealthUpdatePerformanceSnapshot left, ModHealthUpdatePerformanceSnapshot right)
+    {
+        int compare = right.TotalMilliseconds.CompareTo(left.TotalMilliseconds);
+        return compare != 0 ? compare : left.CaptureSequence.CompareTo(right.CaptureSequence);
+    }
+
+    /// <summary>Compare slow episodes in desired ranking order.</summary>
+    private static int CompareEpisodes(ModHealthSlowEpisodeSnapshot left, ModHealthSlowEpisodeSnapshot right)
+    {
+        int compare = right.MaximumMilliseconds.CompareTo(left.MaximumMilliseconds);
+        if (compare != 0)
+            return compare;
+        compare = right.SummedQualifyingMilliseconds.CompareTo(left.SummedQualifyingMilliseconds);
+        return compare != 0 ? compare : left.FirstCaptureSequence.CompareTo(right.FirstCaptureSequence);
+    }
+
+    /// <summary>Compare contributors in desired ranking order.</summary>
+    private static int CompareContributors(ModHealthTickContributorSnapshot left, ModHealthTickContributorSnapshot right)
+    {
+        int compare = right.Milliseconds.CompareTo(left.Milliseconds);
+        if (compare != 0)
+            return compare;
+        compare = StringComparer.OrdinalIgnoreCase.Compare(left.ModId, right.ModId);
+        return compare != 0 ? compare : StringComparer.Ordinal.Compare(left.ModId, right.ModId);
+    }
+
+    /// <summary>Infer an operation kind for legacy call sites which don't provide one explicitly.</summary>
+    private static ModHealthOperationKind GetOperationKind(string eventName)
+    {
+        if (eventName.StartsWith("Content.Load", StringComparison.Ordinal))
+            return ModHealthOperationKind.ContentLoad;
+        if (eventName.StartsWith("Content.Edit", StringComparison.Ordinal))
+            return ModHealthOperationKind.ContentEdit;
+        if (eventName.StartsWith("ConsoleCommand.", StringComparison.Ordinal))
+            return ModHealthOperationKind.Console;
+        if (eventName.StartsWith("ModLifecycle.Entry", StringComparison.Ordinal))
+            return ModHealthOperationKind.Entry;
+        if (eventName.StartsWith("ModLifecycle.GetApi", StringComparison.Ordinal))
+            return ModHealthOperationKind.GetApi;
+        return ModHealthOperationKind.Event;
+    }
+
     /// <summary>Reset all mutable sample data. The caller must hold <see cref="SyncRoot"/> unless constructing the instance.</summary>
     /// <param name="timestamp">The current timestamp.</param>
     private void ResetCore(long timestamp)
@@ -660,10 +1217,24 @@ internal sealed class ModPerformanceManager
         this.ModLogs.Clear();
         this.CurrentTickMods.Clear();
         Array.Clear(this.TickHistory);
+        Array.Clear(this.HealthTickHistory);
+        Array.Clear(this.WorstHealthTicks);
+        Array.Clear(this.SlowEpisodes);
+        Array.Clear(this.HealthHistogramBuckets);
+        Array.Clear(this.HealthThresholdCounts);
         this.TickHistoryStart = 0;
         this.TickHistoryCount = 0;
+        this.HealthTickHistoryStart = 0;
+        this.HealthTickHistoryCount = 0;
+        this.WorstHealthTickCount = 0;
+        this.SlowEpisodeCount = 0;
         this.CompletedTicks = 0;
+        this.NextHealthTickSequence = 0;
         this.OmittedHandlerInvocations = 0;
+        this.OmittedTickContributorIdentities = 0;
+        this.OmittedRetainedSlowTickContributors = 0;
+        this.OmittedSlowEpisodes = 0;
+        this.InvalidHistogramUpdates = 0;
         this.SampleStartedUtc = DateTime.UtcNow;
         this.SampleStartTimestamp = timestamp;
         for (int generation = 0; generation < this.SampleStartGcCollections.Length; generation++)
@@ -672,6 +1243,10 @@ internal sealed class ModPerformanceManager
         this.IsTickOpen = false;
         this.CurrentTickThreadId = 0;
         this.CurrentTickErrors = 0;
+        this.CurrentTickWarnings = 0;
+        this.CurrentTickCallbackFailures = 0;
+        this.CurrentTickContext = default;
+        this.CurrentTickOmittedContributorIdentities = 0;
         this.CurrentTickInstrumentedTimestampTicks = 0;
         this.CurrentTickGameUpdateTimestampTicks = 0;
         this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
@@ -684,6 +1259,16 @@ internal sealed class ModPerformanceManager
         Array.Clear(this.TotalGcCollections);
         this.InvalidTimingPartitionTicks = 0;
         this.InvalidGcCollectionTicks = 0;
+        this.SlowUpdateCount = 0;
+        this.HasOpenSlowEpisode = false;
+        this.OpenSlowEpisode = default;
+        this.OpenEpisodeTrailingFastUpdates = 0;
+        this.HealthHistogramCount = 0;
+        this.HealthHistogramTotalTimestampTicks = 0;
+        this.HealthHistogramMinimumTimestampTicks = 0;
+        this.HealthHistogramMaximumTimestampTicks = 0;
+        this.HealthHistogramUnderflowCount = 0;
+        this.HealthHistogramOverflowCount = 0;
     }
 
     /// <summary>Get whether raw timing values form a valid non-overlapping tick partition.</summary>
@@ -724,7 +1309,15 @@ internal sealed class ModPerformanceManager
     ** Private models
     *********/
     /// <summary>A distinct mod-owned event handler.</summary>
-    private readonly record struct HandlerIdentity(string ModId, string ModName, string EventName, string HandlerName);
+    private readonly record struct HandlerIdentity(
+        string ModId,
+        string ModName,
+        string EventName,
+        string HandlerName,
+        ModHealthExecutionPhase Phase,
+        ModHealthOperationKind Operation,
+        string? OnBehalfOfModId
+    );
 
     /// <summary>Mutable aggregate statistics for one handler.</summary>
     private sealed class HandlerCounter
@@ -761,7 +1354,7 @@ internal sealed class ModPerformanceManager
     }
 
     /// <summary>One active nested handler invocation.</summary>
-    private struct ActiveHandler(ModPerformanceManager manager, long generation, string modId, string modName, string eventName, string handlerName, long startTimestamp, long nestedTimestampTicks)
+    private struct ActiveHandler(ModPerformanceManager manager, long generation, string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long startTimestamp, long nestedTimestampTicks)
     {
         public ModPerformanceManager Manager { get; } = manager;
         public long Generation { get; } = generation;
@@ -769,8 +1362,90 @@ internal sealed class ModPerformanceManager
         public string ModName { get; } = modName;
         public string EventName { get; } = eventName;
         public string HandlerName { get; } = handlerName;
+        public ModHealthExecutionPhase Phase { get; } = phase;
+        public ModHealthOperationKind Operation { get; } = operation;
+        public string? OnBehalfOfModId { get; } = onBehalfOfModId;
         public long StartTimestamp { get; } = startTimestamp;
         public long NestedTimestampTicks = nestedTimestampTicks;
+    }
+
+    /// <summary>One mutable streaming slow-update episode.</summary>
+    private struct MutableSlowEpisode
+    {
+        public long FirstCaptureSequence;
+        public long LastCaptureSequence;
+        public uint FirstTick;
+        public uint LastTick;
+        public int QualifyingUpdateCount;
+        public double MaximumMilliseconds;
+        public double SummedQualifyingMilliseconds;
+        public uint RepresentativeTick;
+
+        public MutableSlowEpisode(ModHealthUpdatePerformanceSnapshot first)
+        {
+            this.FirstCaptureSequence = first.CaptureSequence;
+            this.LastCaptureSequence = first.CaptureSequence;
+            this.FirstTick = first.Tick;
+            this.LastTick = first.Tick;
+            this.QualifyingUpdateCount = 1;
+            this.MaximumMilliseconds = first.TotalMilliseconds;
+            this.SummedQualifyingMilliseconds = first.TotalMilliseconds;
+            this.RepresentativeTick = first.Tick;
+        }
+
+        public void Add(ModHealthUpdatePerformanceSnapshot sample)
+        {
+            this.LastCaptureSequence = sample.CaptureSequence;
+            this.LastTick = sample.Tick;
+            this.QualifyingUpdateCount++;
+            this.SummedQualifyingMilliseconds += sample.TotalMilliseconds;
+            if (sample.TotalMilliseconds > this.MaximumMilliseconds)
+            {
+                this.MaximumMilliseconds = sample.TotalMilliseconds;
+                this.RepresentativeTick = sample.Tick;
+            }
+        }
+
+        public ModHealthSlowEpisodeSnapshot ToSnapshot()
+        {
+            return new ModHealthSlowEpisodeSnapshot(
+                this.FirstCaptureSequence,
+                this.LastCaptureSequence,
+                this.FirstTick,
+                this.LastTick,
+                this.QualifyingUpdateCount,
+                this.MaximumMilliseconds,
+                this.SummedQualifyingMilliseconds,
+                this.RepresentativeTick
+            );
+        }
+    }
+
+    /// <summary>Deterministic callback snapshot ordering.</summary>
+    private sealed class ModHealthCallbackPerformanceSnapshotComparer : IComparer<ModHealthCallbackPerformanceSnapshot>
+    {
+        public static ModHealthCallbackPerformanceSnapshotComparer Instance { get; } = new();
+
+        public int Compare(ModHealthCallbackPerformanceSnapshot left, ModHealthCallbackPerformanceSnapshot right)
+        {
+            int compare = StringComparer.OrdinalIgnoreCase.Compare(left.ModId, right.ModId);
+            if (compare != 0)
+                return compare;
+            compare = StringComparer.Ordinal.Compare(left.ModId, right.ModId);
+            if (compare != 0)
+                return compare;
+            compare = left.Phase.CompareTo(right.Phase);
+            if (compare != 0)
+                return compare;
+            compare = left.Operation.CompareTo(right.Operation);
+            if (compare != 0)
+                return compare;
+            compare = StringComparer.Ordinal.Compare(left.OnBehalfOfModId, right.OnBehalfOfModId);
+            if (compare != 0)
+                return compare;
+            compare = StringComparer.Ordinal.Compare(left.EventName, right.EventName);
+            return compare != 0 ? compare : StringComparer.Ordinal.Compare(left.CallbackName, right.CallbackName);
+        }
     }
 }
 
@@ -827,7 +1502,8 @@ internal sealed record ModPerformanceSnapshot(
     long CaptureGen0Collections = 0,
     long CaptureGen1Collections = 0,
     long CaptureGen2Collections = 0,
-    bool CaptureGcCollectionDataIsValid = true
+    bool CaptureGcCollectionDataIsValid = true,
+    ModHealthPerformanceSnapshot? Health = null
 )
 {
     /// <summary>Base game update time in completed ticks, excluding instrumented mod callbacks which ran within it.</summary>
