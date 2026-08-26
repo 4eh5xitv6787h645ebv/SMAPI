@@ -17,6 +17,8 @@ dotnet build LinuxMenuClickProbe.csproj -c Release -p:GamePath=/path/to/game
 
 Copy `manifest.json`, `config.json`, and `bin/Release/net6.0/LinuxMenuClickProbe.dll` into an isolated mod folder named `LinuxMenuClickProbe`. Run the same folder and configuration against each bundled Linux host. A valid comparison keeps the game, complete mod set, save, virtual display, click duration, and click interval identical; only the runtime/GC policy changes.
 
+For a fast native-input smoke test which doesn't load a save, set `StartAtTitle` to `true`. That mode replaces the title menu after the configured warmup and is intended for an otherwise empty isolated `Mods` directory.
+
 The terminal line is machine-readable:
 
 ```text

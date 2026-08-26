@@ -83,7 +83,8 @@ internal sealed class LinuxMouseClickBuffer : IDisposable
                     buffer.QueuedPulses += buffer.CompletedPulsesSincePoll;
 
                 buffer.CompletedPulsesSincePoll = 0;
-                buffer.SawDownSincePoll = false;
+                if (isActuallyDown)
+                    buffer.SawDownSincePoll = false;
                 buffer.WasDownAtLastPoll = isActuallyDown;
 
                 if (buffer.NeedsSyntheticRelease)

@@ -35,6 +35,7 @@ public sealed class ModEntry : Mod
     {
         this.Config = helper.ReadConfig<ProbeConfig>();
         this.Config.Validate();
+        helper.Events.GameLoop.GameLaunched += this.OnGameLaunched;
         helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
         helper.Events.GameLoop.UpdateTicking += this.OnUpdateTicking;
         helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
@@ -45,6 +46,15 @@ public sealed class ModEntry : Mod
             + $"server_gc={System.Runtime.GCSettings.IsServerGC} clicks={this.Config.TotalClicks} hold_ms={this.Config.HoldMilliseconds} interval_ticks={this.Config.IntervalTicks}",
             LogLevel.Info
         );
+    }
+
+    private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
+    {
+        if (!this.Config.StartAtTitle)
+            return;
+
+        this.TicksSinceSaveLoaded = 0;
+        this.Monitor.Log("clickprobe-title-ready", LogLevel.Info);
     }
 
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
@@ -245,6 +255,7 @@ public sealed class ModEntry : Mod
         public int IntervalTicks { get; set; } = 30;
         public int WarmupTicks { get; set; } = 180;
         public int FrameGapMilliseconds { get; set; } = 50;
+        public bool StartAtTitle { get; set; }
 
         public void Validate()
         {

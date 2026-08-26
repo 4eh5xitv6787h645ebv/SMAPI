@@ -3,5 +3,6 @@
   "HoldMilliseconds": 40,
   "IntervalTicks": 30,
   "WarmupTicks": 180,
-  "FrameGapMilliseconds": 50
+  "FrameGapMilliseconds": 50,
+  "StartAtTitle": false
 }
