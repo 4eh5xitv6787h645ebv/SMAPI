@@ -12,7 +12,15 @@ The save owner shares this data for testing purposes; feel free to relocate or t
 | [`mods.json`](mods.json) | The same list in machine-readable form, including folder paths. |
 | `Blossom_389524656.tar.xz` | The save game (~1.3 MB compressed, ~81 MB extracted): main save file, `SaveGameInfo`, `JsonAssets/` ID cache, and SpaceCore serialization indexes. Backup/rotation copies are excluded. |
 
-Mods are **not** included — most can't be redistributed. Download them from their official pages using the update keys in the mod list.
+Mods are **not** included in the repo itself. For convenience, a one-shot snapshot of the full `Mods` folder (746 MB `tar.zst`, 1.0 GB extracted, matching the list exactly) is available as a release asset, shared by the save owner **for fork testing only** — mod authors retain all rights, so download mods from their official pages (via the update keys in the mod list) for any other use:
+
+> https://github.com/adventurexplore/SMAPI/releases/download/benchmark-mods-2026-08-26/Mods-2026-08-26.tar.zst
+
+Extract it into the game folder so you get `Stardew Valley/Mods/`:
+
+```bash
+tar --zstd -xf Mods-2026-08-26.tar.zst -C "path/to/Stardew Valley"
+```
 
 ## Benchmark machine
 
