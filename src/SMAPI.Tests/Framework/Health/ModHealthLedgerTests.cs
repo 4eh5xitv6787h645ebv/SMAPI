@@ -118,6 +118,24 @@ internal sealed class ModHealthLedgerTests
     }
 
     [Test]
+    public void UpdateMod_DoesNotRecountDependencyCapacityOmissions()
+    {
+        ModHealthLedger ledger = new(dependencyCapacity: 1, timestampFrequency: 1000, getTimestamp: () => 0);
+        ModHealthModObservation observation = CreateMod("example.mod", ModHealthLedgerModStatus.Loaded) with
+        {
+            DependencyIds = ["first.mod", "second.mod", "third.mod"]
+        };
+        ModHealthModKey key = ledger.RegisterMod(observation);
+
+        ledger.UpdateMod(key, ModHealthLedgerModStatus.Loaded, observation with { UpdateStatus = ModHealthUpdateStatus.Pending });
+        ledger.UpdateMod(key, ModHealthLedgerModStatus.Loaded, observation with { UpdateStatus = ModHealthUpdateStatus.UpToDate });
+
+        ModHealthLedgerSnapshot snapshot = ledger.GetSnapshot();
+        snapshot.Mods.Single().DependencyIds.Should().ContainSingle();
+        snapshot.Omissions.DependencyIds.Should().Be(2);
+    }
+
+    [Test]
     public void ObserveLog_CountsEverySeverityAndCaptureDeltaWithoutText()
     {
         ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: () => 0);

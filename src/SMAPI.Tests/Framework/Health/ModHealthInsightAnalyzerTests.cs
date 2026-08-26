@@ -63,8 +63,54 @@ internal sealed class ModHealthInsightAnalyzerTests
         findings.Select(finding => finding.RuleId).Should().Contain(new[] { "mod-load-problem", "callback-failure", "short-sample" });
     }
 
+    [Test]
+    public void Analyze_ShortSampleSuppressesSustainedConclusionsButKeepsIndividualPeak()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ImmutableArray<ModHealthUpdate> updates = ImmutableArray.Create(CreateSlowUpdate(1), CreateSlowUpdate(2), CreateSlowUpdate(3));
+        ModHealthCallback peak = baseReport.Performance.Callbacks[0] with { MaximumMilliseconds = ModHealthReportLimits.ExtremeCallbackMilliseconds };
+        ModHealthReport report = baseReport with
+        {
+            Capture = baseReport.Capture with { DurationMilliseconds = 1000, CompletedUpdateCount = 60, IsShortSample = true },
+            Performance = baseReport.Performance with { SlowUpdateCount = 3, WorstUpdates = updates, Callbacks = ImmutableArray.Create(peak) }
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        findings.Should().Contain(finding => finding.RuleId == "extreme-callback-peak");
+        findings.Should().Contain(finding => finding.RuleId == "short-sample");
+        findings.Should().NotContain(finding => finding.RuleId == "repeated-slow-updates");
+        findings.Should().NotContain(finding => finding.RuleId == "observed-mod-dominance");
+        findings.Should().NotContain(finding => finding.RuleId == "mostly-unattributed-slow-updates");
+    }
+
+    [Test]
+    public void Analyze_DominanceUsesAllValidQualifyingSlowUpdateTime()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ModHealthUpdate first = CreateSlowUpdate(1) with
+        {
+            ObservedModMilliseconds = 100,
+            Contributors = ImmutableArray.Create(new ModHealthContributor("Example.Mod", 51))
+        };
+        ModHealthUpdate second = first with { UpdateTick = 2 };
+        ModHealthUpdate third = first with
+        {
+            UpdateTick = 3,
+            Contributors = ImmutableArray.Create(new ModHealthContributor("Other.Mod", 100))
+        };
+        ModHealthReport report = baseReport with
+        {
+            Performance = baseReport.Performance with { SlowUpdateCount = 3, WorstUpdates = ImmutableArray.Create(first, second, third) }
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        findings.Should().NotContain(finding => finding.RuleId == "observed-mod-dominance");
+    }
+
     private static ModHealthUpdate CreateSlowUpdate(uint tick)
     {
-        return new(tick, tick * 20, 100, 80, 10, 5, 5, true, "gameplay", true, 0, 0, 0, 0, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 10)), null);
+        return new(tick, tick * 20, 100, 80, 10, 5, 5, true, "gameplay", true, 0, 0, 0, 0, 0, 0, 0, true, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 10)), null);
     }
 }

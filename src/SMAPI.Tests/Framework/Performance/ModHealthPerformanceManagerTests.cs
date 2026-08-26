@@ -43,6 +43,36 @@ internal sealed class ModHealthPerformanceManagerTests
     }
 
     [Test]
+    public void LegacyHandlers_ReaggregateHealthOnlyDimensions()
+    {
+        ModPerformanceManager manager = CreateManager();
+        manager.Start();
+        manager.RecordHandler("Framework.Mod", "Framework", "Content.Load", "Framework.Load", ModHealthExecutionPhase.Update, ModHealthOperationKind.ContentLoad, "Pack.One", 4, failed: false);
+        manager.RecordHandler("Framework.Mod", "Framework", "Content.Load", "Framework.Load", ModHealthExecutionPhase.Draw, ModHealthOperationKind.ContentLoad, "Pack.Two", 6, failed: true);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+
+        snapshot.Health!.Callbacks.Should().HaveCount(2);
+        snapshot.Handlers.Should().ContainSingle().Which.Should().BeEquivalentTo(
+            new HandlerPerformanceSnapshot("Framework.Mod", "Framework", "Content.Load", "Framework.Load", 2, 10, 6, 1)
+        );
+    }
+
+    [Test]
+    public void SlowUpdateThreshold_IsIndependentFromAdvancedTickLoggingThreshold()
+    {
+        ModPerformanceManager manager = CreateManager();
+        manager.Start(logIndividualTicks: true, tickLogThresholdMilliseconds: 100);
+        CompleteTick(manager, 1, 40);
+        CompleteTick(manager, 2, 120);
+
+        ModHealthPerformanceSnapshot health = manager.GetSnapshot().Health!;
+        health.SlowUpdateThresholdMilliseconds.Should().Be(33.333);
+        health.SlowUpdateCount.Should().Be(2);
+        health.Episodes.Should().ContainSingle().Which.QualifyingUpdateCount.Should().Be(2);
+    }
+
+    [Test]
     public void RecentAndWorstUpdates_RolloverIndependentlyAndUseCaptureSequenceForTies()
     {
         ModPerformanceManager manager = CreateManager(tickHistoryCapacity: 2, worstTickCapacity: 3);
@@ -114,12 +144,12 @@ internal sealed class ModHealthPerformanceManagerTests
     {
         ModPerformanceManager manager = CreateManager();
         manager.Start(logIndividualTicks: false, tickLogThresholdMilliseconds: 10);
-        CompleteTick(manager, 1, 12);
+        CompleteTick(manager, 1, 42);
         CompleteTick(manager, 2, 5);
-        CompleteTick(manager, 3, 20);
+        CompleteTick(manager, 3, 50);
         CompleteTick(manager, 4, 5);
         CompleteTick(manager, 5, 5);
-        CompleteTick(manager, 6, 30);
+        CompleteTick(manager, 6, 60);
 
         ModHealthPerformanceSnapshot active = manager.GetSnapshot().Health!;
         active.Episodes.Should().HaveCount(2);
@@ -128,8 +158,8 @@ internal sealed class ModHealthPerformanceManagerTests
             episode.FirstTick == 1
             && episode.LastTick == 3
             && episode.QualifyingUpdateCount == 2
-            && episode.MaximumMilliseconds == 20
-            && episode.SummedQualifyingMilliseconds == 32
+            && episode.MaximumMilliseconds == 50
+            && episode.SummedQualifyingMilliseconds == 92
             && episode.RepresentativeTick == 3
         );
 
@@ -142,9 +172,9 @@ internal sealed class ModHealthPerformanceManagerTests
     {
         ModPerformanceManager manager = CreateManager(slowEpisodeCapacity: 2);
         manager.Start(logIndividualTicks: false, tickLogThresholdMilliseconds: 10);
-        CompleteEpisode(manager, firstTick: 1, 20);
-        CompleteEpisode(manager, firstTick: 10, 20, 20);
-        CompleteEpisode(manager, firstTick: 20, 20);
+        CompleteEpisode(manager, firstTick: 1, 40);
+        CompleteEpisode(manager, firstTick: 10, 40, 40);
+        CompleteEpisode(manager, firstTick: 20, 40);
         manager.Stop();
 
         ModHealthPerformanceSnapshot health = manager.GetSnapshot().Health!;
@@ -169,7 +199,7 @@ internal sealed class ModHealthPerformanceManagerTests
             manager.RecordLog("Background.Mod", "Background", LogLevel.Warn);
             manager.RecordLog("Background.Mod", "Background", LogLevel.Error);
         }).GetAwaiter().GetResult();
-        manager.CompleteTick(530);
+        manager.CompleteTick(550);
 
         ModHealthUpdatePerformanceSnapshot update = manager.GetSnapshot().Health!.RecentUpdates.Should().ContainSingle().Subject;
         update.OffsetMilliseconds.Should().Be(500);
@@ -177,6 +207,8 @@ internal sealed class ModHealthPerformanceManagerTests
         update.WarningCount.Should().Be(1);
         update.ErrorCount.Should().Be(1);
         update.CallbackFailureCount.Should().Be(1);
+        update.Gen0Collections.Should().Be(0);
+        update.GcCollectionDataIsValid.Should().BeTrue();
         update.InstrumentedModMilliseconds.Should().Be(20);
         update.Contributors.Select(entry => entry.ModId).Should().Equal("C.Mod", "A.Mod");
         update.OmittedContributors.Should().Be(1);
@@ -190,7 +222,7 @@ internal sealed class ModHealthPerformanceManagerTests
         manager.BeginTick(1, 0);
         manager.RecordHandler("A.Mod", "A", "Event", "A.Run", 6, failed: false);
         manager.RecordHandler("B.Mod", "B", "Event", "B.Run", 6, failed: false);
-        manager.CompleteTick(20);
+        manager.CompleteTick(40);
 
         ModHealthPerformanceSnapshot health = manager.GetSnapshot().Health!;
         health.RecentUpdates[0].InstrumentedModMilliseconds.Should().Be(12);
@@ -242,6 +274,30 @@ internal sealed class ModHealthPerformanceManagerTests
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         allocated.Should().Be(0);
+    }
+
+    [Test]
+    public void Snapshot_RemainsConsistentWhileBoundedCallbacksAreUpdatedConcurrently()
+    {
+        ModPerformanceManager manager = CreateManager();
+        manager.Start();
+        for (int i = 0; i < 128; i++)
+            manager.RecordHandler($"Mod.{i}", $"Mod {i}", "Event", "Handler", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, null, 1, failed: false);
+
+        Task writer = Task.Run(() =>
+        {
+            for (int i = 0; i < 1000; i++)
+                manager.RecordHandler($"Mod.{i % 128}", $"Mod {i % 128}", "Event", "Handler", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, null, 1, failed: false);
+        });
+        for (int i = 0; i < 100; i++)
+        {
+            ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+            snapshot.Health!.Callbacks.Should().HaveCount(128);
+            snapshot.Handlers.Should().HaveCount(128);
+        }
+        writer.GetAwaiter().GetResult();
+
+        manager.GetSnapshot().Health!.Callbacks.Sum(callback => callback.CallCount).Should().Be(1128);
     }
 
     private static ModPerformanceManager CreateManager(

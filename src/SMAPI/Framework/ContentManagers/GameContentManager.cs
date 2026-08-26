@@ -372,8 +372,10 @@ internal class GameContentManager : BaseContentManager
     }
 
     /// <summary>Get the broad execution phase without retaining game or asset state.</summary>
-    private static ModHealthExecutionPhase GetExecutionPhase()
+    private ModHealthExecutionPhase GetExecutionPhase()
     {
+        if (this.Coordinator.PerformanceManager.GetActiveExecutionPhase() is { } inheritedPhase)
+            return inheritedPhase;
         return Game1.IsOnMainThread()
             ? ModHealthExecutionPhase.Update
             : ModHealthExecutionPhase.Background;

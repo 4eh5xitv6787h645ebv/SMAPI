@@ -96,6 +96,10 @@
         "warningCount": 0,
         "errorCount": 0,
         "callbackFailureCount": 0,
+        "gen0Collections": 2,
+        "gen1Collections": 0,
+        "gen2Collections": 0,
+        "gcCollectionDataValid": true,
         "contributors": [
           { "modId": "Example.Mod", "milliseconds": 0.2 }
         ],

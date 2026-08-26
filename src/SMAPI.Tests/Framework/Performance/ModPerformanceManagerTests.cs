@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI;
+using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Performance;
 
 namespace SMAPI.Tests.Framework.Performance;
@@ -290,6 +291,55 @@ internal sealed class ModPerformanceManagerTests
     }
 
     [Test]
+    public void BeginHandler_RemovesAbandonedFramesFromPreviousGeneration()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginHandler("Stale.Mod", "Stale", "Event", "Stale.Handler");
+
+        manager.Start();
+        HandlerTimingToken current = manager.BeginHandler("Current.Mod", "Current", "Event", "Current.Handler");
+        current.Depth.Should().Be(0);
+        manager.EndHandler(current, failed: false);
+
+        manager.GetSnapshot().Handlers.Should().ContainSingle().Which.ModId.Should().Be("Current.Mod");
+    }
+
+    [Test]
+    public void RecordHandler_SanitizesAndCapsCollectorIdentitiesAtIngress()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        manager.Start();
+        string oversized = new('x', ModHealthReportLimits.MaxCallbackNameLength + 1000);
+        manager.RecordHandler("\u001b[31m/path/private/mod\u001b[0m", "Bad\nName", oversized, oversized, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, "/home/private/pack", 1, failed: false);
+
+        ModHealthCallbackPerformanceSnapshot callback = manager.GetSnapshot().Health!.Callbacks.Should().ContainSingle().Subject;
+        callback.ModId.Should().NotContain("\u001b").And.NotContain("private");
+        callback.ModName.Should().Be("Bad Name");
+        callback.EventName.Should().HaveLength(ModHealthReportLimits.MaxCallbackNameLength);
+        callback.CallbackName.Should().HaveLength(ModHealthReportLimits.MaxCallbackNameLength);
+        callback.OnBehalfOfModId.Should().Be("[path]");
+    }
+
+    [Test]
+    public void DisabledHandlerIngress_WithHostileIdentitiesDoesNotAllocateAfterWarmup()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+        string hostile = "\u001b[31m/home/private/" + new string('x', 4096);
+        manager.BeginHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile);
+        manager.RecordHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile, 1, failed: false);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++)
+        {
+            manager.BeginHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile);
+            manager.RecordHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile, 1, failed: false);
+        }
+
+        (GC.GetAllocatedBytesForCurrentThread() - before).Should().Be(0);
+    }
+
+    [Test]
     public void GameUpdateBoundary_DoesNotAllocateAfterWarmup()
     {
         ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
@@ -346,6 +396,10 @@ internal sealed class ModPerformanceManagerTests
         snapshot.CaptureGen1Collections.Should().Be(1);
         snapshot.CaptureGen2Collections.Should().Be(1);
         snapshot.CaptureGcCollectionDataIsValid.Should().BeTrue();
+        snapshot.Health!.RecentUpdates.Should().SatisfyRespectively(
+            first => first.Should().Match<ModHealthUpdatePerformanceSnapshot>(update => update.Gen0Collections == 2 && update.Gen1Collections == 1 && update.Gen2Collections == 0 && update.GcCollectionDataIsValid),
+            second => second.Should().Match<ModHealthUpdatePerformanceSnapshot>(update => update.Gen0Collections == 1 && update.Gen1Collections == 0 && update.Gen2Collections == 1 && update.GcCollectionDataIsValid)
+        );
     }
 
     [Test]

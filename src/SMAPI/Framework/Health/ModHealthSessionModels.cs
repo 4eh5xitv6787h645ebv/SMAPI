@@ -90,7 +90,8 @@ internal sealed record ModHealthExportStatus(
     bool IsFinal = false,
     string? TextPath = null,
     string? JsonPath = null,
-    string? Error = null
+    string? Error = null,
+    ModHealthCompletionSummary? Summary = null
 )
 {
     public static ModHealthExportStatus None { get; } = new(ModHealthExportState.None);

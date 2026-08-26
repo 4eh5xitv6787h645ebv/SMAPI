@@ -131,12 +131,13 @@
     },
     "update": {
       "type": "object", "additionalProperties": false,
-      "required": ["updateTick", "offsetMilliseconds", "totalMilliseconds", "baseGameExclusiveMilliseconds", "observedModMilliseconds", "smapiOtherMilliseconds", "residualMilliseconds", "timingValid", "phase", "focused", "screen", "warningCount", "errorCount", "callbackFailureCount", "contributors", "nearbyMark"],
+      "required": ["updateTick", "offsetMilliseconds", "totalMilliseconds", "baseGameExclusiveMilliseconds", "observedModMilliseconds", "smapiOtherMilliseconds", "residualMilliseconds", "timingValid", "phase", "focused", "screen", "warningCount", "errorCount", "callbackFailureCount", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid", "contributors", "nearbyMark"],
       "properties": {
         "updateTick": { "$ref": "#/$defs/nonnegativeInteger" }, "offsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "totalMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
         "baseGameExclusiveMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "observedModMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "smapiOtherMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "residualMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
         "timingValid": { "type": "boolean" }, "phase": { "$ref": "#/$defs/identity" }, "focused": { "type": "boolean" }, "screen": { "$ref": "#/$defs/nonnegativeInteger" },
         "warningCount": { "$ref": "#/$defs/nonnegativeInteger" }, "errorCount": { "$ref": "#/$defs/nonnegativeInteger" }, "callbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "gen0Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen1Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen2Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gcCollectionDataValid": { "type": "boolean" },
         "contributors": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/contributor" } }, "nearbyMark": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] }
       }
     },
@@ -159,7 +160,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/identity" }, "name": { "$ref": "#/$defs/identity" }, "version": { "$ref": "#/$defs/identity" },
         "kind": { "enum": ["code-mod", "content-pack", "invalid"] }, "parentId": { "$ref": "#/$defs/nullableIdentity" },
-        "status": { "enum": ["loaded", "skipped", "ignored", "invalid", "failed"] }, "failureCategory": { "$ref": "#/$defs/nullableIdentity" },
+        "status": { "enum": ["discovered", "loaded", "skipped", "ignored", "invalid", "failed"] }, "failureCategory": { "$ref": "#/$defs/nullableIdentity" },
         "warningFlags": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/identity" } },
         "dependencies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/identity" } },
         "updateStatus": { "enum": ["unknown", "pending", "up-to-date", "update-available", "disabled", "suppressed", "unavailable"] }, "suggestedUpdateVersion": { "$ref": "#/$defs/nullableIdentity" },

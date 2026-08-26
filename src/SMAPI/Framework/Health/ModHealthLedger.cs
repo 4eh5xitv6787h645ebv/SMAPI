@@ -110,6 +110,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
             this.ModStatusTotals[(int)observation.Status] = SaturatingIncrement(this.ModStatusTotals[(int)observation.Status]);
 
             MutableModRecord record = this.CreateModRecord(key, observation);
+            this.DependenciesOmitted = SaturatingAdd(this.DependenciesOmitted, record.DependencyIdsOmitted);
             this.TryRetainMod(record);
             return key;
         }
@@ -415,13 +416,14 @@ internal sealed class ModHealthLedger : IModHealthLogSink
         string? suggestedVersion = SanitizeOptionalIdentity(observation.SuggestedUpdateVersion);
 
         List<string> dependencies = [];
+        long dependenciesOmitted = 0;
         if (!generated && observation.DependencyIds != null)
         {
             foreach (string dependency in observation.DependencyIds)
             {
                 if (dependencies.Count >= this.DependencyCapacity)
                 {
-                    this.DependenciesOmitted = SaturatingIncrement(this.DependenciesOmitted);
+                    dependenciesOmitted = SaturatingIncrement(dependenciesOmitted);
                     continue;
                 }
 
@@ -438,6 +440,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
             generated ? ModHealthLedgerModKind.Unknown : observation.Kind,
             parentId,
             dependencies.ToArray(),
+            dependenciesOmitted,
             observation.Status,
             observation.FailureReason,
             observation.WarningFlags,
@@ -690,6 +693,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
         public ModHealthLedgerModKind Kind { get; }
         public string? ParentId { get; }
         public string[] DependencyIds { get; }
+        public long DependencyIdsOmitted { get; }
         public ModHealthLedgerModStatus Status { get; }
         public ModHealthModFailureReason FailureReason { get; }
         public ulong WarningFlags { get; }
@@ -698,7 +702,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
         public bool UsesGeneratedInvalidIdentity { get; }
         public LinkedListNode<long>? PriorityNode { get; set; }
 
-        public MutableModRecord(ModHealthModKey key, string uniqueId, string displayName, string? version, ModHealthLedgerModKind kind, string? parentId, string[] dependencyIds, ModHealthLedgerModStatus status, ModHealthModFailureReason failureReason, ulong warningFlags, ModHealthUpdateStatus updateStatus, string? suggestedUpdateVersion, bool usesGeneratedInvalidIdentity)
+        public MutableModRecord(ModHealthModKey key, string uniqueId, string displayName, string? version, ModHealthLedgerModKind kind, string? parentId, string[] dependencyIds, long dependencyIdsOmitted, ModHealthLedgerModStatus status, ModHealthModFailureReason failureReason, ulong warningFlags, ModHealthUpdateStatus updateStatus, string? suggestedUpdateVersion, bool usesGeneratedInvalidIdentity)
         {
             this.Key = key;
             this.UniqueId = uniqueId;
@@ -707,6 +711,7 @@ internal sealed class ModHealthLedger : IModHealthLogSink
             this.Kind = kind;
             this.ParentId = parentId;
             this.DependencyIds = dependencyIds;
+            this.DependencyIdsOmitted = dependencyIdsOmitted;
             this.Status = status;
             this.FailureReason = failureReason;
             this.WarningFlags = warningFlags;

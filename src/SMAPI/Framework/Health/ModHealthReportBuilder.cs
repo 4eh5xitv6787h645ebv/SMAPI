@@ -167,8 +167,8 @@ internal sealed class ModHealthReportBuilder
             RuntimeVersion: Sanitize(source.RuntimeVersion, "unknown"),
             ProcessArchitecture: Sanitize(source.ProcessArchitecture, "unknown"),
             ProcessBitness: source.ProcessBitness is 32 or 64 ? source.ProcessBitness : 0,
-            LinuxDistribution: SanitizeOptional(source.LinuxDistribution),
-            Kernel: SanitizeOptional(source.Kernel),
+            LinuxDistribution: NormalizeLinuxDistribution(source.LinuxDistribution),
+            Kernel: NormalizeKernelRelease(source.Kernel),
             SessionType: NormalizeSessionType(source.SessionType),
             Locale: Sanitize(source.Locale, "unknown"),
             LogicalProcessorCount: Math.Max(1, source.LogicalProcessorCount),
@@ -410,6 +410,10 @@ internal sealed class ModHealthReportBuilder
             Math.Max(0, source.WarningCount),
             Math.Max(0, source.ErrorCount),
             Math.Max(0, source.CallbackFailureCount),
+            source.GcCollectionDataIsValid ? Math.Max(0, source.Gen0Collections) : 0,
+            source.GcCollectionDataIsValid ? Math.Max(0, source.Gen1Collections) : 0,
+            source.GcCollectionDataIsValid ? Math.Max(0, source.Gen2Collections) : 0,
+            source.GcCollectionDataIsValid,
             source.Contributors
                 .OrderByDescending(contributor => NonnegativeFinite(contributor.Milliseconds))
                 .ThenBy(contributor => contributor.ModId, StringComparer.OrdinalIgnoreCase)
@@ -577,6 +581,7 @@ internal sealed class ModHealthReportBuilder
 
     private static ModHealthModStatus GetModStatus(ModHealthLedgerModStatus status) => status switch
     {
+        ModHealthLedgerModStatus.Discovered => ModHealthModStatus.Discovered,
         ModHealthLedgerModStatus.Loaded => ModHealthModStatus.Loaded,
         ModHealthLedgerModStatus.Ignored => ModHealthModStatus.Ignored,
         ModHealthLedgerModStatus.Invalid => ModHealthModStatus.Invalid,
@@ -622,7 +627,7 @@ internal sealed class ModHealthReportBuilder
     private static int GetModPriority(ModHealthModStatus status) => status switch
     {
         ModHealthModStatus.Loaded or ModHealthModStatus.Failed or ModHealthModStatus.Invalid => 0,
-        ModHealthModStatus.Skipped => 1,
+        ModHealthModStatus.Skipped or ModHealthModStatus.Discovered => 1,
         _ => 2
     };
 
@@ -658,6 +663,18 @@ internal sealed class ModHealthReportBuilder
             "client" => "client",
             _ => "unknown"
         };
+    }
+
+    /// <summary>Reduce a runtime OS description to a known non-identifying Linux distribution ID and numeric version.</summary>
+    private static string? NormalizeLinuxDistribution(string? value)
+    {
+        return LinuxModHealthEnvironment.NormalizeDistribution(value);
+    }
+
+    /// <summary>Reduce a kernel banner to its leading numeric release.</summary>
+    private static string? NormalizeKernelRelease(string? value)
+    {
+        return LinuxModHealthEnvironment.NormalizeKernel(value);
     }
 
     private static string CreateReportId(Guid requestId) => "report-" + requestId.ToString("N", CultureInfo.InvariantCulture)[..16];

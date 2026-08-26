@@ -10,8 +10,8 @@ using System.Threading;
 
 namespace StardewModdingAPI.Framework.Health;
 
-/// <summary>The paths for a completely published report pair.</summary>
-internal sealed record ModHealthPublishedReport(string TextPath, string JsonPath);
+/// <summary>The paths and immutable payload summary for a completely published report pair.</summary>
+internal sealed record ModHealthPublishedReport(string TextPath, string JsonPath, ModHealthCompletionSummary? Summary = null);
 
 /// <summary>Publishes a matching report pair.</summary>
 internal interface IModHealthReportPublisher
@@ -42,11 +42,11 @@ internal sealed class ModHealthReportPublisher : IModHealthReportPublisher, IDis
     private static readonly TimeSpan StaleIncompleteAge = TimeSpan.FromMinutes(10);
     private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
     private static readonly Regex ArtifactPattern = new(
-        @"^(?<stem>SMAPI-health-\d{8}-\d{6}-[0-9a-f]{32}(?:-\d+)?)\.(?<extension>txt|json|complete)$",
+        @"^(?<stem>SMAPI-health-\d{8}-\d{6}-report-[0-9a-f]{16}(?:-\d+)?)\.(?<extension>txt|json|complete)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant
     );
     private static readonly Regex TemporaryPattern = new(
-        @"^\.SMAPI-health-\d{8}-\d{6}-[0-9a-f]{32}(?:-\d+)?\.(?:txt|json|complete)\.tmp-[0-9a-f]{32}$",
+        @"^\.SMAPI-health-\d{8}-\d{6}-report-[0-9a-f]{16}(?:-\d+)?\.(?:txt|json|complete)\.tmp-[0-9a-f]{32}$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant
     );
 
@@ -68,7 +68,10 @@ internal sealed class ModHealthReportPublisher : IModHealthReportPublisher, IDis
         byte[] text = ModHealthReportPublisher.Utf8.GetBytes(payload.Text);
         byte[] json = ModHealthReportPublisher.Utf8.GetBytes(payload.Json);
         string timestamp = request.RequestedUtc.UtcDateTime.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-        string root = $"SMAPI-health-{timestamp}-{request.RequestId:N}";
+        string reportId = "report-" + request.RequestId.ToString("N", CultureInfo.InvariantCulture)[..16];
+        if (!string.Equals(payload.Model.Header.ReportId, reportId, StringComparison.Ordinal))
+            throw new InvalidOperationException("The report payload ID does not match its frozen export request.");
+        string root = $"SMAPI-health-{timestamp}-{reportId}";
 
         for (int collision = 0; collision < 1000; collision++)
         {
@@ -87,6 +90,7 @@ internal sealed class ModHealthReportPublisher : IModHealthReportPublisher, IDis
             bool textPublished = false;
             bool jsonPublished = false;
             bool markerPublished = false;
+            bool pairCommitted = false;
             try
             {
                 this.FileSystem.WritePrivateFile(textTemporary, text);
@@ -109,6 +113,7 @@ internal sealed class ModHealthReportPublisher : IModHealthReportPublisher, IDis
                     continue;
                 markerPublished = true;
                 this.FileSystem.SyncDirectory();
+                pairCommitted = true;
 
                 try
                 {
@@ -123,15 +128,21 @@ internal sealed class ModHealthReportPublisher : IModHealthReportPublisher, IDis
                     // Maintenance is best-effort once a complete report pair has been committed.
                 }
                 string prefix = this.FileSystem.RelativeDirectory.TrimEnd('/', '\\');
-                return new($"{prefix}/{textName}", $"{prefix}/{jsonName}");
+                return new(
+                    $"{prefix}/{textName}",
+                    $"{prefix}/{jsonName}",
+                    ModHealthCompletionSummary.FromReport(payload.Model)
+                );
             }
             finally
             {
                 this.DeleteIfPresent(textTemporary);
                 this.DeleteIfPresent(jsonTemporary);
                 this.DeleteIfPresent(markerTemporary);
-                if (!markerPublished)
+                if (!pairCommitted)
                 {
+                    if (markerPublished)
+                        this.DeleteIfPresent(markerName);
                     if (textPublished)
                         this.DeleteIfPresent(textName);
                     if (jsonPublished)

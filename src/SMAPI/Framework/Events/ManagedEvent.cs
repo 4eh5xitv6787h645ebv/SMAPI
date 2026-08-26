@@ -280,6 +280,8 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
             return ModHealthExecutionPhase.Startup;
         if (this.EventName.StartsWith("Display.Rendering", StringComparison.Ordinal) || this.EventName.StartsWith("Display.Rendered", StringComparison.Ordinal))
             return ModHealthExecutionPhase.Draw;
+        if (this.PerformanceManager?.GetActiveExecutionPhase() is { } inheritedPhase)
+            return inheritedPhase;
         return Game1.IsOnMainThread()
             ? ModHealthExecutionPhase.Update
             : ModHealthExecutionPhase.Background;

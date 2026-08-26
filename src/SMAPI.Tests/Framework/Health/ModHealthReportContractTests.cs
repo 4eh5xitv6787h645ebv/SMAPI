@@ -86,4 +86,12 @@ internal sealed class ModHealthReportContractTests
             .Should().Throw<JsonSerializationException>()
             .WithMessage("*non-finite*");
     }
+
+    [Test]
+    public void OperationLabels_MatchSchemaKebabCase()
+    {
+        ModHealthReportLabels.GetOperation(ModHealthOperationKind.ContentLoad).Should().Be("content-load");
+        ModHealthReportLabels.GetOperation(ModHealthOperationKind.ContentEdit).Should().Be("content-edit");
+        ModHealthReportLabels.GetOperation(ModHealthOperationKind.GetApi).Should().Be("get-api");
+    }
 }

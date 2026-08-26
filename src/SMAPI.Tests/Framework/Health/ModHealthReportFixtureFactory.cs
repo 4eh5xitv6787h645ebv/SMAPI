@@ -25,7 +25,7 @@ internal static class ModHealthReportFixtureFactory
                 TotalResidualMilliseconds: 48,
                 SlowUpdateCount: 3,
                 Callbacks: ImmutableArray.Create(new ModHealthCallback("Example.Mod", "Example Mod", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, "UpdateTicked", "Example.Mod.OnUpdate", null, 3600, 12, 0.08, 0)),
-                WorstUpdates: ImmutableArray.Create(new ModHealthUpdate(1200, 20000, 41.2, 38, 0.2, 2, 1, true, "gameplay", true, 0, 0, 0, 0, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 0.2)), 1)),
+                WorstUpdates: ImmutableArray.Create(new ModHealthUpdate(1200, 20000, 41.2, 38, 0.2, 2, 1, true, "gameplay", true, 0, 0, 0, 0, 2, 0, 0, true, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 0.2)), 1)),
                 RecentUpdates: ImmutableArray<ModHealthUpdate>.Empty,
                 Episodes: ImmutableArray.Create(new ModHealthEpisode(1200, 1202, 3, 41.2, 119.4, 1200, 1)),
                 Gen0Collections: 2,

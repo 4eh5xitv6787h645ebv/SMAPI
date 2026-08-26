@@ -15,6 +15,7 @@ internal sealed class ModHealthSessionCoordinator
     private readonly Func<DateTimeOffset> GetUtcNow;
     private readonly Func<ModHealthEnvironmentSnapshot>? GetEnvironment;
     private readonly Func<bool>? IsLifecycleTimingAvailable;
+    private readonly Func<uint>? GetCurrentUpdateTick;
 
     private ModHealthCaptureState State;
     private ModHealthCaptureOwner Owner;
@@ -27,7 +28,7 @@ internal sealed class ModHealthSessionCoordinator
     private bool LifecycleTimingObserved;
 
     /// <summary>Construct a coordinator.</summary>
-    public ModHealthSessionCoordinator(ModPerformanceManager performanceManager, ModHealthLedger ledger, IModHealthExportQueue exportQueue, Func<DateTimeOffset>? getUtcNow = null, Func<ModHealthEnvironmentSnapshot>? getEnvironment = null, Func<bool>? isLifecycleTimingAvailable = null)
+    public ModHealthSessionCoordinator(ModPerformanceManager performanceManager, ModHealthLedger ledger, IModHealthExportQueue exportQueue, Func<DateTimeOffset>? getUtcNow = null, Func<ModHealthEnvironmentSnapshot>? getEnvironment = null, Func<bool>? isLifecycleTimingAvailable = null, Func<uint>? getCurrentUpdateTick = null)
     {
         this.PerformanceManager = performanceManager;
         this.Ledger = ledger;
@@ -35,6 +36,7 @@ internal sealed class ModHealthSessionCoordinator
         this.GetUtcNow = getUtcNow ?? (() => DateTimeOffset.UtcNow);
         this.GetEnvironment = getEnvironment;
         this.IsLifecycleTimingAvailable = isLifecycleTimingAvailable;
+        this.GetCurrentUpdateTick = getCurrentUpdateTick;
     }
 
     /// <summary>Start a fresh user-facing health capture.</summary>
@@ -106,10 +108,11 @@ internal sealed class ModHealthSessionCoordinator
                 return Refused($"The sample already contains the maximum of {ModHealthReportLimits.MaxMarks} marks.");
 
             ModPerformanceSnapshot snapshot = this.PerformanceManager.GetSnapshot();
-            uint tick = snapshot.RecentTicks.Count > 0 ? snapshot.RecentTicks[^1].Tick : 0;
+            uint tick = this.GetCurrentUpdateTick?.Invoke()
+                ?? (snapshot.RecentTicks.Count > 0 ? snapshot.RecentTicks[^1].Tick : 0);
             ModHealthMark mark = new(this.Marks.Length + 1, tick, snapshot.Elapsed.TotalMilliseconds);
             this.Marks = this.Marks.Add(mark);
-            return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Marked, $"Added reproduction mark #{mark.Number} at completed update tick {mark.UpdateTick}.");
+            return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Marked, $"Added reproduction mark #{mark.Number} at update tick {mark.UpdateTick}.");
         }
     }
 
@@ -207,9 +210,15 @@ internal sealed class ModHealthSessionCoordinator
                 return Refused("The sample is performance-owned. Use 'performance reset' instead.");
 
             bool restart = this.State == ModHealthCaptureState.Active && this.Owner == ModHealthCaptureOwner.Health;
+            bool applyPendingSettings = this.PendingSettings.HasValue;
             this.ExportQueue.DiscardRetryable();
             this.ClearCore();
             this.PerformanceManager.Reset();
+            if (applyPendingSettings)
+            {
+                this.ApplyPendingSettingsIfPossible();
+                return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Discarded the timed evidence and applied the pending persistent diagnostic settings. The session ledger was kept.");
+            }
             if (restart)
             {
                 this.StartCore(ModHealthCaptureOwner.Health, ModHealthCaptureOrigin.Manual, logTicks: false, ModHealthReportLimits.SlowUpdateMilliseconds);
@@ -255,8 +264,28 @@ internal sealed class ModHealthSessionCoordinator
             {
                 ModHealthExportDisposition.Retried => new(ModHealthCoordinatorResultCode.ExportRetried, "Retrying the exact frozen health report.", Export: queued.Status),
                 ModHealthExportDisposition.Pending => new(ModHealthCoordinatorResultCode.ExportPending, "The retry is pending behind the report currently being written.", Export: queued.Status),
+                ModHealthExportDisposition.Coalesced => new(ModHealthCoordinatorResultCode.ExportPending, "That exact frozen health report is already queued or being written.", Export: queued.Status),
+                ModHealthExportDisposition.RejectedBusy => Refused("The report queue is busy. The failed frozen health report is still retained; enter 'health retry' again after the current export finishes.", queued.Status),
                 _ => new(ModHealthCoordinatorResultCode.NothingToRetry, "There is no failed frozen health report to retry.", IsError: true, Export: queued.Status)
             };
+        }
+    }
+
+    /// <summary>Apply any pending persistent transition when its retained final export completes.</summary>
+    public void HandleExportCompleted(ModHealthExportStatus status)
+    {
+        lock (this.SyncRoot)
+        {
+            if (status.State != ModHealthExportState.Succeeded
+                || !status.IsFinal
+                || this.RetainedCapture?.ExportRequestId != status.RequestId
+                || !this.PendingSettings.HasValue)
+            {
+                return;
+            }
+
+            this.ClearCore();
+            this.ApplyPendingSettingsIfPossible();
         }
     }
 
@@ -284,10 +313,12 @@ internal sealed class ModHealthSessionCoordinator
         lock (this.SyncRoot)
         {
             this.PerformanceManager.ConfigureTickLogging(settings.LogPerformanceTicks, settings.PerformanceTickThresholdMilliseconds);
-            if (!initialLoad && this.State == ModHealthCaptureState.Active && this.Origin == ModHealthCaptureOrigin.Manual)
+            bool preserveActiveCapture = this.State == ModHealthCaptureState.Active
+                && (this.Origin == ModHealthCaptureOrigin.Manual || this.Owner == ModHealthCaptureOwner.Health);
+            if (!initialLoad && preserveActiveCapture)
             {
                 this.PendingSettings = settings;
-                return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.SettingsPending, "Persistent diagnostic start/stop changes are pending until the manual sample ends; live tick logging was updated.");
+                return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.SettingsPending, "Persistent diagnostic start/stop changes are pending until the active sample is exported or reset; live tick logging was updated.");
             }
 
             this.PendingSettings = null;

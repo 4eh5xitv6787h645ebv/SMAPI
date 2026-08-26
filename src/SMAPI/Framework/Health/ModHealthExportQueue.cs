@@ -10,7 +10,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     private readonly object SyncRoot = new();
     private readonly AutoResetEvent WorkAvailable = new(initialState: false);
     private readonly CancellationTokenSource Cancellation = new();
-    private readonly Func<ModHealthExportRequest, ModHealthReportPayload> BuildPayload;
+    private readonly Func<ModHealthExportRequest, bool, ModHealthReportPayload> BuildPayload;
     private readonly IModHealthReportPublisher Publisher;
     private readonly Action<ModHealthExportStatus>? OnCompleted;
     private readonly Thread Worker;
@@ -18,6 +18,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
 
     private ModHealthExportRequest? WritingRequest;
     private ModHealthExportRequest? PendingRequest;
+    private bool PendingIsRetry;
     private ModHealthExportRequest? RetryableRequest;
     private bool RetryScheduled;
     private ModHealthExportStatus LatestStatus = ModHealthExportStatus.None;
@@ -25,7 +26,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     private TaskCompletionSource<bool> Drained = ModHealthExportQueue.CreateCompletionSource(completed: true);
     private bool DisposeRequested;
 
-    public ModHealthExportQueue(Func<ModHealthExportRequest, ModHealthReportPayload> buildPayload, IModHealthReportPublisher publisher, string workerName = "SMAPI mod health report writer", TimeSpan? shutdownTimeout = null, Action<ModHealthExportStatus>? onCompleted = null)
+    public ModHealthExportQueue(Func<ModHealthExportRequest, bool, ModHealthReportPayload> buildPayload, IModHealthReportPublisher publisher, string workerName = "SMAPI mod health report writer", TimeSpan? shutdownTimeout = null, Action<ModHealthExportStatus>? onCompleted = null)
     {
         this.BuildPayload = buildPayload ?? throw new ArgumentNullException(nameof(buildPayload));
         this.Publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
@@ -63,8 +64,11 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
 
             if (request.IsFinal && !this.PendingRequest.IsFinal)
             {
+                if (this.PendingIsRetry && this.RetryableRequest?.RequestId == this.PendingRequest.RequestId)
+                    this.RetryScheduled = false;
                 this.PreviousStatus = new(ModHealthExportState.Failed, this.PendingRequest.RequestId, this.PendingRequest.IsFinal, Error: "Superseded by the final report.");
                 this.PendingRequest = request;
+                this.PendingIsRetry = false;
                 this.LatestStatus = CreateQueuedStatus(request);
                 return new(ModHealthExportDisposition.Coalesced, this.LatestStatus);
             }
@@ -88,7 +92,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
 
             bool queuedDirectly = this.WritingRequest is null;
             this.RetryScheduled = true;
-            this.AcceptPending(this.RetryableRequest);
+            this.AcceptPending(this.RetryableRequest, isRetry: true);
             return new(queuedDirectly ? ModHealthExportDisposition.Retried : ModHealthExportDisposition.Pending, this.LatestStatus);
         }
     }
@@ -152,23 +156,41 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
             {
                 this.PreviousStatus = new(ModHealthExportState.Failed, this.PendingRequest.RequestId, this.PendingRequest.IsFinal, Error: "Report export was cancelled during shutdown.");
                 this.PendingRequest = null;
+                this.PendingIsRetry = false;
             }
             this.CompleteDrainIfIdle();
         }
         this.WorkAvailable.Set();
-        if (this.Worker.Join(this.ShutdownTimeout))
+        this.Worker.Join(this.ShutdownTimeout);
+    }
+
+    private void Run()
+    {
+        try
         {
-            (this.Publisher as IDisposable)?.Dispose();
+            this.RunCore();
+        }
+        finally
+        {
+            try
+            {
+                (this.Publisher as IDisposable)?.Dispose();
+            }
+            catch
+            {
+                // Resource cleanup must not terminate the process from the background worker.
+            }
             this.WorkAvailable.Dispose();
             this.Cancellation.Dispose();
         }
     }
 
-    private void Run()
+    private void RunCore()
     {
         while (true)
         {
             ModHealthExportRequest? request;
+            bool isRetry = false;
             bool notify;
             lock (this.SyncRoot)
             {
@@ -178,6 +200,8 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
                 if (request is not null)
                 {
                     this.PendingRequest = null;
+                    isRetry = this.PendingIsRetry;
+                    this.PendingIsRetry = false;
                     this.WritingRequest = request;
                     this.LatestStatus = new(ModHealthExportState.Writing, request.RequestId, request.IsFinal);
                 }
@@ -193,10 +217,17 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
             try
             {
                 this.Cancellation.Token.ThrowIfCancellationRequested();
-                ModHealthReportPayload payload = this.BuildPayload(request);
+                ModHealthReportPayload payload = this.BuildPayload(request, isRetry);
                 this.Cancellation.Token.ThrowIfCancellationRequested();
                 ModHealthPublishedReport published = this.Publisher.Publish(request, payload, this.Cancellation.Token);
-                result = new(ModHealthExportState.Succeeded, request.RequestId, request.IsFinal, published.TextPath, published.JsonPath);
+                result = new(
+                    ModHealthExportState.Succeeded,
+                    request.RequestId,
+                    request.IsFinal,
+                    published.TextPath,
+                    published.JsonPath,
+                    Summary: published.Summary ?? ModHealthCompletionSummary.FromReport(payload.Model)
+                );
             }
             catch (OperationCanceledException) when (this.Cancellation.IsCancellationRequested)
             {
@@ -242,11 +273,12 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
         }
     }
 
-    private void AcceptPending(ModHealthExportRequest request)
+    private void AcceptPending(ModHealthExportRequest request, bool isRetry = false)
     {
         if (this.WritingRequest is null && this.PendingRequest is null && this.Drained.Task.IsCompleted)
             this.Drained = ModHealthExportQueue.CreateCompletionSource(completed: false);
         this.PendingRequest = request;
+        this.PendingIsRetry = isRetry;
         this.LatestStatus = CreateQueuedStatus(request);
         this.WorkAvailable.Set();
     }

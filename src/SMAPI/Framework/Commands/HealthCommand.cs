@@ -115,6 +115,8 @@ internal sealed class HealthCommand : IInternalCommand
         {
             ModHealthCaptureState.Active => "Reproduce the problem, optionally enter 'health mark', then enter 'health stop'.",
             ModHealthCaptureState.StoppedRetained when status.Export.State == ModHealthExportState.Failed => "Enter 'health retry', or 'health reset confirm' to discard the failed report.",
+            ModHealthCaptureState.StoppedRetained when status.Export.State is ModHealthExportState.Queued or ModHealthExportState.Writing => "The retained report is queued or being written. Enter 'health status' to check it, or wait for the completed paths.",
+            ModHealthCaptureState.StoppedRetained when status.Export.State == ModHealthExportState.Succeeded => HealthCommand.FormatCompletedNextStep(status.Export),
             ModHealthCaptureState.StoppedRetained => "Enter 'health report' to save the retained sample, or 'health reset confirm' to discard it.",
             _ => "Enter 'health start', reproduce the problem, then enter 'health stop'."
         };
@@ -168,5 +170,13 @@ internal sealed class HealthCommand : IInternalCommand
             ModHealthCaptureState.StoppedRetained => $"stopped with a retained {owner} sample",
             _ => "inactive with no retained sample"
         };
+    }
+
+    private static string FormatCompletedNextStep(ModHealthExportStatus export)
+    {
+        string saved = export.TextPath is not null && export.JsonPath is not null
+            ? $"The retained report was saved as {export.TextPath} and {export.JsonPath}."
+            : "The retained report was saved successfully.";
+        return $"{saved} Enter 'health start' for a fresh sample, or 'health reset confirm' to discard the retained timing.";
     }
 }

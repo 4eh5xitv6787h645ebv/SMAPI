@@ -153,8 +153,12 @@ internal sealed record ModHealthUpdate(
     [property: JsonProperty("warningCount", Order = 11, Required = Required.Always)] int WarningCount,
     [property: JsonProperty("errorCount", Order = 12, Required = Required.Always)] int ErrorCount,
     [property: JsonProperty("callbackFailureCount", Order = 13, Required = Required.Always)] int CallbackFailureCount,
-    [property: JsonProperty("contributors", Order = 14, Required = Required.Always)] ImmutableArray<ModHealthContributor> Contributors,
-    [property: JsonProperty("nearbyMark", Order = 15)] int? NearbyMark
+    [property: JsonProperty("gen0Collections", Order = 14, Required = Required.Always)] int Gen0Collections,
+    [property: JsonProperty("gen1Collections", Order = 15, Required = Required.Always)] int Gen1Collections,
+    [property: JsonProperty("gen2Collections", Order = 16, Required = Required.Always)] int Gen2Collections,
+    [property: JsonProperty("gcCollectionDataValid", Order = 17, Required = Required.Always)] bool GcCollectionDataValid,
+    [property: JsonProperty("contributors", Order = 18, Required = Required.Always)] ImmutableArray<ModHealthContributor> Contributors,
+    [property: JsonProperty("nearbyMark", Order = 19)] int? NearbyMark
 );
 
 [JsonObject(MemberSerialization.OptIn)]
@@ -364,19 +368,19 @@ internal enum ModHealthExecutionPhase
 [JsonConverter(typeof(StringEnumConverter))]
 internal enum ModHealthOperationKind
 {
-    [EnumMember(Value = "event")]
+    [EnumMember(Value = ModHealthReportLabels.Event)]
     Event,
-    [EnumMember(Value = "content-load")]
+    [EnumMember(Value = ModHealthReportLabels.ContentLoad)]
     ContentLoad,
-    [EnumMember(Value = "content-edit")]
+    [EnumMember(Value = ModHealthReportLabels.ContentEdit)]
     ContentEdit,
-    [EnumMember(Value = "console")]
+    [EnumMember(Value = ModHealthReportLabels.Console)]
     Console,
-    [EnumMember(Value = "entry")]
+    [EnumMember(Value = ModHealthReportLabels.Entry)]
     Entry,
-    [EnumMember(Value = "get-api")]
+    [EnumMember(Value = ModHealthReportLabels.GetApi)]
     GetApi,
-    [EnumMember(Value = "other")]
+    [EnumMember(Value = ModHealthReportLabels.Other)]
     Other
 }
 
@@ -394,6 +398,8 @@ internal enum ModHealthModKind
 [JsonConverter(typeof(StringEnumConverter))]
 internal enum ModHealthModStatus
 {
+    [EnumMember(Value = "discovered")]
+    Discovered,
     [EnumMember(Value = "loaded")]
     Loaded,
     [EnumMember(Value = "skipped")]

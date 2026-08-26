@@ -60,6 +60,10 @@ internal readonly record struct ModHealthUpdatePerformanceSnapshot(
     int WarningCount,
     int ErrorCount,
     int CallbackFailureCount,
+    int Gen0Collections,
+    int Gen1Collections,
+    int Gen2Collections,
+    bool GcCollectionDataIsValid,
     IReadOnlyList<ModHealthTickContributorSnapshot> Contributors,
     long OmittedContributors
 )

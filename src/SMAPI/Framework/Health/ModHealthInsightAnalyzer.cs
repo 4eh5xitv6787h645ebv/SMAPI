@@ -103,13 +103,13 @@ internal sealed class ModHealthInsightAnalyzer
                 ModHealthFindingConfidence.Factual,
                 callback.ModId,
                 $"SMAPI observed a long callback from {callback.ModName} ({callback.ModId}).",
-                $"The {callback.Operation.ToString().ToLowerInvariant()} callback peaked at {callback.MaximumMilliseconds.ToString("0.###", CultureInfo.InvariantCulture)} ms.",
+                $"The {ModHealthReportLabels.GetOperation(callback.Operation)} callback peaked at {callback.MaximumMilliseconds.ToString("0.###", CultureInfo.InvariantCulture)} ms.",
                 "Reproduce again and compare with the normal SMAPI log before changing the mod setup.",
                 "Elapsed callback time is wall-clock correlation at an SMAPI boundary, not proof of root cause."
             ));
         }
 
-        if (report.Performance.SlowUpdateCount >= ModHealthReportLimits.RepeatedSlowUpdateCount)
+        if (!report.Capture.IsShortSample && report.Performance.SlowUpdateCount >= ModHealthReportLimits.RepeatedSlowUpdateCount)
         {
             findings.Add(new(
                 "repeated-slow-updates",
@@ -123,8 +123,11 @@ internal sealed class ModHealthInsightAnalyzer
             ));
         }
 
-        this.AddDominanceFinding(report, findings);
-        this.AddUnattributedFinding(report, findings);
+        if (!report.Capture.IsShortSample)
+        {
+            this.AddDominanceFinding(report, findings);
+            this.AddUnattributedFinding(report, findings);
+        }
 
         if (report.Capture.IsShortSample)
         {
@@ -193,31 +196,34 @@ internal sealed class ModHealthInsightAnalyzer
     private void AddDominanceFinding(ModHealthReport report, List<ModHealthFinding> findings)
     {
         ModHealthUpdate[] validSlowUpdates = report.Performance.WorstUpdates
-            .Where(update => update.TimingValid && update.TotalMilliseconds >= report.Capture.SlowUpdateThresholdMilliseconds && update.Contributors.Length > 0)
+            .Where(update => update.TimingValid && update.TotalMilliseconds >= report.Capture.SlowUpdateThresholdMilliseconds)
             .ToArray();
         if (validSlowUpdates.Length < ModHealthReportLimits.RepeatedSlowUpdateCount)
             return;
 
         var leading = validSlowUpdates
+            .Where(update => update.Contributors.Length > 0)
             .Select(update => update.Contributors.OrderByDescending(contributor => contributor.Milliseconds).ThenBy(contributor => contributor.ModId, StringComparer.OrdinalIgnoreCase).First())
             .GroupBy(contributor => contributor.ModId, StringComparer.OrdinalIgnoreCase)
             .Select(group => new { ModId = group.Key, Count = group.Count() })
             .OrderByDescending(entry => entry.Count)
             .ThenBy(entry => entry.ModId, StringComparer.OrdinalIgnoreCase)
-            .First();
-
-        ModHealthUpdate[] ledUpdates = validSlowUpdates
-            .Where(update => update.Contributors.OrderByDescending(contributor => contributor.Milliseconds).ThenBy(contributor => contributor.ModId, StringComparer.OrdinalIgnoreCase).First().ModId.Equals(leading.ModId, StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-        if (ledUpdates.Length * 2 < validSlowUpdates.Length)
+            .FirstOrDefault();
+        if (leading == null || leading.Count * 2 < validSlowUpdates.Length)
             return;
 
-        double modMilliseconds = ledUpdates.Sum(update => update.Contributors.First(contributor => contributor.ModId.Equals(leading.ModId, StringComparison.OrdinalIgnoreCase)).Milliseconds);
-        double instrumentedMilliseconds = ledUpdates.Sum(update => update.ObservedModMilliseconds);
+        ModHealthUpdate[] ledUpdates = validSlowUpdates
+            .Where(update => update.Contributors.Length > 0 && update.Contributors.OrderByDescending(contributor => contributor.Milliseconds).ThenBy(contributor => contributor.ModId, StringComparer.OrdinalIgnoreCase).First().ModId.Equals(leading.ModId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        double modMilliseconds = validSlowUpdates.Sum(update => update.Contributors
+            .Where(contributor => contributor.ModId.Equals(leading.ModId, StringComparison.OrdinalIgnoreCase))
+            .Sum(contributor => contributor.Milliseconds));
+        double instrumentedMilliseconds = validSlowUpdates.Sum(update => update.ObservedModMilliseconds);
         if (instrumentedMilliseconds <= 0 || modMilliseconds / instrumentedMilliseconds < ModHealthReportLimits.DominantInstrumentedShare)
             return;
 
-        double totalMilliseconds = ledUpdates.Sum(update => update.TotalMilliseconds);
+        double totalMilliseconds = validSlowUpdates.Sum(update => update.TotalMilliseconds);
         ModHealthFindingConfidence confidence = totalMilliseconds > 0 && instrumentedMilliseconds / totalMilliseconds >= ModHealthReportLimits.SufficientInstrumentedShare
             ? ModHealthFindingConfidence.Likely
             : ModHealthFindingConfidence.Possible;

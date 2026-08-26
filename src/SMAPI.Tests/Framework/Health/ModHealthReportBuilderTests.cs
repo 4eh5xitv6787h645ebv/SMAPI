@@ -77,7 +77,15 @@ internal sealed class ModHealthReportBuilderTests
         report.Logs.Should().ContainSingle().Which.Should().Match<ModHealthLogSummary>(log => log.SinceLedgerStart.ErrorMessages == 1 && log.DuringCapture.ErrorMessages == 1 && log.SinceLedgerStart.ErrorCharacters == 41);
         report.CallbackFailures.Should().ContainSingle().Which.Should().Match<ModHealthCallbackFailure>(failure => failure.CaptureCount == 1 && failure.OnBehalfOfModId == "Pack.Mod");
         report.Performance.Callbacks.Should().ContainSingle().Which.Should().Match<ModHealthCallback>(callback => callback.Event == "AssetRequested" && callback.OnBehalfOfModId == "Pack.Mod");
-        report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(update => update.NearbyMark == 1 && update.SmapiOtherMilliseconds == 10 && update.ResidualMilliseconds == 0);
+        report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(update =>
+            update.NearbyMark == 1
+            && update.SmapiOtherMilliseconds == 10
+            && update.ResidualMilliseconds == 0
+            && update.Gen0Collections == 2
+            && update.Gen1Collections == 1
+            && update.Gen2Collections == 0
+            && update.GcCollectionDataValid
+        );
         report.Performance.Episodes.Should().ContainSingle().Which.NearbyMark.Should().Be(1, "the earlier mark wins an equal-distance tie");
         report.Capacities.Select(capacity => capacity.Name).Should().BeInAscendingOrder(StringComparer.Ordinal);
         report.Omissions.Select(omission => omission.Section).Should().BeInAscendingOrder(StringComparer.Ordinal);
@@ -104,7 +112,7 @@ internal sealed class ModHealthReportBuilderTests
         report.Capture.Mode.Should().Be(ModHealthCaptureMode.LedgerOnly);
         report.Capture.IsShortSample.Should().BeTrue();
         report.Capture.TimingValid.Should().BeFalse();
-        report.Mods.Single().Status.Should().Be(ModHealthModStatus.Skipped);
+        report.Mods.Single().Status.Should().Be(ModHealthModStatus.Discovered);
         report.Mods.Single().FailureCategory.Should().Be("status-incomplete");
         report.Mods.Single().UpdateStatus.Should().Be(ModHealthReportUpdateStatus.Disabled);
         report.Mods.Single().CaptureErrorCount.Should().Be(0);
@@ -154,6 +162,32 @@ internal sealed class ModHealthReportBuilderTests
         report.Performance.WorstUpdates.Single().NearbyMark.Should().Be(1);
     }
 
+    [Test]
+    public void Build_EnvironmentReducesOsBannersToNonIdentifyingNumericValues()
+    {
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 0);
+        ModHealthExportRequest request = new(Guid.NewGuid(), DateTimeOffset.UtcNow, ModHealthCaptureOwner.None, null, ModHealthCompletionReason.InterimReport, null, ledger.GetSnapshot(), ImmutableArray<ModHealthMark>.Empty, 33.333, false);
+        ModHealthEnvironmentSnapshot environment = CreateEnvironment() with
+        {
+            LinuxDistribution = "ubuntu 24.04.3",
+            Kernel = "Linux 6.12.9-private-hostname"
+        };
+
+        ModHealthReportPayload payload = new ModHealthReportBuilder().BuildPayload(request, environment);
+
+        payload.Model.Environment.LinuxDistribution.Should().Be("ubuntu 24.04.3");
+        payload.Model.Environment.Kernel.Should().Be("6.12.9");
+        payload.Json.Should().NotContain("private-admin-banner").And.NotContain("private-hostname");
+
+        ModHealthReport unknown = new ModHealthReportBuilder().Build(request, environment with
+        {
+            LinuxDistribution = "ubuntu 24.04 private-admin-banner",
+            Kernel = "host-name 6.12"
+        });
+        unknown.Environment.LinuxDistribution.Should().BeNull();
+        unknown.Environment.Kernel.Should().BeNull();
+    }
+
     private static ModHealthEnvironmentSnapshot CreateEnvironment()
     {
         return new("4.5.2-fork", "abc123", "1.6.15", ".NET 6.0.36", "x64", 64, "Linux", "6.12", "Wayland", "en-AU", 8, "single-player", 1, true, false);
@@ -174,6 +208,10 @@ internal sealed class ModHealthReportBuilderTests
             WarningCount: 1,
             ErrorCount: 1,
             CallbackFailureCount: 1,
+            Gen0Collections: 2,
+            Gen1Collections: 1,
+            Gen2Collections: 0,
+            GcCollectionDataIsValid: true,
             Contributors: Array.AsReadOnly(new[] { new ModHealthTickContributorSnapshot("Example.Mod", "Example Mod", 15) }),
             OmittedContributors: 0
         );

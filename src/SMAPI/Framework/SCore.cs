@@ -231,7 +231,7 @@ internal class SCore : IDisposable
             ModHealthReportBuilder reportBuilder = new();
             LinuxModHealthReportPublisher reportPublisher = new(Path.Combine(Constants.LogDir, "HealthReports"));
             this.ModHealthExportQueue = new ModHealthExportQueue(
-                request => reportBuilder.BuildPayload(request, request.Environment ?? throw new InvalidOperationException("A frozen Linux health environment snapshot is required.")),
+                (request, isRetry) => reportBuilder.BuildPayload(request, request.Environment ?? throw new InvalidOperationException("A frozen Linux health environment snapshot is required."), writeRetry: isRetry),
                 reportPublisher,
                 shutdownTimeout: TimeSpan.Zero,
                 onCompleted: this.OnModHealthExportCompleted
@@ -241,7 +241,8 @@ internal class SCore : IDisposable
                 this.ModHealthLedger!,
                 this.ModHealthExportQueue,
                 getEnvironment: this.GetModHealthEnvironmentSnapshot,
-                isLifecycleTimingAvailable: () => !Context.IsGameLaunched
+                isLifecycleTimingAvailable: () => !Context.IsGameLaunched,
+                getCurrentUpdateTick: () => SCore.TicksElapsed
             );
             this.ModHealthSessionCoordinator.ApplySettings(this.GetModHealthDiagnosticSettings(this.Settings), initialLoad: true);
             this.CommandManager.Add(new PerformanceCommand(this.ModHealthSessionCoordinator), this.Monitor);
@@ -668,9 +669,20 @@ internal class SCore : IDisposable
     /// <summary>Log an asynchronous health-report result without feeding reporter output back into the ledger.</summary>
     private void OnModHealthExportCompleted(ModHealthExportStatus status)
     {
+        this.ModHealthSessionCoordinator?.HandleExportCompleted(status);
         using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
-        if (status.State == ModHealthExportState.Succeeded && status.TextPath is not null && status.JsonPath is not null)
-            this.Monitor.Log($"Mod health report saved as {status.TextPath} and {status.JsonPath}. Reports are kept in private local storage until you choose to share them.", LogLevel.Info);
+        if (status.State == ModHealthExportState.Succeeded && status.TextPath is not null && status.JsonPath is not null && status.Summary is not null)
+        {
+            string summary = ModHealthCompletionSummaryFormatter.Format(
+                status.Summary,
+                status.TextPath,
+                status.JsonPath,
+                ModHealthCompletionSummaryFormatter.GetTerminalWidth()
+            );
+            this.Monitor.Log(summary, LogLevel.Info);
+        }
+        else if (status.State == ModHealthExportState.Succeeded)
+            this.Monitor.Log("The mod health report was saved, but its frozen completion summary or relative paths were unavailable. Enter 'health status' for details.", LogLevel.Warn);
         else if (status.State == ModHealthExportState.Failed)
             this.Monitor.Log($"{status.Error ?? "The mod health report could not be written."} Enter 'health retry' to retry the exact frozen report.", LogLevel.Error);
     }
@@ -694,8 +706,8 @@ internal class SCore : IDisposable
             RuntimeVersion: RuntimeInformation.FrameworkDescription,
             ProcessArchitecture: RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(),
             ProcessBitness: Environment.Is64BitProcess ? 64 : 32,
-            LinuxDistribution: RuntimeInformation.OSDescription,
-            Kernel: Environment.OSVersion.Version.ToString(),
+            LinuxDistribution: LinuxModHealthEnvironment.ReadDistribution(),
+            Kernel: LinuxModHealthEnvironment.NormalizeKernel(RuntimeInformation.OSDescription),
             SessionType: sessionType,
             Locale: locale,
             LogicalProcessorCount: Math.Max(1, Environment.ProcessorCount),

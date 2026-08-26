@@ -28,6 +28,8 @@ internal sealed class ModHealthReportPublisherTests
 
         string[] names = Directory.GetFiles(output).Select(Path.GetFileName).Where(name => !name!.StartsWith('.')).Order().ToArray()!;
         names.Should().HaveCount(3);
+        result.TextPath.Should().Contain(CreatePayload().Model.Header.ReportId);
+        result.Summary.Should().BeEquivalentTo(ModHealthCompletionSummary.FromReport(CreatePayload().Model));
         names.Should().Contain(Path.GetFileNameWithoutExtension(result.TextPath) + ".complete");
         File.ReadAllText(Path.Combine(output, Path.GetFileName(result.TextPath))).Should().Be(CreatePayload().Text);
         File.ReadAllText(Path.Combine(output, Path.GetFileName(result.JsonPath))).Should().Be(CreatePayload().Json);
@@ -41,7 +43,7 @@ internal sealed class ModHealthReportPublisherTests
     {
         using InMemoryFileSystem fileSystem = new();
         ModHealthExportRequest request = CreateRequest();
-        string stem = $"SMAPI-health-20260826-123456-{request.RequestId:N}";
+        string stem = $"SMAPI-health-20260826-123456-{CreatePayload().Model.Header.ReportId}";
         fileSystem.Files[$"{stem}.txt"] = Encoding.UTF8.GetBytes("existing");
         ModHealthReportPublisher publisher = new(fileSystem);
 
@@ -66,6 +68,18 @@ internal sealed class ModHealthReportPublisherTests
     }
 
     [Test]
+    public void Publish_FinalDirectorySyncFailureRemovesMarkerPairAndTemps()
+    {
+        using InMemoryFileSystem fileSystem = new() { FailDirectorySyncCall = 2 };
+        ModHealthReportPublisher publisher = new(fileSystem);
+
+        FluentActions.Invoking(() => publisher.Publish(CreateRequest(), CreatePayload(), CancellationToken.None))
+            .Should().Throw<IOException>();
+
+        fileSystem.Files.Keys.Should().NotContain(name => name.EndsWith(".txt") || name.EndsWith(".json") || name.EndsWith(".complete") || name.Contains(".tmp-"));
+    }
+
+    [Test]
     public void Publish_RetainsOnlyFiveCompletePairsAndUnrelatedFiles()
     {
         using InMemoryFileSystem fileSystem = new();
@@ -73,7 +87,10 @@ internal sealed class ModHealthReportPublisherTests
         ModHealthReportPublisher publisher = new(fileSystem, () => new DateTimeOffset(2026, 8, 26, 13, 0, 0, TimeSpan.Zero));
 
         for (int i = 0; i < 7; i++)
-            publisher.Publish(CreateRequest(Guid.NewGuid()), CreatePayload(), CancellationToken.None);
+        {
+            ModHealthExportRequest request = CreateRequest(Guid.NewGuid());
+            publisher.Publish(request, CreatePayload(request.RequestId), CancellationToken.None);
+        }
 
         fileSystem.Files.Keys.Count(name => name.EndsWith(".complete")).Should().Be(5);
         fileSystem.Files.Should().ContainKey("keep-me.txt");
@@ -83,8 +100,8 @@ internal sealed class ModHealthReportPublisherTests
     public void Publish_CleansStaleIncompleteButPreservesFreshIncomplete()
     {
         using InMemoryFileSystem fileSystem = new();
-        string stale = "SMAPI-health-20260826-120000-11111111111111111111111111111111.txt";
-        string fresh = "SMAPI-health-20260826-120001-22222222222222222222222222222222.json";
+        string stale = "SMAPI-health-20260826-120000-report-1111111111111111.txt";
+        string fresh = "SMAPI-health-20260826-120001-report-2222222222222222.json";
         fileSystem.Files[stale] = [1];
         fileSystem.Files[fresh] = [2];
         fileSystem.Timestamps[stale] = new DateTimeOffset(2026, 8, 26, 12, 40, 0, TimeSpan.Zero);
@@ -103,7 +120,10 @@ internal sealed class ModHealthReportPublisherTests
         ModHealthReportPublisher publisher = new(fileSystem);
 
         for (int i = 0; i < 6; i++)
-            publisher.Publish(CreateRequest(Guid.NewGuid()), CreatePayload(), CancellationToken.None);
+        {
+            ModHealthExportRequest request = CreateRequest(Guid.NewGuid());
+            publisher.Publish(request, CreatePayload(request.RequestId), CancellationToken.None);
+        }
 
         fileSystem.Files.Keys.Count(name => name.EndsWith(".complete")).Should().Be(6);
     }
@@ -133,7 +153,7 @@ internal sealed class ModHealthReportPublisherTests
         ModHealthExportRequest request = CreateRequest();
         string target = Path.Combine(directory.Path, "outside.txt");
         File.WriteAllText(target, "unchanged");
-        string stem = $"SMAPI-health-20260826-123456-{request.RequestId:N}";
+        string stem = $"SMAPI-health-20260826-123456-{CreatePayload().Model.Header.ReportId}";
         File.CreateSymbolicLink(Path.Combine(output, $"{stem}.txt"), target);
 
         FluentActions.Invoking(() => new ModHealthReportPublisher(fileSystem).Publish(request, CreatePayload(), CancellationToken.None))
@@ -157,9 +177,12 @@ internal sealed class ModHealthReportPublisherTests
         second.TryAcquireMaintenanceLock().Should().BeNull();
     }
 
-    private static ModHealthReportPayload CreatePayload()
+    private static ModHealthReportPayload CreatePayload(Guid? requestId = null)
     {
-        return new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        Guid id = requestId ?? Guid.Parse("11111111-2222-3333-4444-555555555555");
+        ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical();
+        report = report with { Header = report.Header with { ReportId = "report-" + id.ToString("N")[..16] } };
+        return new ModHealthReportPayloadFactory().Create(report);
     }
 
     private static ModHealthExportRequest CreateRequest(Guid? id = null)
@@ -200,7 +223,9 @@ internal sealed class ModHealthReportPublisherTests
         public Dictionary<string, DateTimeOffset> Timestamps { get; } = new(StringComparer.Ordinal);
         public List<string> PublicationOrder { get; } = [];
         public bool FailMarkerPublication { get; init; }
+        public int? FailDirectorySyncCall { get; init; }
         public bool MaintenanceLockAvailable { get; init; } = true;
+        private int DirectorySyncCalls;
 
         public void WritePrivateFile(string name, ReadOnlySpan<byte> contents)
         {
@@ -223,7 +248,11 @@ internal sealed class ModHealthReportPublisherTests
         }
 
         public bool Exists(string name) => this.Files.ContainsKey(name);
-        public void SyncDirectory() { }
+        public void SyncDirectory()
+        {
+            if (++this.DirectorySyncCalls == this.FailDirectorySyncCall)
+                throw new IOException("injected directory sync failure");
+        }
         public DateTimeOffset GetLastWriteTimeUtc(string name) => this.Timestamps.GetValueOrDefault(name, new DateTimeOffset(2026, 8, 26, 13, 0, 0, TimeSpan.Zero));
         public IEnumerable<string> EnumerateNames() => this.Files.Keys.ToArray();
 

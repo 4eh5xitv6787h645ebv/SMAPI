@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using FluentAssertions;
 using Moq;
 using NUnit.Framework;
@@ -99,6 +100,33 @@ internal class ManagedEventTests
         healthCallback.Phase.Should().Be(ModHealthExecutionPhase.Startup);
         healthCallback.Operation.Should().Be(ModHealthOperationKind.Event);
         monitor.Verify(instance => instance.Log(It.Is<string>(message => message.Contains("test failure")), LogLevel.Error), Times.Once);
+        Context.HeuristicModsRunningCode.Should().BeEmpty();
+    }
+
+    [TestCase("Display.Rendering", ModHealthExecutionPhase.Draw)]
+    [TestCase("GameLoop.GameLaunched", ModHealthExecutionPhase.Startup)]
+    public void Raise_Profiled_NestedEventsInheritAmbientExecutionPhase(string outerEventName, ModHealthExecutionPhase expectedPhase)
+    {
+        ModPerformanceManager performance = new(timestampFrequency: 1000, getTimestamp: static () => 0, getGcCollectionCount: _ => 0);
+        performance.Start();
+
+        Mock<IManifest> manifest = new();
+        manifest.SetupGet(instance => instance.UniqueID).Returns("Example.Mod");
+        Mock<IModMetadata> mod = new();
+        mod.Setup(instance => instance.HasManifest()).Returns(true);
+        mod.SetupGet(instance => instance.Manifest).Returns(manifest.Object);
+        mod.SetupGet(instance => instance.DisplayName).Returns("Example Mod");
+
+        ManagedEvent<EventArgs> inner = new("Content.AssetRequested", new ModRegistry(), performance);
+        inner.Add((_, _) => { }, mod.Object);
+        ManagedEvent<EventArgs> outer = new(outerEventName, new ModRegistry(), performance);
+        outer.Add((_, _) => inner.Raise(EventArgs.Empty), mod.Object);
+
+        outer.Raise(EventArgs.Empty);
+
+        performance.GetSnapshot().Health!.Callbacks
+            .Single(callback => callback.EventName == "Content.AssetRequested")
+            .Phase.Should().Be(expectedPhase);
         Context.HeuristicModsRunningCode.Should().BeEmpty();
     }
 

@@ -259,6 +259,20 @@ internal sealed class ModHealthSessionCoordinatorTests
         context.Queue.LastRequest.Should().BeSameAs(original);
     }
 
+    [TestCase(ModHealthExportDisposition.Coalesced, ModHealthCoordinatorResultCode.ExportPending, false)]
+    [TestCase(ModHealthExportDisposition.RejectedBusy, ModHealthCoordinatorResultCode.Refused, true)]
+    public void Retry_ReportsAlreadyScheduledAndBusyStatesExplicitly(ModHealthExportDisposition disposition, ModHealthCoordinatorResultCode expectedCode, bool expectedError)
+    {
+        Context context = new();
+        context.Queue.SetNextRetryResult(disposition, ModHealthExportState.Queued);
+
+        ModHealthCoordinatorResult result = context.Coordinator.RetryHealthExport();
+
+        result.Code.Should().Be(expectedCode);
+        result.IsError.Should().Be(expectedError);
+        result.Message.Should().NotContain("no failed frozen health report");
+    }
+
     [Test]
     public void FailedRetainedReport_RequiresExactRetryInsteadOfRebuilding()
     {
@@ -289,6 +303,23 @@ internal sealed class ModHealthSessionCoordinatorTests
     }
 
     [Test]
+    public void Mark_BeforeFirstCompletedUpdateUsesCurrentTickAndAssociatesWithThatUpdate()
+    {
+        Context context = new(currentUpdateTick: 42);
+        context.Coordinator.StartHealth();
+
+        context.Coordinator.Mark();
+        context.Manager.BeginTick(42, 0);
+        context.Manager.CompleteTick(40);
+        context.Coordinator.StopHealth();
+
+        ModHealthExportRequest request = context.Queue.LastRequest!;
+        request.Marks.Should().ContainSingle().Which.UpdateTick.Should().Be(42);
+        ModHealthReport report = new ModHealthReportBuilder().Build(request, request.Environment!);
+        report.Performance.WorstUpdates.Should().ContainSingle().Which.NearbyMark.Should().Be(1);
+    }
+
+    [Test]
     public void InitialSettings_GiveHealthOnLaunchPrecedence()
     {
         Context context = new();
@@ -316,6 +347,69 @@ internal sealed class ModHealthSessionCoordinatorTests
         status.HasPendingConfiguration.Should().BeTrue();
         status.Performance!.LogIndividualTicks.Should().BeTrue();
         status.Performance.TickLogThresholdMilliseconds.Should().Be(44);
+    }
+
+    [Test]
+    public void ReloadSettings_DoesNotDiscardHealthOnLaunchAndAppliesAlternateAfterExport()
+    {
+        Context context = new();
+        context.Coordinator.ApplySettings(new(true, false, false, 0), initialLoad: true);
+        context.Manager.RecordHandler("example.mod", "Example", "event", "callback", 10, failed: false);
+
+        ModHealthCoordinatorResult reload = context.Coordinator.ApplySettings(new(false, true, true, 44), initialLoad: false);
+
+        reload.Code.Should().Be(ModHealthCoordinatorResultCode.SettingsPending);
+        ModHealthSessionStatus active = context.Coordinator.GetStatus();
+        active.CaptureState.Should().Be(ModHealthCaptureState.Active);
+        active.Owner.Should().Be(ModHealthCaptureOwner.Health);
+        active.Origin.Should().Be(ModHealthCaptureOrigin.HealthOnLaunch);
+        active.Performance!.Handlers.Should().ContainSingle();
+
+        context.Coordinator.StopHealth();
+        context.Queue.SetLastState(ModHealthExportState.Succeeded);
+        ModHealthSessionStatus switched = context.Coordinator.GetStatus();
+
+        switched.CaptureState.Should().Be(ModHealthCaptureState.Active);
+        switched.Owner.Should().Be(ModHealthCaptureOwner.Performance);
+        switched.Origin.Should().Be(ModHealthCaptureOrigin.Configuration);
+        switched.HasPendingConfiguration.Should().BeFalse();
+        switched.Performance!.LogIndividualTicks.Should().BeTrue();
+        switched.Performance.TickLogThresholdMilliseconds.Should().Be(44);
+    }
+
+    [Test]
+    public void FinalExportCompletion_AppliesPendingConfigurationWithoutStatusPolling()
+    {
+        Context context = new();
+        context.Coordinator.ApplySettings(new(true, false, false, 0), initialLoad: true);
+        context.Coordinator.ApplySettings(new(false, true, false, 20), initialLoad: false);
+        context.Coordinator.StopHealth();
+        Guid requestId = context.Queue.LastRequest!.RequestId;
+
+        context.Coordinator.HandleExportCompleted(new ModHealthExportStatus(ModHealthExportState.Succeeded, requestId, IsFinal: true, "ErrorLogs/HealthReports/report.txt", "ErrorLogs/HealthReports/report.json"));
+
+        context.Manager.IsTracking.Should().BeTrue();
+        ModHealthSessionStatus status = context.Coordinator.GetStatus();
+        status.Owner.Should().Be(ModHealthCaptureOwner.Performance);
+        status.Origin.Should().Be(ModHealthCaptureOrigin.Configuration);
+        status.HasPendingConfiguration.Should().BeFalse();
+    }
+
+    [Test]
+    public void ResetHealth_AppliesPendingAlternateConfiguration()
+    {
+        Context context = new();
+        context.Coordinator.ApplySettings(new(true, false, false, 0), initialLoad: true);
+        context.Coordinator.ApplySettings(new(false, true, false, 20), initialLoad: false);
+
+        ModHealthCoordinatorResult reset = context.Coordinator.ResetHealth();
+
+        reset.Code.Should().Be(ModHealthCoordinatorResultCode.Reset);
+        ModHealthSessionStatus status = context.Coordinator.GetStatus();
+        status.CaptureState.Should().Be(ModHealthCaptureState.Active);
+        status.Owner.Should().Be(ModHealthCaptureOwner.Performance);
+        status.Origin.Should().Be(ModHealthCaptureOrigin.Configuration);
+        status.HasPendingConfiguration.Should().BeFalse();
     }
 
     [Test]
@@ -394,7 +488,7 @@ internal sealed class ModHealthSessionCoordinatorTests
         public FakeExportQueue Queue { get; } = new();
         public ModHealthSessionCoordinator Coordinator { get; }
 
-        public Context(bool? isLifecycleTimingAvailable = null)
+        public Context(bool? isLifecycleTimingAvailable = null, uint? currentUpdateTick = null)
         {
             this.Manager = new ModPerformanceManager(timestampFrequency: 1000, getTimestamp: () => this.Timestamp, getGcCollectionCount: _ => 0);
             this.Ledger = new ModHealthLedger(timestampFrequency: 1000, getTimestamp: () => this.Timestamp);
@@ -404,7 +498,8 @@ internal sealed class ModHealthSessionCoordinatorTests
                 this.Queue,
                 getUtcNow: () => new DateTimeOffset(2026, 8, 26, 0, 0, 0, TimeSpan.Zero),
                 getEnvironment: () => new ModHealthEnvironmentSnapshot("4.5.2", "abcdef0", "1.6.15", ".NET 10", "x64", 64, "Linux", "6.0", "wayland", "en", 8, "single-player", 1, false, false),
-                isLifecycleTimingAvailable: isLifecycleTimingAvailable.HasValue ? () => isLifecycleTimingAvailable.Value : null
+                isLifecycleTimingAvailable: isLifecycleTimingAvailable.HasValue ? () => isLifecycleTimingAvailable.Value : null,
+                getCurrentUpdateTick: currentUpdateTick.HasValue ? () => currentUpdateTick.Value : null
             );
         }
     }
@@ -413,6 +508,7 @@ internal sealed class ModHealthSessionCoordinatorTests
     {
         private readonly Dictionary<Guid, ModHealthExportStatus> Statuses = [];
         private ModHealthExportRequest? Retryable;
+        private ModHealthExportQueueResult? NextRetryResult;
 
         public List<ModHealthExportRequest> Requests { get; } = [];
         public ModHealthExportRequest? LastRequest => this.Requests.Count > 0 ? this.Requests[^1] : null;
@@ -427,6 +523,11 @@ internal sealed class ModHealthSessionCoordinatorTests
 
         public ModHealthExportQueueResult Retry()
         {
+            if (this.NextRetryResult is ModHealthExportQueueResult result)
+            {
+                this.NextRetryResult = null;
+                return result;
+            }
             if (this.Retryable == null)
                 return new ModHealthExportQueueResult(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
             ModHealthExportStatus status = new(ModHealthExportState.Queued, this.Retryable.RequestId, this.Retryable.IsFinal);
@@ -453,6 +554,11 @@ internal sealed class ModHealthSessionCoordinatorTests
             ModHealthExportRequest request = this.LastRequest!;
             this.Statuses[request.RequestId] = new ModHealthExportStatus(state, request.RequestId, request.IsFinal, textPath, jsonPath, state == ModHealthExportState.Failed ? "test failure" : null);
             this.Retryable = state == ModHealthExportState.Failed ? request : null;
+        }
+
+        public void SetNextRetryResult(ModHealthExportDisposition disposition, ModHealthExportState state)
+        {
+            this.NextRetryResult = new ModHealthExportQueueResult(disposition, new ModHealthExportStatus(state, Guid.NewGuid(), IsFinal: true));
         }
     }
 }
