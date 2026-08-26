@@ -55,6 +55,24 @@ internal class LinuxMouseClickBufferTests
     }
 
     [Test]
+    public void ReplaysPulseCompletedAfterNormallyObservedPress()
+    {
+        using LinuxMouseClickBuffer buffer = new();
+        MouseStateBuilder mouse = new();
+        LinuxMouseClickBufferTests.Apply(buffer, mouse, ButtonState.Released).ShouldBe(ButtonState.Released);
+
+        buffer.RecordNativeEvent(LinuxMouseClickBufferTests.MouseButtonDown, nativeButton: 1);
+        LinuxMouseClickBufferTests.Apply(buffer, mouse, ButtonState.Pressed).ShouldBe(ButtonState.Pressed);
+        buffer.RecordNativeEvent(LinuxMouseClickBufferTests.MouseButtonUp, nativeButton: 1);
+        buffer.RecordNativeEvent(LinuxMouseClickBufferTests.MouseButtonDown, nativeButton: 1);
+        buffer.RecordNativeEvent(LinuxMouseClickBufferTests.MouseButtonUp, nativeButton: 1);
+
+        LinuxMouseClickBufferTests.Apply(buffer, mouse, ButtonState.Released).ShouldBe(ButtonState.Released);
+        LinuxMouseClickBufferTests.Apply(buffer, mouse, ButtonState.Released).ShouldBe(ButtonState.Pressed);
+        LinuxMouseClickBufferTests.Apply(buffer, mouse, ButtonState.Released).ShouldBe(ButtonState.Released);
+    }
+
+    [Test]
     public void SeparatesMultipleMissedPulsesWithReleaseTicks()
     {
         using LinuxMouseClickBuffer buffer = new();

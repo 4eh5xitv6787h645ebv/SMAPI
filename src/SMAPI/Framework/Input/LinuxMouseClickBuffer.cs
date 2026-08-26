@@ -78,8 +78,9 @@ internal sealed class LinuxMouseClickBuffer : IDisposable
                 ButtonBuffer buffer = this.ButtonBuffers[i];
                 SButton button = LinuxMouseClickBuffer.Buttons[i];
                 bool isActuallyDown = LinuxMouseClickBuffer.IsDown(actualState, button);
+                bool wasActuallyDown = buffer.WasDownAtLastPoll;
 
-                if (!buffer.WasDownAtLastPoll && !isActuallyDown && buffer.CompletedPulsesSincePoll > 0)
+                if (buffer.CompletedPulsesSincePoll > 0)
                     buffer.QueuedPulses += buffer.CompletedPulsesSincePoll;
 
                 buffer.CompletedPulsesSincePoll = 0;
@@ -93,7 +94,7 @@ internal sealed class LinuxMouseClickBuffer : IDisposable
                     continue;
                 }
 
-                if (!isActuallyDown && buffer.QueuedPulses > 0)
+                if (!wasActuallyDown && !isActuallyDown && buffer.QueuedPulses > 0)
                 {
                     buffer.QueuedPulses--;
                     buffer.NeedsSyntheticRelease = true;
