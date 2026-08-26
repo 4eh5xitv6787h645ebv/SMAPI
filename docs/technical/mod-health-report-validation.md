@@ -58,4 +58,29 @@ This first run ended through a window close and produced an X11 `BadDrawable`, s
 
 ## Final verification
 
-Final test/build/package/runtime commands and GitHub/merge evidence are recorded here after the post-review runtime matrix completes.
+The post-review source under test was `bb954ce97` plus documentation-only evidence updates. A package preflight compared the built assembly with both host-specific package assemblies; stale host-specific copies found during a preliminary run were replaced before either final run. The final net6 and net10 assemblies all had SHA-256 `e9a53fead33101038f7b60e8bd44df156d9212bb58a5d355dd1a04cc4bf65b98`.
+
+The repository gates passed:
+
+- the full Release test run: 1,625 passed, three existing skips, zero failures;
+- the Release solution build: zero errors and nine existing warnings;
+- explicit publishes for both supported Linux desktop hosts;
+- `LinuxRuntimeDispatcherTests`: four passed, zero failed;
+- `dotnet format --verify-no-changes` restricted to modified files;
+- `git diff --check` and the Android/mobile path exclusion check;
+- the fixture tool's synthetic suite: 13 passed, zero failed.
+
+Both final full-corpus runs used Xvfb with PTY command input, `de_DE.UTF-8`, fresh mode-`0700` home and XDG runtime roots, the pinned complete Mods release, the pinned Blossom save, the external probe, and a top-level probe content pack. Each host-specific assembly hash was checked immediately before launch. The corpus reported 132 archive code mods and 176 archive content packs; the report inventory contained 309 loaded entries after adding the code probe and its content pack, plus 127 problem-first discovered identities, one skipped identity, and no ignored, invalid, or failed identities. This distinction is expected because the ledger records discovery observations which aren't part of the console's loaded-mod totals.
+
+| Host / flow | Final reason | Final updates | Slow updates | JSON bytes | Text bytes | On-behalf-of callback rows |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| net6, manual `health start` / `health stop` | `user-stop` | 2,292 | 19 | 1,290,641 | 108,161 | 94 |
+| net10, `EnableModHealthReportOnLaunch` / normal exit | `normal-shutdown` | 2,561 | 22 | 1,331,802 | 123,417 | 155 |
+
+The net6 interim snapshot contained 1,168 updates, and the net10 interim snapshot contained 1,284. All four reports used the fixed 33.333 ms threshold, valid timing partitions, per-update/sample generation collection counts, reproduction marks, structured probe callback failures, and retained on-behalf-of content operations. Each retained the deliberate roughly 1.2-second unobserved stall as more than one second of base-game-exclusive time instead of attributing it to the probe. The net6 final sample exceeded the 600-update recent ring while preserving its earlier worst update.
+
+Every JSON payload validated against the checked-in schema v1. Each completion marker named exactly its matching text and JSON pair; report IDs matched the marker stem and both payloads. The report directories were `0700`, all payloads/markers were `0600`, filenames used `report-` plus 16 hexadecimal characters, and every payload was below five MiB. Manual and automated inspection found none of the injected player/farm/save names, home/game/archive paths, IP address, token, private manifest fields, configuration values, update keys, or private repository identity canaries in either format. The generated findings consistently used observed/attribution-limited wording and directed detailed exception review to the normal SMAPI log.
+
+A separate probe-only net6 PTY/Xvfb run exercised the real retry workflow. After a successful interim export, the disposable `HealthReports` directory was moved aside and replaced temporarily with a regular file. The next `health report` failed with an `IOException` without crashing or stopping capture. After restoring the original private directory, `health retry` exported the exact frozen 1,907-update snapshot even though status had advanced to 3,261 updates. Its report set `writeRetry` to `true`, passed the schema and privacy scans, and normal `health stop` / probe-driven game exit then completed successfully. A simple mode change could not induce this failure because the publisher correctly repaired the private directory mode before writing.
+
+The disposable launch-time setting was restored to `false` after the net10 run. The source fixture, source game, and live user state remained unchanged. GitHub PR, review, merge, issue-closure, synchronization, and final branch-state evidence is added to the feature PR and verified after merge.
