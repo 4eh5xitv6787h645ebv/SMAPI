@@ -1,0 +1,7 @@
+{
+  "TotalClicks": 120,
+  "HoldMilliseconds": 40,
+  "IntervalTicks": 30,
+  "WarmupTicks": 180,
+  "FrameGapMilliseconds": 50
+}
