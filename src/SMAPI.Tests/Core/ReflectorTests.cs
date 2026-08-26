@@ -34,7 +34,8 @@ internal class ReflectorTests
         ReflectionTarget target = new();
         Reflector reflector = new();
 
-        for (int i = 0; i < 1_000; i++)
+        // Cross the runtime's tiered-compilation threshold before measuring steady-state allocations.
+        for (int i = 0; i < 10_000; i++)
             reflector.GetField<int>(target, nameof(ReflectionTarget.Value));
 
         const int iterations = 10_000;
