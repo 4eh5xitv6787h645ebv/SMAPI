@@ -17,9 +17,9 @@ public sealed class ModEntry : Mod
     private long LastUpdateTimestamp;
     private double MaximumFrameGapMilliseconds;
     private int FrameGapCount;
-    private int PreviousGen0Collections;
-    private int PreviousGen1Collections;
-    private int PreviousGen2Collections;
+    private int MeasurementGen0Collections;
+    private int MeasurementGen1Collections;
+    private int MeasurementGen2Collections;
     private int TicksSinceSaveLoaded = -1;
     private int TicksSinceLastClick;
     private int TicksSinceFinalClick;
@@ -40,9 +40,6 @@ public sealed class ModEntry : Mod
         helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
         helper.Events.Input.ButtonPressed += this.OnButtonPressed;
         helper.Events.Input.ButtonReleased += this.OnButtonReleased;
-        this.PreviousGen0Collections = GC.CollectionCount(0);
-        this.PreviousGen1Collections = GC.CollectionCount(1);
-        this.PreviousGen2Collections = GC.CollectionCount(2);
         this.Monitor.Log(
             $"clickprobe-start runtime={Environment.Version} framework={System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription} "
             + $"server_gc={System.Runtime.GCSettings.IsServerGC} clicks={this.Config.TotalClicks} hold_ms={this.Config.HoldMilliseconds} interval_ticks={this.Config.IntervalTicks}",
@@ -70,20 +67,6 @@ public sealed class ModEntry : Mod
             }
         }
         this.LastUpdateTimestamp = now;
-
-        int gen0 = GC.CollectionCount(0);
-        int gen1 = GC.CollectionCount(1);
-        int gen2 = GC.CollectionCount(2);
-        if (gen0 != this.PreviousGen0Collections || gen1 != this.PreviousGen1Collections || gen2 != this.PreviousGen2Collections)
-        {
-            this.Monitor.Log(
-                $"clickprobe-gc gen0={gen0 - this.PreviousGen0Collections} gen1={gen1 - this.PreviousGen1Collections} gen2={gen2 - this.PreviousGen2Collections} attempts={this.AttemptsStarted}",
-                LogLevel.Info
-            );
-            this.PreviousGen0Collections = gen0;
-            this.PreviousGen1Collections = gen1;
-            this.PreviousGen2Collections = gen2;
-        }
     }
 
     private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
@@ -101,6 +84,11 @@ public sealed class ModEntry : Mod
             this.Menu = new ProbeMenu(this);
             Game1.activeClickableMenu = this.Menu;
             this.TicksSinceLastClick = this.Config.IntervalTicks;
+            this.FrameGapCount = 0;
+            this.MaximumFrameGapMilliseconds = 0;
+            this.MeasurementGen0Collections = GC.CollectionCount(0);
+            this.MeasurementGen1Collections = GC.CollectionCount(1);
+            this.MeasurementGen2Collections = GC.CollectionCount(2);
             this.Monitor.Log($"clickprobe-menu-opened bounds={this.Menu.Target.bounds}", LogLevel.Info);
         }
 
@@ -129,7 +117,7 @@ public sealed class ModEntry : Mod
 
     private void OnButtonPressed(object? sender, ButtonPressedEventArgs e)
     {
-        if (e.Button == SButton.MouseLeft && this.Menu?.Target.containsPoint((int)e.Cursor.ScreenPixels.X, (int)e.Cursor.ScreenPixels.Y) == true)
+        if (e.Button == SButton.MouseLeft)
             this.PressEvents++;
     }
 
@@ -205,7 +193,8 @@ public sealed class ModEntry : Mod
         this.Monitor.Log(
             $"clickprobe-complete result={(passed ? "pass" : "fail")} attempts={this.AttemptsStarted} processes={this.ProcessesCompleted} "
             + $"process_failures={this.ProcessFailures} press_events={this.PressEvents} release_events={this.ReleaseEvents} activations={activations} "
-            + $"frame_gaps={this.FrameGapCount} max_frame_gap_ms={this.MaximumFrameGapMilliseconds:F3}",
+            + $"frame_gaps={this.FrameGapCount} max_frame_gap_ms={this.MaximumFrameGapMilliseconds:F3} "
+            + $"gc={GC.CollectionCount(0) - this.MeasurementGen0Collections}/{GC.CollectionCount(1) - this.MeasurementGen1Collections}/{GC.CollectionCount(2) - this.MeasurementGen2Collections}",
             passed ? LogLevel.Info : LogLevel.Error
         );
     }

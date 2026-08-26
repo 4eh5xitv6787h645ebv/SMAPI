@@ -20,7 +20,7 @@ Copy `manifest.json`, `config.json`, and `bin/Release/net6.0/LinuxMenuClickProbe
 The terminal line is machine-readable:
 
 ```text
-clickprobe-complete result=pass attempts=120 processes=120 process_failures=0 press_events=120 release_events=120 activations=120 frame_gaps=... max_frame_gap_ms=...
+clickprobe-complete result=pass attempts=120 processes=120 process_failures=0 press_events=120 release_events=120 activations=120 frame_gaps=... max_frame_gap_ms=... gc=.../.../...
 ```
 
 Any count mismatch is a failure. Retain the full log because a missed press with a completed `xdotool` process identifies polling/update loss, while a press event without a menu activation points to later menu handling.
