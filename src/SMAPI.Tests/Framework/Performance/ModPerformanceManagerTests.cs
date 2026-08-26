@@ -326,8 +326,13 @@ internal sealed class ModPerformanceManagerTests
     {
         ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         string hostile = "\u001b[31m/home/private/" + new string('x', 4096);
-        manager.BeginHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile);
-        manager.RecordHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile, 1, failed: false);
+
+        // Cross the runtime's tiered-compilation threshold before measuring steady-state allocations.
+        for (int i = 0; i < 10_000; i++)
+        {
+            manager.BeginHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile);
+            manager.RecordHandler(hostile, hostile, hostile, hostile, ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, hostile, 1, failed: false);
+        }
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 10_000; i++)
