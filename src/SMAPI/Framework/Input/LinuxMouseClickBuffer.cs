@@ -84,15 +84,16 @@ internal sealed class LinuxMouseClickBuffer : IDisposable
                     buffer.QueuedPulses += buffer.CompletedPulsesSincePoll;
 
                 buffer.CompletedPulsesSincePoll = 0;
-                if (isActuallyDown)
-                    buffer.SawDownSincePoll = false;
                 buffer.WasDownAtLastPoll = isActuallyDown;
 
                 if (buffer.NeedsSyntheticRelease)
                 {
                     buffer.NeedsSyntheticRelease = false;
                     if (isActuallyDown)
+                    {
                         buffer.HasDeferredActualPress = true;
+                        buffer.SawDownSincePoll = false;
+                    }
                     mouse.OverrideButton(button, SButtonState.Released);
                     continue;
                 }
@@ -105,6 +106,9 @@ internal sealed class LinuxMouseClickBuffer : IDisposable
                         buffer.NeedsSyntheticRelease = true;
                     continue;
                 }
+
+                if (isActuallyDown)
+                    buffer.SawDownSincePoll = false;
 
                 if (!wasActuallyDown && !isActuallyDown && buffer.QueuedPulses > 0)
                 {
