@@ -5,7 +5,7 @@ This record captures reproducible evidence for the Linux desktop Mod Health Repo
 ## Reviewed prerequisites
 
 - Baseline: `origin/develop` at `7cb06cfd6` (bounded diagnostics from issue #154 / PR #155).
-- Issue #156 and PR #157 were still open when reviewed. The pinned PR #157 head `66b806b6ab702ba0008ddf72ea01c9b1d3adcd5a` was independently reviewed; its safe base-game/observed-mod/SMAPI-other update split and GC collection signals were incorporated and hardened in this branch without adding another collector.
+- Issue #156 and PR #157 were still open when reviewed. The pinned PR #157 head `66b806b6ab702ba0008ddf72ea01c9b1d3adcd5a` was independently reviewed; its safe base-game/observed-mod split and GC collection signals were incorporated and hardened in this branch without adding another collector. Its proposed SMAPI/other attribution was reviewed but deliberately left as unavailable/residual because no separately owned measurement boundary exists.
 - Fixture PR #158 was still open at pinned head `599c8b786215c7cfa5bf395fa4b726c0d1c61805` and was used as an external test workspace only.
 - Feature issue: #159.
 
