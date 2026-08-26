@@ -63,6 +63,7 @@
     "totalObservedModMilliseconds": 12.0,
     "totalBaseGameExclusiveMilliseconds": 60300.0,
     "totalSmapiOtherMilliseconds": 0.0,
+    "smapiOtherTimingAvailable": false,
     "totalResidualMilliseconds": 168.0,
     "slowUpdateCount": 3,
     "callbacks": [
@@ -88,6 +89,7 @@
         "baseGameExclusiveMilliseconds": 38.0,
         "observedModMilliseconds": 0.2,
         "smapiOtherMilliseconds": 0.0,
+        "smapiOtherTimingAvailable": false,
         "residualMilliseconds": 3.0,
         "timingValid": true,
         "phase": "gameplay",

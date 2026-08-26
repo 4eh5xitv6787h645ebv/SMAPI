@@ -140,6 +140,6 @@ internal sealed class ModHealthInsightAnalyzerTests
 
     private static ModHealthUpdate CreateSlowUpdate(uint tick)
     {
-        return new(tick, tick * 20, 100, 80, 10, 5, 5, true, "gameplay", true, 0, 0, 0, 0, 0, 0, 0, true, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 10)), null);
+        return new(tick, tick * 20, 100, 80, 10, 5, true, 5, true, "gameplay", true, 0, 0, 0, 0, 0, 0, 0, true, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 10)), null);
     }
 }

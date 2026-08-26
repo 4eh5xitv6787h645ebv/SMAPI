@@ -88,6 +88,20 @@ internal sealed class ModHealthCompletionSummaryTests
         text.Should().NotContain("/home/player").And.NotContain("secret");
     }
 
+    [Test]
+    public void FromReport_RemovesBidirectionalFormattingControlsFromFindingText()
+    {
+        ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical() with
+        {
+            Findings = ImmutableArray.Create(CreateFinding(ModHealthFindingSeverity.Check, "safe\u202eevil\u202c", "next\u2066step\u2069"))
+        };
+
+        ModHealthCompletionSummary summary = ModHealthCompletionSummary.FromReport(report);
+
+        summary.Findings[0].Summary.Should().Be("safeevil");
+        summary.Findings[0].Action.Should().Be("nextstep");
+    }
+
     private static ModHealthFinding CreateFinding(ModHealthFindingSeverity severity, string summary, string action)
     {
         return new(

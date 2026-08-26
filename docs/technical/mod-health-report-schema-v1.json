@@ -86,12 +86,13 @@
     },
     "performance": {
       "type": "object", "additionalProperties": false,
-      "required": ["histogram", "totalObservedModMilliseconds", "totalBaseGameExclusiveMilliseconds", "totalSmapiOtherMilliseconds", "totalResidualMilliseconds", "slowUpdateCount", "callbacks", "worstUpdates", "recentUpdates", "episodes", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid"],
+      "required": ["histogram", "totalObservedModMilliseconds", "totalBaseGameExclusiveMilliseconds", "totalSmapiOtherMilliseconds", "smapiOtherTimingAvailable", "totalResidualMilliseconds", "slowUpdateCount", "callbacks", "worstUpdates", "recentUpdates", "episodes", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid"],
       "properties": {
         "histogram": { "$ref": "#/$defs/histogram" },
         "totalObservedModMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
         "totalBaseGameExclusiveMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
         "totalSmapiOtherMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "smapiOtherTimingAvailable": { "type": "boolean" },
         "totalResidualMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
         "slowUpdateCount": { "$ref": "#/$defs/nonnegativeInteger" },
         "callbacks": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/callback" } },
@@ -131,10 +132,10 @@
     },
     "update": {
       "type": "object", "additionalProperties": false,
-      "required": ["updateTick", "offsetMilliseconds", "totalMilliseconds", "baseGameExclusiveMilliseconds", "observedModMilliseconds", "smapiOtherMilliseconds", "residualMilliseconds", "timingValid", "phase", "focused", "screen", "warningCount", "errorCount", "callbackFailureCount", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid", "contributors", "nearbyMark"],
+      "required": ["updateTick", "offsetMilliseconds", "totalMilliseconds", "baseGameExclusiveMilliseconds", "observedModMilliseconds", "smapiOtherMilliseconds", "smapiOtherTimingAvailable", "residualMilliseconds", "timingValid", "phase", "focused", "screen", "warningCount", "errorCount", "callbackFailureCount", "gen0Collections", "gen1Collections", "gen2Collections", "gcCollectionDataValid", "contributors", "nearbyMark"],
       "properties": {
         "updateTick": { "$ref": "#/$defs/nonnegativeInteger" }, "offsetMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "totalMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
-        "baseGameExclusiveMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "observedModMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "smapiOtherMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "residualMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
+        "baseGameExclusiveMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "observedModMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "smapiOtherMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" }, "smapiOtherTimingAvailable": { "type": "boolean" }, "residualMilliseconds": { "$ref": "#/$defs/nonnegativeNumber" },
         "timingValid": { "type": "boolean" }, "phase": { "$ref": "#/$defs/identity" }, "focused": { "type": "boolean" }, "screen": { "$ref": "#/$defs/nonnegativeInteger" },
         "warningCount": { "$ref": "#/$defs/nonnegativeInteger" }, "errorCount": { "$ref": "#/$defs/nonnegativeInteger" }, "callbackFailureCount": { "$ref": "#/$defs/nonnegativeInteger" },
         "gen0Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen1Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gen2Collections": { "$ref": "#/$defs/nonnegativeInteger" }, "gcCollectionDataValid": { "type": "boolean" },

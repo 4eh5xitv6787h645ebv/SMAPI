@@ -83,6 +83,8 @@ internal sealed record ModHealthCompletionSummary(
         bool pendingSpace = false;
         foreach (char character in value)
         {
+            if (ModHealthTextSanitizer.IsBidiControl(character))
+                continue;
             if (char.IsControl(character) || char.IsWhiteSpace(character))
             {
                 pendingSpace = normalized.Length > 0;

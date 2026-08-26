@@ -55,9 +55,12 @@ internal sealed class ModHealthReportTextFormatter
             .Append("Slow update threshold: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Capture.SlowUpdateThresholdMilliseconds)).Append(" ms\n")
             .Append("Slow update ticks: ").Append(report.Performance.SlowUpdateCount.ToString(CultureInfo.InvariantCulture)).Append('\n')
             .Append("Observed mod callbacks: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalObservedModMilliseconds)).Append(" ms\n")
-            .Append("Base-game update (exclusive): ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalBaseGameExclusiveMilliseconds)).Append(" ms\n")
-            .Append("Separately measured SMAPI/other update work: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalSmapiOtherMilliseconds)).Append(" ms\n")
-            .Append("Remaining unattributed time: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalResidualMilliseconds)).Append(" ms\n");
+            .Append("Base-game update (exclusive): ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalBaseGameExclusiveMilliseconds)).Append(" ms\n");
+        if (report.Performance.SmapiOtherTimingAvailable)
+            text.Append("Separately measured SMAPI/other update work: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalSmapiOtherMilliseconds)).Append(" ms\n");
+        else
+            text.Append("Separately measured SMAPI/other update work: unavailable; no owned measurement boundary was active.\n");
+        text.Append("Remaining unattributed time: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalResidualMilliseconds)).Append(" ms\n");
         ModHealthHistogram histogram = report.Performance.Histogram;
         if (histogram.Count > 0)
         {
@@ -109,7 +112,12 @@ internal sealed class ModHealthReportTextFormatter
             text.Append("- Episode ticks ").Append(episode.FirstUpdateTick.ToString(CultureInfo.InvariantCulture)).Append('-').Append(episode.LastUpdateTick.ToString(CultureInfo.InvariantCulture)).Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(episode.MaximumMilliseconds)).Append(" ms maximum\n");
         foreach (ModHealthUpdate update in report.Performance.WorstUpdates.Take(10))
         {
-            text.Append("- Update tick ").Append(update.UpdateTick.ToString(CultureInfo.InvariantCulture)).Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.TotalMilliseconds)).Append(" ms total; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ObservedModMilliseconds)).Append(" ms observed mod callbacks; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.BaseGameExclusiveMilliseconds)).Append(" ms base-game exclusive; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.SmapiOtherMilliseconds)).Append(" ms SMAPI/other; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ResidualMilliseconds)).Append(" ms remaining unattributed; ");
+            text.Append("- Update tick ").Append(update.UpdateTick.ToString(CultureInfo.InvariantCulture)).Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.TotalMilliseconds)).Append(" ms total; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ObservedModMilliseconds)).Append(" ms observed mod callbacks; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.BaseGameExclusiveMilliseconds)).Append(" ms base-game exclusive; ");
+            if (update.SmapiOtherTimingAvailable)
+                text.Append(ModHealthReportTextFormatter.FormatMilliseconds(update.SmapiOtherMilliseconds)).Append(" ms SMAPI/other;");
+            else
+                text.Append("SMAPI/other not separately measured;");
+            text.Append(' ').Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ResidualMilliseconds)).Append(" ms remaining unattributed; ");
             if (update.GcCollectionDataValid)
                 text.Append("GC ").Append(update.Gen0Collections.ToString(CultureInfo.InvariantCulture)).Append('/').Append(update.Gen1Collections.ToString(CultureInfo.InvariantCulture)).Append('/').Append(update.Gen2Collections.ToString(CultureInfo.InvariantCulture)).Append(" process-wide");
             else

@@ -376,6 +376,7 @@ internal sealed class ModHealthReportBuilder
             validPartition ? NonnegativeFinite(performance.TickInstrumentedMilliseconds) : 0,
             baseGame,
             0,
+            false,
             residual,
             Math.Max(0, health.SlowUpdateCount),
             callbacks,
@@ -403,6 +404,7 @@ internal sealed class ModHealthReportBuilder
             baseGame,
             observed,
             0,
+            false,
             residual,
             valid,
             GetTickPhase(source.Context.Phase),
@@ -483,7 +485,7 @@ internal sealed class ModHealthReportBuilder
     private static ModHealthPerformance EmptyPerformance()
     {
         ModHealthHistogram histogram = new(0, 0, null, null, null, null, null, false, 0, 0, 0, ImmutableArray<ModHealthThresholdCount>.Empty);
-        return new ModHealthPerformance(histogram, 0, 0, 0, 0, 0, ImmutableArray<ModHealthCallback>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthEpisode>.Empty, 0, 0, 0, false);
+        return new ModHealthPerformance(histogram, 0, 0, 0, false, 0, 0, ImmutableArray<ModHealthCallback>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthUpdate>.Empty, ImmutableArray<ModHealthEpisode>.Empty, 0, 0, 0, false);
     }
 
     private static ModHealthLogSeveritySummary BuildSeverity(ModHealthSeverityCountsSnapshot source)

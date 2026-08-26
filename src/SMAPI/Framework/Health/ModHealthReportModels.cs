@@ -89,16 +89,17 @@ internal sealed record ModHealthPerformance(
     [property: JsonProperty("totalObservedModMilliseconds", Order = 1, Required = Required.Always)] double TotalObservedModMilliseconds,
     [property: JsonProperty("totalBaseGameExclusiveMilliseconds", Order = 2, Required = Required.Always)] double TotalBaseGameExclusiveMilliseconds,
     [property: JsonProperty("totalSmapiOtherMilliseconds", Order = 3, Required = Required.Always)] double TotalSmapiOtherMilliseconds,
-    [property: JsonProperty("totalResidualMilliseconds", Order = 4, Required = Required.Always)] double TotalResidualMilliseconds,
-    [property: JsonProperty("slowUpdateCount", Order = 5, Required = Required.Always)] long SlowUpdateCount,
-    [property: JsonProperty("callbacks", Order = 6, Required = Required.Always)] ImmutableArray<ModHealthCallback> Callbacks,
-    [property: JsonProperty("worstUpdates", Order = 7, Required = Required.Always)] ImmutableArray<ModHealthUpdate> WorstUpdates,
-    [property: JsonProperty("recentUpdates", Order = 8, Required = Required.Always)] ImmutableArray<ModHealthUpdate> RecentUpdates,
-    [property: JsonProperty("episodes", Order = 9, Required = Required.Always)] ImmutableArray<ModHealthEpisode> Episodes,
-    [property: JsonProperty("gen0Collections", Order = 10, Required = Required.Always)] long Gen0Collections,
-    [property: JsonProperty("gen1Collections", Order = 11, Required = Required.Always)] long Gen1Collections,
-    [property: JsonProperty("gen2Collections", Order = 12, Required = Required.Always)] long Gen2Collections,
-    [property: JsonProperty("gcCollectionDataValid", Order = 13, Required = Required.Always)] bool GcCollectionDataValid
+    [property: JsonProperty("smapiOtherTimingAvailable", Order = 4, Required = Required.Always)] bool SmapiOtherTimingAvailable,
+    [property: JsonProperty("totalResidualMilliseconds", Order = 5, Required = Required.Always)] double TotalResidualMilliseconds,
+    [property: JsonProperty("slowUpdateCount", Order = 6, Required = Required.Always)] long SlowUpdateCount,
+    [property: JsonProperty("callbacks", Order = 7, Required = Required.Always)] ImmutableArray<ModHealthCallback> Callbacks,
+    [property: JsonProperty("worstUpdates", Order = 8, Required = Required.Always)] ImmutableArray<ModHealthUpdate> WorstUpdates,
+    [property: JsonProperty("recentUpdates", Order = 9, Required = Required.Always)] ImmutableArray<ModHealthUpdate> RecentUpdates,
+    [property: JsonProperty("episodes", Order = 10, Required = Required.Always)] ImmutableArray<ModHealthEpisode> Episodes,
+    [property: JsonProperty("gen0Collections", Order = 11, Required = Required.Always)] long Gen0Collections,
+    [property: JsonProperty("gen1Collections", Order = 12, Required = Required.Always)] long Gen1Collections,
+    [property: JsonProperty("gen2Collections", Order = 13, Required = Required.Always)] long Gen2Collections,
+    [property: JsonProperty("gcCollectionDataValid", Order = 14, Required = Required.Always)] bool GcCollectionDataValid
 );
 
 [JsonObject(MemberSerialization.OptIn)]
@@ -146,20 +147,21 @@ internal sealed record ModHealthUpdate(
     [property: JsonProperty("baseGameExclusiveMilliseconds", Order = 3, Required = Required.Always)] double BaseGameExclusiveMilliseconds,
     [property: JsonProperty("observedModMilliseconds", Order = 4, Required = Required.Always)] double ObservedModMilliseconds,
     [property: JsonProperty("smapiOtherMilliseconds", Order = 5, Required = Required.Always)] double SmapiOtherMilliseconds,
-    [property: JsonProperty("residualMilliseconds", Order = 6, Required = Required.Always)] double ResidualMilliseconds,
-    [property: JsonProperty("timingValid", Order = 7, Required = Required.Always)] bool TimingValid,
-    [property: JsonProperty("phase", Order = 8, Required = Required.Always)] string Phase,
-    [property: JsonProperty("focused", Order = 9, Required = Required.Always)] bool Focused,
-    [property: JsonProperty("screen", Order = 10, Required = Required.Always)] int Screen,
-    [property: JsonProperty("warningCount", Order = 11, Required = Required.Always)] int WarningCount,
-    [property: JsonProperty("errorCount", Order = 12, Required = Required.Always)] int ErrorCount,
-    [property: JsonProperty("callbackFailureCount", Order = 13, Required = Required.Always)] int CallbackFailureCount,
-    [property: JsonProperty("gen0Collections", Order = 14, Required = Required.Always)] int Gen0Collections,
-    [property: JsonProperty("gen1Collections", Order = 15, Required = Required.Always)] int Gen1Collections,
-    [property: JsonProperty("gen2Collections", Order = 16, Required = Required.Always)] int Gen2Collections,
-    [property: JsonProperty("gcCollectionDataValid", Order = 17, Required = Required.Always)] bool GcCollectionDataValid,
-    [property: JsonProperty("contributors", Order = 18, Required = Required.Always)] ImmutableArray<ModHealthContributor> Contributors,
-    [property: JsonProperty("nearbyMark", Order = 19)] int? NearbyMark
+    [property: JsonProperty("smapiOtherTimingAvailable", Order = 6, Required = Required.Always)] bool SmapiOtherTimingAvailable,
+    [property: JsonProperty("residualMilliseconds", Order = 7, Required = Required.Always)] double ResidualMilliseconds,
+    [property: JsonProperty("timingValid", Order = 8, Required = Required.Always)] bool TimingValid,
+    [property: JsonProperty("phase", Order = 9, Required = Required.Always)] string Phase,
+    [property: JsonProperty("focused", Order = 10, Required = Required.Always)] bool Focused,
+    [property: JsonProperty("screen", Order = 11, Required = Required.Always)] int Screen,
+    [property: JsonProperty("warningCount", Order = 12, Required = Required.Always)] int WarningCount,
+    [property: JsonProperty("errorCount", Order = 13, Required = Required.Always)] int ErrorCount,
+    [property: JsonProperty("callbackFailureCount", Order = 14, Required = Required.Always)] int CallbackFailureCount,
+    [property: JsonProperty("gen0Collections", Order = 15, Required = Required.Always)] int Gen0Collections,
+    [property: JsonProperty("gen1Collections", Order = 16, Required = Required.Always)] int Gen1Collections,
+    [property: JsonProperty("gen2Collections", Order = 17, Required = Required.Always)] int Gen2Collections,
+    [property: JsonProperty("gcCollectionDataValid", Order = 18, Required = Required.Always)] bool GcCollectionDataValid,
+    [property: JsonProperty("contributors", Order = 19, Required = Required.Always)] ImmutableArray<ModHealthContributor> Contributors,
+    [property: JsonProperty("nearbyMark", Order = 20)] int? NearbyMark
 );
 
 [JsonObject(MemberSerialization.OptIn)]

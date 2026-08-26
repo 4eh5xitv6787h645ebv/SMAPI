@@ -32,6 +32,24 @@ internal sealed class ModHealthTextSanitizerTests
     }
 
     [Test]
+    public void SanitizeIdentity_RemovesPathsImmediatelyAfterLabels()
+    {
+        string actual = ModHealthTextSanitizer.SanitizeIdentity(@"path:/home/private-canary win:C:\private-canary unc:\\private-server\share");
+
+        actual.Should().Be("path:[path] win:[path] unc:[path]");
+        actual.Should().NotContain("private");
+    }
+
+    [Test]
+    public void SanitizeIdentity_RemovesBidirectionalFormattingControls()
+    {
+        string actual = ModHealthTextSanitizer.SanitizeIdentity("safe\u202eevil\u202c \u2066isolated\u2069");
+
+        actual.Should().Be("safeevil isolated");
+        actual.Should().NotContain("\u202e").And.NotContain("\u202c").And.NotContain("\u2066").And.NotContain("\u2069");
+    }
+
+    [Test]
     public void SanitizeIdentity_PreservesValidUnicode()
     {
         ModHealthTextSanitizer.SanitizeIdentity("Café 🌻 Mod").Should().Be("Café 🌻 Mod");
