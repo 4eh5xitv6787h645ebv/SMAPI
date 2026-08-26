@@ -10,6 +10,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
@@ -81,6 +82,85 @@ internal static class MiniMonoModHotfix
             );
         }
 
+        // .NET 10 optimizes closed reference types in Harmony's wrappers more aggressively. Since CoreCLR shares
+        // generic code between reference-type instantiations, that can make a wrapper created for (for example)
+        // T=string reinterpret arguments passed to the same native method for T=object. Use the canonical object ABI
+        // for generic-derived reference parameters on this host, matching the behavior mods previously saw on .NET 6.
+        if (OperatingSystem.IsLinux() && Environment.Version.Major >= 10)
+        {
+            harmony.Patch(
+                original: typeof(Harmony).Assembly
+                    .GetType("HarmonyLib.MethodPatcherTools", throwOnError: true)!
+                    .GetMethod("CreateDynamicMethod", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static),
+                postfix: new HarmonyMethod(typeof(MiniMonoModHotfix), nameof(CanonicalizeLinuxNet10GenericPatchSignature))
+            );
+        }
+
+    }
+
+    /// <summary>Use canonical reference types in a generated wrapper when its signature comes from a generic substitution.</summary>
+    /// <param name="original">The constructed method Harmony is wrapping.</param>
+    /// <param name="__result">The generated wrapper definition.</param>
+    internal static void CanonicalizeLinuxNet10GenericPatchSignature(MethodBase original, DynamicMethodDefinition __result)
+    {
+        MethodBase openMethod = MiniMonoModHotfix.GetOpenGenericMethod(original);
+        ParameterInfo[] openParameters = openMethod.GetParameters();
+        ParameterInfo[] closedParameters = original.GetParameters();
+        int offset = original.IsStatic ? 0 : 1;
+
+        for (int i = 0; i < openParameters.Length; i++)
+        {
+            if (!openParameters[i].ParameterType.ContainsGenericParameters)
+                continue;
+
+            Type? canonicalType = MiniMonoModHotfix.GetCanonicalReferenceType(closedParameters[i].ParameterType);
+            if (canonicalType is not null)
+                __result.Definition.Parameters[i + offset].ParameterType = __result.Module.ImportReference(canonicalType);
+        }
+
+        if (openMethod is MethodInfo openMethodInfo
+            && original is MethodInfo closedMethodInfo
+            && openMethodInfo.ReturnType.ContainsGenericParameters)
+        {
+            Type? canonicalType = MiniMonoModHotfix.GetCanonicalReferenceType(closedMethodInfo.ReturnType);
+            if (canonicalType is not null)
+                __result.Definition.ReturnType = __result.Module.ImportReference(canonicalType);
+        }
+    }
+
+    /// <summary>Get the open declaration which shows which signature types came from generic substitutions.</summary>
+    private static MethodBase GetOpenGenericMethod(MethodBase method)
+    {
+        MethodBase openMethod = method;
+        if (method.DeclaringType?.IsConstructedGenericType is true)
+        {
+            Type openType = method.DeclaringType.GetGenericTypeDefinition();
+            openMethod = openType
+                .GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
+                .OfType<MethodBase>()
+                .Single(candidate => candidate.MetadataToken == method.MetadataToken);
+        }
+
+        if (openMethod is MethodInfo { IsGenericMethod: true, IsGenericMethodDefinition: false } methodInfo)
+            openMethod = methodInfo.GetGenericMethodDefinition();
+
+        return openMethod;
+    }
+
+    /// <summary>Get the shared generic ABI type for a constructed reference type, if it can be canonicalized safely.</summary>
+    private static Type? GetCanonicalReferenceType(Type type)
+    {
+        if (type.IsByRef)
+        {
+            Type elementType = type.GetElementType()!;
+            return !elementType.IsValueType && !elementType.IsPointer
+                ? typeof(object).MakeByRefType()
+                : null;
+        }
+
+        return !type.IsValueType && !type.IsPointer
+            ? typeof(object)
+            : null;
     }
 
     private static IEnumerable<CodeInstruction> AllowLegacyCodeMatcherAppendAtEnd(IEnumerable<CodeInstruction> instructions)
