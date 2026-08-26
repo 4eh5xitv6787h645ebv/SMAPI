@@ -698,25 +698,6 @@ internal class SCore : IDisposable
         EventManager events = this.EventManager;
         bool verbose = this.Monitor.IsVerbose;
 
-        // measure the base game update separately from mod callbacks and SMAPI dispatch while profiling
-        if (this.ModPerformanceManager.IsTracking)
-        {
-            ModPerformanceManager performanceManager = this.ModPerformanceManager;
-            Action<GameTime> baseRunUpdate = runUpdate;
-            runUpdate = time =>
-            {
-                performanceManager.BeginGameUpdate(Stopwatch.GetTimestamp());
-                try
-                {
-                    baseRunUpdate(time);
-                }
-                finally
-                {
-                    performanceManager.EndGameUpdate(Stopwatch.GetTimestamp());
-                }
-            };
-        }
-
         try
         {
             /*********
@@ -832,7 +813,7 @@ internal class SCore : IDisposable
             if (Game1.gameMode == Game1.loadingMode)
             {
                 events.UnvalidatedUpdateTicking.RaiseEmpty();
-                runUpdate(gameTime);
+                this.RunBaseGameUpdate(runUpdate, gameTime);
                 events.UnvalidatedUpdateTicked.RaiseEmpty();
                 return;
             }
@@ -863,7 +844,7 @@ internal class SCore : IDisposable
 
                 // suppress non-save events
                 events.UnvalidatedUpdateTicking.RaiseEmpty();
-                runUpdate(gameTime);
+                this.RunBaseGameUpdate(runUpdate, gameTime);
                 events.UnvalidatedUpdateTicked.RaiseEmpty();
                 return;
             }
@@ -1227,7 +1208,7 @@ internal class SCore : IDisposable
                 try
                 {
                     instance.Input.ApplyOverrides(); // if mods added any new overrides since the update, process them now
-                    runUpdate(gameTime);
+                    this.RunBaseGameUpdate(runUpdate, gameTime);
                 }
                 catch (Exception ex)
                 {
@@ -1253,6 +1234,29 @@ internal class SCore : IDisposable
             // exit if irrecoverable
             if (!this.UpdateCrashTimer.Decrement())
                 this.ExitGameImmediately("The game crashed when updating, and SMAPI was unable to recover the game.");
+        }
+    }
+
+    /// <summary>Run one base game update, measuring the owned boundary without allocating a wrapper delegate per tick.</summary>
+    /// <param name="runUpdate">Invoke the game's update logic for the given timing state.</param>
+    /// <param name="gameTime">A snapshot of the game timing state.</param>
+    private void RunBaseGameUpdate(Action<GameTime> runUpdate, GameTime gameTime)
+    {
+        ModPerformanceManager performanceManager = this.ModPerformanceManager;
+        if (!performanceManager.IsTracking)
+        {
+            runUpdate(gameTime);
+            return;
+        }
+
+        performanceManager.BeginGameUpdate();
+        try
+        {
+            runUpdate(gameTime);
+        }
+        finally
+        {
+            performanceManager.EndGameUpdate();
         }
     }
 

@@ -64,6 +64,18 @@ internal sealed class ModPerformanceManager
     /// <summary>The timestamp when the current sample began.</summary>
     private long SampleStartTimestamp;
 
+    /// <summary>A monotonically increasing identity for the current sample.</summary>
+    private long SampleGeneration;
+
+    /// <summary>The garbage collection counts per generation when the current sample began.</summary>
+    private readonly int[] SampleStartGcCollections = new int[3];
+
+    /// <summary>The frozen garbage collection counts per generation when the current sample stopped.</summary>
+    private readonly int[] SampleEndGcCollections = new int[3];
+
+    /// <summary>Whether <see cref="SampleEndGcCollections"/> contains a frozen stop boundary.</summary>
+    private bool HasSampleEndGcCollections;
+
     /// <summary>Whether an update tick is currently being measured.</summary>
     private bool IsTickOpen;
 
@@ -72,6 +84,9 @@ internal sealed class ModPerformanceManager
 
     /// <summary>The timestamp when the current update tick began.</summary>
     private long CurrentTickStartTimestamp;
+
+    /// <summary>The managed thread which owns the current update tick.</summary>
+    private int CurrentTickThreadId;
 
     /// <summary>The number of error messages emitted by mods during the current update tick.</summary>
     private int CurrentTickErrors;
@@ -91,8 +106,8 @@ internal sealed class ModPerformanceManager
     /// <summary>The timestamp when the current base game update began.</summary>
     private long GameUpdateStartTimestamp;
 
-    /// <summary>The instrumented handler time already recorded in this tick when the current base game update began.</summary>
-    private long InstrumentedAtGameUpdateStartTicks;
+    /// <summary>Whether the current tick's timing partition is invalid.</summary>
+    private bool CurrentTickTimingPartitionIsInvalid;
 
     /// <summary>The garbage collection counts per generation when the current update tick began.</summary>
     private readonly int[] TickStartGcCollections = new int[3];
@@ -111,6 +126,12 @@ internal sealed class ModPerformanceManager
 
     /// <summary>The total garbage collections per generation observed within ticks in this sample.</summary>
     private readonly long[] TotalGcCollections = new long[3];
+
+    /// <summary>The number of completed ticks whose timing partition was invalid.</summary>
+    private long InvalidTimingPartitionTicks;
+
+    /// <summary>The number of completed ticks whose garbage collection delta was invalid.</summary>
+    private long InvalidGcCollectionTicks;
 
     /// <summary>Whether completed ticks should be logged individually.</summary>
     private bool LogIndividualTicks;
@@ -173,11 +194,18 @@ internal sealed class ModPerformanceManager
     /// <summary>Stop performance sampling while retaining the current results.</summary>
     public void Stop()
     {
-        Volatile.Write(ref this.TrackingEnabled, 0);
+        bool wasTracking = Interlocked.Exchange(ref this.TrackingEnabled, 0) != 0;
         lock (this.SyncRoot)
         {
+            if (wasTracking && !this.HasSampleEndGcCollections)
+            {
+                for (int generation = 0; generation < this.SampleEndGcCollections.Length; generation++)
+                    this.SampleEndGcCollections[generation] = this.GetGcCollectionCount(generation);
+                this.HasSampleEndGcCollections = true;
+            }
             this.IsTickOpen = false;
             this.IsGameUpdateOpen = false;
+            this.CurrentTickThreadId = 0;
             this.CurrentTickMods.Clear();
         }
     }
@@ -236,11 +264,13 @@ internal sealed class ModPerformanceManager
             this.IsTickOpen = true;
             this.CurrentTick = tick;
             this.CurrentTickStartTimestamp = startTimestamp;
+            this.CurrentTickThreadId = Environment.CurrentManagedThreadId;
             this.CurrentTickErrors = 0;
             this.CurrentTickMods.Clear();
             this.CurrentTickInstrumentedTimestampTicks = 0;
             this.CurrentTickGameUpdateTimestampTicks = 0;
             this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
+            this.CurrentTickTimingPartitionIsInvalid = false;
             this.IsGameUpdateOpen = false;
             for (int generation = 0; generation < this.TickStartGcCollections.Length; generation++)
                 this.TickStartGcCollections[generation] = this.GetGcCollectionCount(generation);
@@ -248,35 +278,41 @@ internal sealed class ModPerformanceManager
     }
 
     /// <summary>Begin measuring a base game update within the current update tick.</summary>
-    /// <param name="startTimestamp">The timestamp at which the base game update began.</param>
-    public void BeginGameUpdate(long startTimestamp)
+    public void BeginGameUpdate()
     {
         if (!this.IsTracking)
             return;
 
         lock (this.SyncRoot)
         {
-            if (!this.IsTracking || !this.IsTickOpen || this.IsGameUpdateOpen)
+            if (!this.IsTracking || !this.IsTickOpen)
                 return;
+            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || this.IsGameUpdateOpen)
+            {
+                this.CurrentTickTimingPartitionIsInvalid = true;
+                return;
+            }
 
             this.IsGameUpdateOpen = true;
-            this.GameUpdateStartTimestamp = startTimestamp;
-            this.InstrumentedAtGameUpdateStartTicks = this.CurrentTickInstrumentedTimestampTicks;
+            this.GameUpdateStartTimestamp = this.GetTimestamp();
         }
     }
 
     /// <summary>Finish measuring a base game update within the current update tick.</summary>
-    /// <param name="endTimestamp">The timestamp at which the base game update ended.</param>
-    public void EndGameUpdate(long endTimestamp)
+    public void EndGameUpdate()
     {
         lock (this.SyncRoot)
         {
-            if (!this.IsGameUpdateOpen)
+            if (!this.IsTickOpen)
                 return;
+            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || !this.IsGameUpdateOpen)
+            {
+                this.CurrentTickTimingPartitionIsInvalid = true;
+                return;
+            }
 
             this.IsGameUpdateOpen = false;
-            this.CurrentTickGameUpdateTimestampTicks += Math.Max(0, endTimestamp - this.GameUpdateStartTimestamp);
-            this.CurrentTickInstrumentedDuringGameUpdateTicks += Math.Max(0, this.CurrentTickInstrumentedTimestampTicks - this.InstrumentedAtGameUpdateStartTicks);
+            this.CurrentTickGameUpdateTimestampTicks += this.GetTimestamp() - this.GameUpdateStartTimestamp;
         }
     }
 
@@ -293,7 +329,10 @@ internal sealed class ModPerformanceManager
             if (!this.IsTracking || !this.IsTickOpen)
                 return null;
 
-            long totalTimestampTicks = Math.Max(0, endTimestamp - this.CurrentTickStartTimestamp);
+            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || this.IsGameUpdateOpen)
+                this.CurrentTickTimingPartitionIsInvalid = true;
+
+            long totalTimestampTicks = endTimestamp - this.CurrentTickStartTimestamp;
             long instrumentedTimestampTicks = this.CurrentTickInstrumentedTimestampTicks;
             string? slowestModId = null;
             string? slowestModName = null;
@@ -310,8 +349,25 @@ internal sealed class ModPerformanceManager
             }
 
             Span<int> gcCollections = stackalloc int[3];
+            bool gcCollectionDataIsValid = true;
             for (int generation = 0; generation < gcCollections.Length; generation++)
-                gcCollections[generation] = Math.Max(0, this.GetGcCollectionCount(generation) - this.TickStartGcCollections[generation]);
+            {
+                long delta = (long)this.GetGcCollectionCount(generation) - this.TickStartGcCollections[generation];
+                if (delta is < 0 or > int.MaxValue)
+                    gcCollectionDataIsValid = false;
+                gcCollections[generation] = delta is >= int.MinValue and <= int.MaxValue
+                    ? (int)delta
+                    : 0;
+            }
+
+            bool timingPartitionIsValid =
+                !this.CurrentTickTimingPartitionIsInvalid
+                && ModPerformanceManager.IsValidTimingPartition(
+                    totalTimestampTicks,
+                    this.CurrentTickGameUpdateTimestampTicks,
+                    instrumentedTimestampTicks,
+                    this.CurrentTickInstrumentedDuringGameUpdateTicks
+                );
 
             TickPerformanceSnapshot sample = new(
                 Tick: this.CurrentTick,
@@ -325,7 +381,9 @@ internal sealed class ModPerformanceManager
                 InstrumentedDuringGameUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickInstrumentedDuringGameUpdateTicks),
                 Gen0Collections: gcCollections[0],
                 Gen1Collections: gcCollections[1],
-                Gen2Collections: gcCollections[2]
+                Gen2Collections: gcCollections[2],
+                TimingPartitionIsValid: timingPartitionIsValid,
+                GcCollectionDataIsValid: gcCollectionDataIsValid
             );
 
             this.TotalTickTimestampTicks += totalTimestampTicks;
@@ -334,11 +392,16 @@ internal sealed class ModPerformanceManager
             this.TotalInstrumentedDuringGameUpdateTicks += this.CurrentTickInstrumentedDuringGameUpdateTicks;
             for (int generation = 0; generation < gcCollections.Length; generation++)
                 this.TotalGcCollections[generation] += gcCollections[generation];
+            if (!timingPartitionIsValid)
+                this.InvalidTimingPartitionTicks++;
+            if (!gcCollectionDataIsValid)
+                this.InvalidGcCollectionTicks++;
 
             this.AddTick(sample);
             this.CompletedTicks++;
             this.IsTickOpen = false;
             this.IsGameUpdateOpen = false;
+            this.CurrentTickThreadId = 0;
             this.CurrentTickMods.Clear();
 
             return this.LogIndividualTicks && sample.TotalMilliseconds >= this.TickLogThresholdMilliseconds
@@ -358,10 +421,11 @@ internal sealed class ModPerformanceManager
         if (!this.IsTracking)
             return default;
 
+        long generation = Volatile.Read(ref this.SampleGeneration);
         List<ActiveHandler> handlers = ModPerformanceManager.ActiveHandlers ??= new List<ActiveHandler>(8);
         int depth = handlers.Count;
-        handlers.Add(new ActiveHandler(this, modId, modName, eventName, handlerName, this.GetTimestamp(), 0));
-        return new HandlerTimingToken(this, depth);
+        handlers.Add(new ActiveHandler(this, generation, modId, modName, eventName, handlerName, this.GetTimestamp(), 0));
+        return new HandlerTimingToken(this, generation, depth);
     }
 
     /// <summary>Begin timing one mod-owned operation.</summary>
@@ -391,6 +455,8 @@ internal sealed class ModPerformanceManager
 
         int index = handlers.Count - 1;
         ActiveHandler handler = handlers[index];
+        if (handler.Generation != token.Generation)
+            return;
         handlers.RemoveAt(index);
 
         long elapsedTimestampTicks = Math.Max(0, this.GetTimestamp() - handler.StartTimestamp);
@@ -400,14 +466,14 @@ internal sealed class ModPerformanceManager
         {
             int parentIndex = handlers.Count - 1;
             ActiveHandler parent = handlers[parentIndex];
-            if (ReferenceEquals(parent.Manager, this))
+            if (ReferenceEquals(parent.Manager, this) && parent.Generation == handler.Generation)
             {
                 parent.NestedTimestampTicks += elapsedTimestampTicks;
                 handlers[parentIndex] = parent;
             }
         }
 
-        this.RecordHandler(handler.ModId, handler.ModName, handler.EventName, handler.HandlerName, exclusiveTimestampTicks, failed);
+        this.RecordHandler(handler.ModId, handler.ModName, handler.EventName, handler.HandlerName, exclusiveTimestampTicks, failed, handler.Generation);
     }
 
     /// <summary>Record one invocation of a mod-owned SMAPI event handler.</summary>
@@ -419,18 +485,32 @@ internal sealed class ModPerformanceManager
     /// <param name="failed">Whether the handler threw an exception.</param>
     public void RecordHandler(string modId, string modName, string eventName, string handlerName, long elapsedTimestampTicks, bool failed)
     {
+        this.RecordHandler(modId, modName, eventName, handlerName, elapsedTimestampTicks, failed, requiredGeneration: null);
+    }
+
+    /// <summary>Record one invocation of a mod-owned SMAPI event handler.</summary>
+    /// <param name="modId">The mod's unique ID.</param>
+    /// <param name="modName">The mod's display name.</param>
+    /// <param name="eventName">The managed event name.</param>
+    /// <param name="handlerName">The registered handler method name.</param>
+    /// <param name="elapsedTimestampTicks">The elapsed timestamp ticks.</param>
+    /// <param name="failed">Whether the handler threw an exception.</param>
+    /// <param name="requiredGeneration">The sample generation which must still be active, if any.</param>
+    private void RecordHandler(string modId, string modName, string eventName, string handlerName, long elapsedTimestampTicks, bool failed, long? requiredGeneration)
+    {
         if (!this.IsTracking)
             return;
 
         elapsedTimestampTicks = Math.Max(0, elapsedTimestampTicks);
         HandlerIdentity identity = new(modId, modName, eventName, handlerName);
+        int currentThreadId = Environment.CurrentManagedThreadId;
 
         lock (this.SyncRoot)
         {
-            if (!this.IsTracking)
+            if (!this.IsTracking || (requiredGeneration.HasValue && requiredGeneration.Value != this.SampleGeneration))
                 return;
 
-            if (this.IsTickOpen)
+            if (this.IsTickOpen && currentThreadId == this.CurrentTickThreadId)
             {
                 if (!this.CurrentTickMods.TryGetValue(modId, out TickModCounter tickCounter))
                     tickCounter = new TickModCounter(modName, 0);
@@ -438,6 +518,8 @@ internal sealed class ModPerformanceManager
                 tickCounter.TimestampTicks += elapsedTimestampTicks;
                 this.CurrentTickMods[modId] = tickCounter;
                 this.CurrentTickInstrumentedTimestampTicks += elapsedTimestampTicks;
+                if (this.IsGameUpdateOpen)
+                    this.CurrentTickInstrumentedDuringGameUpdateTicks += elapsedTimestampTicks;
             }
 
             if (!this.HandlerCounters.TryGetValue(identity, out HandlerCounter? counter))
@@ -476,7 +558,7 @@ internal sealed class ModPerformanceManager
             if (isError)
             {
                 summary.ErrorCount++;
-                if (this.IsTickOpen)
+                if (this.IsTickOpen && Environment.CurrentManagedThreadId == this.CurrentTickThreadId)
                     this.CurrentTickErrors++;
             }
         }
@@ -509,6 +591,18 @@ internal sealed class ModPerformanceManager
                 ticks[i] = this.TickHistory[(this.TickHistoryStart + i) % this.TickHistory.Length];
 
             long now = this.GetTimestamp();
+            Span<long> captureGcCollections = stackalloc long[3];
+            bool captureGcCollectionDataIsValid = true;
+            for (int generation = 0; generation < captureGcCollections.Length; generation++)
+            {
+                int currentCount = this.HasSampleEndGcCollections
+                    ? this.SampleEndGcCollections[generation]
+                    : this.GetGcCollectionCount(generation);
+                captureGcCollections[generation] = (long)currentCount - this.SampleStartGcCollections[generation];
+                if (captureGcCollections[generation] < 0)
+                    captureGcCollectionDataIsValid = false;
+            }
+
             return new ModPerformanceSnapshot(
                 IsTracking: this.IsTracking,
                 StartedUtc: this.SampleStartedUtc,
@@ -526,7 +620,22 @@ internal sealed class ModPerformanceManager
                 InstrumentedDuringGameUpdateMilliseconds: this.ToMilliseconds(this.TotalInstrumentedDuringGameUpdateTicks),
                 Gen0Collections: this.TotalGcCollections[0],
                 Gen1Collections: this.TotalGcCollections[1],
-                Gen2Collections: this.TotalGcCollections[2]
+                Gen2Collections: this.TotalGcCollections[2],
+                TimingPartitionIsValid:
+                    this.InvalidTimingPartitionTicks == 0
+                    && ModPerformanceManager.IsValidTimingPartition(
+                        this.TotalTickTimestampTicks,
+                        this.TotalGameUpdateTimestampTicks,
+                        this.TotalTickInstrumentedTimestampTicks,
+                        this.TotalInstrumentedDuringGameUpdateTicks
+                    ),
+                InvalidTimingPartitionTickCount: this.InvalidTimingPartitionTicks,
+                GcCollectionDataIsValid: this.InvalidGcCollectionTicks == 0,
+                InvalidGcCollectionTickCount: this.InvalidGcCollectionTicks,
+                CaptureGen0Collections: captureGcCollections[0],
+                CaptureGen1Collections: captureGcCollections[1],
+                CaptureGen2Collections: captureGcCollections[2],
+                CaptureGcCollectionDataIsValid: captureGcCollectionDataIsValid
             );
         }
     }
@@ -546,6 +655,7 @@ internal sealed class ModPerformanceManager
     /// <param name="timestamp">The current timestamp.</param>
     private void ResetCore(long timestamp)
     {
+        Interlocked.Increment(ref this.SampleGeneration);
         this.HandlerCounters.Clear();
         this.ModLogs.Clear();
         this.CurrentTickMods.Clear();
@@ -556,17 +666,38 @@ internal sealed class ModPerformanceManager
         this.OmittedHandlerInvocations = 0;
         this.SampleStartedUtc = DateTime.UtcNow;
         this.SampleStartTimestamp = timestamp;
+        for (int generation = 0; generation < this.SampleStartGcCollections.Length; generation++)
+            this.SampleStartGcCollections[generation] = this.GetGcCollectionCount(generation);
+        this.HasSampleEndGcCollections = false;
         this.IsTickOpen = false;
+        this.CurrentTickThreadId = 0;
         this.CurrentTickErrors = 0;
         this.CurrentTickInstrumentedTimestampTicks = 0;
         this.CurrentTickGameUpdateTimestampTicks = 0;
         this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
+        this.CurrentTickTimingPartitionIsInvalid = false;
         this.IsGameUpdateOpen = false;
         this.TotalTickTimestampTicks = 0;
         this.TotalGameUpdateTimestampTicks = 0;
         this.TotalTickInstrumentedTimestampTicks = 0;
         this.TotalInstrumentedDuringGameUpdateTicks = 0;
         Array.Clear(this.TotalGcCollections);
+        this.InvalidTimingPartitionTicks = 0;
+        this.InvalidGcCollectionTicks = 0;
+    }
+
+    /// <summary>Get whether raw timing values form a valid non-overlapping tick partition.</summary>
+    private static bool IsValidTimingPartition(long totalTicks, long gameUpdateTicks, long instrumentedTicks, long instrumentedDuringGameUpdateTicks)
+    {
+        return
+            totalTicks >= 0
+            && gameUpdateTicks >= 0
+            && instrumentedTicks >= 0
+            && instrumentedDuringGameUpdateTicks >= 0
+            && instrumentedDuringGameUpdateTicks <= gameUpdateTicks
+            && instrumentedDuringGameUpdateTicks <= instrumentedTicks
+            && gameUpdateTicks <= totalTicks
+            && instrumentedTicks - instrumentedDuringGameUpdateTicks <= totalTicks - gameUpdateTicks;
     }
 
     /// <summary>Add a tick to the bounded circular history.</summary>
@@ -630,9 +761,10 @@ internal sealed class ModPerformanceManager
     }
 
     /// <summary>One active nested handler invocation.</summary>
-    private struct ActiveHandler(ModPerformanceManager manager, string modId, string modName, string eventName, string handlerName, long startTimestamp, long nestedTimestampTicks)
+    private struct ActiveHandler(ModPerformanceManager manager, long generation, string modId, string modName, string eventName, string handlerName, long startTimestamp, long nestedTimestampTicks)
     {
         public ModPerformanceManager Manager { get; } = manager;
+        public long Generation { get; } = generation;
         public string ModId { get; } = modId;
         public string ModName { get; } = modName;
         public string EventName { get; } = eventName;
@@ -648,13 +780,17 @@ internal readonly struct HandlerTimingToken
     /// <summary>The manager which created this token.</summary>
     private readonly ModPerformanceManager? Manager;
 
+    /// <summary>The sample generation in which the invocation began.</summary>
+    internal long Generation { get; }
+
     /// <summary>The handler's zero-based nesting depth.</summary>
     internal int Depth { get; }
 
     /// <summary>Construct an instance.</summary>
-    public HandlerTimingToken(ModPerformanceManager manager, int depth)
+    public HandlerTimingToken(ModPerformanceManager manager, long generation, int depth)
     {
         this.Manager = manager;
+        this.Generation = generation;
         this.Depth = depth;
     }
 
@@ -683,14 +819,22 @@ internal sealed record ModPerformanceSnapshot(
     double InstrumentedDuringGameUpdateMilliseconds = 0,
     long Gen0Collections = 0,
     long Gen1Collections = 0,
-    long Gen2Collections = 0
+    long Gen2Collections = 0,
+    bool TimingPartitionIsValid = true,
+    long InvalidTimingPartitionTickCount = 0,
+    bool GcCollectionDataIsValid = true,
+    long InvalidGcCollectionTickCount = 0,
+    long CaptureGen0Collections = 0,
+    long CaptureGen1Collections = 0,
+    long CaptureGen2Collections = 0,
+    bool CaptureGcCollectionDataIsValid = true
 )
 {
     /// <summary>Base game update time in completed ticks, excluding instrumented mod callbacks which ran within it.</summary>
-    public double GameUpdateExclusiveMilliseconds => Math.Max(0, this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
+    public double GameUpdateExclusiveMilliseconds => this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds;
 
     /// <summary>Tick time outside both the base game update and instrumented mod callbacks, such as SMAPI's own dispatch and per-tick framework work.</summary>
-    public double OutsideGameUpdateMilliseconds => Math.Max(0, this.TickTotalMilliseconds - this.GameUpdateMilliseconds - Math.Max(0, this.TickInstrumentedMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds));
+    public double OutsideGameUpdateMilliseconds => this.TickTotalMilliseconds - this.GameUpdateMilliseconds - (this.TickInstrumentedMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
 }
 
 /// <summary>Aggregate timing for one mod-owned event handler.</summary>
@@ -725,15 +869,17 @@ internal readonly record struct TickPerformanceSnapshot(
     double InstrumentedDuringGameUpdateMilliseconds = 0,
     int Gen0Collections = 0,
     int Gen1Collections = 0,
-    int Gen2Collections = 0
+    int Gen2Collections = 0,
+    bool TimingPartitionIsValid = true,
+    bool GcCollectionDataIsValid = true
 )
 {
     /// <summary>Time in the update which wasn't observed inside a SMAPI-managed mod event handler.</summary>
-    public double UnattributedMilliseconds => Math.Max(0, this.TotalMilliseconds - this.InstrumentedModMilliseconds);
+    public double UnattributedMilliseconds => this.TotalMilliseconds - this.InstrumentedModMilliseconds;
 
     /// <summary>Base game update time excluding instrumented mod callbacks which ran within it. This can include Harmony patches and other unobserved work invoked by the game.</summary>
-    public double GameUpdateExclusiveMilliseconds => Math.Max(0, this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
+    public double GameUpdateExclusiveMilliseconds => this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds;
 
     /// <summary>Tick time outside both the base game update and instrumented mod callbacks, such as SMAPI's own dispatch and per-tick framework work.</summary>
-    public double OutsideGameUpdateMilliseconds => Math.Max(0, this.TotalMilliseconds - this.GameUpdateMilliseconds - Math.Max(0, this.InstrumentedModMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds));
+    public double OutsideGameUpdateMilliseconds => this.TotalMilliseconds - this.GameUpdateMilliseconds - (this.InstrumentedModMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
 }

@@ -65,28 +65,66 @@ internal static class ModPerformanceReportFormatter
                 .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickTotalMilliseconds))
                 .Append("ms total (")
                 .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickTotalMilliseconds / tickCount))
-                .Append("ms/tick): base game update ")
-                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.GameUpdateExclusiveMilliseconds))
-                .Append("ms (")
-                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.GameUpdateExclusiveMilliseconds / tickCount))
-                .Append("ms/tick), instrumented mod callbacks ")
-                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds))
-                .Append("ms (")
-                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds / tickCount))
-                .Append("ms/tick), SMAPI dispatch & other ")
-                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds))
-                .Append("ms (")
-                .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds / tickCount))
-                .AppendLine("ms/tick).");
+                .Append("ms/tick)");
+            if (snapshot.TimingPartitionIsValid)
+            {
+                report.Append(": base game update excluding observed callbacks ")
+                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.GameUpdateExclusiveMilliseconds))
+                    .Append("ms (")
+                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.GameUpdateExclusiveMilliseconds / tickCount))
+                    .Append("ms/tick), observed mod callbacks ")
+                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds))
+                    .Append("ms (")
+                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds / tickCount))
+                    .Append("ms/tick), residual outside measured game/callback boundaries ")
+                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds))
+                    .Append("ms (")
+                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds / tickCount))
+                    .AppendLine("ms/tick).");
+            }
+            else
+            {
+                report.Append(". Timing split unavailable because ");
+                if (snapshot.InvalidTimingPartitionTickCount > 0)
+                {
+                    report.Append(snapshot.InvalidTimingPartitionTickCount.ToString("N0", CultureInfo.InvariantCulture))
+                        .Append(" completed tick(s) contained an invalid timing partition");
+                }
+                else
+                    report.Append("the accumulated timing counters did not form a valid partition");
+                report.AppendLine("; percentage conclusions must not use this sample.");
+            }
 
-            report.Append("GC collections during measured ticks: ")
-                .Append(snapshot.Gen0Collections.ToString("N0", CultureInfo.InvariantCulture))
-                .Append(" gen0, ")
-                .Append(snapshot.Gen1Collections.ToString("N0", CultureInfo.InvariantCulture))
-                .Append(" gen1, ")
-                .Append(snapshot.Gen2Collections.ToString("N0", CultureInfo.InvariantCulture))
-                .AppendLine(" gen2.");
+            if (snapshot.GcCollectionDataIsValid)
+            {
+                report.Append("Process-wide GC collections during measured ticks: ")
+                    .Append(snapshot.Gen0Collections.ToString("N0", CultureInfo.InvariantCulture))
+                    .Append(" gen0, ")
+                    .Append(snapshot.Gen1Collections.ToString("N0", CultureInfo.InvariantCulture))
+                    .Append(" gen1, ")
+                    .Append(snapshot.Gen2Collections.ToString("N0", CultureInfo.InvariantCulture))
+                    .AppendLine(" gen2.");
+            }
+            else
+            {
+                report.Append("Process-wide GC tick deltas unavailable because ")
+                    .Append(snapshot.InvalidGcCollectionTickCount.ToString("N0", CultureInfo.InvariantCulture))
+                    .AppendLine(" completed tick(s) contained an invalid counter delta.");
+            }
         }
+
+        if (snapshot.CaptureGcCollectionDataIsValid)
+        {
+            report.Append("Process-wide GC collections across the sample: ")
+                .Append(snapshot.CaptureGen0Collections.ToString("N0", CultureInfo.InvariantCulture))
+                .Append(" gen0, ")
+                .Append(snapshot.CaptureGen1Collections.ToString("N0", CultureInfo.InvariantCulture))
+                .Append(" gen1, ")
+                .Append(snapshot.CaptureGen2Collections.ToString("N0", CultureInfo.InvariantCulture))
+                .AppendLine(" gen2 (correlation only, not mod attribution).");
+        }
+        else
+            report.AppendLine("Process-wide GC sample delta unavailable because a collection counter moved backwards or overflowed.");
 
         if (mods.Count == 0)
             report.AppendLine("No mod callback timings, warnings, or errors have been recorded yet.");
@@ -179,7 +217,8 @@ internal static class ModPerformanceReportFormatter
         report.AppendLine();
         report.Append("Interpretation: instrumented time covers SMAPI-managed event handlers, content load/edit callbacks, console commands, and lifecycle callbacks. ")
             .Append("Base game update time is measured around the vanilla update, so it can include Harmony patches, direct mod API calls, and other unobserved work invoked by the game. ")
-            .Append("'SMAPI dispatch & other' is the remaining tick time outside both, such as SMAPI's own event dispatch and per-tick framework work, background work, waiting, or operating-system scheduling. ")
+            .Append("Residual time outside the measured game/callback boundaries can include SMAPI dispatch and framework work, unobserved work, waiting, or operating-system scheduling; it isn't attributed to SMAPI or any mod. ")
+            .Append("GC counts are process-wide correlations and don't identify which code allocated memory or caused a pause. ")
             .Append("A high timing identifies where SMAPI observed time; it does not by itself prove the underlying cause.");
 
         return report.ToString();
@@ -193,7 +232,14 @@ internal static class ModPerformanceReportFormatter
             ? "none"
             : $"{tick.SlowestModName} ({tick.SlowestModId}) {ModPerformanceReportFormatter.FormatMilliseconds(tick.SlowestModMilliseconds)}ms";
 
-        return $"tick {tick.Tick}: {ModPerformanceReportFormatter.FormatMilliseconds(tick.TotalMilliseconds)}ms total; {ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateExclusiveMilliseconds)}ms base game update; {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms instrumented mod callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.OutsideGameUpdateMilliseconds)}ms SMAPI dispatch & other; GC {tick.Gen0Collections}/{tick.Gen1Collections}/{tick.Gen2Collections}; slowest mod {slowest}; {tick.ErrorCount} mod errors";
+        string timing = tick.TimingPartitionIsValid
+            ? $"{ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateExclusiveMilliseconds)}ms base game update excluding observed callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms observed mod callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.OutsideGameUpdateMilliseconds)}ms residual outside measured boundaries"
+            : $"timing partition invalid (raw game window {ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateMilliseconds)}ms; raw observed callbacks {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms)";
+        string gc = tick.GcCollectionDataIsValid
+            ? $"GC {tick.Gen0Collections}/{tick.Gen1Collections}/{tick.Gen2Collections} process-wide"
+            : "GC delta invalid";
+
+        return $"tick {tick.Tick}: {ModPerformanceReportFormatter.FormatMilliseconds(tick.TotalMilliseconds)}ms total; {timing}; {gc}; slowest mod {slowest}; {tick.ErrorCount} mod errors";
     }
 
     /// <summary>Format milliseconds with enough precision for handler-level diagnostics.</summary>
