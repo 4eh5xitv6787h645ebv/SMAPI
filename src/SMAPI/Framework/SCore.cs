@@ -671,20 +671,26 @@ internal class SCore : IDisposable
     {
         this.ModHealthSessionCoordinator?.HandleExportCompleted(status);
         using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
+        (string Message, LogLevel Level)? message = SCore.GetModHealthExportCompletionMessage(status, ModHealthCompletionSummaryFormatter.GetTerminalWidth());
+        if (message.HasValue)
+            this.Monitor.Log(message.Value.Message, message.Value.Level);
+    }
+
+    /// <summary>Format one asynchronous health-export result for safe console presentation.</summary>
+    internal static (string Message, LogLevel Level)? GetModHealthExportCompletionMessage(ModHealthExportStatus status, int terminalWidth)
+    {
         if (status.State == ModHealthExportState.Succeeded && status.TextPath is not null && status.JsonPath is not null && status.Summary is not null)
         {
-            string summary = ModHealthCompletionSummaryFormatter.Format(
-                status.Summary,
-                status.TextPath,
-                status.JsonPath,
-                ModHealthCompletionSummaryFormatter.GetTerminalWidth()
+            return (
+                ModHealthCompletionSummaryFormatter.Format(status.Summary, status.TextPath, status.JsonPath, terminalWidth),
+                LogLevel.Info
             );
-            this.Monitor.Log(summary, LogLevel.Info);
         }
-        else if (status.State == ModHealthExportState.Succeeded)
-            this.Monitor.Log("The mod health report was saved, but its frozen completion summary or relative paths were unavailable. Enter 'health status' for details.", LogLevel.Warn);
-        else if (status.State == ModHealthExportState.Failed)
-            this.Monitor.Log($"{status.Error ?? "The mod health report could not be written."} Enter 'health retry' to retry the exact frozen report.", LogLevel.Error);
+        if (status.State == ModHealthExportState.Succeeded)
+            return ("The mod health report was saved, but its frozen completion summary or relative paths were unavailable. Enter 'health status' for details.", LogLevel.Warn);
+        if (status.State == ModHealthExportState.Failed)
+            return ($"{status.Error ?? "The mod health report could not be written."} Enter 'health retry' to retry the exact frozen report.", LogLevel.Error);
+        return null;
     }
 
     /// <summary>Capture only allowlisted, non-identifying environment and game state on the game thread.</summary>
@@ -2963,7 +2969,13 @@ internal class SCore : IDisposable
     /// <summary>Delete normal (non-crash) log files created by SMAPI.</summary>
     private void PurgeNormalLogs()
     {
-        DirectoryInfo logsDir = new(Constants.LogDir);
+        SCore.PurgeNormalLogs(Constants.LogDir, Constants.FatalCrashLog);
+    }
+
+    /// <summary>Delete top-level normal SMAPI logs without touching crash logs, report directories, or unrelated files.</summary>
+    internal static void PurgeNormalLogs(string logsDirectoryPath, string fatalCrashLogPath)
+    {
+        DirectoryInfo logsDir = new(logsDirectoryPath);
         if (!logsDir.Exists)
             return;
 
@@ -2974,7 +2986,7 @@ internal class SCore : IDisposable
                 continue;
 
             // skip crash log
-            if (logFile.FullName == Constants.FatalCrashLog)
+            if (logFile.FullName == fatalCrashLogPath)
                 continue;
 
             // delete file

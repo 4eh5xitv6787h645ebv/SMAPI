@@ -41,6 +41,8 @@ internal sealed class HealthCommand : IInternalCommand
 
         Usage: health reset confirm
         Explicitly discard timed evidence and any failed retry. The session ledger is kept.
+
+        Reports stay in private local storage. After a successful export, SMAPI keeps at most five complete report pairs and removes pairs older than 30 days.
         """;
 
     /// <summary>Construct an instance.</summary>

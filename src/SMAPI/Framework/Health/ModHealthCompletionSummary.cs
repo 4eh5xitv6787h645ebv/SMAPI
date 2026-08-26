@@ -134,7 +134,7 @@ internal static class ModHealthCompletionSummaryFormatter
         ModHealthCompletionSummaryFormatter.AppendWrapped(lines, sample, width);
         ModHealthCompletionSummaryFormatter.AppendWrapped(
             lines,
-            $"Frozen counts: {summary.WarningCount.ToString(CultureInfo.InvariantCulture)} warnings, {summary.ErrorCount.ToString(CultureInfo.InvariantCulture)} errors, {summary.FailedCallbackCount.ToString(CultureInfo.InvariantCulture)} failed callbacks, {summary.SlowUpdateCount.ToString(CultureInfo.InvariantCulture)} slow updates.",
+            $"Frozen counts: {summary.WarningCount.ToString(CultureInfo.InvariantCulture)} warnings/alerts, {summary.ErrorCount.ToString(CultureInfo.InvariantCulture)} errors, {summary.FailedCallbackCount.ToString(CultureInfo.InvariantCulture)} failed callbacks, {summary.SlowUpdateCount.ToString(CultureInfo.InvariantCulture)} slow updates.",
             width
         );
 
@@ -161,6 +161,7 @@ internal static class ModHealthCompletionSummaryFormatter
         lines.Add("Reports:");
         ModHealthCompletionSummaryFormatter.AppendWrapped(lines, $"Text: {ModHealthCompletionSummaryFormatter.GetSafeRelativePath(textPath)}", width, continuationIndent: 6);
         ModHealthCompletionSummaryFormatter.AppendWrapped(lines, $"JSON: {ModHealthCompletionSummaryFormatter.GetSafeRelativePath(jsonPath)}", width, continuationIndent: 6);
+        ModHealthCompletionSummaryFormatter.AppendWrapped(lines, "Storage: private local; SMAPI keeps at most five complete report pairs and removes pairs older than 30 days.", width);
         return string.Join('\n', lines);
     }
 

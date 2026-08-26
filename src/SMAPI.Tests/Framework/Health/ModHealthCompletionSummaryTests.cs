@@ -42,13 +42,15 @@ internal sealed class ModHealthCompletionSummaryTests
         );
 
         text.Should().Contain("Sample: 42 completed update ticks.");
-        text.Should().Contain("Frozen counts: 8 warnings, 3 errors, 4 failed callbacks, 5");
+        text.Should().Contain("Frozen counts: 8 warnings/alerts, 3 errors, 4 failed");
+        text.Should().Contain("callbacks, 5 slow updates.");
         text.Should().Contain("slow updates.");
         text.Should().Contain("Flags: short sample, truncated, invalid timing.");
         text.Should().Contain("1. Action needed: First summary [31m");
         text.Should().Contain("Next: First action");
         text.Should().Contain("2. Performance:");
         text.Should().Contain("3. Check: Third summary");
+        text.Should().Contain("at most five complete").And.Contain("30 days");
         text.Should().NotContain("Fourth summary");
         text.Should().NotContain("\u001b");
         text.Split('\n').Should().OnlyContain(line => line.Length <= 60);
@@ -80,6 +82,7 @@ internal sealed class ModHealthCompletionSummaryTests
         summary.ErrorCount.Should().Be(8);
         summary.FailedCallbackCount.Should().Be(9);
         summary.IsTimingInvalid.Should().BeFalse();
+        summary.IsShortSample.Should().BeFalse();
         text.Should().Contain("Sample: ledger-only; no deep timing sample was available.");
         text.Should().Contain("relative path unavailable");
         text.Should().NotContain("/home/player").And.NotContain("secret");

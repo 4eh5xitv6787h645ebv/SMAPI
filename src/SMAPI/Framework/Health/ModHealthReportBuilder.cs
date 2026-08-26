@@ -106,9 +106,9 @@ internal sealed class ModHealthReportBuilder
         ModHealthPerformance reportPerformance = BuildPerformance(performance, health, marks);
 
         long completedUpdates = Math.Max(0, performance?.CompletedTickCount ?? 0);
-        bool isShort = !hasCapture
-            || durationMilliseconds < TimeSpan.FromSeconds(ModHealthReportLimits.ShortSampleSeconds).TotalMilliseconds
-            || completedUpdates < ModHealthReportLimits.ShortSampleUpdates;
+        bool isShort = hasCapture
+            && (durationMilliseconds < TimeSpan.FromSeconds(ModHealthReportLimits.ShortSampleSeconds).TotalMilliseconds
+                || completedUpdates < ModHealthReportLimits.ShortSampleUpdates);
 
         ImmutableArray<ModHealthCapacity> capacities = BuildCapacities(request, health);
         ImmutableArray<ModHealthOmission> omissions = BuildOmissions(request, health, mods.Length, logs.Length, failures.Length);

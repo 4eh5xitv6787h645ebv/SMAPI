@@ -110,7 +110,7 @@ internal sealed class ModHealthReportBuilderTests
         ModHealthReport report = new ModHealthReportBuilder().Build(request, CreateEnvironment());
 
         report.Capture.Mode.Should().Be(ModHealthCaptureMode.LedgerOnly);
-        report.Capture.IsShortSample.Should().BeTrue();
+        report.Capture.IsShortSample.Should().BeFalse("ledger-only evidence has no timing sample to classify as short");
         report.Capture.TimingValid.Should().BeFalse();
         report.Mods.Single().Status.Should().Be(ModHealthModStatus.Discovered);
         report.Mods.Single().FailureCategory.Should().Be("status-incomplete");
@@ -119,6 +119,10 @@ internal sealed class ModHealthReportBuilderTests
         report.Logs.Single().DuringCapture.TotalMessages.Should().Be(0);
         report.CallbackFailures.Single().CaptureCount.Should().Be(0);
         report.Performance.Histogram.Count.Should().Be(0);
+        report = report with { Findings = new ModHealthInsightAnalyzer().Analyze(report) };
+        string text = new ModHealthReportTextFormatter().Format(report);
+        text.Should().Contain("Timing data: unavailable; this report contains session-ledger evidence only");
+        text.Should().NotContain("This timing sample is short");
     }
 
     [Test]

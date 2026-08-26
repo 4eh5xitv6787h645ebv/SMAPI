@@ -64,6 +64,35 @@ internal sealed class ModHealthInsightAnalyzerTests
     }
 
     [Test]
+    public void Analyze_LedgerOnlyExplainsThatTimingIsUnavailableWithoutCallingItShort()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ModHealthReport report = baseReport with
+        {
+            Capture = baseReport.Capture with
+            {
+                Mode = ModHealthCaptureMode.LedgerOnly,
+                DurationMilliseconds = 0,
+                CompletedUpdateCount = 0,
+                IsShortSample = false,
+                TimingValid = false
+            },
+            Mods = ImmutableArray<ModHealthMod>.Empty,
+            Performance = baseReport.Performance with
+            {
+                SlowUpdateCount = 0,
+                Callbacks = ImmutableArray<ModHealthCallback>.Empty,
+                WorstUpdates = ImmutableArray<ModHealthUpdate>.Empty
+            }
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        findings.Should().ContainSingle(finding => finding.RuleId == "ledger-only");
+        findings.Should().NotContain(finding => finding.RuleId == "short-sample" || finding.RuleId == "no-clear-observed-issue");
+    }
+
+    [Test]
     public void Analyze_ShortSampleSuppressesSustainedConclusionsButKeepsIndividualPeak()
     {
         ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();

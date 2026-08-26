@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import date
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import stat
 import subprocess
@@ -395,10 +397,30 @@ def project_mods_json(source: Path) -> dict[str, object]:
     for index, entry in enumerate(document["mods"]):
         if not isinstance(entry, dict):
             raise FixtureAuditError(f"mods.json entry {index} is not an object")
+        for field in PROJECTED_MOD_FIELDS:
+            if field not in entry:
+                continue
+            value = entry[field]
+            valid = (
+                type(value) is str
+                if field in {"name", "id", "version"}
+                else value is None or type(value) is str
+                if field == "contentPackFor"
+                else type(value) is bool
+            )
+            if not valid:
+                raise FixtureAuditError(f"mods.json entry {index} field {field!r} has an invalid type")
         projected_mods.append({field: entry[field] for field in PROJECTED_MOD_FIELDS if field in entry})
     result: dict[str, object] = {"mods": projected_mods}
-    if isinstance(document.get("generated"), str):
-        result["generated"] = document["generated"]
+    if "generated" in document:
+        generated = document["generated"]
+        if type(generated) is not str or re.fullmatch(r"\d{4}-\d{2}-\d{2}", generated) is None:
+            raise FixtureAuditError("mods.json generated value must be an ISO date")
+        try:
+            date.fromisoformat(generated)
+        except ValueError as exc:
+            raise FixtureAuditError("mods.json generated value must be an ISO date") from exc
+        result["generated"] = generated
     return result
 
 

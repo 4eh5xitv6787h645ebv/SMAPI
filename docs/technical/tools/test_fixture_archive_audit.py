@@ -229,6 +229,21 @@ class FixtureArchiveAuditTests(unittest.TestCase):
         self.assertEqual(projected["mods"][0]["id"], "Example.Mod")
         self.assertEqual(projected["generated"], "2026-08-26")
 
+    def test_mods_json_projection_rejects_nested_allowlisted_values_and_non_date_generation(self) -> None:
+        source = self.root / "mods.json"
+        malformed_values = (
+            ({"mods": [{"name": {"folder": "/home/private"}}]}, "field 'name' has an invalid type"),
+            ({"mods": [{"contentPackFor": ["/home/private"]}]}, "field 'contentPackFor' has an invalid type"),
+            ({"mods": [{"isCodeMod": 1}]}, "field 'isCodeMod' has an invalid type"),
+            ({"generated": "/home/private", "mods": []}, "generated value must be an ISO date"),
+            ({"generated": "2026-02-30", "mods": []}, "generated value must be an ISO date"),
+        )
+        for document, message in malformed_values:
+            with self.subTest(document=document):
+                source.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaisesRegex(audit.FixtureAuditError, message):
+                    audit.project_mods_json(source)
+
 
 if __name__ == "__main__":
     unittest.main()

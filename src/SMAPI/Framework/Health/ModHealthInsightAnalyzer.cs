@@ -159,16 +159,27 @@ internal sealed class ModHealthInsightAnalyzer
 
         if (findings.Count == 0)
         {
-            findings.Add(new(
-                "no-clear-observed-issue",
-                ModHealthFindingSeverity.Info,
-                ModHealthFindingConfidence.Limited,
-                null,
-                "No clear mod-owned issue was observed during this capture.",
-                "The configured direct-failure, error-volume, logging, and timing thresholds were not reached.",
-                "If the problem continues, reproduce for longer and share the health text report with the normal SMAPI log after inspecting both.",
-                "SMAPI cannot observe Harmony bodies, arbitrary background work, native code, GPU work, I/O waits, or operating-system scheduling."
-            ));
+            findings.Add(report.Capture.Mode == ModHealthCaptureMode.LedgerOnly
+                ? new(
+                    "ledger-only",
+                    ModHealthFindingSeverity.Info,
+                    ModHealthFindingConfidence.Limited,
+                    null,
+                    "No direct mod issue was recorded in the session ledger.",
+                    "No deep timing sample was available, and the configured direct-failure, error-volume, and logging thresholds were not reached.",
+                    "If the problem continues, enter 'health start', reproduce it, then enter 'health stop'.",
+                    "Ledger-only evidence cannot support timing conclusions, and the absence of a finding does not show that no issue exists."
+                )
+                : new(
+                    "no-clear-observed-issue",
+                    ModHealthFindingSeverity.Info,
+                    ModHealthFindingConfidence.Limited,
+                    null,
+                    "No clear mod-owned issue was observed during this capture.",
+                    "The configured direct-failure, error-volume, logging, and timing thresholds were not reached.",
+                    "If the problem continues, reproduce for longer and share the health text report with the normal SMAPI log after inspecting both.",
+                    "SMAPI cannot observe Harmony bodies, arbitrary background work, native code, GPU work, I/O waits, or operating-system scheduling."
+                ));
         }
 
         return findings

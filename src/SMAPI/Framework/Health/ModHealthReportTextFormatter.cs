@@ -41,7 +41,11 @@ internal sealed class ModHealthReportTextFormatter
             .Append("Completion: ").Append(ModHealthReportTextFormatter.GetCompletionReason(report.Capture.CompletionReason)).Append('\n')
             .Append("Duration: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Capture.DurationMilliseconds)).Append(" ms\n")
             .Append("Completed update ticks: ").Append(report.Capture.CompletedUpdateCount.ToString(CultureInfo.InvariantCulture)).Append('\n')
-            .Append("Timing data: ").Append(report.Capture.TimingValid ? "valid" : "invalid; percentage conclusions were suppressed").Append('\n')
+            .Append("Timing data: ").Append(report.Capture.Mode == ModHealthCaptureMode.LedgerOnly
+                ? "unavailable; this report contains session-ledger evidence only"
+                : report.Capture.TimingValid
+                    ? "valid"
+                    : "invalid; percentage conclusions were suppressed").Append('\n')
             .Append("Ledger boundary: ").Append(report.Completeness.Boundary).Append('\n');
         if (report.Header.IsTruncated)
             text.Append("Report detail was truncated; see omissions below.\n");
