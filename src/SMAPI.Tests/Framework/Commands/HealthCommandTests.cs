@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using FluentAssertions;
 using Moq;
@@ -6,6 +7,7 @@ using StardewModdingAPI;
 using StardewModdingAPI.Framework;
 using StardewModdingAPI.Framework.Commands;
 using StardewModdingAPI.Framework.Health;
+using StardewModdingAPI.Framework.Health.Viewer;
 using StardewModdingAPI.Framework.Performance;
 
 namespace SMAPI.Tests.Framework.Commands;
@@ -21,8 +23,46 @@ internal sealed class HealthCommandTests
 
         command.HandleCommand([], monitor.Object);
 
-        messages.Should().ContainSingle(message => message.Contains("health start"));
-        command.Description.Should().Contain("at most five complete report pairs").And.Contain("30 days");
+        messages.Should().ContainSingle(message => message.Contains("health start") && message.Contains("health view"));
+        command.Description.Should()
+            .Contain("health view")
+            .And.Contain("mouse")
+            .And.Contain("controller")
+            .And.Contain("never uploads")
+            .And.Contain("fall back to English")
+            .And.Contain("canonical English")
+            .And.Contain("at most five complete report pairs")
+            .And.Contain("30 days");
+    }
+
+    [TestCase(ModHealthViewerActionDisposition.Queued, "next safe game update", LogLevel.Info)]
+    [TestCase(ModHealthViewerActionDisposition.Coalesced, "already open or queued", LogLevel.Info)]
+    [TestCase(ModHealthViewerActionDisposition.RejectedFull, "queue is full", LogLevel.Error)]
+    public void View_QueuesInjectedScreenLocalOpen(ModHealthViewerActionDisposition disposition, string expectedMessage, LogLevel expectedLevel)
+    {
+        int calls = 0;
+        (HealthCommand command, _, Mock<IMonitor> monitor, List<string> messages, _) = Create(() =>
+        {
+            calls++;
+            return disposition;
+        });
+
+        command.HandleCommand(["view"], monitor.Object);
+
+        calls.Should().Be(1);
+        messages.Should().ContainSingle(message => message.Contains(expectedMessage));
+        monitor.Verify(instance => instance.Log(It.Is<string>(message => message.Contains(expectedMessage)), expectedLevel), Times.Once);
+    }
+
+    [Test]
+    public void View_WithoutLinuxViewerExplainsAvailability()
+    {
+        (HealthCommand command, _, Mock<IMonitor> monitor, List<string> messages, _) = Create();
+
+        command.HandleCommand(["view"], monitor.Object);
+
+        messages.Should().ContainSingle(message => message.Contains("only available in Linux desktop SMAPI"));
+        monitor.Verify(instance => instance.Log(It.IsAny<string>(), LogLevel.Error), Times.Once);
     }
 
     [Test]
@@ -65,6 +105,7 @@ internal sealed class HealthCommandTests
 
     [TestCase("start")]
     [TestCase("status")]
+    [TestCase("view")]
     [TestCase("report")]
     [TestCase("stop")]
     [TestCase("retry")]
@@ -153,7 +194,7 @@ internal sealed class HealthCommandTests
 
         command.HandleCommand(["status"], monitor.Object);
 
-        messages.Should().ContainSingle(message => message.Contains("Session ledger:") && message.Contains("Timed capture:"));
+        messages.Should().ContainSingle(message => message.Contains("Session ledger:") && message.Contains("Timed capture:") && message.Contains("health view"));
     }
 
     [Test]
@@ -171,7 +212,7 @@ internal sealed class HealthCommandTests
         messages.Should().NotContain(message => message.Contains("health report' to save"));
     }
 
-    private static (HealthCommand Command, ModHealthSessionCoordinator Coordinator, Mock<IMonitor> Monitor, List<string> Messages, TestExportQueue Queue) Create()
+    private static (HealthCommand Command, ModHealthSessionCoordinator Coordinator, Mock<IMonitor> Monitor, List<string> Messages, TestExportQueue Queue) Create(Func<ModHealthViewerActionDisposition>? queueViewerOpen = null)
     {
         ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
         ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: () => 0);
@@ -181,7 +222,7 @@ internal sealed class HealthCommandTests
         Mock<IMonitor> monitor = new();
         monitor.Setup(instance => instance.Log(It.IsAny<string>(), It.IsAny<LogLevel>()))
             .Callback<string, LogLevel>((message, _) => messages.Add(message));
-        return (new HealthCommand(coordinator), coordinator, monitor, messages, queue);
+        return (new HealthCommand(coordinator, queueViewerOpen), coordinator, monitor, messages, queue);
     }
 
     private sealed class TestExportQueue : IModHealthExportQueue
@@ -199,9 +240,10 @@ internal sealed class HealthCommandTests
             return new ModHealthExportQueueResult(ModHealthExportDisposition.Queued, status);
         }
 
-        public ModHealthExportQueueResult Retry() => this.RetryResult;
-        public void DiscardRetryable() { }
+        public ModHealthExportQueueResult Retry(System.Guid? requestId = null) => this.RetryResult;
+        public void DiscardRetryable(System.Guid? requestId = null) { }
         public ModHealthExportStatus GetStatus(System.Guid? requestId = null) => requestId is null || requestId == this.Status.RequestId ? this.Status : ModHealthExportStatus.None;
+        public ModHealthPreparedReportSnapshot GetPreparedReport(System.Guid? requestId = null) => ModHealthPreparedReportSnapshot.Absent;
 
         public void SetLastStatus(ModHealthExportState state, string? textPath = null, string? jsonPath = null)
         {

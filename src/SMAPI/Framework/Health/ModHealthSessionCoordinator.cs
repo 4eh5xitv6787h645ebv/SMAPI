@@ -5,6 +5,13 @@ using StardewModdingAPI.Framework.Performance;
 
 namespace StardewModdingAPI.Framework.Health;
 
+/// <summary>The exact request selected or created for an in-game health report viewer.</summary>
+internal sealed record ModHealthViewPreparation(
+    Guid RequestId,
+    ModHealthCoordinatorResult Operation,
+    ModHealthPreparedReportSnapshot PreparedReport
+);
+
 /// <summary>Coordinates the single timing collector shared by the user health workflow, advanced performance commands, and persistent settings.</summary>
 internal sealed class ModHealthSessionCoordinator
 {
@@ -26,6 +33,8 @@ internal sealed class ModHealthSessionCoordinator
     private double SlowUpdateThresholdMilliseconds;
     private ModHealthDiagnosticSettings? PendingSettings;
     private bool LifecycleTimingObserved;
+    private Guid? ActiveInterimExportRequestId;
+    private Guid? LatestLedgerOnlyExportRequestId;
 
     /// <summary>Construct a coordinator.</summary>
     public ModHealthSessionCoordinator(ModPerformanceManager performanceManager, ModHealthLedger ledger, IModHealthExportQueue exportQueue, Func<DateTimeOffset>? getUtcNow = null, Func<ModHealthEnvironmentSnapshot>? getEnvironment = null, Func<bool>? isLifecycleTimingAvailable = null, Func<uint>? getCurrentUpdateTick = null)
@@ -137,7 +146,10 @@ internal sealed class ModHealthSessionCoordinator
                     this.Marks,
                     isFinal: false
                 );
-                return this.Enqueue(request, "Health report queued from an interim timing snapshot.");
+                ModHealthCoordinatorResult result = this.Enqueue(request, "Health report queued from an interim timing snapshot.");
+                if (!result.IsError)
+                    this.ActiveInterimExportRequestId = request.RequestId;
+                return result;
             }
 
             ModHealthExportRequest ledgerOnly = this.CreateRequest(
@@ -149,8 +161,77 @@ internal sealed class ModHealthSessionCoordinator
                 ImmutableArray<ModHealthMark>.Empty,
                 isFinal: false
             );
-            return this.Enqueue(ledgerOnly, "Session health report queued. No deep timing window was available.");
+            ModHealthCoordinatorResult ledgerResult = this.Enqueue(ledgerOnly, "Session health report queued. No deep timing window was available.");
+            if (!ledgerResult.IsError)
+                this.LatestLedgerOnlyExportRequestId = ledgerOnly.RequestId;
+            return ledgerResult;
         }
+    }
+
+    /// <summary>Select an exact current-process report for the viewer, preparing one snapshot only when needed.</summary>
+    /// <param name="forceRefresh">Whether to prepare a fresh active interim or inactive ledger-only snapshot instead of reusing the current generation's request.</param>
+    public ModHealthViewPreparation PrepareHealthView(bool forceRefresh = false)
+    {
+        lock (this.SyncRoot)
+        {
+            this.RefreshSucceededRetainedExport();
+
+            if (this.State == ModHealthCaptureState.StoppedRetained)
+            {
+                Guid? retainedId = this.RetainedCapture?.ExportRequestId;
+                if (retainedId is Guid existingId && this.HasExactRequest(existingId))
+                    return this.CreateViewPreparation(existingId, "Using the exact retained final health report.");
+
+                ModHealthCoordinatorResult queued = this.QueueRetainedCapture();
+                Guid requestId = this.RetainedCapture!.ExportRequestId!.Value;
+                return this.CreateViewPreparation(requestId, queued);
+            }
+
+            if (this.State == ModHealthCaptureState.Active)
+            {
+                if (!forceRefresh && this.ActiveInterimExportRequestId is Guid existingId && this.HasExactRequest(existingId))
+                    return this.CreateViewPreparation(existingId, "Using the current capture's prepared interim report.");
+
+                ModPerformanceSnapshot performance = FreezeSnapshot(this.PerformanceManager.GetSnapshot());
+                ModHealthExportRequest request = this.CreateRequest(
+                    this.Owner,
+                    this.Origin,
+                    ModHealthCompletionReason.InterimReport,
+                    performance,
+                    this.Ledger.GetSnapshot(this.CaptureBaseline),
+                    this.Marks,
+                    isFinal: false
+                );
+                ModHealthCoordinatorResult queued = this.Enqueue(request, "Health viewer report queued from an interim timing snapshot.");
+                if (!queued.IsError)
+                    this.ActiveInterimExportRequestId = request.RequestId;
+                return this.CreateViewPreparation(request.RequestId, queued);
+            }
+
+            if (!forceRefresh && this.LatestLedgerOnlyExportRequestId is Guid ledgerId && this.HasExactRequest(ledgerId))
+                return this.CreateViewPreparation(ledgerId, "Using the latest prepared session health report.");
+
+            ModHealthExportRequest ledgerOnly = this.CreateRequest(
+                ModHealthCaptureOwner.None,
+                origin: null,
+                ModHealthCompletionReason.InterimReport,
+                performance: null,
+                this.Ledger.GetSnapshot(),
+                ImmutableArray<ModHealthMark>.Empty,
+                isFinal: false
+            );
+            ModHealthCoordinatorResult ledgerResult = this.Enqueue(ledgerOnly, "Session health viewer report queued. No deep timing window was available.");
+            if (!ledgerResult.IsError)
+                this.LatestLedgerOnlyExportRequestId = ledgerOnly.RequestId;
+            return this.CreateViewPreparation(ledgerOnly.RequestId, ledgerResult);
+        }
+    }
+
+    /// <summary>Get the prepared state for one exact viewer request without substituting a newer report.</summary>
+    public ModHealthPreparedReportSnapshot GetPreparedHealthReport(Guid requestId)
+    {
+        lock (this.SyncRoot)
+            return this.ExportQueue.GetPreparedReport(requestId);
     }
 
     /// <summary>Stop any active capture and queue a health-format final report, or export retained/session-only evidence.</summary>
@@ -178,7 +259,10 @@ internal sealed class ModHealthSessionCoordinator
                 ImmutableArray<ModHealthMark>.Empty,
                 isFinal: true
             );
-            return this.Enqueue(request, "Session health report queued. No deep timing window was available.");
+            ModHealthCoordinatorResult result = this.Enqueue(request, "Session health report queued. No deep timing window was available.");
+            if (!result.IsError)
+                this.LatestLedgerOnlyExportRequestId = request.RequestId;
+            return result;
         }
     }
 
@@ -202,32 +286,60 @@ internal sealed class ModHealthSessionCoordinator
     public ModHealthCoordinatorResult ResetHealth()
     {
         lock (this.SyncRoot)
+            return this.ResetHealthCore(expectedRequestId: null);
+    }
+
+    /// <summary>Reset health evidence only if the viewer still owns the exact current request.</summary>
+    public ModHealthCoordinatorResult ResetHealth(Guid expectedRequestId)
+    {
+        lock (this.SyncRoot)
         {
-            ModHealthExportStatus export = this.ExportQueue.GetStatus();
-            if (export.State is ModHealthExportState.Queued or ModHealthExportState.Writing)
-                return Refused("A health report is queued or being written. Wait for it to finish before resetting.", export);
-            if (this.Owner == ModHealthCaptureOwner.Performance && this.State != ModHealthCaptureState.Inactive)
-                return Refused("The sample is performance-owned. Use 'performance reset' instead.");
-
-            bool restart = this.State == ModHealthCaptureState.Active && this.Owner == ModHealthCaptureOwner.Health;
-            bool applyPendingSettings = this.PendingSettings.HasValue;
-            this.ExportQueue.DiscardRetryable();
-            this.ClearCore();
-            this.PerformanceManager.Reset();
-            if (applyPendingSettings)
+            ModHealthPreparedReportSnapshot prepared = this.ExportQueue.GetPreparedReport(expectedRequestId);
+            if (prepared.State == ModHealthPreparedReportState.Superseded)
             {
-                this.ApplyPendingSettingsIfPossible();
-                return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Discarded the timed evidence and applied the pending persistent diagnostic settings. The session ledger was kept.");
+                string supersededMessage = prepared.NewerRequestId is Guid newerId
+                    ? $"That report was superseded by newer request {newerId}. View the newer report instead of resetting current evidence."
+                    : "That report was superseded. Reopen the viewer before resetting current evidence.";
+                return Refused(supersededMessage, this.ExportQueue.GetStatus(expectedRequestId));
             }
-            if (restart)
-            {
-                this.StartCore(ModHealthCaptureOwner.Health, ModHealthCaptureOrigin.Manual, logTicks: false, ModHealthReportLimits.SlowUpdateMilliseconds);
-                return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Discarded the timed evidence and started a fresh health window. The session ledger was kept.");
-            }
+            if (prepared.State is ModHealthPreparedReportState.Canceled or ModHealthPreparedReportState.Disposed)
+                return Refused("That report is no longer active. Reopen the viewer before resetting current evidence.", this.ExportQueue.GetStatus(expectedRequestId));
 
-            this.ApplyPendingSettingsIfPossible();
-            return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Discarded the retained timed evidence. The session ledger was kept.");
+            Guid? currentRequestId = this.GetCurrentViewRequestId();
+            if (currentRequestId != expectedRequestId)
+            {
+                return Refused("That viewer no longer owns the current health report. Reopen the viewer before resetting evidence.", this.ExportQueue.GetStatus(expectedRequestId));
+            }
+            return this.ResetHealthCore(expectedRequestId);
         }
+    }
+
+    private ModHealthCoordinatorResult ResetHealthCore(Guid? expectedRequestId)
+    {
+        ModHealthExportStatus export = this.ExportQueue.GetStatus();
+        if (export.State is ModHealthExportState.Queued or ModHealthExportState.Writing)
+            return Refused("A health report is queued or being written. Wait for it to finish before resetting.", export);
+        if (this.Owner == ModHealthCaptureOwner.Performance && this.State != ModHealthCaptureState.Inactive)
+            return Refused("The sample is performance-owned. Use 'performance reset' instead.");
+
+        bool restart = this.State == ModHealthCaptureState.Active && this.Owner == ModHealthCaptureOwner.Health;
+        bool applyPendingSettings = this.PendingSettings.HasValue;
+        this.ExportQueue.DiscardRetryable(expectedRequestId);
+        this.ClearCore();
+        this.PerformanceManager.Reset();
+        if (applyPendingSettings)
+        {
+            this.ApplyPendingSettingsIfPossible();
+            return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Discarded the timed evidence and applied the pending persistent diagnostic settings. The session ledger was kept.");
+        }
+        if (restart)
+        {
+            this.StartCore(ModHealthCaptureOwner.Health, ModHealthCaptureOrigin.Manual, logTicks: false, ModHealthReportLimits.SlowUpdateMilliseconds);
+            return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Discarded the timed evidence and started a fresh health window. The session ledger was kept.");
+        }
+
+        this.ApplyPendingSettingsIfPossible();
+        return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Discarded the retained timed evidence. The session ledger was kept.");
     }
 
     /// <summary>Clear advanced diagnostics without changing whether advanced sampling is active.</summary>
@@ -248,6 +360,7 @@ internal sealed class ModHealthSessionCoordinator
             if (active)
             {
                 this.CaptureBaseline = this.Ledger.CreateCaptureBaseline();
+                this.ActiveInterimExportRequestId = null;
                 return new ModHealthCoordinatorResult(ModHealthCoordinatorResultCode.Reset, "Cleared the mod performance, warning, and error diagnostics.");
             }
 
@@ -258,17 +371,18 @@ internal sealed class ModHealthSessionCoordinator
     }
 
     /// <summary>Retry the exact frozen request retained by the export queue.</summary>
-    public ModHealthCoordinatorResult RetryHealthExport()
+    public ModHealthCoordinatorResult RetryHealthExport(Guid? requestId = null)
     {
         lock (this.SyncRoot)
         {
-            ModHealthExportQueueResult queued = this.ExportQueue.Retry();
+            ModHealthExportQueueResult queued = this.ExportQueue.Retry(requestId);
             return queued.Disposition switch
             {
                 ModHealthExportDisposition.Retried => new(ModHealthCoordinatorResultCode.ExportRetried, "Retrying the exact frozen health report.", Export: queued.Status),
                 ModHealthExportDisposition.Pending => new(ModHealthCoordinatorResultCode.ExportPending, "The retry is pending behind the report currently being written.", Export: queued.Status),
                 ModHealthExportDisposition.Coalesced => new(ModHealthCoordinatorResultCode.ExportPending, "That exact frozen health report is already queued or being written.", Export: queued.Status),
                 ModHealthExportDisposition.RejectedBusy => Refused("The report queue is busy. The failed frozen health report is still retained; enter 'health retry' again after the current export finishes.", queued.Status),
+                _ when requestId is Guid exactId => this.CreateExactNothingToRetry(exactId),
                 _ => new(ModHealthCoordinatorResultCode.NothingToRetry, "There is no failed frozen health report to retry.", IsError: true, Export: queued.Status)
             };
         }
@@ -377,6 +491,13 @@ internal sealed class ModHealthSessionCoordinator
         }
     }
 
+    /// <summary>Get the minimal state needed to choose in-game viewer actions without building diagnostic snapshots.</summary>
+    public ModHealthViewerActionState GetViewerActionState()
+    {
+        lock (this.SyncRoot)
+            return new(this.State);
+    }
+
     /// <summary>Get the current or frozen performance snapshot for the advanced report command.</summary>
     public ModPerformanceSnapshot GetPerformanceSnapshot()
     {
@@ -406,6 +527,8 @@ internal sealed class ModHealthSessionCoordinator
         this.CaptureBaseline = this.Ledger.CreateCaptureBaseline();
         this.RetainedCapture = null;
         this.Marks = ImmutableArray<ModHealthMark>.Empty;
+        this.ActiveInterimExportRequestId = null;
+        this.LatestLedgerOnlyExportRequestId = null;
         this.LifecycleTimingObserved = this.IsLifecycleTimingAvailable?.Invoke()
             ?? origin is ModHealthCaptureOrigin.Configuration or ModHealthCaptureOrigin.HealthOnLaunch;
     }
@@ -417,6 +540,7 @@ internal sealed class ModHealthSessionCoordinator
         ModHealthLedgerSnapshot ledger = this.Ledger.GetSnapshot(this.CaptureBaseline);
         this.RetainedCapture = new FrozenCapture(this.Owner, this.Origin ?? ModHealthCaptureOrigin.Manual, completionReason, performance, ledger, this.Marks, this.SlowUpdateThresholdMilliseconds, null);
         this.State = ModHealthCaptureState.StoppedRetained;
+        this.ActiveInterimExportRequestId = null;
     }
 
     private ModHealthCoordinatorResult QueueRetainedCapture()
@@ -536,6 +660,61 @@ internal sealed class ModHealthSessionCoordinator
         this.Marks = ImmutableArray<ModHealthMark>.Empty;
         this.SlowUpdateThresholdMilliseconds = 0;
         this.LifecycleTimingObserved = false;
+        this.ActiveInterimExportRequestId = null;
+        this.LatestLedgerOnlyExportRequestId = null;
+    }
+
+    private bool HasExactRequest(Guid requestId)
+    {
+        ModHealthPreparedReportSnapshot prepared = this.ExportQueue.GetPreparedReport(requestId);
+        if (prepared.State is not (ModHealthPreparedReportState.Absent or ModHealthPreparedReportState.Disposed or ModHealthPreparedReportState.Canceled))
+            return true;
+        return this.ExportQueue.GetStatus(requestId).State != ModHealthExportState.None;
+    }
+
+    private ModHealthViewPreparation CreateViewPreparation(Guid requestId, string message)
+    {
+        ModHealthExportStatus export = this.ExportQueue.GetStatus(requestId);
+        ModHealthPreparedReportSnapshot prepared = this.ExportQueue.GetPreparedReport(requestId);
+        ModHealthCoordinatorResult operation = prepared.State switch
+        {
+            ModHealthPreparedReportState.Saved => new(ModHealthCoordinatorResultCode.ExportAlreadySucceeded, message, Export: export),
+            ModHealthPreparedReportState.WriteFailed => Refused("Using the exact prepared report, but it was not saved. Retry the exact request to save it.", export),
+            ModHealthPreparedReportState.FailedBeforeModel => Refused("That exact report failed before a model was prepared. Retry the exact request or refresh the viewer.", export),
+            ModHealthPreparedReportState.Superseded when prepared.NewerRequestId is Guid newerId => Refused($"That exact report was superseded by newer request {newerId}.", export),
+            ModHealthPreparedReportState.Superseded => Refused("That exact report was superseded.", export),
+            ModHealthPreparedReportState.Canceled or ModHealthPreparedReportState.Disposed => Refused("That exact report is no longer available. Refresh the viewer to prepare another report.", export),
+            _ => new(ModHealthCoordinatorResultCode.ExportPending, message, Export: export)
+        };
+        return new(requestId, operation, prepared);
+    }
+
+    private ModHealthViewPreparation CreateViewPreparation(Guid requestId, ModHealthCoordinatorResult operation)
+    {
+        ModHealthPreparedReportSnapshot prepared = this.ExportQueue.GetPreparedReport(requestId);
+        if (operation.IsError && prepared.State == ModHealthPreparedReportState.Absent)
+            prepared = new(ModHealthPreparedReportState.Rejected, requestId, operation.Export?.IsFinal ?? false);
+        return new(requestId, operation, prepared);
+    }
+
+    private Guid? GetCurrentViewRequestId()
+    {
+        return this.State switch
+        {
+            ModHealthCaptureState.Active => this.ActiveInterimExportRequestId,
+            ModHealthCaptureState.StoppedRetained => this.RetainedCapture?.ExportRequestId,
+            _ => this.LatestLedgerOnlyExportRequestId
+        };
+    }
+
+    private ModHealthCoordinatorResult CreateExactNothingToRetry(Guid requestId)
+    {
+        ModHealthPreparedReportSnapshot prepared = this.ExportQueue.GetPreparedReport(requestId);
+        if (prepared.State == ModHealthPreparedReportState.Superseded && prepared.NewerRequestId is Guid newerId)
+            return new(ModHealthCoordinatorResultCode.NothingToRetry, $"That report was superseded by newer request {newerId}. View the newer report instead.", IsError: true, Export: this.ExportQueue.GetStatus(requestId));
+        if (prepared.State == ModHealthPreparedReportState.Saved)
+            return new(ModHealthCoordinatorResultCode.NothingToRetry, "That exact report is already saved and does not need a retry.", IsError: true, Export: this.ExportQueue.GetStatus(requestId));
+        return new(ModHealthCoordinatorResultCode.NothingToRetry, "That exact report is not the failed report retained for retry. Reopen the viewer to see its current state.", IsError: true, Export: this.ExportQueue.GetStatus(requestId));
     }
 
     private static ModPerformanceSnapshot FreezeSnapshot(ModPerformanceSnapshot snapshot)

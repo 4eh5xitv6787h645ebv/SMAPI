@@ -12,6 +12,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     private readonly CancellationTokenSource Cancellation = new();
     private readonly Func<ModHealthExportRequest, bool, ModHealthReportPayload> BuildPayload;
     private readonly IModHealthReportPublisher Publisher;
+    private readonly ModHealthPreparedReportStore PreparedReports;
     private readonly Action<ModHealthExportStatus>? OnCompleted;
     private readonly Thread Worker;
     private readonly TimeSpan ShutdownTimeout;
@@ -27,10 +28,11 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     private bool DisposeRequested;
     private bool CompletionCallbackInProgress;
 
-    public ModHealthExportQueue(Func<ModHealthExportRequest, bool, ModHealthReportPayload> buildPayload, IModHealthReportPublisher publisher, string workerName = "SMAPI mod health report writer", TimeSpan? shutdownTimeout = null, Action<ModHealthExportStatus>? onCompleted = null)
+    public ModHealthExportQueue(Func<ModHealthExportRequest, bool, ModHealthReportPayload> buildPayload, IModHealthReportPublisher publisher, string workerName = "SMAPI mod health report writer", TimeSpan? shutdownTimeout = null, Action<ModHealthExportStatus>? onCompleted = null, ModHealthPreparedReportStore? preparedReports = null)
     {
         this.BuildPayload = buildPayload ?? throw new ArgumentNullException(nameof(buildPayload));
         this.Publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
+        this.PreparedReports = preparedReports ?? new ModHealthPreparedReportStore();
         this.OnCompleted = onCompleted;
         this.ShutdownTimeout = shutdownTimeout ?? TimeSpan.FromSeconds(2);
         if (this.ShutdownTimeout < TimeSpan.Zero && this.ShutdownTimeout != Timeout.InfiniteTimeSpan)
@@ -66,11 +68,17 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
             if (request.IsFinal && !this.PendingRequest.IsFinal)
             {
                 if (this.PendingIsRetry && this.RetryableRequest?.RequestId == this.PendingRequest.RequestId)
+                {
                     this.RetryScheduled = false;
+                    this.PreparedReports.RetryDeferred(this.PendingRequest.RequestId, this.PendingRequest.IsFinal);
+                }
+                else
+                    this.PreparedReports.Superseded(this.PendingRequest.RequestId, this.PendingRequest.IsFinal, request.RequestId);
                 this.PreviousStatus = new(ModHealthExportState.Failed, this.PendingRequest.RequestId, this.PendingRequest.IsFinal, Error: "Superseded by the final report.");
                 this.PendingRequest = request;
                 this.PendingIsRetry = false;
                 this.LatestStatus = CreateQueuedStatus(request);
+                this.PreparedReports.Begin(request, isRetry: false);
                 return new(ModHealthExportDisposition.Coalesced, this.LatestStatus);
             }
 
@@ -79,12 +87,12 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     }
 
     /// <inheritdoc />
-    public ModHealthExportQueueResult Retry()
+    public ModHealthExportQueueResult Retry(Guid? requestId = null)
     {
         lock (this.SyncRoot)
         {
             this.ThrowIfDisposed();
-            if (this.RetryableRequest is null)
+            if (this.RetryableRequest is null || (requestId.HasValue && this.RetryableRequest.RequestId != requestId.Value))
                 return new(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
             if (this.RetryScheduled)
                 return new(ModHealthExportDisposition.Coalesced, this.FindStatus(this.RetryableRequest.RequestId) ?? CreateQueuedStatus(this.RetryableRequest));
@@ -99,12 +107,15 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     }
 
     /// <inheritdoc />
-    public void DiscardRetryable()
+    public void DiscardRetryable(Guid? requestId = null)
     {
         lock (this.SyncRoot)
         {
+            if (this.RetryableRequest is null || (requestId.HasValue && this.RetryableRequest.RequestId != requestId.Value))
+                return;
             if (this.RetryScheduled)
                 throw new InvalidOperationException("The retryable export is already queued or writing.");
+            this.PreparedReports.DiscardRetryable(this.RetryableRequest.RequestId);
             this.RetryableRequest = null;
         }
     }
@@ -114,6 +125,13 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
     {
         lock (this.SyncRoot)
             return requestId is null ? this.LatestStatus : this.FindStatus(requestId.Value) ?? ModHealthExportStatus.None;
+    }
+
+    /// <inheritdoc />
+    public ModHealthPreparedReportSnapshot GetPreparedReport(Guid? requestId = null)
+    {
+        lock (this.SyncRoot)
+            return this.PreparedReports.Get(requestId);
     }
 
     /// <summary>Wait until the current write and pending slot are empty.</summary>
@@ -156,9 +174,13 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
             if (this.PendingRequest is not null)
             {
                 this.PreviousStatus = new(ModHealthExportState.Failed, this.PendingRequest.RequestId, this.PendingRequest.IsFinal, Error: "Report export was cancelled during shutdown.");
+                this.PreparedReports.Canceled(this.PendingRequest.RequestId, this.PendingRequest.IsFinal, "Report export was canceled during shutdown.");
                 this.PendingRequest = null;
                 this.PendingIsRetry = false;
             }
+            if (this.WritingRequest is not null)
+                this.PreparedReports.Canceled(this.WritingRequest.RequestId, this.WritingRequest.IsFinal, "Report export was canceled during shutdown.");
+            this.PreparedReports.Dispose();
             this.CompleteDrainIfIdle();
             // Signal before releasing the state lock. The worker must acquire this same lock to
             // observe DisposeRequested and exit, so it can't dispose the event before this Set.
@@ -216,10 +238,16 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
             }
 
             ModHealthExportStatus result;
+            ModHealthReportPayload? payload = null;
             try
             {
                 this.Cancellation.Token.ThrowIfCancellationRequested();
-                ModHealthReportPayload payload = this.BuildPayload(request, isRetry);
+                payload = this.BuildPayload(request, isRetry);
+                if (!this.PreparedReports.PublishReady(request.RequestId, request.IsFinal, payload.Model))
+                {
+                    this.Cancellation.Token.ThrowIfCancellationRequested();
+                    throw new ObjectDisposedException(nameof(ModHealthPreparedReportStore));
+                }
                 this.Cancellation.Token.ThrowIfCancellationRequested();
                 ModHealthPublishedReport published = this.Publisher.Publish(request, payload, this.Cancellation.Token);
                 result = new(
@@ -260,6 +288,15 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
                     this.RetryableRequest = null;
                     this.RetryScheduled = false;
                 }
+
+                if (this.DisposeRequested || this.Cancellation.IsCancellationRequested)
+                    this.PreparedReports.Canceled(request.RequestId, request.IsFinal, "Report export was canceled during shutdown.");
+                else if (result.State == ModHealthExportState.Succeeded)
+                    this.PreparedReports.Saved(request.RequestId, request.IsFinal, result.TextPath, result.JsonPath);
+                else if (payload is null)
+                    this.PreparedReports.FailedBeforeModel(request.RequestId, request.IsFinal, result.Error ?? "Report preparation failed.");
+                else
+                    this.PreparedReports.WriteFailed(request.RequestId, request.IsFinal, result.Error ?? "Report write failed.");
             }
 
             this.NotifyCompleted(result);
@@ -276,6 +313,7 @@ internal sealed class ModHealthExportQueue : IModHealthExportQueue, IDisposable
         this.PendingRequest = request;
         this.PendingIsRetry = isRetry;
         this.LatestStatus = CreateQueuedStatus(request);
+        this.PreparedReports.Begin(request, isRetry);
         this.WorkAvailable.Set();
     }
 

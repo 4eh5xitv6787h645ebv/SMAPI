@@ -4,6 +4,7 @@
 ## Upcoming release
 * For players:
   * Added a Linux desktop `health` console workflow which creates private, local mod-health reports for troubleshooting load errors, log floods, failed callbacks, and slow update ticks.
+  * Added a Linux desktop in-game viewer for Mod Health Reports. Enter `health view` to inspect the current session's sanitized report using mouse, keyboard, or controller. The report stays private and local: the viewer never uploads it or opens external apps. Missing viewer translations fall back to English, while schema-v1 finding text remains canonical English.
   * Improved performance.
   * Improved error message when a mod is blocked by Windows Smart App Control.
   * Improved translations. Thanks to To2morrow (updated Korean)!

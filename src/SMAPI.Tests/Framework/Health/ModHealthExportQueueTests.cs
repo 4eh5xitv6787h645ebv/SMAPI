@@ -14,6 +14,119 @@ namespace SMAPI.Tests.Framework.Health;
 internal sealed class ModHealthExportQueueTests
 {
     [Test]
+    public async Task Worker_PublishesPreparingReadyAndSavedStatesAtExactBoundaries()
+    {
+        ManualResetEventSlim buildStarted = new(false);
+        ManualResetEventSlim releaseBuild = new(false);
+        BlockingPublisher publisher = new();
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        using ModHealthExportQueue queue = new(
+            (_, _) =>
+            {
+                buildStarted.Set();
+                releaseBuild.Wait();
+                return payload;
+            },
+            publisher
+        );
+        ModHealthExportRequest request = CreateRequest(isFinal: true);
+
+        queue.Enqueue(request);
+        buildStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        queue.GetPreparedReport(request.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.State == ModHealthPreparedReportState.Preparing && snapshot.Model == null);
+
+        releaseBuild.Set();
+        publisher.Started.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        queue.GetPreparedReport(request.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.State == ModHealthPreparedReportState.ReadyBeforeWrite && ReferenceEquals(snapshot.Model, payload.Model));
+
+        publisher.Release.Set();
+        (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        queue.GetPreparedReport(request.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot =>
+            snapshot.State == ModHealthPreparedReportState.Saved
+            && ReferenceEquals(snapshot.Model, payload.Model)
+            && snapshot.TextPath == "ErrorLogs/HealthReports/report.txt"
+            && snapshot.JsonPath == "ErrorLogs/HealthReports/report.json"
+        );
+    }
+
+    [Test]
+    public async Task Worker_DistinguishesBuildFailureFromWriteFailureAndRetainsWrittenModel()
+    {
+        ModHealthExportRequest buildFailure = CreateRequest(isFinal: false);
+        using (ModHealthExportQueue queue = new((_, _) => throw new InvalidOperationException("build"), new DisposablePublisher()))
+        {
+            queue.Enqueue(buildFailure);
+            (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+            queue.GetPreparedReport(buildFailure.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.State == ModHealthPreparedReportState.FailedBeforeModel && snapshot.Model == null);
+        }
+
+        FailingOncePublisher publisher = new();
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        using ModHealthExportQueue failedWriteQueue = new((_, _) => payload, publisher);
+        ModHealthExportRequest writeFailure = CreateRequest(isFinal: true);
+        failedWriteQueue.Enqueue(writeFailure);
+        (await failedWriteQueue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+
+        failedWriteQueue.GetPreparedReport(writeFailure.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot =>
+            snapshot.State == ModHealthPreparedReportState.WriteFailed && ReferenceEquals(snapshot.Model, payload.Model)
+        );
+    }
+
+    [Test]
+    public async Task Retry_IsExactRequestKeyedAndExposesRetryingWithRetainedModel()
+    {
+        int builds = 0;
+        ManualResetEventSlim retryBuildStarted = new(false);
+        ManualResetEventSlim releaseRetryBuild = new(false);
+        FailingOncePublisher publisher = new();
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        using ModHealthExportQueue queue = new(
+            (_, _) =>
+            {
+                if (Interlocked.Increment(ref builds) == 2)
+                {
+                    retryBuildStarted.Set();
+                    releaseRetryBuild.Wait();
+                }
+                return payload;
+            },
+            publisher
+        );
+        ModHealthExportRequest request = CreateRequest(isFinal: true);
+        queue.Enqueue(request);
+        (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+
+        queue.Retry(Guid.NewGuid()).Disposition.Should().Be(ModHealthExportDisposition.NoRetryableExport);
+        queue.Retry(request.RequestId).Disposition.Should().Be(ModHealthExportDisposition.Retried);
+        retryBuildStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        queue.GetPreparedReport(request.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot =>
+            snapshot.State == ModHealthPreparedReportState.Retrying && snapshot.RequestId == request.RequestId && ReferenceEquals(snapshot.Model, payload.Model)
+        );
+
+        releaseRetryBuild.Set();
+        (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        queue.GetPreparedReport(request.RequestId).State.Should().Be(ModHealthPreparedReportState.Saved);
+    }
+
+    [Test]
+    public async Task DiscardRetryable_OnlyDiscardsMatchingUnsavedModel()
+    {
+        FailingOncePublisher publisher = new();
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        using ModHealthExportQueue queue = new((_, _) => payload, publisher);
+        ModHealthExportRequest request = CreateRequest(isFinal: true);
+        queue.Enqueue(request);
+        (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+
+        queue.DiscardRetryable(Guid.NewGuid());
+        queue.GetPreparedReport(request.RequestId).Model.Should().BeSameAs(payload.Model);
+        queue.DiscardRetryable(request.RequestId);
+
+        queue.GetPreparedReport(request.RequestId).State.Should().Be(ModHealthPreparedReportState.Absent);
+        queue.Retry(request.RequestId).Disposition.Should().Be(ModHealthExportDisposition.NoRetryableExport);
+    }
+
+    [Test]
     public async Task Enqueue_AllowsOneWriterAndFinalReplacesPendingInterim()
     {
         BlockingPublisher publisher = new();
@@ -27,6 +140,8 @@ internal sealed class ModHealthExportQueueTests
         queue.Enqueue(interim).Disposition.Should().Be(ModHealthExportDisposition.Pending);
         queue.Enqueue(final).Disposition.Should().Be(ModHealthExportDisposition.Coalesced);
         queue.GetStatus(interim.RequestId).State.Should().Be(ModHealthExportState.Failed);
+        queue.GetPreparedReport(interim.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.State == ModHealthPreparedReportState.Superseded && snapshot.NewerRequestId == final.RequestId);
+        queue.GetPreparedReport().Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.State == ModHealthPreparedReportState.Preparing && snapshot.RequestId == final.RequestId);
 
         publisher.Release.Set();
         (await queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
@@ -63,6 +178,7 @@ internal sealed class ModHealthExportQueueTests
 
         queue.GetStatus().Should().BeEquivalentTo(new ModHealthExportStatus(ModHealthExportState.Queued, second.RequestId, IsFinal: true));
         queue.GetStatus(first.RequestId).State.Should().Be(ModHealthExportState.Succeeded);
+        queue.GetPreparedReport().Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.RequestId == second.RequestId && snapshot.State == ModHealthPreparedReportState.Preparing);
 
         releaseCallback.Set();
         publisher.SecondStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
@@ -121,6 +237,12 @@ internal sealed class ModHealthExportQueueTests
         ModHealthExportRequest[] attempts = publisher.Requests.ToArray();
         attempts.Select(candidate => candidate.RequestId).Should().Equal(failedInterim.RequestId, writingInterim.RequestId, final.RequestId, failedInterim.RequestId);
         ReferenceEquals(attempts[0], attempts[3]).Should().BeTrue();
+        queue.GetPreparedReport().Should().Match<ModHealthPreparedReportSnapshot>(snapshot =>
+            snapshot.RequestId == final.RequestId && snapshot.State == ModHealthPreparedReportState.Saved && snapshot.Model != null
+        );
+        queue.GetPreparedReport(failedInterim.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot =>
+            snapshot.State == ModHealthPreparedReportState.Superseded && snapshot.NewerRequestId == final.RequestId && snapshot.Model == null
+        );
     }
 
     [Test]
@@ -141,11 +263,45 @@ internal sealed class ModHealthExportQueueTests
     {
         CancellationPublisher publisher = new();
         ModHealthExportQueue queue = CreateQueue(publisher);
-        queue.Enqueue(CreateRequest(isFinal: true));
+        ModHealthExportRequest request = CreateRequest(isFinal: true);
+        queue.Enqueue(request);
         publisher.Started.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
 
         FluentActions.Invoking(queue.Dispose).Should().NotThrow();
         publisher.Cancelled.Should().BeTrue();
+        queue.GetPreparedReport(requestId: null).State.Should().Be(ModHealthPreparedReportState.Disposed);
+        queue.GetPreparedReport(request.RequestId).State.Should().Be(ModHealthPreparedReportState.Canceled);
+    }
+
+    [Test]
+    public void Dispose_BlocksLateModelPublicationAfterUncooperativeBuild()
+    {
+        ManualResetEventSlim buildStarted = new(false);
+        ManualResetEventSlim releaseBuild = new(false);
+        DisposablePublisher publisher = new();
+        ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+        ModHealthExportQueue queue = new(
+            (_, _) =>
+            {
+                buildStarted.Set();
+                releaseBuild.Wait();
+                return payload;
+            },
+            publisher,
+            shutdownTimeout: TimeSpan.Zero
+        );
+        ModHealthExportRequest request = CreateRequest(isFinal: true);
+        queue.Enqueue(request);
+        buildStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        queue.Dispose();
+        queue.GetPreparedReport().State.Should().Be(ModHealthPreparedReportState.Disposed);
+        queue.GetPreparedReport(request.RequestId).State.Should().Be(ModHealthPreparedReportState.Canceled);
+        releaseBuild.Set();
+
+        SpinWait.SpinUntil(() => publisher.IsDisposed, TimeSpan.FromSeconds(5)).Should().BeTrue();
+        publisher.PublishCalls.Should().Be(0);
+        queue.GetPreparedReport(request.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.State == ModHealthPreparedReportState.Canceled && snapshot.Model == null);
     }
 
     [Test]
@@ -402,16 +558,21 @@ internal sealed class ModHealthExportQueueTests
 
     private sealed class DisposablePublisher : IModHealthReportPublisher, IDisposable
     {
-        public bool IsDisposed { get; private set; }
+        private int DisposedValue;
+        private int PublishCallCount;
+
+        public bool IsDisposed => Volatile.Read(ref this.DisposedValue) != 0;
+        public int PublishCalls => Volatile.Read(ref this.PublishCallCount);
 
         public ModHealthPublishedReport Publish(ModHealthExportRequest request, ModHealthReportPayload payload, CancellationToken cancellationToken)
         {
+            Interlocked.Increment(ref this.PublishCallCount);
             return new("ErrorLogs/HealthReports/report.txt", "ErrorLogs/HealthReports/report.json");
         }
 
         public void Dispose()
         {
-            this.IsDisposed = true;
+            Volatile.Write(ref this.DisposedValue, 1);
         }
     }
 

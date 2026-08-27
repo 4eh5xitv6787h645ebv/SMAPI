@@ -2,11 +2,39 @@
 
 ## Status and scope
 
-This is a design and implementation plan only. It does not implement the feature.
+This document is the authoritative design, implementation, and validation contract. The original Linux desktop report shipped through issue #159 / PR #160, the issue #156 timing boundary shipped through PR #165, and the private in-game viewer is implemented as the issue #166 follow-up. Historical future-tense wording below records the contract used to build and review those phases; it is not a claim that the feature remains unimplemented.
 
 The feature is for Linux desktop SMAPI. Android and other mobile code paths are excluded. Changing the default .NET runtime, solving runtime-specific input problems, automatic web uploads, and modifying the public mod API are also excluded.
 
 Register the `health` workflow and its persistent setting only when `Constants.Platform` is Linux. Shared internal models may remain portable, and all existing desktop targets must continue compiling, but Linux environment probes must be guarded and no support claim is added for Windows/macOS in v1.
+
+The issue #166 viewer adds `health view` without changing schema v1 or adding another collector, analyzer, or report interpretation. It displays the one immutable sanitized model prepared for an exact request ID; preparation and file work remain off the game thread. The menu is explicit and never opens automatically, refuses unsafe parent menus before it queues work, and keeps the persistent local-only privacy notice visible. Its eight bounded sections cover overview, findings, capture quality, mods needing attention, performance, errors/logging, inventory, and context/limitations. Mouse, keyboard, and controller input use one screen-local game-thread action queue, while large rows are paged instead of represented by a persistent component per item. Android/mobile, historical on-disk browsing, uploads/sharing actions, and the unrelated .NET 10 menu-click issue remain excluded.
+
+### Issue #166 viewer extension contract
+
+`health view` opens only the latest exact model prepared during the current process. It does not deserialize an on-disk report, accept a path, or browse history.
+
+| Current state | Required behavior |
+| --- | --- |
+| Active capture | Queue an interim snapshot without stopping or resetting capture. |
+| Stopped retained capture | Queue or reuse its exact frozen final model. |
+| No timed capture | Queue a ledger-only model. |
+| Report queued or writing | Open a non-blocking Preparing state tied to that exact request ID. |
+| Model built but write failed | Keep the model viewable with a prominent not-saved banner and exact retry action. |
+| Rejected, superseded, canceled, disposed, or failed before build | Preserve that exact terminal state and show only a safe next action; never silently substitute content. |
+| Unsafe parent menu, minigame, save/load, fade, or warp state | Refuse before report work is queued and never replace the existing menu. |
+
+Opening an already prepared model must not export it again. Available footer actions are derived from the exact viewer/capture state and may include Start capture, Add mark, Stop capture, Refresh and save snapshot, Retry exact save, View newer report, and Close. Confirmed reset discards the exact unsaved/retryable prepared model but never deletes a saved artifact.
+
+The viewer maps the canonical frozen DTO into eight sections without re-analysis: overview/privacy, findings, capture quality, needs attention, performance, errors/logging, mod inventory, and context/limitations. It preserves finding order, severity, confidence, evidence, suggested action, affected mod ID, and limitation. It must distinguish ledger-only, short, invalid, truncated, complete, measured-zero, and unavailable states; invalid timing suppresses percentages and valid-looking partition conclusions. It uses the exact SMAPI dispatch label and explains that elapsed wall-clock time is neither total SMAPI CPU nor proof of cause, base-game time can include Harmony/direct mod work, unavailable SMAPI timing is folded into residual, GC values are process-wide correlation, update ticks are not FPS, and draw/GPU coverage is incomplete.
+
+The persistent notice says the model and artifacts are private/local, no upload occurred, the user should inspect them before sharing, the normal SMAPI log remains necessary for detailed exceptions, and `smapi.io/log` does not parse a standalone report. Viewer data is restricted to sanitized DTO fields and stable relative artifact paths. It must not access or expose raw logs/stacks, absolute paths, saves or identities, multiplayer/network details, host/user/machine identity, command/chat history, manifest descriptions/authors/update fields, configuration, or arbitrary extension data. It offers no network/upload, clipboard, browser/file-manager, mutation/removal, or report deletion/alteration action.
+
+Visible chrome uses centralized translation-ready keys with default-English fallback; schema-v1 finding prose stays canonical until a separate localization-equivalence design exists. Headings, text, and icons convey meaning without relying on color alone. Required input is mouse click/wheel; keyboard arrows, Page Up/Down, Home/End, Enter, Tab, Escape, I, and P; and controller D-pad, shoulder tabs, A/B/X/Y/back. Direct Close exits the viewer, while Escape/B backs out expanded text and row details first. Layout and hit targets recompute for window, viewport, UI-scale, and split-screen changes, with 1280×720 as the minimum validation resolution. Large sections are virtual/paged and materialize only the visible bounded row window.
+
+One bounded prepared-report store publishes only after build, sanitation, analysis, and deterministic pruning. It retains at most one model plus bounded exact-request terminal tombstones and releases replaced content deterministically. One per-screen controller/session owns a bounded typed action queue. Menu callbacks enqueue actions; `SCore` drains them at the next safe pre-base-update boundary. UI creation, input, update, and draw stay on the game thread; worker work never accesses game/menu/graphics/live metadata, and the menu never waits on it. While closed, the fast path performs one integer-backed pending-action check with no controller lookup, polling, UI allocation, update, or draw work.
+
+Viewer validation covers canonical, empty, ledger-only, short, invalid, truncated, maximum-capacity, GC, status/failure, and all timing-availability models; exact request/state transitions and final-over-interim priority; reset/shutdown/concurrent reads; privacy and viewer/text/JSON equivalence; mouse/keyboard/controller/focus/resize/scale/split-screen ownership; safe refusal and close while preparing; queue dispositions; pagination; and the allocation-free closed path. Packaged validation uses both Linux hosts, the complete trusted PR #158 fixture and Blossom save in fresh isolated roots, Xvfb/PTTY, non-English locale, full inventory, required input types, exact write failure/retry, request succession, small/common resolution behavior, schema/privacy checks, normal exit, and unchanged source/live state. Screenshots and fixture inventory are never committed.
 
 The implementation should build on the bounded performance diagnostics added in issue #154 and pull request #155. It must not recreate the unbounded experimental profiler removed in SMAPI 3.8.3 because of its memory, performance, and interpretation problems.
 
@@ -45,6 +73,7 @@ The health report should solve those problems without claiming that elapsed time
 7. Avoid collecting or transmitting personal data that is not needed for troubleshooting.
 8. Keep disabled timing overhead and memory behavior effectively unchanged.
 9. Fail safely when the sample is incomplete, storage is unavailable, or counters reach capacity.
+10. Let Linux desktop players inspect the current exact sanitized report in-game without upload, history browsing, or another interpretation layer.
 
 ## Non-goals for the first release
 
@@ -55,7 +84,7 @@ The health report should solve those problems without claiming that elapsed time
 - Include raw log messages, stack traces, chat, command history, saves, or mod configuration files.
 - Time Harmony patch bodies, arbitrary background tasks, direct mod-to-mod calls, native code, or per-mod memory.
 - Claim to measure GPU time or complete presented FPS.
-- Add web-parser support, a ZIP support bundle, or an in-game report viewer.
+- Add web-parser support or a ZIP support bundle. The in-game viewer is the separate issue #166 extension and remains in-memory/current-process only.
 - Add adaptive always-on deep profiling or periodic report checkpointing.
 - Change Android/mobile projects or behavior.
 
@@ -67,6 +96,7 @@ Add a built-in `health` command as the ordinary-user facade. Keep `performance` 
 health
 health start
 health status
+health view
 health mark
 health report
 health stop
@@ -79,6 +109,7 @@ Behavior:
 - Bare `health` explains the current state and the next action.
 - `health start` begins a fresh, quiet timing capture with a 33.333 ms default slow-update threshold. It says: “Recording a mod health sample. Reproduce the problem, then enter `health stop`.”
 - `health status` shows capture duration, tick count, retained slow moments, errors, and capacity warnings.
+- `health view` prepares or reuses the current process's exact sanitized report model without stopping/resetting capture or browsing on-disk reports. It refuses unsafe parent menus before queuing report work.
 - `health mark` marks the current reproduction point without accepting free text. This avoids copying save names, secrets, or other accidental personal data into a shareable file.
 - `health report` freezes an interim snapshot and saves a report without stopping capture.
 - `health stop` stops timing first, freezes the end time and data, saves the report, logs a compact summary, and prints the report locations.
@@ -324,7 +355,7 @@ Call update measurements “update ticks,” never frames or FPS.
 
 ### Privacy notice and limitations
 
-Every text and JSON report must state:
+Every text/JSON report and the in-game viewer must state:
 
 - it contains the installed mod names, IDs, versions, and statuses;
 - the user should inspect it before sharing;
@@ -633,7 +664,7 @@ Publish both Linux hosts and run the existing runtime-dispatcher tests as packag
 - resource/GC time-series correlation if v1 data shows value;
 - best-effort crash finalization and checkpoint recovery;
 - optional `smapi.io` parser/view support with explicit upload consent;
-- in-game report viewer or translated presentation;
+- broader localization of canonical schema-v1 finding prose, subject to a localization-equivalence design;
 - automatic low-overhead alerts after false-positive and overhead evaluation.
 
 ## Definition of done
@@ -656,8 +687,14 @@ The feature is complete only when:
 - issue #156 / PR #157 were reviewed and their safe timing split/GC behavior is integrated without duplicate collectors;
 - the complete pinned 308-mod release asset plus PR #158's save and metadata was used from an isolated disposable location, with hash verification, extraction containment, source Mods/save protection, corpus completeness, and report privacy verified;
 - the GitHub issue and PR contain the final evidence, the PR is merged, the issue is closed, and `develop` is clean and synchronized.
+- `health view` implements the exact request-state table without replacing unsafe menus or silently switching reports;
+- the viewer preserves schema-v1 semantics, privacy, relative paths, bounded paging, and screen-local game-thread ownership;
+- mouse, keyboard, controller, resize/scale, split-screen, and large-list tests pass with no normal closed-path work;
+- both supported Linux hosts pass the isolated full-corpus viewer validation.
 
-## Ready-to-use `/goal` prompt
+## Historical base-feature `/goal` prompt
+
+The prompt below records the completed base-report implementation goal. It is retained for provenance and should not be rerun as the issue #166 viewer goal.
 
 ```text
 Implement a private, bounded, shareable Mod Health Report for the Linux desktop SMAPI fork in /home/jake/Downloads/SMAPI-audit, following docs/technical/mod-health-report-plan.md as the authoritative specification.
