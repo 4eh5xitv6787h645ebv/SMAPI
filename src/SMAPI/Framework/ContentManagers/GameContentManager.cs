@@ -235,33 +235,46 @@ internal class GameContentManager : BaseContentManager
             )
             : default;
         bool failed = false;
+        Exception? failure = null;
         try
         {
-            data = (T)loader.GetData();
+            try
+            {
+                data = (T)loader.GetData();
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                failure = ex;
+                data = default;
+            }
+            finally
+            {
+                if (profile)
+                    this.Coordinator.PerformanceManager.EndHandler(timing, failed);
+            }
+
+            if (failure != null)
+            {
+                this.Coordinator.HealthObserver?.ObserveCallbackFailure(
+                    mod,
+                    this.GetExecutionPhase(),
+                    ModHealthOperationKind.ContentLoad,
+                    $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}",
+                    failure,
+                    loader.OnBehalfOf
+                );
+                mod.LogAsMod($"Mod crashed when loading asset '{info.Name}'{this.GetOnBehalfOfLabel(loader.OnBehalfOf)}. SMAPI will use the default asset instead. Error details:\n{failure.GetLogSummary()}", LogLevel.Error);
+                return false;
+            }
+
             this.Monitor.LogDeferred(
                 (ModName: mod.DisplayName, AssetName: info.Name.Name, ContentPackName: loader.OnBehalfOf?.Manifest.Name),
                 static state => $"{state.ModName} loaded asset '{state.AssetName}'{FormatContentPackLabel(state.ContentPackName)}."
             );
         }
-        catch (Exception ex)
-        {
-            failed = true;
-            this.Coordinator.HealthObserver?.ObserveCallbackFailure(
-                mod,
-                this.GetExecutionPhase(),
-                ModHealthOperationKind.ContentLoad,
-                $"{loader.GetType().FullName}.{nameof(AssetLoadOperation.GetData)}",
-                ex,
-                loader.OnBehalfOf
-            );
-            mod.LogAsMod($"Mod crashed when loading asset '{info.Name}'{this.GetOnBehalfOfLabel(loader.OnBehalfOf)}. SMAPI will use the default asset instead. Error details:\n{ex.GetLogSummary()}", LogLevel.Error);
-            data = default;
-            return false;
-        }
         finally
         {
-            if (profile)
-                this.Coordinator.PerformanceManager.EndHandler(timing, failed);
             Context.HeuristicModsRunningCode.TryPop(out _);
         }
 
@@ -308,31 +321,46 @@ internal class GameContentManager : BaseContentManager
                 )
                 : default;
             bool failed = false;
+            Exception? failure = null;
             try
             {
-                editor.ApplyEdit(asset);
-                this.Monitor.LogDeferred(
-                    (ModName: mod.DisplayName, AssetName: info.Name.Name, ContentPackName: editor.OnBehalfOf?.Manifest.Name),
-                    static state => $"{state.ModName} edited {state.AssetName}{FormatContentPackLabel(state.ContentPackName)}."
-                );
-            }
-            catch (Exception ex)
-            {
-                failed = true;
-                this.Coordinator.HealthObserver?.ObserveCallbackFailure(
-                    mod,
-                    this.GetExecutionPhase(),
-                    ModHealthOperationKind.ContentEdit,
-                    $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}",
-                    ex,
-                    editor.OnBehalfOf
-                );
-                mod.LogAsMod($"Mod crashed when editing asset '{info.Name}'{this.GetOnBehalfOfLabel(editor.OnBehalfOf)}, which may cause errors in-game. Error details:\n{ex.GetLogSummary()}", LogLevel.Error);
+                try
+                {
+                    editor.ApplyEdit(asset);
+                }
+                catch (Exception ex)
+                {
+                    failed = true;
+                    failure = ex;
+                }
+                finally
+                {
+                    if (profile)
+                        this.Coordinator.PerformanceManager.EndHandler(timing, failed);
+                }
+
+                if (failure != null)
+                {
+                    this.Coordinator.HealthObserver?.ObserveCallbackFailure(
+                        mod,
+                        this.GetExecutionPhase(),
+                        ModHealthOperationKind.ContentEdit,
+                        $"{editor.ApplyEdit.Method.DeclaringType?.FullName}.{editor.ApplyEdit.Method.Name}",
+                        failure,
+                        editor.OnBehalfOf
+                    );
+                    mod.LogAsMod($"Mod crashed when editing asset '{info.Name}'{this.GetOnBehalfOfLabel(editor.OnBehalfOf)}, which may cause errors in-game. Error details:\n{failure.GetLogSummary()}", LogLevel.Error);
+                }
+                else
+                {
+                    this.Monitor.LogDeferred(
+                        (ModName: mod.DisplayName, AssetName: info.Name.Name, ContentPackName: editor.OnBehalfOf?.Manifest.Name),
+                        static state => $"{state.ModName} edited {state.AssetName}{FormatContentPackLabel(state.ContentPackName)}."
+                    );
+                }
             }
             finally
             {
-                if (profile)
-                    this.Coordinator.PerformanceManager.EndHandler(timing, failed);
                 Context.HeuristicModsRunningCode.TryPop(out _);
             }
 

@@ -76,11 +76,27 @@ internal static class ModPerformanceReportFormatter
                     .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds))
                     .Append("ms (")
                     .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.TickInstrumentedMilliseconds / tickCount))
-                    .Append("ms/tick), residual outside measured game/callback boundaries ")
-                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds))
-                    .Append("ms (")
-                    .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds / tickCount))
-                    .AppendLine("ms/tick).");
+                    .Append("ms/tick), ");
+                if (snapshot.SmapiUpdateTimingAvailable)
+                {
+                    report.Append("SMAPI update dispatch observed outside the base-game update ")
+                        .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.SmapiUpdateExclusiveMilliseconds))
+                        .Append("ms (")
+                        .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.SmapiUpdateExclusiveMilliseconds / tickCount))
+                        .Append("ms/tick), true residual outside categorized boundaries ")
+                        .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.ResidualMilliseconds))
+                        .Append("ms (")
+                        .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.ResidualMilliseconds / tickCount))
+                        .AppendLine("ms/tick).");
+                }
+                else
+                {
+                    report.Append("SMAPI update dispatch outside the base-game update unavailable, residual outside measured game/callback boundaries ")
+                        .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds))
+                        .Append("ms (")
+                        .Append(ModPerformanceReportFormatter.FormatMilliseconds(snapshot.OutsideGameUpdateMilliseconds / tickCount))
+                        .AppendLine("ms/tick); that residual is not labeled as SMAPI work.");
+                }
             }
             else
             {
@@ -217,7 +233,8 @@ internal static class ModPerformanceReportFormatter
         report.AppendLine();
         report.Append("Interpretation: instrumented time covers SMAPI-managed event handlers, content load/edit callbacks, console commands, and lifecycle callbacks. ")
             .Append("Base game update time is measured around the vanilla update, so it can include Harmony patches, direct mod API calls, and other unobserved work invoked by the game. ")
-            .Append("Residual time outside the measured game/callback boundaries can include SMAPI dispatch and framework work, unobserved work, waiting, or operating-system scheduling; it isn't attributed to SMAPI or any mod. ")
+            .Append("When available, SMAPI update dispatch observed outside the base-game update is elapsed wall-clock time within an owned boundary, not total SMAPI CPU or proof of cause; it can include waiting, scheduling, and unobserved nested work. ")
+            .Append("Residual time outside categorized boundaries can include framework, background, native, waiting, or operating-system work; it isn't attributed to SMAPI or any mod. ")
             .Append("GC counts are process-wide correlations and don't identify which code allocated memory or caused a pause. ")
             .Append("A high timing identifies where SMAPI observed time; it does not by itself prove the underlying cause.");
 
@@ -233,7 +250,9 @@ internal static class ModPerformanceReportFormatter
             : $"{tick.SlowestModName} ({tick.SlowestModId}) {ModPerformanceReportFormatter.FormatMilliseconds(tick.SlowestModMilliseconds)}ms";
 
         string timing = tick.TimingPartitionIsValid
-            ? $"{ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateExclusiveMilliseconds)}ms base game update excluding observed callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms observed mod callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.OutsideGameUpdateMilliseconds)}ms residual outside measured boundaries"
+            ? tick.SmapiUpdateTimingAvailable
+                ? $"{ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateExclusiveMilliseconds)}ms base game update excluding observed callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms observed mod callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.SmapiUpdateExclusiveMilliseconds)}ms SMAPI update dispatch observed outside the base-game update; {ModPerformanceReportFormatter.FormatMilliseconds(tick.ResidualMilliseconds)}ms true residual outside categorized boundaries"
+                : $"{ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateExclusiveMilliseconds)}ms base game update excluding observed callbacks; {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms observed mod callbacks; SMAPI update dispatch outside the base-game update unavailable; {ModPerformanceReportFormatter.FormatMilliseconds(tick.OutsideGameUpdateMilliseconds)}ms residual outside measured game/callback boundaries (not labeled as SMAPI work)"
             : $"timing partition invalid (raw game window {ModPerformanceReportFormatter.FormatMilliseconds(tick.GameUpdateMilliseconds)}ms; raw observed callbacks {ModPerformanceReportFormatter.FormatMilliseconds(tick.InstrumentedModMilliseconds)}ms)";
         string gc = tick.GcCollectionDataIsValid
             ? $"GC {tick.Gen0Collections}/{tick.Gen1Collections}/{tick.Gen2Collections} process-wide"

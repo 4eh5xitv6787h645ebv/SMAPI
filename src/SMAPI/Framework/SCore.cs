@@ -788,6 +788,7 @@ internal class SCore : IDisposable
         {
             long performanceTickStart = Stopwatch.GetTimestamp();
             this.ModPerformanceManager.BeginTick(SCore.TicksElapsed, performanceTickStart, this.GetModHealthTickContext());
+            this.ModPerformanceManager.BeginSmapiUpdate();
         }
 
         try
@@ -861,7 +862,17 @@ internal class SCore : IDisposable
             /*********
             ** Run game update
             *********/
-            runGameUpdate(gameTime);
+            if (profileTick)
+                this.ModPerformanceManager.EndSmapiUpdate();
+            try
+            {
+                runGameUpdate(gameTime);
+            }
+            finally
+            {
+                if (profileTick)
+                    this.ModPerformanceManager.BeginSmapiUpdate();
+            }
 
             /*********
             ** Reset crash timer
@@ -881,6 +892,7 @@ internal class SCore : IDisposable
         {
             if (profileTick)
             {
+                this.ModPerformanceManager.EndSmapiUpdate();
                 TickPerformanceSnapshot? tick = this.ModPerformanceManager.CompleteTick(Stopwatch.GetTimestamp());
                 if (tick.HasValue)
                     this.Monitor.Log(ModPerformanceReportFormatter.FormatTick(tick.Value), LogLevel.Info);
@@ -897,11 +909,13 @@ internal class SCore : IDisposable
     /// <param name="runUpdate">Invoke the game's update logic for the given timing state.</param>
     private void OnPlayerInstanceUpdating(SGame instance, GameTime gameTime, Action<GameTime> runUpdate)
     {
-        EventManager events = this.EventManager;
-        bool verbose = this.Monitor.IsVerbose;
+        this.ModPerformanceManager.BeginSmapiUpdate();
 
         try
         {
+            EventManager events = this.EventManager;
+            bool verbose = this.Monitor.IsVerbose;
+
             /*********
             ** Reapply overrides
             *********/
@@ -926,6 +940,7 @@ internal class SCore : IDisposable
                         ? this.ModPerformanceManager.BeginHandler(command.Mod!, $"ConsoleCommand.{command.Name}", $"{command.Callback.Method.DeclaringType?.FullName}.{command.Callback.Method.Name}", ModHealthExecutionPhase.Update, ModHealthOperationKind.Console, onBehalfOfModId: null)
                         : default;
                     bool failed = false;
+                    Exception? failure = null;
                     try
                     {
                         command.Callback.Invoke(name, args);
@@ -933,6 +948,16 @@ internal class SCore : IDisposable
                     catch (Exception ex)
                     {
                         failed = true;
+                        failure = ex;
+                    }
+                    finally
+                    {
+                        if (profile)
+                            this.ModPerformanceManager.EndHandler(timing, failed);
+                    }
+
+                    if (failure != null)
+                    {
                         if (command.Mod != null)
                         {
                             this.ModHealthRuntimeObserver?.ObserveCallbackFailure(
@@ -940,17 +965,12 @@ internal class SCore : IDisposable
                                 ModHealthExecutionPhase.Update,
                                 ModHealthOperationKind.Console,
                                 $"{command.Callback.Method.DeclaringType?.FullName}.{command.Callback.Method.Name}",
-                                ex
+                                failure
                             );
-                            command.Mod.LogAsMod($"Mod failed handling that command:\n{ex.GetLogSummary()}", LogLevel.Error);
+                            command.Mod.LogAsMod($"Mod failed handling that command:\n{failure.GetLogSummary()}", LogLevel.Error);
                         }
                         else
-                            this.Monitor.Log($"Failed handling that command:\n{ex.GetLogSummary()}", LogLevel.Error);
-                    }
-                    finally
-                    {
-                        if (profile)
-                            this.ModPerformanceManager.EndHandler(timing, failed);
+                            this.Monitor.Log($"Failed handling that command:\n{failure.GetLogSummary()}", LogLevel.Error);
                     }
                 }
                 commandQueue.Clear();
@@ -1446,6 +1466,10 @@ internal class SCore : IDisposable
             if (!this.UpdateCrashTimer.Decrement())
                 this.ExitGameImmediately("The game crashed when updating, and SMAPI was unable to recover the game.");
         }
+        finally
+        {
+            this.ModPerformanceManager.EndSmapiUpdate();
+        }
     }
 
     /// <summary>Run one base game update, measuring the owned boundary without allocating a wrapper delegate per tick.</summary>
@@ -1460,6 +1484,7 @@ internal class SCore : IDisposable
             return;
         }
 
+        performanceManager.EndSmapiUpdate();
         performanceManager.BeginGameUpdate();
         try
         {
@@ -1468,6 +1493,7 @@ internal class SCore : IDisposable
         finally
         {
             performanceManager.EndGameUpdate();
+            performanceManager.BeginSmapiUpdate();
         }
     }
 
@@ -2382,6 +2408,7 @@ internal class SCore : IDisposable
                     ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.Entry", $"{mod.GetType().FullName}.{nameof(Mod.Entry)}", ModHealthExecutionPhase.Startup, ModHealthOperationKind.Entry, onBehalfOfModId: null)
                     : default;
                 bool entryFailed = false;
+                Exception? entryFailure = null;
                 try
                 {
                     mod.Entry(mod.Helper);
@@ -2389,13 +2416,17 @@ internal class SCore : IDisposable
                 catch (Exception ex)
                 {
                     entryFailed = true;
-                    this.ModHealthRuntimeObserver?.ObserveCallbackFailure(metadata, ModHealthExecutionPhase.Startup, ModHealthOperationKind.Entry, $"{mod.GetType().FullName}.{nameof(Mod.Entry)}", ex);
-                    metadata.LogAsMod($"Mod crashed on entry and might not work correctly. Technical details:\n{ex.GetLogSummary()}", LogLevel.Error);
+                    entryFailure = ex;
                 }
                 finally
                 {
                     if (profileEntry)
                         this.ModPerformanceManager.EndHandler(entryTiming, entryFailed);
+                }
+                if (entryFailure != null)
+                {
+                    this.ModHealthRuntimeObserver?.ObserveCallbackFailure(metadata, ModHealthExecutionPhase.Startup, ModHealthOperationKind.Entry, $"{mod.GetType().FullName}.{nameof(Mod.Entry)}", entryFailure);
+                    metadata.LogAsMod($"Mod crashed on entry and might not work correctly. Technical details:\n{entryFailure.GetLogSummary()}", LogLevel.Error);
                 }
 
                 // get mod API
@@ -2404,9 +2435,29 @@ internal class SCore : IDisposable
                     ? this.ModPerformanceManager.BeginHandler(metadata, "ModLifecycle.GetApi", $"{mod.GetType().FullName}.{nameof(Mod.GetApi)}", ModHealthExecutionPhase.Startup, ModHealthOperationKind.GetApi, onBehalfOfModId: null)
                     : default;
                 bool apiFailed = false;
+                Exception? apiFailure = null;
+                object? api = null;
                 try
                 {
-                    object? api = mod.GetApi();
+                    api = mod.GetApi();
+                }
+                catch (Exception ex)
+                {
+                    apiFailed = true;
+                    apiFailure = ex;
+                }
+                finally
+                {
+                    if (profileApi)
+                        this.ModPerformanceManager.EndHandler(apiTiming, apiFailed);
+                }
+                if (apiFailure != null)
+                {
+                    this.ModHealthRuntimeObserver?.ObserveCallbackFailure(metadata, ModHealthExecutionPhase.Startup, ModHealthOperationKind.GetApi, $"{mod.GetType().FullName}.{nameof(Mod.GetApi)}", apiFailure);
+                    this.Monitor.Log($"Failed loading mod-provided API for {metadata.DisplayName}. Integrations with other mods may not work. Error: {apiFailure.GetLogSummary()}", LogLevel.Error);
+                }
+                else
+                {
                     if (api != null && !api.GetType().IsPublic)
                     {
                         api = null;
@@ -2416,17 +2467,6 @@ internal class SCore : IDisposable
                     if (api != null)
                         this.Monitor.Log($"   Found mod-provided API ({api.GetType().FullName}).");
                     metadata.SetApi(api);
-                }
-                catch (Exception ex)
-                {
-                    apiFailed = true;
-                    this.ModHealthRuntimeObserver?.ObserveCallbackFailure(metadata, ModHealthExecutionPhase.Startup, ModHealthOperationKind.GetApi, $"{mod.GetType().FullName}.{nameof(Mod.GetApi)}", ex);
-                    this.Monitor.Log($"Failed loading mod-provided API for {metadata.DisplayName}. Integrations with other mods may not work. Error: {ex.GetLogSummary()}", LogLevel.Error);
-                }
-                finally
-                {
-                    if (profileApi)
-                        this.ModPerformanceManager.EndHandler(apiTiming, apiFailed);
                 }
 
                 // validate mod doesn't implement both GetApi() and GetApi(mod)

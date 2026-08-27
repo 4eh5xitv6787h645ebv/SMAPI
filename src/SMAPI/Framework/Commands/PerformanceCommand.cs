@@ -28,7 +28,7 @@ internal sealed class PerformanceCommand : IInternalCommand
     /// <inheritdoc />
     public string Description { get; } =
         """
-        Record and report which mod callbacks consume time or emit errors. This includes SMAPI events, content load/edit callbacks, mod console commands, and lifecycle callbacks. Each measured tick distinguishes the base game update (which can include Harmony patches and other unobserved work invoked by the game), observed mod callbacks, and residual time outside those boundaries. Separate SMAPI/other update timing is unavailable until SMAPI has an owned measurement boundary. Garbage collection counts are included as an allocation-pressure signal.
+        Record and report which mod callbacks consume time or emit errors. This includes SMAPI events, content load/edit callbacks, mod console commands, and lifecycle callbacks. Each valid measured tick distinguishes the base game update (which can include Harmony patches and other unobserved work invoked by the game), observed mod callbacks, SMAPI update dispatch observed outside the base-game update, and uncategorized residual time. The SMAPI dispatch measurement is elapsed wall-clock time within an owned boundary, not total SMAPI CPU or proof of cause; it can include waiting, scheduling, and unobserved nested work. Garbage collection counts are included as an allocation-pressure signal.
 
         Usage: performance start [tick-threshold-ms]
         Start a fresh sample. If a nonnegative threshold is provided, log each update tick at or above that duration; use 0 to log every tick.

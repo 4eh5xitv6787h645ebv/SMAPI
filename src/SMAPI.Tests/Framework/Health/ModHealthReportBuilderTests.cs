@@ -79,8 +79,9 @@ internal sealed class ModHealthReportBuilderTests
         report.Performance.Callbacks.Should().ContainSingle().Which.Should().Match<ModHealthCallback>(callback => callback.Event == "AssetRequested" && callback.OnBehalfOfModId == "Pack.Mod");
         report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(update =>
             update.NearbyMark == 1
-            && update.SmapiOtherMilliseconds == 0
-            && update.ResidualMilliseconds == 10
+            && update.SmapiOtherMilliseconds == 5
+            && update.SmapiOtherTimingAvailable
+            && update.ResidualMilliseconds == 5
             && update.Gen0Collections == 2
             && update.Gen1Collections == 1
             && update.Gen2Collections == 0
@@ -89,8 +90,9 @@ internal sealed class ModHealthReportBuilderTests
         report.Performance.Should().Match<ModHealthPerformance>(timing =>
             timing.TotalObservedModMilliseconds == 15
             && timing.TotalBaseGameExclusiveMilliseconds == 25
-            && timing.TotalSmapiOtherMilliseconds == 0
-            && timing.TotalResidualMilliseconds == 10
+            && timing.TotalSmapiOtherMilliseconds == 5
+            && timing.SmapiOtherTimingAvailable
+            && timing.TotalResidualMilliseconds == 5
             && timing.TotalObservedModMilliseconds + timing.TotalBaseGameExclusiveMilliseconds + timing.TotalSmapiOtherMilliseconds + timing.TotalResidualMilliseconds == 50
             && timing.GcCollectionDataValid
         );
@@ -104,6 +106,161 @@ internal sealed class ModHealthReportBuilderTests
         string schemaPath = Path.Combine(TestContext.CurrentContext.TestDirectory, "TestAssets", "ModHealthReport", "mod-health-report-schema-v1.json");
         JSchema schema = JSchema.Parse(File.ReadAllText(schemaPath));
         JToken.Parse(new ModHealthReportJsonSerializer().Serialize(report)).IsValid(schema, out IList<string> errors).Should().BeTrue(string.Join("\n", errors));
+    }
+
+    [Test]
+    public void Build_MixedSmapiAvailabilityFoldsMeasuredDispatchBackIntoResidual()
+    {
+        ModPerformanceSnapshot performance = CreatePerformanceSnapshot();
+        ModHealthUpdatePerformanceSnapshot unavailableUpdate = performance.Health!.WorstUpdates[0] with { SmapiUpdateTimingAvailable = false };
+        performance = performance with
+        {
+            SmapiUpdateTimingAvailable = false,
+            Health = performance.Health with
+            {
+                WorstUpdates = Array.AsReadOnly(new[] { unavailableUpdate }),
+                RecentUpdates = Array.AsReadOnly(new[] { unavailableUpdate })
+            }
+        };
+
+        ModHealthReport report = BuildReport(performance);
+
+        report.Performance.Should().Match<ModHealthPerformance>(timing =>
+            !timing.SmapiOtherTimingAvailable
+            && timing.TotalSmapiOtherMilliseconds == 0
+            && timing.TotalResidualMilliseconds == 10
+            && timing.TotalObservedModMilliseconds + timing.TotalBaseGameExclusiveMilliseconds + timing.TotalSmapiOtherMilliseconds + timing.TotalResidualMilliseconds == 50
+        );
+        report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(update =>
+            !update.SmapiOtherTimingAvailable
+            && update.SmapiOtherMilliseconds == 0
+            && update.ResidualMilliseconds == 10
+            && update.ObservedModMilliseconds + update.BaseGameExclusiveMilliseconds + update.SmapiOtherMilliseconds + update.ResidualMilliseconds == update.TotalMilliseconds
+        );
+        string text = new ModHealthReportTextFormatter().Format(report);
+        text.Should().Contain("SMAPI update dispatch observed outside the base-game update: unavailable");
+        text.Should().Contain("Remaining uncategorized residual time: 10 ms");
+        text.Should().NotContain("SMAPI update dispatch observed outside the base-game update: 0 ms");
+    }
+
+    [Test]
+    public void Build_ValidZeroSmapiDispatchRemainsAvailableAndReconciles()
+    {
+        ModPerformanceSnapshot performance = CreatePerformanceSnapshot();
+        ModHealthUpdatePerformanceSnapshot zeroUpdate = performance.Health!.WorstUpdates[0] with
+        {
+            SmapiUpdateMilliseconds = 0,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            SmapiUpdateTimingAvailable = true
+        };
+        performance = performance with
+        {
+            SmapiUpdateMilliseconds = 0,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            SmapiUpdateTimingAvailable = true,
+            Health = performance.Health with
+            {
+                WorstUpdates = Array.AsReadOnly(new[] { zeroUpdate }),
+                RecentUpdates = Array.AsReadOnly(new[] { zeroUpdate })
+            }
+        };
+
+        ModHealthReport report = BuildReport(performance);
+
+        report.Performance.Should().Match<ModHealthPerformance>(timing =>
+            timing.SmapiOtherTimingAvailable
+            && timing.TotalSmapiOtherMilliseconds == 0
+            && timing.TotalResidualMilliseconds == 10
+            && timing.TotalObservedModMilliseconds + timing.TotalBaseGameExclusiveMilliseconds + timing.TotalSmapiOtherMilliseconds + timing.TotalResidualMilliseconds == 50
+        );
+        report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(update =>
+            update.SmapiOtherTimingAvailable
+            && update.SmapiOtherMilliseconds == 0
+            && update.ResidualMilliseconds == 10
+            && update.ObservedModMilliseconds + update.BaseGameExclusiveMilliseconds + update.SmapiOtherMilliseconds + update.ResidualMilliseconds == update.TotalMilliseconds
+        );
+        string text = new ModHealthReportTextFormatter().Format(report);
+        text.Should().Contain("SMAPI update dispatch observed outside the base-game update: 0 ms");
+        text.Should().NotContain("SMAPI update dispatch observed outside the base-game update: unavailable");
+    }
+
+    [Test]
+    public void Build_FloatingPointNoiseDoesNotInvalidateRawValidPartition()
+    {
+        ModPerformanceSnapshot performance = CreatePerformanceSnapshot();
+        ModHealthUpdatePerformanceSnapshot update = performance.Health!.WorstUpdates[0] with
+        {
+            TotalMilliseconds = 0.3,
+            GameUpdateMilliseconds = 0.1,
+            InstrumentedModMilliseconds = 0.1,
+            InstrumentedDuringGameUpdateMilliseconds = 0,
+            SmapiUpdateMilliseconds = 0.1,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            TimingPartitionIsValid = true,
+            SmapiUpdateTimingAvailable = true
+        };
+        performance = performance with
+        {
+            TickTotalMilliseconds = 0.3,
+            GameUpdateMilliseconds = 0.1,
+            TickInstrumentedMilliseconds = 0.1,
+            InstrumentedDuringGameUpdateMilliseconds = 0,
+            SmapiUpdateMilliseconds = 0.1,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            TimingPartitionIsValid = true,
+            SmapiUpdateTimingAvailable = true,
+            Health = performance.Health with
+            {
+                WorstUpdates = Array.AsReadOnly(new[] { update }),
+                RecentUpdates = Array.AsReadOnly(new[] { update })
+            }
+        };
+
+        ModHealthReport report = BuildReport(performance);
+
+        report.Performance.Should().Match<ModHealthPerformance>(timing =>
+            timing.SmapiOtherTimingAvailable
+            && timing.TotalObservedModMilliseconds + timing.TotalBaseGameExclusiveMilliseconds + timing.TotalSmapiOtherMilliseconds + timing.TotalResidualMilliseconds == 0.3
+        );
+        report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(result =>
+            result.TimingValid
+            && result.SmapiOtherTimingAvailable
+            && result.ObservedModMilliseconds + result.BaseGameExclusiveMilliseconds + result.SmapiOtherMilliseconds + result.ResidualMilliseconds == result.TotalMilliseconds
+        );
+    }
+
+    [Test]
+    public void Build_MateriallyInvalidUpdatePartitionRemainsSuppressed()
+    {
+        ModPerformanceSnapshot performance = CreatePerformanceSnapshot();
+        ModHealthUpdatePerformanceSnapshot invalid = performance.Health!.WorstUpdates[0] with
+        {
+            TotalMilliseconds = 10,
+            GameUpdateMilliseconds = 8,
+            InstrumentedModMilliseconds = 5,
+            InstrumentedDuringGameUpdateMilliseconds = 0,
+            SmapiUpdateMilliseconds = 3,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            TimingPartitionIsValid = true,
+            SmapiUpdateTimingAvailable = true
+        };
+        performance = performance with
+        {
+            Health = performance.Health with
+            {
+                WorstUpdates = Array.AsReadOnly(new[] { invalid }),
+                RecentUpdates = Array.AsReadOnly(new[] { invalid })
+            }
+        };
+
+        ModHealthUpdate result = BuildReport(performance).Performance.WorstUpdates.Should().ContainSingle().Subject;
+
+        result.TimingValid.Should().BeFalse();
+        result.SmapiOtherTimingAvailable.Should().BeFalse();
+        result.BaseGameExclusiveMilliseconds.Should().Be(0);
+        result.ObservedModMilliseconds.Should().Be(0);
+        result.SmapiOtherMilliseconds.Should().Be(0);
+        result.ResidualMilliseconds.Should().Be(0);
     }
 
     [Test]
@@ -213,6 +370,13 @@ internal sealed class ModHealthReportBuilderTests
         return new("4.5.2-fork", "abc123", "1.6.15", ".NET 6.0.36", "x64", 64, "Linux", "6.12", "Wayland", "en-AU", 8, "single-player", 1, true, false);
     }
 
+    private static ModHealthReport BuildReport(ModPerformanceSnapshot performance)
+    {
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 0);
+        ModHealthExportRequest request = new(Guid.NewGuid(), DateTimeOffset.UtcNow, ModHealthCaptureOwner.Performance, ModHealthCaptureOrigin.Manual, ModHealthCompletionReason.InterimReport, performance, ledger.GetSnapshot(ledger.CreateCaptureBaseline()), ImmutableArray<ModHealthMark>.Empty, 33.333, false);
+        return new ModHealthReportBuilder().Build(request, CreateEnvironment());
+    }
+
     private static ModPerformanceSnapshot CreatePerformanceSnapshot()
     {
         ModHealthUpdatePerformanceSnapshot update = new(
@@ -234,7 +398,10 @@ internal sealed class ModHealthReportBuilderTests
             GcCollectionDataIsValid: true,
             Contributors: Array.AsReadOnly(new[] { new ModHealthTickContributorSnapshot("Example.Mod", "Example Mod", 15) }),
             OmittedContributorIdentities: 0,
-            OmittedContributorObservations: 0
+            OmittedContributorObservations: 0,
+            SmapiUpdateMilliseconds: 6,
+            InstrumentedDuringSmapiUpdateMilliseconds: 1,
+            SmapiUpdateTimingAvailable: true
         );
         ModHealthPerformanceSnapshot health = new(
             33.333,
@@ -273,6 +440,9 @@ internal sealed class ModHealthReportBuilderTests
             CaptureGen1Collections: 1,
             CaptureGen2Collections: 0,
             CaptureGcCollectionDataIsValid: true,
+            SmapiUpdateMilliseconds: 6,
+            InstrumentedDuringSmapiUpdateMilliseconds: 1,
+            SmapiUpdateTimingAvailable: true,
             Health: health
         );
     }

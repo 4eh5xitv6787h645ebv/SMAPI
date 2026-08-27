@@ -21,13 +21,15 @@ Timing data: valid
 Ledger boundary: SMAPI core initialized before LogManager; earlier launcher/native failures are unavailable.
 
 Slow update overview
-Definitions: a callback is mod-owned code observed at a named SMAPI boundary; unattributed time is work outside those measured boundaries and is not assigned to a cause.
+Definitions: a callback is mod-owned code observed at a named SMAPI boundary; residual time is outside the categorized update boundaries and is not assigned to a cause.
+Timing is elapsed wall-clock correlation, not proof of CPU ownership or cause. Base-game-exclusive time can include Harmony patches and direct mod API work invoked by the game.
 Slow update threshold: 33.333 ms
 Slow update ticks: 3
 Observed mod callbacks: 12 ms
 Base-game update (exclusive): 60300.0 ms
-Separately measured SMAPI/other update work: unavailable; no owned measurement boundary was active.
-Remaining unattributed time: 168.0 ms
+SMAPI update dispatch observed outside the base-game update: 120.0 ms
+This is not total SMAPI CPU; the measured boundary can include waiting, scheduling, and unobserved nested work.
+Remaining uncategorized residual time: 48 ms
 Mean update duration: 16.8 ms
 Update distribution: p50 16.75 ms, p95 18 ms, p99 35 ms (approximate bucket upper bounds)
 Process-wide GC collections during capture: 2 gen0, 0 gen1, 0 gen2 (correlation only, not mod attribution).
@@ -41,7 +43,7 @@ Top observed mods and callbacks
 
 Slow episodes and worst updates
 - Episode ticks 1200-1202: 41.2 ms maximum
-- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 38 ms base-game exclusive; SMAPI/other not separately measured; 3 ms remaining unattributed; GC 2/0/0 process-wide
+- Update tick 1200: 41.2 ms total; 0.2 ms observed mod callbacks; 38 ms base-game exclusive; 2 ms SMAPI update dispatch observed outside the base-game update; 1 ms uncategorized residual; GC 2/0/0 process-wide
 
 Errors, failures, and logging volume
 A failed callback may also emit an error; do not sum those columns as unique incidents.
@@ -65,6 +67,7 @@ Omissions and capacities
 
 Attribution and privacy limitations
 - SMAPI observes only named callback boundaries.
+- The SMAPI update-dispatch measurement is not total SMAPI CPU or proof of cause.
 - Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.
 - Allowed mod identity text is length-capped and structurally sanitized, but arbitrary author-chosen text cannot be semantically guaranteed private.
 - No report was transmitted automatically.

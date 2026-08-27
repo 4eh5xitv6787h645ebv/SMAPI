@@ -10,7 +10,7 @@ namespace SMAPI.Tests.Framework.Health;
 internal sealed class ModHealthInsightAnalyzerTests
 {
     [Test]
-    public void Analyze_PrioritizesUnattributedEvidenceAndAvoidsUnsupportedClaims()
+    public void Analyze_CategorizesBaseGameBoundaryTimeWithoutCallingItUnattributedOrCausal()
     {
         ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
         ImmutableArray<ModHealthUpdate> updates = ImmutableArray.Create(
@@ -23,9 +23,91 @@ internal sealed class ModHealthInsightAnalyzerTests
 
         ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
 
-        findings.Should().Contain(finding => finding.RuleId == "mostly-unattributed-slow-updates");
+        findings.Should().Contain(finding => finding.RuleId == "base-game-update-dominance");
+        findings.Should().NotContain(finding => finding.RuleId == "mostly-unattributed-slow-updates");
         string wording = string.Join("\n", findings.SelectMany(finding => new[] { finding.Summary, finding.Evidence, finding.SuggestedAction, finding.Limitation }));
         wording.Should().NotContain("caused your lag").And.NotContain("health score");
+    }
+
+    [Test]
+    public void Analyze_CategorizesMeasuredSmapiUpdateDispatchWithBoundaryLimitations()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ModHealthUpdate update = CreateSlowUpdate(1) with
+        {
+            BaseGameExclusiveMilliseconds = 5,
+            SmapiOtherMilliseconds = 80,
+            ResidualMilliseconds = 5
+        };
+        ModHealthReport report = baseReport with
+        {
+            Performance = baseReport.Performance with
+            {
+                SlowUpdateCount = 3,
+                WorstUpdates = ImmutableArray.Create(update, update with { UpdateTick = 2 }, update with { UpdateTick = 3 })
+            }
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        ModHealthFinding finding = findings.Should().ContainSingle(entry => entry.RuleId == "smapi-update-dispatch-dominance").Which;
+        finding.Summary.Should().Contain("SMAPI update dispatch observed outside the base-game update");
+        finding.Limitation.Should().Contain("not total SMAPI CPU or proof of cause");
+        findings.Should().Contain(entry => entry.RuleId == "observed-mod-dominance");
+        findings.First(entry => entry.Severity == ModHealthFindingSeverity.Performance).RuleId.Should().Be("smapi-update-dispatch-dominance");
+        findings.Should().NotContain(entry => entry.RuleId == "mostly-unattributed-slow-updates");
+    }
+
+    [Test]
+    public void Analyze_UnavailableSmapiTimingIsNamedAsAResidualPossibility()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ModHealthUpdate update = CreateSlowUpdate(1) with
+        {
+            BaseGameExclusiveMilliseconds = 5,
+            SmapiOtherMilliseconds = 0,
+            SmapiOtherTimingAvailable = false,
+            ResidualMilliseconds = 85
+        };
+        ModHealthReport report = baseReport with
+        {
+            Performance = baseReport.Performance with
+            {
+                SlowUpdateCount = 3,
+                WorstUpdates = ImmutableArray.Create(update, update with { UpdateTick = 2 }, update with { UpdateTick = 3 })
+            }
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        ModHealthFinding finding = findings.Should().ContainSingle(entry => entry.RuleId == "mostly-unattributed-slow-updates").Which;
+        finding.Limitation.Should().Contain("owned SMAPI update-dispatch timing is unavailable");
+    }
+
+    [Test]
+    public void Analyze_UsesMostlyUnattributedOnlyForUncategorizedResidualTime()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ModHealthUpdate update = CreateSlowUpdate(1) with
+        {
+            BaseGameExclusiveMilliseconds = 5,
+            SmapiOtherMilliseconds = 5,
+            ResidualMilliseconds = 80
+        };
+        ModHealthReport report = baseReport with
+        {
+            Performance = baseReport.Performance with
+            {
+                SlowUpdateCount = 3,
+                WorstUpdates = ImmutableArray.Create(update, update with { UpdateTick = 2 }, update with { UpdateTick = 3 })
+            }
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        ModHealthFinding finding = findings.Should().ContainSingle(entry => entry.RuleId == "mostly-unattributed-slow-updates").Which;
+        finding.Evidence.Should().Contain("residual category");
+        findings.Should().NotContain(entry => entry.RuleId == "base-game-update-dominance" || entry.RuleId == "smapi-update-dispatch-dominance");
     }
 
     [Test]
@@ -38,13 +120,13 @@ internal sealed class ModHealthInsightAnalyzerTests
             Performance = baseReport.Performance with
             {
                 SlowUpdateCount = 3,
-                WorstUpdates = ImmutableArray.Create(CreateSlowUpdate(1) with { TimingValid = false }, CreateSlowUpdate(2) with { TimingValid = false }, CreateSlowUpdate(3) with { TimingValid = false })
+                WorstUpdates = ImmutableArray.Create(CreateSlowUpdate(1), CreateSlowUpdate(2), CreateSlowUpdate(3))
             }
         };
 
         ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
 
-        findings.Should().NotContain(finding => finding.RuleId == "mostly-unattributed-slow-updates" || finding.RuleId == "observed-mod-dominance");
+        findings.Should().NotContain(finding => finding.RuleId == "mostly-unattributed-slow-updates" || finding.RuleId == "base-game-update-dominance" || finding.RuleId == "smapi-update-dispatch-dominance" || finding.RuleId == "observed-mod-dominance");
     }
 
     [Test]
@@ -110,7 +192,7 @@ internal sealed class ModHealthInsightAnalyzerTests
         findings.Should().Contain(finding => finding.RuleId == "short-sample");
         findings.Should().NotContain(finding => finding.RuleId == "repeated-slow-updates");
         findings.Should().NotContain(finding => finding.RuleId == "observed-mod-dominance");
-        findings.Should().NotContain(finding => finding.RuleId == "mostly-unattributed-slow-updates");
+        findings.Should().NotContain(finding => finding.RuleId == "mostly-unattributed-slow-updates" || finding.RuleId == "base-game-update-dominance" || finding.RuleId == "smapi-update-dispatch-dominance");
     }
 
     [Test]

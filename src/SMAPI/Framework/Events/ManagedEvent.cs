@@ -195,19 +195,29 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
             Context.HeuristicModsRunningCode.Push(handler.SourceMod);
             HandlerTimingToken timing = this.BeginPerformance(handler);
             bool failed = false;
+            Exception? failure = null;
 
             try
             {
-                handler.Handler(null, args);
-            }
-            catch (Exception ex)
-            {
-                failed = true;
-                this.LogError(handler, ex);
+                try
+                {
+                    handler.Handler(null, args);
+                }
+                catch (Exception ex)
+                {
+                    failed = true;
+                    failure = ex;
+                }
+                finally
+                {
+                    this.PerformanceManager!.EndHandler(timing, failed);
+                }
+
+                if (failure != null)
+                    this.LogError(handler, failure);
             }
             finally
             {
-                this.PerformanceManager!.EndHandler(timing, failed);
                 Context.HeuristicModsRunningCode.TryPop(out _);
             }
         }
@@ -224,19 +234,29 @@ internal class ManagedEvent<TEventArgs> : IManagedEvent
             Context.HeuristicModsRunningCode.Push(handler.SourceMod);
             HandlerTimingToken timing = this.BeginPerformance(handler);
             bool failed = false;
+            Exception? failure = null;
 
             try
             {
-                invoke(ref state, handler.SourceMod, handler.Callback);
-            }
-            catch (Exception ex)
-            {
-                failed = true;
-                this.LogError(handler, ex);
+                try
+                {
+                    invoke(ref state, handler.SourceMod, handler.Callback);
+                }
+                catch (Exception ex)
+                {
+                    failed = true;
+                    failure = ex;
+                }
+                finally
+                {
+                    this.PerformanceManager!.EndHandler(timing, failed);
+                }
+
+                if (failure != null)
+                    this.LogError(handler, failure);
             }
             finally
             {
-                this.PerformanceManager!.EndHandler(timing, failed);
                 Context.HeuristicModsRunningCode.TryPop(out _);
             }
         }

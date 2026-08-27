@@ -21,12 +21,12 @@ internal static class ModHealthReportFixtureFactory
                 new ModHealthHistogram(3600, 60480, 15.2, 41.2, 16.75, 18, 35, PercentilesApproximate: true, 0.044, 0, 0, ImmutableArray.Create(new ModHealthThresholdCount(33.333, 3))),
                 TotalObservedModMilliseconds: 12,
                 TotalBaseGameExclusiveMilliseconds: 60300,
-                TotalSmapiOtherMilliseconds: 0,
-                SmapiOtherTimingAvailable: false,
-                TotalResidualMilliseconds: 168,
+                TotalSmapiOtherMilliseconds: 120,
+                SmapiOtherTimingAvailable: true,
+                TotalResidualMilliseconds: 48,
                 SlowUpdateCount: 3,
                 Callbacks: ImmutableArray.Create(new ModHealthCallback("Example.Mod", "Example Mod", ModHealthExecutionPhase.Update, ModHealthOperationKind.Event, "UpdateTicked", "Example.Mod.OnUpdate", null, 3600, 12, 0.08, 0)),
-                WorstUpdates: ImmutableArray.Create(new ModHealthUpdate(1200, 20000, 41.2, 38, 0.2, 0, false, 3, true, "gameplay", true, 0, 0, 0, 0, 2, 0, 0, true, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 0.2)), 1)),
+                WorstUpdates: ImmutableArray.Create(new ModHealthUpdate(1200, 20000, 41.2, 38, 0.2, 2, true, 1, true, "gameplay", true, 0, 0, 0, 0, 2, 0, 0, true, ImmutableArray.Create(new ModHealthContributor("Example.Mod", 0.2)), 1)),
                 RecentUpdates: ImmutableArray<ModHealthUpdate>.Empty,
                 Episodes: ImmutableArray.Create(new ModHealthEpisode(1200, 1202, 3, 41.2, 119.4, 1200, 1)),
                 Gen0Collections: 2,
@@ -43,7 +43,7 @@ internal static class ModHealthReportFixtureFactory
             Capacities: ImmutableArray.Create(new ModHealthCapacity("callbacks", ModHealthReportLimits.MaxCallbacks, false)),
             Omissions: ImmutableArray.Create(new ModHealthOmission("callbacks", 0)),
             Privacy: new(true, false, ImmutableArray.Create("mod names", "mod IDs", "versions", "statuses"), ImmutableArray.Create("raw logs", "stack traces", "paths", "save data", "configuration")),
-            Limitations: ImmutableArray.Create("SMAPI observes only named callback boundaries.", "Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.")
+            Limitations: ImmutableArray.Create("SMAPI observes only named callback boundaries.", "The SMAPI update-dispatch measurement is not total SMAPI CPU or proof of cause.", "Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.")
         );
     }
 }

@@ -118,15 +118,15 @@ internal sealed class ModHealthInsightAnalyzer
                 null,
                 "SMAPI recorded repeated slow update ticks.",
                 $"{report.Performance.SlowUpdateCount.ToString(CultureInfo.InvariantCulture)} update ticks met the {report.Capture.SlowUpdateThresholdMilliseconds.ToString("0.###", CultureInfo.InvariantCulture)} ms threshold.",
-                "Compare the slow episodes, observed callback contributors, and unattributed time below.",
+                "Compare the slow episodes, observed callback contributors, categorized update boundaries, and uncategorized residual time below.",
                 "Update ticks are not a complete presentation-rate measurement, and a slow update can include work SMAPI cannot attribute."
             ));
         }
 
-        if (!report.Capture.IsShortSample)
+        if (!report.Capture.IsShortSample && report.Capture.TimingValid)
         {
             this.AddDominanceFinding(report, findings);
-            this.AddUnattributedFinding(report, findings);
+            this.AddTimingCategoryFindings(report, findings);
         }
 
         if (report.Capture.IsShortSample)
@@ -185,6 +185,7 @@ internal sealed class ModHealthInsightAnalyzer
         return findings
             .Select(ModHealthInsightAnalyzer.NormalizeFinding)
             .OrderBy(finding => ModHealthInsightAnalyzer.GetSeverityOrder(finding.Severity))
+            .ThenBy(finding => ModHealthInsightAnalyzer.GetFindingOrder(finding.RuleId))
             .ThenBy(finding => finding.RuleId, StringComparer.Ordinal)
             .ThenBy(finding => finding.ModId, StringComparer.OrdinalIgnoreCase)
             .Take(ModHealthReportLimits.MaxFindings)
@@ -256,7 +257,7 @@ internal sealed class ModHealthInsightAnalyzer
         ));
     }
 
-    private void AddUnattributedFinding(ModHealthReport report, List<ModHealthFinding> findings)
+    private void AddTimingCategoryFindings(ModHealthReport report, List<ModHealthFinding> findings)
     {
         ModHealthUpdate[] slow = report.Performance.WorstUpdates
             .Where(update => update.TimingValid && update.TotalMilliseconds >= report.Capture.SlowUpdateThresholdMilliseconds)
@@ -265,21 +266,61 @@ internal sealed class ModHealthInsightAnalyzer
             return;
 
         double total = slow.Sum(update => update.TotalMilliseconds);
-        double unattributed = slow.Sum(update => update.ResidualMilliseconds + update.BaseGameExclusiveMilliseconds + update.SmapiOtherMilliseconds);
-        if (total <= 0 || unattributed / total < ModHealthReportLimits.MostlyUnattributedShare)
+        if (total <= 0)
             return;
 
-        findings.Add(new(
-            "mostly-unattributed-slow-updates",
-            ModHealthFindingSeverity.Performance,
-            ModHealthFindingConfidence.Factual,
-            null,
-            "Most time in the retained slow update ticks was outside observed mod callbacks.",
-            $"SMAPI could not attribute {unattributed.ToString("0.###", CultureInfo.InvariantCulture)} of {total.ToString("0.###", CultureInfo.InvariantCulture)} ms to observed mod callback boundaries.",
-            "Use the normal SMAPI log and an external process or system profiler if this pattern continues.",
-            "Unattributed time can include the game, SMAPI, Harmony patches, background/native work, waits, GC correlation, GPU/driver work, and operating-system scheduling."
-        ));
+        double baseGame = slow.Sum(update => update.BaseGameExclusiveMilliseconds);
+        if (baseGame / total >= ModHealthReportLimits.MostlyUnattributedShare)
+        {
+            findings.Add(new(
+                "base-game-update-dominance",
+                ModHealthFindingSeverity.Performance,
+                ModHealthFindingConfidence.Factual,
+                null,
+                "Most time in the retained slow update ticks was observed inside the base-game update boundary.",
+                $"The base-game-exclusive category represented {baseGame.ToString("0.###", CultureInfo.InvariantCulture)} of {total.ToString("0.###", CultureInfo.InvariantCulture)} ms in those ticks.",
+                "Compare the normal SMAPI log and use an external process or system profiler if this pattern continues.",
+                "This elapsed-time boundary can include Harmony patches, direct mod API work, waiting, scheduling, and other unobserved work invoked within the game update; it does not identify a cause."
+            ));
+        }
+
+        if (slow.All(update => update.SmapiOtherTimingAvailable))
+        {
+            double smapiUpdateDispatch = slow.Sum(update => update.SmapiOtherMilliseconds);
+            if (smapiUpdateDispatch / total >= ModHealthReportLimits.MostlyUnattributedShare)
+            {
+                findings.Add(new(
+                    "smapi-update-dispatch-dominance",
+                    ModHealthFindingSeverity.Performance,
+                    ModHealthFindingConfidence.Factual,
+                    null,
+                    "Most time in the retained slow update ticks was within SMAPI update dispatch observed outside the base-game update.",
+                    $"That measured category represented {smapiUpdateDispatch.ToString("0.###", CultureInfo.InvariantCulture)} of {total.ToString("0.###", CultureInfo.InvariantCulture)} ms in those ticks.",
+                    "Reproduce again, compare the normal SMAPI log, and use an external process or system profiler if this pattern continues.",
+                    "This is elapsed wall-clock time within an owned dispatch boundary, not total SMAPI CPU or proof of cause; it can include waiting, scheduling, and unobserved nested work."
+                ));
+            }
+        }
+
+        double residual = slow.Sum(update => update.ResidualMilliseconds);
+        if (residual / total >= ModHealthReportLimits.MostlyUnattributedShare)
+        {
+            findings.Add(new(
+                "mostly-unattributed-slow-updates",
+                ModHealthFindingSeverity.Performance,
+                ModHealthFindingConfidence.Factual,
+                null,
+                "Most time in the retained slow update ticks remained uncategorized.",
+                $"The residual category contained {residual.ToString("0.###", CultureInfo.InvariantCulture)} of {total.ToString("0.###", CultureInfo.InvariantCulture)} ms in those ticks.",
+                "Use the normal SMAPI log and an external process or system profiler if this pattern continues.",
+                "Residual time is not assigned to a cause. When owned SMAPI update-dispatch timing is unavailable, residual also includes that unseparated work; it can include arbitrary background/native work, waits, GC correlation, GPU/driver work, and operating-system scheduling."
+            ));
+        }
     }
+
+    private static int GetFindingOrder(string ruleId) => ruleId is "base-game-update-dominance" or "mostly-unattributed-slow-updates" or "smapi-update-dispatch-dominance"
+        ? 0
+        : 1;
 
     private static int GetSeverityOrder(ModHealthFindingSeverity severity) => severity switch
     {

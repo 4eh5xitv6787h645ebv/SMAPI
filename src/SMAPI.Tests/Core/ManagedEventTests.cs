@@ -72,6 +72,7 @@ internal class ManagedEventTests
         mod.SetupGet(instance => instance.Manifest).Returns(manifest.Object);
         mod.SetupGet(instance => instance.DisplayName).Returns("Example Mod");
         mod.SetupGet(instance => instance.Monitor).Returns(monitor.Object);
+        monitor.Setup(instance => instance.Log(It.IsAny<string>(), LogLevel.Error)).Callback(() => timestamp += 6);
 
         ManagedEvent<EventArgs> managedEvent = new("GameLoop.GameLaunched", new ModRegistry(), performance);
         managedEvent.Add((_, _) =>
@@ -90,6 +91,7 @@ internal class ManagedEventTests
                 ModName = "Example Mod",
                 EventName = "GameLoop.GameLaunched",
                 CallCount = 1,
+                // exclude the six milliseconds spent writing SMAPI's failure report after the callback threw
                 TotalMilliseconds = 4d,
                 MaximumMilliseconds = 4d,
                 FailureCount = 1

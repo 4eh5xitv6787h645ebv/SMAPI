@@ -139,32 +139,37 @@ internal class ModRegistryHelper : BaseHelper, IModRegistry
                     ? this.PerformanceManager!.BeginHandler(mod, "ModLifecycle.GetApi", callbackIdentity, phase, ModHealthOperationKind.GetApi, onBehalfOfModId: null)
                     : default;
                 bool failed = false;
+                Exception? failure = null;
                 try
                 {
                     api = mod.Mod?.GetApi(this.Mod);
-                    if (api != null && !api.GetType().IsPublic)
-                    {
-                        api = null;
-                        this.Monitor.Log($"{mod.DisplayName} provides a per-mod API instance with a non-public type. This isn't currently supported, so the API won't be available to other mods.", LogLevel.Warn);
-                    }
                 }
                 catch (Exception ex)
                 {
                     failed = true;
-                    this.HealthObserver?.ObserveCallbackFailure(
-                        mod,
-                        phase,
-                        ModHealthOperationKind.GetApi,
-                        callbackIdentity,
-                        ex
-                    );
-                    this.Monitor.Log($"Failed loading the per-mod API instance from {mod.DisplayName}. Integrations with other mods may not work. Error: {ex.GetLogSummary()}", LogLevel.Error);
-                    api = null;
+                    failure = ex;
                 }
                 finally
                 {
                     if (profile)
                         this.PerformanceManager!.EndHandler(timing, failed);
+                }
+                if (failure != null)
+                {
+                    this.HealthObserver?.ObserveCallbackFailure(
+                        mod,
+                        phase,
+                        ModHealthOperationKind.GetApi,
+                        callbackIdentity,
+                        failure
+                    );
+                    this.Monitor.Log($"Failed loading the per-mod API instance from {mod.DisplayName}. Integrations with other mods may not work. Error: {failure.GetLogSummary()}", LogLevel.Error);
+                    api = null;
+                }
+                else if (api != null && !api.GetType().IsPublic)
+                {
+                    api = null;
+                    this.Monitor.Log($"{mod.DisplayName} provides a per-mod API instance with a non-public type. This isn't currently supported, so the API won't be available to other mods.", LogLevel.Warn);
                 }
             }
 

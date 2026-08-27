@@ -12,6 +12,14 @@ internal sealed class ModPerformanceManager
     private const double DefaultSlowUpdateThresholdMilliseconds = ModHealthReportLimits.SlowUpdateMilliseconds;
     private static readonly double[] HealthHistogramThresholds = [16.667, 33.333, 50, 100, 250, 500, 1000];
 
+    /// <summary>The mutually exclusive owned update domain active on the main update thread.</summary>
+    internal enum UpdateTimingDomain
+    {
+        Unowned,
+        Game,
+        Smapi
+    }
+
     /// <summary>The nested profiled handlers on the current thread.</summary>
     [ThreadStatic]
     private static List<ActiveHandler>? ActiveHandlers;
@@ -169,11 +177,20 @@ internal sealed class ModPerformanceManager
     /// <summary>The instrumented handler time recorded while a base game update was executing during the current update tick.</summary>
     private long CurrentTickInstrumentedDuringGameUpdateTicks;
 
-    /// <summary>Whether a base game update is currently being measured.</summary>
-    private bool IsGameUpdateOpen;
+    /// <summary>The separately measured SMAPI update time recorded during the current update tick.</summary>
+    private long CurrentTickSmapiUpdateTimestampTicks;
 
-    /// <summary>The timestamp when the current base game update began.</summary>
-    private long GameUpdateStartTimestamp;
+    /// <summary>The instrumented handler time recorded while a SMAPI update scope was executing.</summary>
+    private long CurrentTickInstrumentedDuringSmapiUpdateTicks;
+
+    /// <summary>The mutually exclusive update timing domain currently open.</summary>
+    private UpdateTimingDomain CurrentTickUpdateDomain;
+
+    /// <summary>The timestamp when the current owned update domain began.</summary>
+    private long CurrentUpdateDomainStartTimestamp;
+
+    /// <summary>Whether at least one valid SMAPI update scope began during the current tick.</summary>
+    private bool CurrentTickObservedSmapiUpdateScope;
 
     /// <summary>Whether the current tick's timing partition is invalid.</summary>
     private bool CurrentTickTimingPartitionIsInvalid;
@@ -192,6 +209,15 @@ internal sealed class ModPerformanceManager
 
     /// <summary>The total instrumented handler time measured within base game updates in this sample.</summary>
     private long TotalInstrumentedDuringGameUpdateTicks;
+
+    /// <summary>The total separately measured SMAPI update time in this sample.</summary>
+    private long TotalSmapiUpdateTimestampTicks;
+
+    /// <summary>The total instrumented handler time measured within SMAPI update scopes in this sample.</summary>
+    private long TotalInstrumentedDuringSmapiUpdateTicks;
+
+    /// <summary>The number of completed ticks for which separately measured SMAPI timing was unavailable.</summary>
+    private long UnavailableSmapiUpdateTimingTicks;
 
     /// <summary>The total garbage collections per generation observed within ticks in this sample.</summary>
     private readonly long[] TotalGcCollections = new long[3];
@@ -327,7 +353,9 @@ internal sealed class ModPerformanceManager
             }
             this.CloseOpenSlowEpisode();
             this.IsTickOpen = false;
-            this.IsGameUpdateOpen = false;
+            this.CurrentTickUpdateDomain = UpdateTimingDomain.Unowned;
+            this.CurrentUpdateDomainStartTimestamp = 0;
+            this.CurrentTickObservedSmapiUpdateScope = false;
             this.CurrentTickThreadId = 0;
             this.CurrentTickMods.Clear();
         }
@@ -403,8 +431,12 @@ internal sealed class ModPerformanceManager
             this.CurrentTickInstrumentedTimestampTicks = 0;
             this.CurrentTickGameUpdateTimestampTicks = 0;
             this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
+            this.CurrentTickSmapiUpdateTimestampTicks = 0;
+            this.CurrentTickInstrumentedDuringSmapiUpdateTicks = 0;
+            this.CurrentTickUpdateDomain = UpdateTimingDomain.Unowned;
+            this.CurrentUpdateDomainStartTimestamp = 0;
+            this.CurrentTickObservedSmapiUpdateScope = false;
             this.CurrentTickTimingPartitionIsInvalid = startTimestamp < this.SampleStartTimestamp;
-            this.IsGameUpdateOpen = false;
             for (int generation = 0; generation < this.TickStartGcCollections.Length; generation++)
                 this.TickStartGcCollections[generation] = this.GetGcCollectionCount(generation);
         }
@@ -413,40 +445,25 @@ internal sealed class ModPerformanceManager
     /// <summary>Begin measuring a base game update within the current update tick.</summary>
     public void BeginGameUpdate()
     {
-        if (!this.IsTracking)
-            return;
-
-        lock (this.SyncRoot)
-        {
-            if (!this.IsTracking || !this.IsTickOpen)
-                return;
-            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || this.IsGameUpdateOpen)
-            {
-                this.CurrentTickTimingPartitionIsInvalid = true;
-                return;
-            }
-
-            this.IsGameUpdateOpen = true;
-            this.GameUpdateStartTimestamp = this.GetTimestamp();
-        }
+        this.BeginUpdateDomain(UpdateTimingDomain.Game);
     }
 
     /// <summary>Finish measuring a base game update within the current update tick.</summary>
     public void EndGameUpdate()
     {
-        lock (this.SyncRoot)
-        {
-            if (!this.IsTickOpen)
-                return;
-            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || !this.IsGameUpdateOpen)
-            {
-                this.CurrentTickTimingPartitionIsInvalid = true;
-                return;
-            }
+        this.EndUpdateDomain(UpdateTimingDomain.Game);
+    }
 
-            this.IsGameUpdateOpen = false;
-            this.CurrentTickGameUpdateTimestampTicks += this.GetTimestamp() - this.GameUpdateStartTimestamp;
-        }
+    /// <summary>Begin measuring a SMAPI-owned update scope within the current update tick.</summary>
+    public void BeginSmapiUpdate()
+    {
+        this.BeginUpdateDomain(UpdateTimingDomain.Smapi);
+    }
+
+    /// <summary>Finish measuring a SMAPI-owned update scope within the current update tick.</summary>
+    public void EndSmapiUpdate()
+    {
+        this.EndUpdateDomain(UpdateTimingDomain.Smapi);
     }
 
     /// <summary>Finish measuring the current outer game update tick.</summary>
@@ -462,7 +479,7 @@ internal sealed class ModPerformanceManager
             if (!this.IsTracking || !this.IsTickOpen)
                 return null;
 
-            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || this.IsGameUpdateOpen)
+            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || this.CurrentTickUpdateDomain != UpdateTimingDomain.Unowned)
                 this.CurrentTickTimingPartitionIsInvalid = true;
 
             long totalTimestampTicks = endTimestamp - this.CurrentTickStartTimestamp;
@@ -499,8 +516,11 @@ internal sealed class ModPerformanceManager
                     totalTimestampTicks,
                     this.CurrentTickGameUpdateTimestampTicks,
                     instrumentedTimestampTicks,
-                    this.CurrentTickInstrumentedDuringGameUpdateTicks
+                    this.CurrentTickInstrumentedDuringGameUpdateTicks,
+                    this.CurrentTickSmapiUpdateTimestampTicks,
+                    this.CurrentTickInstrumentedDuringSmapiUpdateTicks
                 );
+            bool smapiUpdateTimingAvailable = timingPartitionIsValid && this.CurrentTickObservedSmapiUpdateScope;
 
             TickPerformanceSnapshot sample = new(
                 Tick: this.CurrentTick,
@@ -516,7 +536,10 @@ internal sealed class ModPerformanceManager
                 Gen1Collections: gcCollections[1],
                 Gen2Collections: gcCollections[2],
                 TimingPartitionIsValid: timingPartitionIsValid,
-                GcCollectionDataIsValid: gcCollectionDataIsValid
+                GcCollectionDataIsValid: gcCollectionDataIsValid,
+                SmapiUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickSmapiUpdateTimestampTicks),
+                InstrumentedDuringSmapiUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickInstrumentedDuringSmapiUpdateTicks),
+                SmapiUpdateTimingAvailable: smapiUpdateTimingAvailable
             );
 
             long captureSequence = this.NextHealthTickSequence++;
@@ -554,7 +577,10 @@ internal sealed class ModPerformanceManager
                 GcCollectionDataIsValid: gcCollectionDataIsValid,
                 Contributors: contributors,
                 OmittedContributorIdentities: omittedContributorIdentities,
-                OmittedContributorObservations: omittedContributorObservations
+                OmittedContributorObservations: omittedContributorObservations,
+                SmapiUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickSmapiUpdateTimestampTicks),
+                InstrumentedDuringSmapiUpdateMilliseconds: this.ToMilliseconds(this.CurrentTickInstrumentedDuringSmapiUpdateTicks),
+                SmapiUpdateTimingAvailable: smapiUpdateTimingAvailable
             );
 
             if (hasValidDuration)
@@ -571,17 +597,23 @@ internal sealed class ModPerformanceManager
             this.TotalGameUpdateTimestampTicks += this.CurrentTickGameUpdateTimestampTicks;
             this.TotalTickInstrumentedTimestampTicks += instrumentedTimestampTicks;
             this.TotalInstrumentedDuringGameUpdateTicks += this.CurrentTickInstrumentedDuringGameUpdateTicks;
+            this.TotalSmapiUpdateTimestampTicks += this.CurrentTickSmapiUpdateTimestampTicks;
+            this.TotalInstrumentedDuringSmapiUpdateTicks += this.CurrentTickInstrumentedDuringSmapiUpdateTicks;
             for (int generation = 0; generation < gcCollections.Length; generation++)
                 this.TotalGcCollections[generation] += gcCollections[generation];
             if (!timingPartitionIsValid)
                 this.InvalidTimingPartitionTicks++;
+            if (!smapiUpdateTimingAvailable)
+                this.UnavailableSmapiUpdateTimingTicks++;
             if (!gcCollectionDataIsValid)
                 this.InvalidGcCollectionTicks++;
 
             this.AddTick(sample);
             this.CompletedTicks++;
             this.IsTickOpen = false;
-            this.IsGameUpdateOpen = false;
+            this.CurrentTickUpdateDomain = UpdateTimingDomain.Unowned;
+            this.CurrentUpdateDomainStartTimestamp = 0;
+            this.CurrentTickObservedSmapiUpdateScope = false;
             this.CurrentTickThreadId = 0;
             this.CurrentTickMods.Clear();
 
@@ -624,8 +656,9 @@ internal sealed class ModPerformanceManager
         handlerName = ModPerformanceManager.SanitizeIdentity(handlerName, "unknown-callback", ModHealthReportLimits.MaxCallbackNameLength);
         onBehalfOfModId = ModPerformanceManager.SanitizeOptionalIdentity(onBehalfOfModId);
         int depth = handlers.Count;
-        handlers.Add(new ActiveHandler(this, generation, modId, modName, eventName, handlerName, phase, operation, onBehalfOfModId, this.GetTimestamp(), 0));
-        return new HandlerTimingToken(this, generation, depth);
+        UpdateTimingDomain startDomain = this.GetUpdateDomainForCurrentThread();
+        handlers.Add(new ActiveHandler(this, generation, modId, modName, eventName, handlerName, phase, operation, onBehalfOfModId, this.GetTimestamp(), 0, startDomain));
+        return new HandlerTimingToken(this, generation, depth, startDomain);
     }
 
     /// <summary>Get the phase of the innermost active invocation for this collector on the current thread, if any.</summary>
@@ -686,7 +719,7 @@ internal sealed class ModPerformanceManager
 
         int index = handlers.Count - 1;
         ActiveHandler handler = handlers[index];
-        if (!ReferenceEquals(handler.Manager, this) || handler.Generation != token.Generation)
+        if (!ReferenceEquals(handler.Manager, this) || handler.Generation != token.Generation || handler.StartDomain != token.StartDomain)
         {
             if (ReferenceEquals(handler.Manager, this) && handler.Generation != Volatile.Read(ref this.SampleGeneration))
                 handlers.RemoveAt(index);
@@ -708,7 +741,7 @@ internal sealed class ModPerformanceManager
             }
         }
 
-        this.RecordHandler(handler.ModId, handler.ModName, handler.EventName, handler.HandlerName, handler.Phase, handler.Operation, handler.OnBehalfOfModId, exclusiveTimestampTicks, failed, handler.Generation);
+        this.RecordHandler(handler.ModId, handler.ModName, handler.EventName, handler.HandlerName, handler.Phase, handler.Operation, handler.OnBehalfOfModId, exclusiveTimestampTicks, failed, handler.Generation, handler.StartDomain);
     }
 
     /// <summary>Record one invocation of a mod-owned SMAPI event handler.</summary>
@@ -720,7 +753,7 @@ internal sealed class ModPerformanceManager
     /// <param name="failed">Whether the handler threw an exception.</param>
     public void RecordHandler(string modId, string modName, string eventName, string handlerName, long elapsedTimestampTicks, bool failed)
     {
-        this.RecordHandler(modId, modName, eventName, handlerName, ModHealthExecutionPhase.Unscoped, ModPerformanceManager.GetOperationKind(eventName), onBehalfOfModId: null, elapsedTimestampTicks, failed, requiredGeneration: null);
+        this.RecordHandler(modId, modName, eventName, handlerName, ModHealthExecutionPhase.Unscoped, ModPerformanceManager.GetOperationKind(eventName), onBehalfOfModId: null, elapsedTimestampTicks, failed, requiredGeneration: null, startDomain: this.GetUpdateDomainForCurrentThread());
     }
 
     /// <summary>Record one invocation with explicit health-report dimensions.</summary>
@@ -735,7 +768,7 @@ internal sealed class ModPerformanceManager
     /// <param name="failed">Whether the handler threw an exception.</param>
     public void RecordHandler(string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long elapsedTimestampTicks, bool failed)
     {
-        this.RecordHandler(modId, modName, eventName, handlerName, phase, operation, onBehalfOfModId, elapsedTimestampTicks, failed, requiredGeneration: null);
+        this.RecordHandler(modId, modName, eventName, handlerName, phase, operation, onBehalfOfModId, elapsedTimestampTicks, failed, requiredGeneration: null, startDomain: this.GetUpdateDomainForCurrentThread());
     }
 
     /// <summary>Record one invocation of a mod-owned SMAPI event handler.</summary>
@@ -749,7 +782,8 @@ internal sealed class ModPerformanceManager
     /// <param name="elapsedTimestampTicks">The elapsed timestamp ticks.</param>
     /// <param name="failed">Whether the handler threw an exception.</param>
     /// <param name="requiredGeneration">The sample generation which must still be active, if any.</param>
-    private void RecordHandler(string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long elapsedTimestampTicks, bool failed, long? requiredGeneration)
+    /// <param name="startDomain">The owned update domain in which the invocation began.</param>
+    private void RecordHandler(string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long elapsedTimestampTicks, bool failed, long? requiredGeneration, UpdateTimingDomain startDomain)
     {
         if (!this.IsTracking)
             return;
@@ -770,6 +804,9 @@ internal sealed class ModPerformanceManager
 
             if (this.IsTickOpen && currentThreadId == this.CurrentTickThreadId)
             {
+                UpdateTimingDomain endDomain = this.CurrentTickUpdateDomain;
+                if (startDomain != endDomain)
+                    this.CurrentTickTimingPartitionIsInvalid = true;
                 if (this.CurrentTickMods.TryGetValue(modId, out TickModCounter tickCounter))
                 {
                     tickCounter.TimestampTicks += elapsedTimestampTicks;
@@ -783,8 +820,10 @@ internal sealed class ModPerformanceManager
                     this.OmittedTickContributorObservations++;
                 }
                 this.CurrentTickInstrumentedTimestampTicks += elapsedTimestampTicks;
-                if (this.IsGameUpdateOpen)
+                if (startDomain == endDomain && endDomain == UpdateTimingDomain.Game)
                     this.CurrentTickInstrumentedDuringGameUpdateTicks += elapsedTimestampTicks;
+                else if (startDomain == endDomain && endDomain == UpdateTimingDomain.Smapi)
+                    this.CurrentTickInstrumentedDuringSmapiUpdateTicks += elapsedTimestampTicks;
                 if (failed)
                     this.CurrentTickCallbackFailures++;
             }
@@ -879,7 +918,9 @@ internal sealed class ModPerformanceManager
                     raw.TotalTickTimestampTicks,
                     raw.TotalGameUpdateTimestampTicks,
                     raw.TotalTickInstrumentedTimestampTicks,
-                    raw.TotalInstrumentedDuringGameUpdateTicks
+                    raw.TotalInstrumentedDuringGameUpdateTicks,
+                    raw.TotalSmapiUpdateTimestampTicks,
+                    raw.TotalInstrumentedDuringSmapiUpdateTicks
                 ),
             InvalidTimingPartitionTickCount: raw.InvalidTimingPartitionTicks,
             GcCollectionDataIsValid: raw.InvalidGcCollectionTicks == 0,
@@ -888,7 +929,21 @@ internal sealed class ModPerformanceManager
             CaptureGen1Collections: raw.CaptureGcCollections[1],
             CaptureGen2Collections: raw.CaptureGcCollections[2],
             CaptureGcCollectionDataIsValid: raw.CaptureGcCollectionDataIsValid,
-            Health: this.GetHealthSnapshot(raw)
+            Health: this.GetHealthSnapshot(raw),
+            SmapiUpdateMilliseconds: this.ToMilliseconds(raw.TotalSmapiUpdateTimestampTicks),
+            InstrumentedDuringSmapiUpdateMilliseconds: this.ToMilliseconds(raw.TotalInstrumentedDuringSmapiUpdateTicks),
+            SmapiUpdateTimingAvailable:
+                raw.CompletedTicks > 0
+                && raw.UnavailableSmapiUpdateTimingTicks == 0
+                && raw.InvalidTimingPartitionTicks == 0
+                && ModPerformanceManager.IsValidTimingPartition(
+                    raw.TotalTickTimestampTicks,
+                    raw.TotalGameUpdateTimestampTicks,
+                    raw.TotalTickInstrumentedTimestampTicks,
+                    raw.TotalInstrumentedDuringGameUpdateTicks,
+                    raw.TotalSmapiUpdateTimestampTicks,
+                    raw.TotalInstrumentedDuringSmapiUpdateTicks
+                )
         );
     }
 
@@ -970,6 +1025,9 @@ internal sealed class ModPerformanceManager
             TotalGameUpdateTimestampTicks = this.TotalGameUpdateTimestampTicks,
             TotalTickInstrumentedTimestampTicks = this.TotalTickInstrumentedTimestampTicks,
             TotalInstrumentedDuringGameUpdateTicks = this.TotalInstrumentedDuringGameUpdateTicks,
+            TotalSmapiUpdateTimestampTicks = this.TotalSmapiUpdateTimestampTicks,
+            TotalInstrumentedDuringSmapiUpdateTicks = this.TotalInstrumentedDuringSmapiUpdateTicks,
+            UnavailableSmapiUpdateTimingTicks = this.UnavailableSmapiUpdateTimingTicks,
             TotalGcCollections = (long[])this.TotalGcCollections.Clone(),
             InvalidTimingPartitionTicks = this.InvalidTimingPartitionTicks,
             InvalidGcCollectionTicks = this.InvalidGcCollectionTicks,
@@ -1406,6 +1464,70 @@ internal sealed class ModPerformanceManager
         return ModPerformanceManager.SanitizeIdentity(value, "unknown", ModHealthReportLimits.MaxIdentityLength);
     }
 
+    /// <summary>Begin one mutually exclusive owned update timing domain.</summary>
+    private void BeginUpdateDomain(UpdateTimingDomain domain)
+    {
+        if (!this.IsTracking)
+            return;
+
+        lock (this.SyncRoot)
+        {
+            if (!this.IsTracking || !this.IsTickOpen)
+                return;
+            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || this.CurrentTickUpdateDomain != UpdateTimingDomain.Unowned)
+            {
+                this.CurrentTickTimingPartitionIsInvalid = true;
+                return;
+            }
+
+            this.CurrentTickUpdateDomain = domain;
+            this.CurrentUpdateDomainStartTimestamp = this.GetTimestamp();
+            if (domain == UpdateTimingDomain.Smapi)
+                this.CurrentTickObservedSmapiUpdateScope = true;
+        }
+    }
+
+    /// <summary>Finish one mutually exclusive owned update timing domain.</summary>
+    private void EndUpdateDomain(UpdateTimingDomain domain)
+    {
+        if (!this.IsTracking)
+            return;
+
+        lock (this.SyncRoot)
+        {
+            if (!this.IsTickOpen)
+                return;
+            if (Environment.CurrentManagedThreadId != this.CurrentTickThreadId || this.CurrentTickUpdateDomain != domain)
+            {
+                this.CurrentTickTimingPartitionIsInvalid = true;
+                return;
+            }
+
+            long elapsedTimestampTicks = this.GetTimestamp() - this.CurrentUpdateDomainStartTimestamp;
+            if (domain == UpdateTimingDomain.Game)
+                this.CurrentTickGameUpdateTimestampTicks += elapsedTimestampTicks;
+            else
+                this.CurrentTickSmapiUpdateTimestampTicks += elapsedTimestampTicks;
+
+            this.CurrentTickUpdateDomain = UpdateTimingDomain.Unowned;
+            this.CurrentUpdateDomainStartTimestamp = 0;
+        }
+    }
+
+    /// <summary>Get the owned update domain active for the current thread.</summary>
+    private UpdateTimingDomain GetUpdateDomainForCurrentThread()
+    {
+        if (!this.IsTracking)
+            return UpdateTimingDomain.Unowned;
+
+        lock (this.SyncRoot)
+        {
+            return this.IsTracking && this.IsTickOpen && Environment.CurrentManagedThreadId == this.CurrentTickThreadId
+                ? this.CurrentTickUpdateDomain
+                : UpdateTimingDomain.Unowned;
+        }
+    }
+
     /// <summary>Reset all mutable sample data. The caller must hold <see cref="SyncRoot"/> unless constructing the instance.</summary>
     /// <param name="timestamp">The current timestamp.</param>
     private void ResetCore(long timestamp)
@@ -1450,12 +1572,19 @@ internal sealed class ModPerformanceManager
         this.CurrentTickInstrumentedTimestampTicks = 0;
         this.CurrentTickGameUpdateTimestampTicks = 0;
         this.CurrentTickInstrumentedDuringGameUpdateTicks = 0;
+        this.CurrentTickSmapiUpdateTimestampTicks = 0;
+        this.CurrentTickInstrumentedDuringSmapiUpdateTicks = 0;
+        this.CurrentTickUpdateDomain = UpdateTimingDomain.Unowned;
+        this.CurrentUpdateDomainStartTimestamp = 0;
+        this.CurrentTickObservedSmapiUpdateScope = false;
         this.CurrentTickTimingPartitionIsInvalid = false;
-        this.IsGameUpdateOpen = false;
         this.TotalTickTimestampTicks = 0;
         this.TotalGameUpdateTimestampTicks = 0;
         this.TotalTickInstrumentedTimestampTicks = 0;
         this.TotalInstrumentedDuringGameUpdateTicks = 0;
+        this.TotalSmapiUpdateTimestampTicks = 0;
+        this.TotalInstrumentedDuringSmapiUpdateTicks = 0;
+        this.UnavailableSmapiUpdateTimingTicks = 0;
         Array.Clear(this.TotalGcCollections);
         this.InvalidTimingPartitionTicks = 0;
         this.InvalidGcCollectionTicks = 0;
@@ -1472,17 +1601,22 @@ internal sealed class ModPerformanceManager
     }
 
     /// <summary>Get whether raw timing values form a valid non-overlapping tick partition.</summary>
-    private static bool IsValidTimingPartition(long totalTicks, long gameUpdateTicks, long instrumentedTicks, long instrumentedDuringGameUpdateTicks)
+    private static bool IsValidTimingPartition(long totalTicks, long gameUpdateTicks, long instrumentedTicks, long instrumentedDuringGameUpdateTicks, long smapiUpdateTicks, long instrumentedDuringSmapiUpdateTicks)
     {
         return
             totalTicks >= 0
             && gameUpdateTicks >= 0
             && instrumentedTicks >= 0
             && instrumentedDuringGameUpdateTicks >= 0
+            && smapiUpdateTicks >= 0
+            && instrumentedDuringSmapiUpdateTicks >= 0
             && instrumentedDuringGameUpdateTicks <= gameUpdateTicks
             && instrumentedDuringGameUpdateTicks <= instrumentedTicks
+            && instrumentedDuringSmapiUpdateTicks <= smapiUpdateTicks
+            && instrumentedDuringSmapiUpdateTicks <= instrumentedTicks - instrumentedDuringGameUpdateTicks
             && gameUpdateTicks <= totalTicks
-            && instrumentedTicks - instrumentedDuringGameUpdateTicks <= totalTicks - gameUpdateTicks;
+            && smapiUpdateTicks <= totalTicks - gameUpdateTicks
+            && instrumentedTicks - instrumentedDuringGameUpdateTicks - instrumentedDuringSmapiUpdateTicks <= totalTicks - gameUpdateTicks - smapiUpdateTicks;
     }
 
     /// <summary>Add a tick to the bounded circular history.</summary>
@@ -1554,6 +1688,9 @@ internal sealed class ModPerformanceManager
         public long TotalGameUpdateTimestampTicks;
         public long TotalTickInstrumentedTimestampTicks;
         public long TotalInstrumentedDuringGameUpdateTicks;
+        public long TotalSmapiUpdateTimestampTicks;
+        public long TotalInstrumentedDuringSmapiUpdateTicks;
+        public long UnavailableSmapiUpdateTimingTicks;
         public long[] TotalGcCollections = [];
         public long InvalidTimingPartitionTicks;
         public long InvalidGcCollectionTicks;
@@ -1614,7 +1751,7 @@ internal sealed class ModPerformanceManager
     }
 
     /// <summary>One active nested handler invocation.</summary>
-    private struct ActiveHandler(ModPerformanceManager manager, long generation, string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long startTimestamp, long nestedTimestampTicks)
+    private struct ActiveHandler(ModPerformanceManager manager, long generation, string modId, string modName, string eventName, string handlerName, ModHealthExecutionPhase phase, ModHealthOperationKind operation, string? onBehalfOfModId, long startTimestamp, long nestedTimestampTicks, UpdateTimingDomain startDomain)
     {
         public ModPerformanceManager Manager { get; } = manager;
         public long Generation { get; } = generation;
@@ -1627,6 +1764,7 @@ internal sealed class ModPerformanceManager
         public string? OnBehalfOfModId { get; } = onBehalfOfModId;
         public long StartTimestamp { get; } = startTimestamp;
         public long NestedTimestampTicks = nestedTimestampTicks;
+        public UpdateTimingDomain StartDomain { get; } = startDomain;
     }
 
     /// <summary>One mutable streaming slow-update episode.</summary>
@@ -1721,12 +1859,16 @@ internal readonly struct HandlerTimingToken
     /// <summary>The handler's zero-based nesting depth.</summary>
     internal int Depth { get; }
 
+    /// <summary>The owned update timing domain in which the invocation began.</summary>
+    internal ModPerformanceManager.UpdateTimingDomain StartDomain { get; }
+
     /// <summary>Construct an instance.</summary>
-    public HandlerTimingToken(ModPerformanceManager manager, long generation, int depth)
+    public HandlerTimingToken(ModPerformanceManager manager, long generation, int depth, ModPerformanceManager.UpdateTimingDomain startDomain)
     {
         this.Manager = manager;
         this.Generation = generation;
         this.Depth = depth;
+        this.StartDomain = startDomain;
     }
 
     /// <summary>Get whether this token belongs to the given manager.</summary>
@@ -1763,13 +1905,26 @@ internal sealed record ModPerformanceSnapshot(
     long CaptureGen1Collections = 0,
     long CaptureGen2Collections = 0,
     bool CaptureGcCollectionDataIsValid = true,
-    ModHealthPerformanceSnapshot? Health = null
+    ModHealthPerformanceSnapshot? Health = null,
+    double SmapiUpdateMilliseconds = 0,
+    double InstrumentedDuringSmapiUpdateMilliseconds = 0,
+    bool SmapiUpdateTimingAvailable = false
 )
 {
     /// <summary>Base game update time in completed ticks, excluding instrumented mod callbacks which ran within it.</summary>
     public double GameUpdateExclusiveMilliseconds => this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds;
 
-    /// <summary>Tick time outside both the base game update and instrumented mod callbacks, such as SMAPI's own dispatch and per-tick framework work.</summary>
+    /// <summary>Separately measured SMAPI update time in completed ticks, excluding observed callbacks which ran within it.</summary>
+    public double SmapiUpdateExclusiveMilliseconds => this.SmapiUpdateMilliseconds - this.InstrumentedDuringSmapiUpdateMilliseconds;
+
+    /// <summary>Time outside the measured game, SMAPI update, and observed callback boundaries.</summary>
+    public double ResidualMilliseconds =>
+        this.TickTotalMilliseconds
+        - this.GameUpdateMilliseconds
+        - this.SmapiUpdateMilliseconds
+        - (this.TickInstrumentedMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds - this.InstrumentedDuringSmapiUpdateMilliseconds);
+
+    /// <summary>Legacy residual outside the base game update and observed callbacks. This isn't an owned SMAPI attribution.</summary>
     public double OutsideGameUpdateMilliseconds => this.TickTotalMilliseconds - this.GameUpdateMilliseconds - (this.TickInstrumentedMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
 }
 
@@ -1807,7 +1962,10 @@ internal readonly record struct TickPerformanceSnapshot(
     int Gen1Collections = 0,
     int Gen2Collections = 0,
     bool TimingPartitionIsValid = true,
-    bool GcCollectionDataIsValid = true
+    bool GcCollectionDataIsValid = true,
+    double SmapiUpdateMilliseconds = 0,
+    double InstrumentedDuringSmapiUpdateMilliseconds = 0,
+    bool SmapiUpdateTimingAvailable = false
 )
 {
     /// <summary>Time in the update which wasn't observed inside a SMAPI-managed mod event handler.</summary>
@@ -1816,6 +1974,16 @@ internal readonly record struct TickPerformanceSnapshot(
     /// <summary>Base game update time excluding instrumented mod callbacks which ran within it. This can include Harmony patches and other unobserved work invoked by the game.</summary>
     public double GameUpdateExclusiveMilliseconds => this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds;
 
-    /// <summary>Tick time outside both the base game update and instrumented mod callbacks, such as SMAPI's own dispatch and per-tick framework work.</summary>
+    /// <summary>Separately measured SMAPI update time excluding observed callbacks which ran within it.</summary>
+    public double SmapiUpdateExclusiveMilliseconds => this.SmapiUpdateMilliseconds - this.InstrumentedDuringSmapiUpdateMilliseconds;
+
+    /// <summary>Time outside the measured game, SMAPI update, and observed callback boundaries.</summary>
+    public double ResidualMilliseconds =>
+        this.TotalMilliseconds
+        - this.GameUpdateMilliseconds
+        - this.SmapiUpdateMilliseconds
+        - (this.InstrumentedModMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds - this.InstrumentedDuringSmapiUpdateMilliseconds);
+
+    /// <summary>Legacy residual outside the base game update and observed callbacks. This isn't an owned SMAPI attribution.</summary>
     public double OutsideGameUpdateMilliseconds => this.TotalMilliseconds - this.GameUpdateMilliseconds - (this.InstrumentedModMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
 }
