@@ -670,12 +670,12 @@ internal sealed class ModHealthViewerContentAdapter
             ModHealthViewerSection.Overview => this.CreateOverviewDetails(rowIndex),
             ModHealthViewerSection.Findings => this.CreateFindingDetails(rowIndex),
             ModHealthViewerSection.Capture => this.CreateCaptureDetails(rowIndex),
-            ModHealthViewerSection.Attention => CreateModDetails(GetOne(this.Report.Attention.Mods, rowIndex)),
+            ModHealthViewerSection.Attention => this.CreateModDetails(GetOne(this.Report.Attention.Mods, rowIndex)),
             ModHealthViewerSection.Performance => this.CreatePerformanceDetails(rowIndex),
             ModHealthViewerSection.Errors => this.CreateErrorDetails(rowIndex),
             ModHealthViewerSection.Inventory => rowIndex == 0
-                ? CreateInventorySummaryDetails(this.Report.Inventory.Summary)
-                : CreateModDetails(GetOne(this.Report.Inventory.Mods, rowIndex - 1)),
+                ? this.CreateInventorySummaryDetails(this.Report.Inventory.Summary)
+                : this.CreateModDetails(GetOne(this.Report.Inventory.Mods, rowIndex - 1)),
             ModHealthViewerSection.Context => this.CreateContextDetails(rowIndex),
             _ => throw new ArgumentOutOfRangeException(nameof(section), section, "Unknown health-report section.")
         };
@@ -686,22 +686,22 @@ internal sealed class ModHealthViewerContentAdapter
         ModHealthOverviewPresentation overview = this.Report.Overview;
         if (rowIndex == 0)
         {
-            return FixedDetails(
-                D("Schema version", N(this.Report.SchemaVersion)),
-                D("Report ID", overview.Header.ReportId),
-                D("Generated UTC", Utc(overview.Header.GeneratedUtc)),
-                D("Truncated", YesNo(overview.Header.IsTruncated)),
-                D("Minimal fallback", YesNo(overview.Header.IsMinimalFallback)),
-                D("Write retry", YesNo(overview.Header.WriteRetry))
+            return this.FixedDetails(
+                this.D("Schema version", N(this.Report.SchemaVersion)),
+                this.D("Report ID", overview.Header.ReportId),
+                this.D("Generated UTC", Utc(overview.Header.GeneratedUtc)),
+                this.D("Truncated", this.YesNo(overview.Header.IsTruncated)),
+                this.D("Minimal fallback", this.YesNo(overview.Header.IsMinimalFallback)),
+                this.D("Write retry", this.YesNo(overview.Header.WriteRetry))
             );
         }
         if (rowIndex == 1)
         {
             ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
-                D("Inspect before sharing", YesNo(overview.Privacy.InspectBeforeSharing)),
-                D("Automatic upload", YesNo(overview.Privacy.AutomaticUpload))
+                this.D("Inspect before sharing", this.YesNo(overview.Privacy.InspectBeforeSharing)),
+                this.D("Automatic upload", this.YesNo(overview.Privacy.AutomaticUpload))
             );
-            return AppendedDetails(
+            return this.AppendedDetails(
                 fixedRows,
                 overview.Privacy.IncludedIdentityFields,
                 "Included identity field",
@@ -709,7 +709,7 @@ internal sealed class ModHealthViewerContentAdapter
                 "Excluded source"
             );
         }
-        return FixedDetails(D("Privacy notice", overview.PrivacyNotices[rowIndex - 2]));
+        return this.FixedDetails(this.D("Privacy notice", overview.PrivacyNotices[rowIndex - 2]));
     }
 
     private DetailSource CreateFindingDetails(int rowIndex)
@@ -718,21 +718,21 @@ internal sealed class ModHealthViewerContentAdapter
         if (rowIndex < findingRows)
         {
             if (this.Report.Findings.Rows.Length == 0)
-                return FixedDetails(D("Finding", this.T("health-view.content.value.no-findings", "No findings were generated from the retained evidence.")));
+                return this.FixedDetails(this.D("Finding", this.T("health-view.content.value.no-findings", "No findings were generated from the retained evidence.")));
 
             ModHealthFinding finding = this.Report.Findings.Rows[rowIndex];
-            return FixedDetails(
-                D("Rule ID", finding.RuleId),
-                D("Severity", FindingSeverity(finding.Severity)),
-                D("Confidence", Confidence(finding.Confidence)),
-                D("Affected mod ID", Optional(finding.ModId)),
-                D("Summary", finding.Summary),
-                D("Evidence", finding.Evidence),
-                D("Suggested action", finding.SuggestedAction),
-                D("Limitation", finding.Limitation)
+            return this.FixedDetails(
+                this.D("Rule ID", finding.RuleId),
+                this.D("Severity", this.FindingSeverity(finding.Severity)),
+                this.D("Confidence", this.Confidence(finding.Confidence)),
+                this.D("Affected mod ID", this.Optional(finding.ModId)),
+                this.D("Summary", finding.Summary),
+                this.D("Evidence", finding.Evidence),
+                this.D("Suggested action", finding.SuggestedAction),
+                this.D("Limitation", finding.Limitation)
             );
         }
-        return FixedDetails(D("Suggested next step", this.Report.Findings.SuggestedActions[rowIndex - findingRows]));
+        return this.FixedDetails(this.D("Suggested next step", this.Report.Findings.SuggestedActions[rowIndex - findingRows]));
     }
 
     private DetailSource CreateCaptureDetails(int rowIndex)
@@ -741,28 +741,28 @@ internal sealed class ModHealthViewerContentAdapter
         ModHealthCapture details = capture.Details;
         if (rowIndex == 0)
         {
-            return FixedDetails(
-                D("Mode", CaptureMode(details.Mode)),
-                D("Completion reason", Completion(details.CompletionReason)),
-                D("Started UTC", OptionalUtc(details.StartedUtc)),
-                D("Ended UTC", OptionalUtc(details.EndedUtc)),
-                D("Duration", Ms(details.DurationMilliseconds)),
-                D("Completed update ticks", N(details.CompletedUpdateCount)),
-                D("Slow-update threshold", Ms(details.SlowUpdateThresholdMilliseconds)),
-                D("Short sample", YesNo(details.IsShortSample)),
-                D("Timing valid", YesNo(details.TimingValid))
+            return this.FixedDetails(
+                this.D("Mode", this.CaptureMode(details.Mode)),
+                this.D("Completion reason", this.Completion(details.CompletionReason)),
+                this.D("Started UTC", this.OptionalUtc(details.StartedUtc)),
+                this.D("Ended UTC", this.OptionalUtc(details.EndedUtc)),
+                this.D("Duration", Ms(details.DurationMilliseconds)),
+                this.D("Completed update ticks", N(details.CompletedUpdateCount)),
+                this.D("Slow-update threshold", Ms(details.SlowUpdateThresholdMilliseconds)),
+                this.D("Short sample", this.YesNo(details.IsShortSample)),
+                this.D("Timing valid", this.YesNo(details.TimingValid))
             );
         }
         if (rowIndex == 1)
         {
-            return FixedDetails(
-                D("Short sample", YesNo(details.IsShortSample)),
-                D("Timing valid", YesNo(details.TimingValid)),
-                D("Truncated", YesNo(capture.IsTruncated)),
-                D("Minimal fallback", YesNo(capture.IsMinimalFallback)),
-                D("Write retry", YesNo(capture.WriteRetry)),
-                D("Mark count", N(details.Marks.Length)),
-                D("Positive omission count", N(capture.PositiveOmissions.Length))
+            return this.FixedDetails(
+                this.D("Short sample", this.YesNo(details.IsShortSample)),
+                this.D("Timing valid", this.YesNo(details.TimingValid)),
+                this.D("Truncated", this.YesNo(capture.IsTruncated)),
+                this.D("Minimal fallback", this.YesNo(capture.IsMinimalFallback)),
+                this.D("Write retry", this.YesNo(capture.WriteRetry)),
+                this.D("Mark count", N(details.Marks.Length)),
+                this.D("Positive omission count", N(capture.PositiveOmissions.Length))
             );
         }
 
@@ -770,55 +770,55 @@ internal sealed class ModHealthViewerContentAdapter
         if (relative < details.Marks.Length)
         {
             ModHealthMark mark = details.Marks[relative];
-            return FixedDetails(
-                D("Mark number", N(mark.Number)),
-                D("Update tick", N(mark.UpdateTick)),
-                D("Offset after capture start", Ms(mark.OffsetMilliseconds))
+            return this.FixedDetails(
+                this.D("Mark number", N(mark.Number)),
+                this.D("Update tick", N(mark.UpdateTick)),
+                this.D("Offset after capture start", Ms(mark.OffsetMilliseconds))
             );
         }
-        return CreateOmissionDetails(capture.PositiveOmissions[relative - details.Marks.Length]);
+        return this.CreateOmissionDetails(capture.PositiveOmissions[relative - details.Marks.Length]);
     }
 
     private DetailSource CreatePerformanceDetails(int rowIndex)
     {
         ModHealthPerformancePresentation performance = this.Report.Performance;
         if (rowIndex == 0)
-            return CreateHistogramDetails(performance.Histogram, performance.CanShowTimingPercentages);
+            return this.CreateHistogramDetails(performance.Histogram, performance.CanShowTimingPercentages);
         if (rowIndex == 1)
-            return CreateEvidenceDetails(performance.ObservedCallbacks);
+            return this.CreateEvidenceDetails(performance.ObservedCallbacks);
         if (rowIndex == 2)
-            return CreateEvidenceDetails(performance.BaseGameExclusive);
+            return this.CreateEvidenceDetails(performance.BaseGameExclusive);
         if (rowIndex == 3)
-            return CreateEvidenceDetails(performance.SmapiUpdateDispatch);
+            return this.CreateEvidenceDetails(performance.SmapiUpdateDispatch);
         if (rowIndex == 4)
-            return CreateEvidenceDetails(performance.Residual);
+            return this.CreateEvidenceDetails(performance.Residual);
         if (rowIndex == 5)
-            return FixedDetails(D("Slow update count", N(performance.SlowUpdateCount)));
+            return this.FixedDetails(this.D("Slow update count", N(performance.SlowUpdateCount)));
         if (rowIndex == 6)
-            return CreateGcDetails(performance.Gc);
+            return this.CreateGcDetails(performance.Gc);
 
         int relative = rowIndex - 7;
         if (relative < performance.AttributionCaveats.Length)
-            return FixedDetails(D("Timing limitation", performance.AttributionCaveats[relative]));
+            return this.FixedDetails(this.D("Timing limitation", performance.AttributionCaveats[relative]));
         relative -= performance.AttributionCaveats.Length;
 
         if (relative < performance.ObservedMods.Count)
-            return CreateModDetails(GetOne(performance.ObservedMods, relative));
+            return this.CreateModDetails(GetOne(performance.ObservedMods, relative));
         relative -= performance.ObservedMods.Count;
 
         if (relative < performance.Callbacks.Count)
-            return CreateCallbackDetails(GetOne(performance.Callbacks, relative));
+            return this.CreateCallbackDetails(GetOne(performance.Callbacks, relative));
         relative -= performance.Callbacks.Count;
 
         if (relative < performance.Episodes.Count)
-            return CreateEpisodeDetails(GetOne(performance.Episodes, relative));
+            return this.CreateEpisodeDetails(GetOne(performance.Episodes, relative));
         relative -= performance.Episodes.Count;
 
         if (relative < performance.WorstUpdates.Count)
-            return CreateUpdateDetails(GetOne(performance.WorstUpdates, relative));
+            return this.CreateUpdateDetails(GetOne(performance.WorstUpdates, relative));
         relative -= performance.WorstUpdates.Count;
 
-        return CreateUpdateDetails(GetOne(performance.RecentUpdates, relative));
+        return this.CreateUpdateDetails(GetOne(performance.RecentUpdates, relative));
     }
 
     private DetailSource CreateErrorDetails(int rowIndex)
@@ -826,26 +826,26 @@ internal sealed class ModHealthViewerContentAdapter
         ModHealthErrorsPresentation errors = this.Report.Errors;
         if (rowIndex == 0)
         {
-            return AppendedDetails(
+            return this.AppendedDetails(
                 ImmutableArray<ModHealthViewerDetailRow>.Empty,
-                CreateSeverityDetails(errors.LogTotals.SinceLedgerStart, "Since ledger start"),
-                CreateSeverityDetails(errors.LogTotals.DuringCapture, "During capture")
+                this.CreateSeverityDetails(errors.LogTotals.SinceLedgerStart, "Since ledger start"),
+                this.CreateSeverityDetails(errors.LogTotals.DuringCapture, "During capture")
             );
         }
         if (rowIndex == 1)
         {
-            return FixedDetails(
-                D("Since ledger start", N(errors.CallbackFailureTotals.SinceLedgerStart)),
-                D("During capture", N(errors.CallbackFailureTotals.DuringCapture)),
-                D("Counting limitation", this.T("health-view.content.value.counting-limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents."))
+            return this.FixedDetails(
+                this.D("Since ledger start", N(errors.CallbackFailureTotals.SinceLedgerStart)),
+                this.D("During capture", N(errors.CallbackFailureTotals.DuringCapture)),
+                this.D("Counting limitation", this.T("health-view.content.value.counting-limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents."))
             );
         }
 
         int relative = rowIndex - 2;
         if (relative < errors.Logs.Count)
-            return CreateLogDetails(GetOne(errors.Logs, relative));
+            return this.CreateLogDetails(GetOne(errors.Logs, relative));
         relative -= errors.Logs.Count;
-        return CreateFailureDetails(GetOne(errors.CallbackFailures, relative));
+        return this.CreateFailureDetails(GetOne(errors.CallbackFailures, relative));
     }
 
     private DetailSource CreateContextDetails(int rowIndex)
@@ -854,30 +854,30 @@ internal sealed class ModHealthViewerContentAdapter
         if (rowIndex == 0)
         {
             ModHealthEnvironment environment = context.Environment;
-            return FixedDetails(
-                D("SMAPI version", environment.SmapiVersion),
-                D("SMAPI commit", Optional(environment.SmapiCommit)),
-                D("Game version", environment.GameVersion),
-                D("Runtime version", environment.RuntimeVersion),
-                D("Process architecture", environment.ProcessArchitecture),
-                D("Process bitness", N(environment.ProcessBitness)),
-                D("Linux distribution", Optional(environment.LinuxDistribution)),
-                D("Kernel", Optional(environment.Kernel)),
-                D("Session type", environment.SessionType),
-                D("Locale", environment.Locale),
-                D("Logical processor count", N(environment.LogicalProcessorCount)),
-                D("Multiplayer role", environment.MultiplayerRole),
-                D("Split-screen count", N(environment.SplitScreenCount))
+            return this.FixedDetails(
+                this.D("SMAPI version", environment.SmapiVersion),
+                this.D("SMAPI commit", this.Optional(environment.SmapiCommit)),
+                this.D("Game version", environment.GameVersion),
+                this.D("Runtime version", environment.RuntimeVersion),
+                this.D("Process architecture", environment.ProcessArchitecture),
+                this.D("Process bitness", N(environment.ProcessBitness)),
+                this.D("Linux distribution", this.Optional(environment.LinuxDistribution)),
+                this.D("Kernel", this.Optional(environment.Kernel)),
+                this.D("Session type", environment.SessionType),
+                this.D("Locale", environment.Locale),
+                this.D("Logical processor count", N(environment.LogicalProcessorCount)),
+                this.D("Multiplayer role", environment.MultiplayerRole),
+                this.D("Split-screen count", N(environment.SplitScreenCount))
             );
         }
         if (rowIndex == 1)
         {
             ModHealthCompleteness completeness = context.Completeness;
-            return FixedDetails(
-                D("Ledger started UTC", Utc(completeness.LedgerStartedUtc)),
-                D("Startup observed", YesNo(completeness.StartupObserved)),
-                D("Lifecycle timing observed", YesNo(completeness.LifecycleTimingObserved)),
-                D("Evidence boundary", completeness.Boundary)
+            return this.FixedDetails(
+                this.D("Ledger started UTC", Utc(completeness.LedgerStartedUtc)),
+                this.D("Startup observed", this.YesNo(completeness.StartupObserved)),
+                this.D("Lifecycle timing observed", this.YesNo(completeness.LifecycleTimingObserved)),
+                this.D("Evidence boundary", completeness.Boundary)
             );
         }
 
@@ -885,217 +885,217 @@ internal sealed class ModHealthViewerContentAdapter
         if (relative < context.Capacities.Length)
         {
             ModHealthCapacity capacity = context.Capacities[relative];
-            return FixedDetails(D("Capacity name", capacity.Name), D("Limit", N(capacity.Limit)), D("Reached", YesNo(capacity.Reached)));
+            return this.FixedDetails(this.D("Capacity name", capacity.Name), this.D("Limit", N(capacity.Limit)), this.D("Reached", this.YesNo(capacity.Reached)));
         }
         relative -= context.Capacities.Length;
         if (relative < context.Omissions.Length)
-            return CreateOmissionDetails(context.Omissions[relative]);
+            return this.CreateOmissionDetails(context.Omissions[relative]);
         relative -= context.Omissions.Length;
-        return FixedDetails(D("Report limitation", context.Limitations[relative]));
+        return this.FixedDetails(this.D("Report limitation", context.Limitations[relative]));
     }
 
     private DetailSource CreateHistogramDetails(ModHealthHistogram histogram, bool canShowTimingPercentages)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
-            D("Count", N(histogram.Count)),
-            D("Sum", Ms(histogram.SumMilliseconds)),
-            D("Mean", SafeAverage(histogram.SumMilliseconds, histogram.Count)),
-            D("Minimum", OptionalMs(histogram.MinimumMilliseconds)),
-            D("Maximum", OptionalMs(histogram.MaximumMilliseconds)),
-            D("P50", OptionalMs(histogram.P50Milliseconds)),
-            D("P95", OptionalMs(histogram.P95Milliseconds)),
-            D("P99", OptionalMs(histogram.P99Milliseconds)),
-            D("Percentiles approximate", YesNo(histogram.PercentilesApproximate)),
-            D("Maximum relative bucket error", Percent(histogram.MaximumRelativeBucketError)),
-            D("Underflow count", N(histogram.UnderflowCount)),
-            D("Overflow count", N(histogram.OverflowCount)),
-            D("Timing percentages available", YesNo(canShowTimingPercentages))
+            this.D("Count", N(histogram.Count)),
+            this.D("Sum", Ms(histogram.SumMilliseconds)),
+            this.D("Mean", this.SafeAverage(histogram.SumMilliseconds, histogram.Count)),
+            this.D("Minimum", this.OptionalMs(histogram.MinimumMilliseconds)),
+            this.D("Maximum", this.OptionalMs(histogram.MaximumMilliseconds)),
+            this.D("P50", this.OptionalMs(histogram.P50Milliseconds)),
+            this.D("P95", this.OptionalMs(histogram.P95Milliseconds)),
+            this.D("P99", this.OptionalMs(histogram.P99Milliseconds)),
+            this.D("Percentiles approximate", this.YesNo(histogram.PercentilesApproximate)),
+            this.D("Maximum relative bucket error", Percent(histogram.MaximumRelativeBucketError)),
+            this.D("Underflow count", N(histogram.UnderflowCount)),
+            this.D("Overflow count", N(histogram.OverflowCount)),
+            this.D("Timing percentages available", this.YesNo(canShowTimingPercentages))
         );
         return new DetailSource(Add(fixedRows.Length, histogram.Thresholds.Length), index =>
         {
             if (index < fixedRows.Length)
                 return fixedRows[index];
             ModHealthThresholdCount threshold = histogram.Thresholds[index - fixedRows.Length];
-            return D("Threshold", this.F("health-view.content.value.threshold", "{0}: {1} update ticks", Ms(threshold.Milliseconds), N(threshold.Count)), $"threshold-{N(index - fixedRows.Length + 1)}");
+            return this.D("Threshold", this.F("health-view.content.value.threshold", "{0}: {1} update ticks", Ms(threshold.Milliseconds), N(threshold.Count)), $"threshold-{N(index - fixedRows.Length + 1)}");
         });
     }
 
     private DetailSource CreateEvidenceDetails(ModHealthMeasuredMilliseconds evidence)
     {
         return evidence.State == ModHealthEvidenceState.Measured
-            ? FixedDetails(D("Evidence state", this.T("health-view.content.value.measured", "measured")), D("Measured value", Ms(evidence.Value)))
-            : FixedDetails(D("Evidence state", Evidence(evidence)));
+            ? this.FixedDetails(this.D("Evidence state", this.T("health-view.content.value.measured", "measured")), this.D("Measured value", Ms(evidence.Value)))
+            : this.FixedDetails(this.D("Evidence state", this.Evidence(evidence)));
     }
 
     private DetailSource CreateGcDetails(ModHealthGcPresentation gc)
     {
         return gc.State == ModHealthEvidenceState.Measured
-            ? FixedDetails(
-                D("Evidence state", this.T("health-view.content.value.measured-process-wide", "measured process-wide correlation")),
-                D("Generation 0 collections", N(gc.Gen0Collections)),
-                D("Generation 1 collections", N(gc.Gen1Collections)),
-                D("Generation 2 collections", N(gc.Gen2Collections))
+            ? this.FixedDetails(
+                this.D("Evidence state", this.T("health-view.content.value.measured-process-wide", "measured process-wide correlation")),
+                this.D("Generation 0 collections", N(gc.Gen0Collections)),
+                this.D("Generation 1 collections", N(gc.Gen1Collections)),
+                this.D("Generation 2 collections", N(gc.Gen2Collections))
             )
-            : FixedDetails(D("Evidence state", Gc(gc)));
+            : this.FixedDetails(this.D("Evidence state", this.Gc(gc)));
     }
 
     private DetailSource CreateModDetails(ModHealthModPresentation mod)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
-            D("Mod ID", mod.Id),
-            D("Display name", mod.Name),
-            D("Version", mod.Version),
-            D("Kind", ModKind(mod.Kind)),
-            D("Parent ID", Optional(mod.ParentId)),
-            D("Status", ModStatus(mod.Status)),
-            D("Failure category", Optional(mod.FailureCategory)),
-            D("Update status", UpdateStatus(mod.UpdateStatus)),
-            D("Suggested update version", Optional(mod.SuggestedUpdateVersion)),
-            D("Session warning count", N(mod.SessionWarningCount)),
-            D("Session error count", N(mod.SessionErrorCount)),
-            D("Capture error count", N(mod.CaptureErrorCount)),
-            D("Callback failure count", N(mod.CallbackFailureCount)),
-            D("Observed callback time", Ms(mod.ObservedCallbackMilliseconds)),
-            D("Observed callback peak", Ms(mod.ObservedCallbackPeakMilliseconds)),
-            D("Observed callback count", N(mod.ObservedCallbackCount)),
-            D("Observed callback failure count", N(mod.ObservedCallbackFailureCount)),
-            D("Slow-update participation count", N(mod.SlowUpdateParticipationCount)),
-            D("Instrumented time share", Ratio(mod.InstrumentedTimeShare)),
-            D("Peak messages per second", N(mod.PeakMessagesPerSecond)),
-            D("Peak characters per second", N(mod.PeakCharactersPerSecond))
+            this.D("Mod ID", mod.Id),
+            this.D("Display name", mod.Name),
+            this.D("Version", mod.Version),
+            this.D("Kind", this.ModKind(mod.Kind)),
+            this.D("Parent ID", this.Optional(mod.ParentId)),
+            this.D("Status", this.ModStatus(mod.Status)),
+            this.D("Failure category", this.Optional(mod.FailureCategory)),
+            this.D("Update status", this.UpdateStatus(mod.UpdateStatus)),
+            this.D("Suggested update version", this.Optional(mod.SuggestedUpdateVersion)),
+            this.D("Session warning count", N(mod.SessionWarningCount)),
+            this.D("Session error count", N(mod.SessionErrorCount)),
+            this.D("Capture error count", N(mod.CaptureErrorCount)),
+            this.D("Callback failure count", N(mod.CallbackFailureCount)),
+            this.D("Observed callback time", Ms(mod.ObservedCallbackMilliseconds)),
+            this.D("Observed callback peak", Ms(mod.ObservedCallbackPeakMilliseconds)),
+            this.D("Observed callback count", N(mod.ObservedCallbackCount)),
+            this.D("Observed callback failure count", N(mod.ObservedCallbackFailureCount)),
+            this.D("Slow-update participation count", N(mod.SlowUpdateParticipationCount)),
+            this.D("Instrumented time share", this.Ratio(mod.InstrumentedTimeShare)),
+            this.D("Peak messages per second", N(mod.PeakMessagesPerSecond)),
+            this.D("Peak characters per second", N(mod.PeakCharactersPerSecond))
         );
-        return AppendedDetails(fixedRows, mod.WarningFlags, "Warning flag", mod.Dependencies, "Dependency ID");
+        return this.AppendedDetails(fixedRows, mod.WarningFlags, "Warning flag", mod.Dependencies, "Dependency ID");
     }
 
     private DetailSource CreateCallbackDetails(ModHealthCallback callback)
     {
-        return FixedDetails(
-            D("Mod ID", callback.ModId),
-            D("Mod name", callback.ModName),
-            D("Execution phase", ExecutionPhase(callback.Phase)),
-            D("Operation", Operation(callback.Operation)),
-            D("Event", callback.Event),
-            D("Callback", callback.Callback),
-            D("On behalf of mod ID", Optional(callback.OnBehalfOfModId)),
-            D("Call count", N(callback.CallCount)),
-            D("Total", Ms(callback.TotalMilliseconds)),
-            D("Average", SafeAverage(callback.TotalMilliseconds, callback.CallCount)),
-            D("Maximum", Ms(callback.MaximumMilliseconds)),
-            D("Failure count", N(callback.FailureCount))
+        return this.FixedDetails(
+            this.D("Mod ID", callback.ModId),
+            this.D("Mod name", callback.ModName),
+            this.D("Execution phase", this.ExecutionPhase(callback.Phase)),
+            this.D("Operation", this.Operation(callback.Operation)),
+            this.D("Event", callback.Event),
+            this.D("Callback", callback.Callback),
+            this.D("On behalf of mod ID", this.Optional(callback.OnBehalfOfModId)),
+            this.D("Call count", N(callback.CallCount)),
+            this.D("Total", Ms(callback.TotalMilliseconds)),
+            this.D("Average", this.SafeAverage(callback.TotalMilliseconds, callback.CallCount)),
+            this.D("Maximum", Ms(callback.MaximumMilliseconds)),
+            this.D("Failure count", N(callback.FailureCount))
         );
     }
 
     private DetailSource CreateEpisodeDetails(ModHealthEpisode episode)
     {
-        return FixedDetails(
-            D("First update tick", N(episode.FirstUpdateTick)),
-            D("Last update tick", N(episode.LastUpdateTick)),
-            D("Qualifying update count", N(episode.QualifyingUpdateCount)),
-            D("Maximum", Ms(episode.MaximumMilliseconds)),
-            D("Summed qualifying time", Ms(episode.SummedQualifyingMilliseconds)),
-            D("Representative update tick", N(episode.RepresentativeUpdateTick)),
-            D("Nearby mark", OptionalNumber(episode.NearbyMark))
+        return this.FixedDetails(
+            this.D("First update tick", N(episode.FirstUpdateTick)),
+            this.D("Last update tick", N(episode.LastUpdateTick)),
+            this.D("Qualifying update count", N(episode.QualifyingUpdateCount)),
+            this.D("Maximum", Ms(episode.MaximumMilliseconds)),
+            this.D("Summed qualifying time", Ms(episode.SummedQualifyingMilliseconds)),
+            this.D("Representative update tick", N(episode.RepresentativeUpdateTick)),
+            this.D("Nearby mark", this.OptionalNumber(episode.NearbyMark))
         );
     }
 
     private DetailSource CreateUpdateDetails(ModHealthUpdatePresentation update)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
-            D("Update tick", N(update.UpdateTick)),
-            D("Offset after capture start", Ms(update.OffsetMilliseconds)),
-            D("Total", Ms(update.TotalMilliseconds)),
-            D("Base-game exclusive", Evidence(update.BaseGameExclusive)),
-            D("Observed callbacks", Evidence(update.ObservedCallbacks)),
-            D(ModHealthPresentationText.SmapiUpdateDispatchLabel, Evidence(update.SmapiUpdateDispatch)),
-            D("Residual", Evidence(update.Residual)),
-            D("Timing valid", YesNo(update.TimingValid)),
-            D("Phase", update.Phase),
-            D("Focused", YesNo(update.Focused)),
-            D("Screen", N(update.Screen)),
-            D("Warning count", N(update.WarningCount)),
-            D("Error count", N(update.ErrorCount)),
-            D("Callback failure count", N(update.CallbackFailureCount)),
-            D("GC collection correlation", Gc(update.Gc)),
-            D("Nearby mark", OptionalNumber(update.NearbyMark))
+            this.D("Update tick", N(update.UpdateTick)),
+            this.D("Offset after capture start", Ms(update.OffsetMilliseconds)),
+            this.D("Total", Ms(update.TotalMilliseconds)),
+            this.D("Base-game exclusive", this.Evidence(update.BaseGameExclusive)),
+            this.D("Observed callbacks", this.Evidence(update.ObservedCallbacks)),
+            this.D(ModHealthPresentationText.SmapiUpdateDispatchLabel, this.Evidence(update.SmapiUpdateDispatch)),
+            this.D("Residual", this.Evidence(update.Residual)),
+            this.D("Timing valid", this.YesNo(update.TimingValid)),
+            this.D("Phase", update.Phase),
+            this.D("Focused", this.YesNo(update.Focused)),
+            this.D("Screen", N(update.Screen)),
+            this.D("Warning count", N(update.WarningCount)),
+            this.D("Error count", N(update.ErrorCount)),
+            this.D("Callback failure count", N(update.CallbackFailureCount)),
+            this.D("GC collection correlation", this.Gc(update.Gc)),
+            this.D("Nearby mark", this.OptionalNumber(update.NearbyMark))
         );
         return new DetailSource(Add(fixedRows.Length, update.Contributors.Length), index =>
         {
             if (index < fixedRows.Length)
                 return fixedRows[index];
             ModHealthContributor contributor = update.Contributors[index - fixedRows.Length];
-            return D("Observed contributor", this.F("health-view.content.value.contributor", "{0}: {1}", contributor.ModId, Ms(contributor.Milliseconds)), $"contributor-{N(index - fixedRows.Length + 1)}");
+            return this.D("Observed contributor", this.F("health-view.content.value.contributor", "{0}: {1}", contributor.ModId, Ms(contributor.Milliseconds)), $"contributor-{N(index - fixedRows.Length + 1)}");
         });
     }
 
     private DetailSource CreateLogDetails(ModHealthLogSummary log)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
-            D("Source", log.Source),
-            D("Source category", LogCategory(log.SourceCategory)),
-            D("Peak messages per second", N(log.PeakMessagesPerSecond)),
-            D("Peak characters per second", N(log.PeakCharactersPerSecond)),
-            D("First offset", OptionalMs(log.FirstOffsetMilliseconds)),
-            D("Last offset", OptionalMs(log.LastOffsetMilliseconds))
+            this.D("Source", log.Source),
+            this.D("Source category", this.LogCategory(log.SourceCategory)),
+            this.D("Peak messages per second", N(log.PeakMessagesPerSecond)),
+            this.D("Peak characters per second", N(log.PeakCharactersPerSecond)),
+            this.D("First offset", this.OptionalMs(log.FirstOffsetMilliseconds)),
+            this.D("Last offset", this.OptionalMs(log.LastOffsetMilliseconds))
         );
-        return AppendedDetails(
+        return this.AppendedDetails(
             fixedRows,
-            CreateSeverityDetails(log.SinceLedgerStart, "Since ledger start"),
-            CreateSeverityDetails(log.DuringCapture, "During capture")
+            this.CreateSeverityDetails(log.SinceLedgerStart, "Since ledger start"),
+            this.CreateSeverityDetails(log.DuringCapture, "During capture")
         );
     }
 
     private DetailSource CreateFailureDetails(ModHealthCallbackFailure failure)
     {
-        return FixedDetails(
-            D("Mod ID", failure.ModId),
-            D("Mod name", failure.ModName),
-            D("Execution phase", ExecutionPhase(failure.Phase)),
-            D("Operation", Operation(failure.Operation)),
-            D("Callback", failure.Callback),
-            D("Exception type", failure.ExceptionType),
-            D("On behalf of mod ID", Optional(failure.OnBehalfOfModId)),
-            D("Session count", N(failure.SessionCount)),
-            D("Capture count", N(failure.CaptureCount)),
-            D("First offset", Ms(failure.FirstOffsetMilliseconds)),
-            D("Last offset", Ms(failure.LastOffsetMilliseconds)),
-            D("Counting limitation", this.T("health-view.content.value.counting-limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents."))
+        return this.FixedDetails(
+            this.D("Mod ID", failure.ModId),
+            this.D("Mod name", failure.ModName),
+            this.D("Execution phase", this.ExecutionPhase(failure.Phase)),
+            this.D("Operation", this.Operation(failure.Operation)),
+            this.D("Callback", failure.Callback),
+            this.D("Exception type", failure.ExceptionType),
+            this.D("On behalf of mod ID", this.Optional(failure.OnBehalfOfModId)),
+            this.D("Session count", N(failure.SessionCount)),
+            this.D("Capture count", N(failure.CaptureCount)),
+            this.D("First offset", Ms(failure.FirstOffsetMilliseconds)),
+            this.D("Last offset", Ms(failure.LastOffsetMilliseconds)),
+            this.D("Counting limitation", this.T("health-view.content.value.counting-limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents."))
         );
     }
 
     private DetailSource CreateInventorySummaryDetails(ModHealthModInventorySummary summary)
     {
-        return FixedDetails(
-            D("Total discovered", N(summary.TotalDiscovered)),
-            D("Discovered", N(summary.Discovered)),
-            D("Loaded", N(summary.Loaded)),
-            D("Skipped", N(summary.Skipped)),
-            D("Ignored", N(summary.Ignored)),
-            D("Invalid", N(summary.Invalid)),
-            D("Failed", N(summary.Failed)),
-            D("Retained records", N(summary.Retained))
+        return this.FixedDetails(
+            this.D("Total discovered", N(summary.TotalDiscovered)),
+            this.D("Discovered", N(summary.Discovered)),
+            this.D("Loaded", N(summary.Loaded)),
+            this.D("Skipped", N(summary.Skipped)),
+            this.D("Ignored", N(summary.Ignored)),
+            this.D("Invalid", N(summary.Invalid)),
+            this.D("Failed", N(summary.Failed)),
+            this.D("Retained records", N(summary.Retained))
         );
     }
 
     private DetailSource CreateOmissionDetails(ModHealthOmission omission)
     {
-        return FixedDetails(D("Section", omission.Section), D("Omitted entry count", N(omission.Count)));
+        return this.FixedDetails(this.D("Section", omission.Section), this.D("Omitted entry count", N(omission.Count)));
     }
 
     private ImmutableArray<ModHealthViewerDetailRow> CreateSeverityDetails(ModHealthLogSeveritySummary summary, string prefix)
     {
         return ImmutableArray.Create(
-            D($"{prefix} trace messages", N(summary.TraceMessages)),
-            D($"{prefix} trace characters", N(summary.TraceCharacters)),
-            D($"{prefix} debug messages", N(summary.DebugMessages)),
-            D($"{prefix} debug characters", N(summary.DebugCharacters)),
-            D($"{prefix} info messages", N(summary.InfoMessages)),
-            D($"{prefix} info characters", N(summary.InfoCharacters)),
-            D($"{prefix} warning messages", N(summary.WarningMessages)),
-            D($"{prefix} warning characters", N(summary.WarningCharacters)),
-            D($"{prefix} error messages", N(summary.ErrorMessages)),
-            D($"{prefix} error characters", N(summary.ErrorCharacters)),
-            D($"{prefix} alert messages", N(summary.AlertMessages)),
-            D($"{prefix} alert characters", N(summary.AlertCharacters))
+            this.D($"{prefix} trace messages", N(summary.TraceMessages)),
+            this.D($"{prefix} trace characters", N(summary.TraceCharacters)),
+            this.D($"{prefix} debug messages", N(summary.DebugMessages)),
+            this.D($"{prefix} debug characters", N(summary.DebugCharacters)),
+            this.D($"{prefix} info messages", N(summary.InfoMessages)),
+            this.D($"{prefix} info characters", N(summary.InfoCharacters)),
+            this.D($"{prefix} warning messages", N(summary.WarningMessages)),
+            this.D($"{prefix} warning characters", N(summary.WarningCharacters)),
+            this.D($"{prefix} error messages", N(summary.ErrorMessages)),
+            this.D($"{prefix} error characters", N(summary.ErrorCharacters)),
+            this.D($"{prefix} alert messages", N(summary.AlertMessages)),
+            this.D($"{prefix} alert characters", N(summary.AlertCharacters))
         );
     }
 
@@ -1125,9 +1125,9 @@ internal sealed class ModHealthViewerContentAdapter
                 return fixedRows[index];
             index -= fixedRows.Length;
             if (index < first.Length)
-                return D(firstLabel, first[index], $"{firstLabel}-{N(index + 1)}");
+                return this.D(firstLabel, first[index], $"{firstLabel}-{N(index + 1)}");
             int secondIndex = index - first.Length;
-            return D(secondLabel, second[secondIndex], $"{secondLabel}-{N(secondIndex + 1)}");
+            return this.D(secondLabel, second[secondIndex], $"{secondLabel}-{N(secondIndex + 1)}");
         });
     }
 
