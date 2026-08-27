@@ -31,6 +31,9 @@ internal sealed record ModHealthEnvironmentSnapshot(
 /// <summary>Maps frozen collector snapshots into the deterministic schema-v1 report contract.</summary>
 internal sealed class ModHealthReportBuilder
 {
+    private const double PartitionAbsoluteToleranceMilliseconds = 0.000000001;
+    private const double PartitionRelativeTolerance = 0.000000000001;
+
     private const int NearestMarkTickDistance = 300;
 
     private static readonly ImmutableArray<string> IncludedIdentityFields = ImmutableArray.Create(
@@ -378,14 +381,18 @@ internal sealed class ModHealthReportBuilder
                 performance.InstrumentedDuringSmapiUpdateMilliseconds
             );
         bool smapiOtherTimingAvailable = validPartition && performance.SmapiUpdateTimingAvailable;
-        double baseGame = validPartition ? NonnegativeFinite(performance.GameUpdateExclusiveMilliseconds) : 0;
-        double smapiOther = smapiOtherTimingAvailable ? NonnegativeFinite(performance.SmapiUpdateExclusiveMilliseconds) : 0;
-        double residual = validPartition
-            ? NonnegativeFinite(smapiOtherTimingAvailable ? performance.ResidualMilliseconds : performance.OutsideGameUpdateMilliseconds)
-            : 0;
+        (double baseGame, double observed, double smapiOther, double residual) = validPartition
+            ? ReconcilePartition(
+                performance.TickTotalMilliseconds,
+                performance.GameUpdateExclusiveMilliseconds,
+                performance.TickInstrumentedMilliseconds,
+                performance.SmapiUpdateExclusiveMilliseconds,
+                smapiOtherTimingAvailable
+            )
+            : default;
         return new ModHealthPerformance(
             histogram,
-            validPartition ? NonnegativeFinite(performance.TickInstrumentedMilliseconds) : 0,
+            observed,
             baseGame,
             smapiOther,
             smapiOtherTimingAvailable,
@@ -415,12 +422,15 @@ internal sealed class ModHealthReportBuilder
             );
         bool smapiOtherTimingAvailable = valid && source.SmapiUpdateTimingAvailable;
         double total = NonnegativeFinite(source.TotalMilliseconds);
-        double baseGame = valid ? NonnegativeFinite(source.GameUpdateExclusiveMilliseconds) : 0;
-        double observed = valid ? NonnegativeFinite(source.InstrumentedModMilliseconds) : 0;
-        double smapiOther = smapiOtherTimingAvailable ? NonnegativeFinite(source.SmapiUpdateExclusiveMilliseconds) : 0;
-        double residual = valid
-            ? NonnegativeFinite(source.ResidualMilliseconds + (smapiOtherTimingAvailable ? 0 : source.SmapiUpdateExclusiveMilliseconds))
-            : 0;
+        (double baseGame, double observed, double smapiOther, double residual) = valid
+            ? ReconcilePartition(
+                total,
+                source.GameUpdateExclusiveMilliseconds,
+                source.InstrumentedModMilliseconds,
+                source.SmapiUpdateExclusiveMilliseconds,
+                smapiOtherTimingAvailable
+            )
+            : default;
         return new ModHealthUpdate(
             source.Tick,
             NonnegativeFinite(source.OffsetMilliseconds),
@@ -562,18 +572,49 @@ internal sealed class ModHealthReportBuilder
 
     private static bool IsValidPartition(double total, double gameUpdate, double observed, double observedDuringGameUpdate, double smapiUpdate, double observedDuringSmapiUpdate)
     {
-        return double.IsFinite(total) && total >= 0
+        if (!(double.IsFinite(total) && total >= 0
             && double.IsFinite(gameUpdate) && gameUpdate >= 0
             && double.IsFinite(observed) && observed >= 0
             && double.IsFinite(observedDuringGameUpdate) && observedDuringGameUpdate >= 0
             && double.IsFinite(smapiUpdate) && smapiUpdate >= 0
-            && double.IsFinite(observedDuringSmapiUpdate) && observedDuringSmapiUpdate >= 0
-            && observedDuringGameUpdate <= gameUpdate
-            && observedDuringGameUpdate <= observed
-            && observedDuringSmapiUpdate <= smapiUpdate
-            && observedDuringSmapiUpdate <= observed
-            && observedDuringGameUpdate + observedDuringSmapiUpdate <= observed
-            && gameUpdate + smapiUpdate + (observed - observedDuringGameUpdate - observedDuringSmapiUpdate) <= total;
+            && double.IsFinite(observedDuringSmapiUpdate) && observedDuringSmapiUpdate >= 0))
+        {
+            return false;
+        }
+
+        double tolerance = Math.Max(PartitionAbsoluteToleranceMilliseconds, total * PartitionRelativeTolerance);
+        return IsLessThanOrEqual(observedDuringGameUpdate, gameUpdate, tolerance)
+            && IsLessThanOrEqual(observedDuringGameUpdate, observed, tolerance)
+            && IsLessThanOrEqual(observedDuringSmapiUpdate, smapiUpdate, tolerance)
+            && IsLessThanOrEqual(observedDuringSmapiUpdate, observed, tolerance)
+            && IsLessThanOrEqual(observedDuringGameUpdate + observedDuringSmapiUpdate, observed, tolerance)
+            && IsLessThanOrEqual(gameUpdate + smapiUpdate + (observed - observedDuringGameUpdate - observedDuringSmapiUpdate), total, tolerance);
+    }
+
+    /// <summary>Build nonnegative exported buckets which consume the measured total exactly, absorbing only accepted floating-point rounding noise.</summary>
+    private static (double BaseGame, double Observed, double SmapiOther, double Residual) ReconcilePartition(double total, double baseGame, double observed, double smapiOther, bool includeSmapiOther)
+    {
+        double remaining = NonnegativeFinite(total);
+        baseGame = TakePartitionBucket(baseGame, ref remaining);
+        observed = TakePartitionBucket(observed, ref remaining);
+        smapiOther = includeSmapiOther
+            ? TakePartitionBucket(smapiOther, ref remaining)
+            : 0;
+        return (baseGame, observed, smapiOther, remaining);
+    }
+
+    /// <summary>Consume one finite nonnegative bucket without allowing independently rounded values to exceed the remaining total.</summary>
+    private static double TakePartitionBucket(double value, ref double remaining)
+    {
+        double bucket = Math.Min(NonnegativeFinite(value), remaining);
+        remaining -= bucket;
+        return bucket;
+    }
+
+    /// <summary>Get whether one value is at most another within an explicit floating-point conversion tolerance.</summary>
+    private static bool IsLessThanOrEqual(double value, double maximum, double tolerance)
+    {
+        return value <= maximum || value - maximum <= tolerance;
     }
 
     private static int? FindNearestMark(uint tick, ImmutableArray<ModHealthMark> marks)

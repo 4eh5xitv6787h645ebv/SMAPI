@@ -185,6 +185,85 @@ internal sealed class ModHealthReportBuilderTests
     }
 
     [Test]
+    public void Build_FloatingPointNoiseDoesNotInvalidateRawValidPartition()
+    {
+        ModPerformanceSnapshot performance = CreatePerformanceSnapshot();
+        ModHealthUpdatePerformanceSnapshot update = performance.Health!.WorstUpdates[0] with
+        {
+            TotalMilliseconds = 0.3,
+            GameUpdateMilliseconds = 0.1,
+            InstrumentedModMilliseconds = 0.1,
+            InstrumentedDuringGameUpdateMilliseconds = 0,
+            SmapiUpdateMilliseconds = 0.1,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            TimingPartitionIsValid = true,
+            SmapiUpdateTimingAvailable = true
+        };
+        performance = performance with
+        {
+            TickTotalMilliseconds = 0.3,
+            GameUpdateMilliseconds = 0.1,
+            TickInstrumentedMilliseconds = 0.1,
+            InstrumentedDuringGameUpdateMilliseconds = 0,
+            SmapiUpdateMilliseconds = 0.1,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            TimingPartitionIsValid = true,
+            SmapiUpdateTimingAvailable = true,
+            Health = performance.Health with
+            {
+                WorstUpdates = Array.AsReadOnly(new[] { update }),
+                RecentUpdates = Array.AsReadOnly(new[] { update })
+            }
+        };
+
+        ModHealthReport report = BuildReport(performance);
+
+        report.Performance.Should().Match<ModHealthPerformance>(timing =>
+            timing.SmapiOtherTimingAvailable
+            && timing.TotalObservedModMilliseconds + timing.TotalBaseGameExclusiveMilliseconds + timing.TotalSmapiOtherMilliseconds + timing.TotalResidualMilliseconds == 0.3
+        );
+        report.Performance.WorstUpdates.Should().ContainSingle().Which.Should().Match<ModHealthUpdate>(result =>
+            result.TimingValid
+            && result.SmapiOtherTimingAvailable
+            && result.ObservedModMilliseconds + result.BaseGameExclusiveMilliseconds + result.SmapiOtherMilliseconds + result.ResidualMilliseconds == result.TotalMilliseconds
+        );
+    }
+
+    [Test]
+    public void Build_MateriallyInvalidUpdatePartitionRemainsSuppressed()
+    {
+        ModPerformanceSnapshot performance = CreatePerformanceSnapshot();
+        ModHealthUpdatePerformanceSnapshot invalid = performance.Health!.WorstUpdates[0] with
+        {
+            TotalMilliseconds = 10,
+            GameUpdateMilliseconds = 8,
+            InstrumentedModMilliseconds = 5,
+            InstrumentedDuringGameUpdateMilliseconds = 0,
+            SmapiUpdateMilliseconds = 3,
+            InstrumentedDuringSmapiUpdateMilliseconds = 0,
+            TimingPartitionIsValid = true,
+            SmapiUpdateTimingAvailable = true
+        };
+        performance = performance with
+        {
+            Health = performance.Health with
+            {
+                WorstUpdates = Array.AsReadOnly(new[] { invalid }),
+                RecentUpdates = Array.AsReadOnly(new[] { invalid })
+            }
+        };
+
+        ModHealthUpdate result = BuildReport(performance).Performance.WorstUpdates.Should().ContainSingle().Subject;
+
+        result.TimingValid.Should().BeFalse();
+        result.SmapiOtherTimingAvailable.Should().BeFalse();
+        result.BaseGameExclusiveMilliseconds.Should().Be(0);
+        result.ObservedModMilliseconds.Should().Be(0);
+        result.SmapiOtherMilliseconds.Should().Be(0);
+        result.ResidualMilliseconds.Should().Be(0);
+    }
+
+    [Test]
     public void Build_LedgerOnlyDoesNotMislabelSessionEvidenceAsDuringCapture()
     {
         ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: static () => 0);
