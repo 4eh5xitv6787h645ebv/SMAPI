@@ -62,6 +62,11 @@ internal sealed class ModHealthViewerControllerTests
         host.Session!.PreparedState.Should().Be(ModHealthPreparedReportState.Rejected);
         controller.LastNoticeTranslationKey.Should().Be(ModHealthViewerTranslationKeys.OperationRefused);
         host.IsOwned.Should().BeTrue("the exact rejected request remains visible instead of being silently substituted");
+
+        controller.UpdateOwnedViewer(host.Session.ViewerInstanceId);
+
+        host.Session.PreparedState.Should().Be(ModHealthPreparedReportState.Rejected, "the real store has no entry for a request it rejected");
+        coordinator.GetPreparedCalls.Should().Be(1);
     }
 
     [Test]
@@ -226,7 +231,7 @@ internal sealed class ModHealthViewerControllerTests
     }
 
     [Test]
-    public void QueueFullFeedback_ClearsAfterTheSafeDrainAppliesQueuedActions()
+    public void QueueFullFeedback_PersistsThroughSafeDrainUntilTheMenuRendersIt()
     {
         FakeCoordinator coordinator = new();
         FakeHost host = new();
@@ -241,6 +246,10 @@ internal sealed class ModHealthViewerControllerTests
         controller.DrainPendingActions();
 
         coordinator.MarkCalls.Should().Be(ModHealthViewerActionQueue.Capacity);
+        session.LastActionDisposition.Should().Be(ModHealthViewerActionDisposition.RejectedFull);
+
+        session.AcknowledgeActionFeedbackRendered();
+
         session.LastActionDisposition.Should().BeNull();
     }
 
@@ -366,7 +375,8 @@ internal sealed class ModHealthViewerControllerTests
                 this.RejectPreparation ? ModHealthPreparedReportState.Rejected : ModHealthPreparedReportState.Preparing,
                 this.InitialRequestId
             );
-            this.Snapshots[this.InitialRequestId] = snapshot;
+            if (!this.RejectPreparation)
+                this.Snapshots[this.InitialRequestId] = snapshot;
             ModHealthCoordinatorResult operation = this.RejectPreparation
                 ? new(ModHealthCoordinatorResultCode.Refused, "busy", IsError: true)
                 : Success();

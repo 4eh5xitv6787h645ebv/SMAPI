@@ -223,6 +223,8 @@ internal sealed class ModHealthReportMenu : IClickableMenu
             Fill(b, this.Layout.ScrollThumbBounds, SelectedColor);
         }
         this.drawMouse(b);
+        if (actionRejected)
+            this.Session.AcknowledgeActionFeedbackRendered();
     }
 
     private void Activate(ModHealthViewerFocusTarget target)
@@ -231,7 +233,7 @@ internal sealed class ModHealthReportMenu : IClickableMenu
         switch (target.Kind)
         {
             case ModHealthViewerTargetKind.Close:
-                this.RequestClose();
+                this.RequestViewerClose();
                 break;
             case ModHealthViewerTargetKind.Section:
                 this.SelectSection(target.Index);
@@ -256,7 +258,7 @@ internal sealed class ModHealthReportMenu : IClickableMenu
             case ModHealthViewerTargetKind.Action when (uint)target.Index < this.Session.AvailableActionCount:
                 ModHealthViewerActionKind action = this.Session.GetAvailableAction(target.Index);
                 if (action == ModHealthViewerActionKind.Close)
-                    this.RequestClose();
+                    this.RequestViewerClose();
                 else
                     this.Session.QueueAction(action);
                 break;
@@ -548,6 +550,11 @@ internal sealed class ModHealthReportMenu : IClickableMenu
             this.CloseDetails();
         else
             this.Session.QueueAction(ModHealthViewerActionKind.Close);
+    }
+
+    private void RequestViewerClose()
+    {
+        this.Session.QueueAction(ModHealthViewerActionKind.Close);
     }
 
     private void NotifyOwnershipReleased()

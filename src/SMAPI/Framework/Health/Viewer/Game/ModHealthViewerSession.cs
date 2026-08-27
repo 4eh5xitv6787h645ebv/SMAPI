@@ -79,6 +79,13 @@ internal sealed class ModHealthViewerSession
         ArgumentNullException.ThrowIfNull(mapper);
         if (snapshot.RequestId is Guid snapshotRequestId && snapshotRequestId != this.RequestId)
             return;
+        if (this.PreparedState == ModHealthPreparedReportState.Rejected && snapshot.State == ModHealthPreparedReportState.Absent)
+        {
+            // A rejected request is never accepted into the prepared-report store, so its exact-ID
+            // poll returns Absent. Keep the explicit terminal result until the user refreshes or
+            // switches request instead of silently downgrading it on the menu's first update.
+            return;
+        }
 
         ModHealthPreparedReportState oldState = this.PreparedState;
         Guid? oldNewerRequestId = this.NewerRequestId;
@@ -165,7 +172,16 @@ internal sealed class ModHealthViewerSession
     /// <summary>Clear transient queue feedback once the next safe boundary has drained the queue.</summary>
     public void AcknowledgeActionQueueDrained()
     {
-        if (this.LastActionDisposition is null)
+        if (this.LastActionDisposition is null or ModHealthViewerActionDisposition.RejectedFull)
+            return;
+        this.LastActionDisposition = null;
+        this.ProjectionRevision++;
+    }
+
+    /// <summary>Clear a queue-full refusal only after the owned menu rendered it at least once.</summary>
+    public void AcknowledgeActionFeedbackRendered()
+    {
+        if (this.LastActionDisposition != ModHealthViewerActionDisposition.RejectedFull)
             return;
         this.LastActionDisposition = null;
         this.ProjectionRevision++;

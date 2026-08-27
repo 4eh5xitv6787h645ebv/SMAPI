@@ -50,6 +50,21 @@ internal sealed class ModHealthViewerSessionTests
     }
 
     [Test]
+    public void ApplyPreparedSnapshot_PreservesRejectedTerminalStateWhenUnstoredRequestPollsAbsent()
+    {
+        Guid requestId = Guid.NewGuid();
+        ModHealthViewerSession session = Create(requestId);
+        ModHealthReportPresentationMapper mapper = new();
+        session.ApplyPreparedSnapshot(new(ModHealthPreparedReportState.Rejected, requestId), mapper);
+        long rejectedRevision = session.ProjectionRevision;
+
+        session.ApplyPreparedSnapshot(ModHealthPreparedReportSnapshot.Absent, mapper);
+
+        session.PreparedState.Should().Be(ModHealthPreparedReportState.Rejected);
+        session.ProjectionRevision.Should().Be(rejectedRevision);
+    }
+
+    [Test]
     public void ApplyPreparedSnapshot_MapsSameExactImmutableModelOnlyOnceAcrossReadyAndSaved()
     {
         Guid requestId = Guid.NewGuid();
@@ -200,6 +215,19 @@ internal sealed class ModHealthViewerSessionTests
 
         session.LastActionDisposition.Should().Be(ModHealthViewerActionDisposition.RejectedFull);
         session.ProjectionRevision.Should().BePositive();
+    }
+
+    [Test]
+    public void QueueFullFeedback_ClearsOnlyAfterRenderedAcknowledgement()
+    {
+        ModHealthViewerSession session = new(Guid.NewGuid(), Guid.NewGuid(), (_, _, _) => ModHealthViewerActionDisposition.RejectedFull);
+        session.QueueAction(ModHealthViewerActionKind.AddMark);
+
+        session.AcknowledgeActionQueueDrained();
+        session.LastActionDisposition.Should().Be(ModHealthViewerActionDisposition.RejectedFull);
+
+        session.AcknowledgeActionFeedbackRendered();
+        session.LastActionDisposition.Should().BeNull();
     }
 
     [Test]
