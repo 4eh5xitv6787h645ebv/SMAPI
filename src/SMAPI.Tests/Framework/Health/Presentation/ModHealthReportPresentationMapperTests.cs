@@ -13,6 +13,17 @@ internal sealed class ModHealthReportPresentationMapperTests
     private readonly ModHealthReportPresentationMapper Mapper = new();
 
     [Test]
+    public void Map_PreparedModelMatchesPayloadProjection()
+    {
+        ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical();
+
+        ModHealthReportPresentation fromModel = this.Mapper.Map(report);
+        ModHealthReportPresentation fromPayload = this.Mapper.Map(CreatePayload(report));
+
+        fromModel.Should().BeEquivalentTo(fromPayload);
+    }
+
+    [Test]
     public void Map_CanonicalPayloadProjectsAllEightSectionsFromFinalModel()
     {
         ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());

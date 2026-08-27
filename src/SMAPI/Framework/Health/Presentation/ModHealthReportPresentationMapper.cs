@@ -8,10 +8,17 @@ namespace StardewModdingAPI.Framework.Health.Presentation;
 /// <summary>Projects one final, sanitized and pruned report payload into a bounded immutable UI model.</summary>
 internal sealed class ModHealthReportPresentationMapper
 {
+    /// <summary>Map a completed report payload.</summary>
     public ModHealthReportPresentation Map(ModHealthReportPayload payload)
     {
         ArgumentNullException.ThrowIfNull(payload);
-        ModHealthReport report = payload.Model;
+        return this.Map(payload.Model);
+    }
+
+    /// <summary>Map the exact immutable report model published by the prepared-report store.</summary>
+    public ModHealthReportPresentation Map(ModHealthReport report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
         bool hasTimingSample = report.Capture.Mode != ModHealthCaptureMode.LedgerOnly;
         bool timingValid = hasTimingSample && report.Capture.TimingValid;
 
