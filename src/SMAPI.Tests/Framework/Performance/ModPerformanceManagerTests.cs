@@ -345,6 +345,171 @@ internal sealed class ModPerformanceManagerTests
     }
 
     [Test]
+    public void CompleteTick_WithOpenSmapiScope_InvalidatesPartition()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        timestamp = 2;
+        manager.BeginSmapiUpdate();
+        manager.CompleteTick(endTimestamp: 10);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        TickPerformanceSnapshot tick = snapshot.RecentTicks.Should().ContainSingle().Subject;
+        tick.TimingPartitionIsValid.Should().BeFalse();
+        tick.SmapiUpdateTimingAvailable.Should().BeFalse();
+        snapshot.InvalidTimingPartitionTickCount.Should().Be(1);
+    }
+
+    [Test]
+    public void Stop_DiscardsOpenScopeAndHandlerBeforeNextSample()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        timestamp = 1;
+        manager.BeginSmapiUpdate();
+        HandlerTimingToken stale = manager.BeginHandler("Stale.Mod", "Stale", "Event", "Stale.Run");
+
+        timestamp = 5;
+        manager.Stop();
+        timestamp = 6;
+        manager.EndHandler(stale, failed: false);
+        manager.EndSmapiUpdate();
+
+        ModPerformanceSnapshot stopped = manager.GetSnapshot();
+        stopped.CompletedTickCount.Should().Be(0);
+        stopped.Handlers.Should().BeEmpty();
+
+        timestamp = 10;
+        manager.Start();
+        manager.BeginTick(tick: 2, startTimestamp: 10);
+        timestamp = 11;
+        manager.BeginSmapiUpdate();
+        timestamp = 14;
+        manager.EndSmapiUpdate();
+        manager.CompleteTick(endTimestamp: 20);
+
+        TickPerformanceSnapshot current = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        current.TimingPartitionIsValid.Should().BeTrue();
+        current.SmapiUpdateTimingAvailable.Should().BeTrue();
+        current.SmapiUpdateMilliseconds.Should().Be(3);
+    }
+
+    [Test]
+    public void Reset_DiscardsOpenScopeAndStaleHandlerBeforeNextTick()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        timestamp = 1;
+        manager.BeginSmapiUpdate();
+        HandlerTimingToken stale = manager.BeginHandler("Stale.Mod", "Stale", "Event", "Stale.Run");
+
+        timestamp = 5;
+        manager.Reset();
+        timestamp = 6;
+        manager.EndHandler(stale, failed: false);
+        manager.EndSmapiUpdate();
+
+        manager.BeginTick(tick: 2, startTimestamp: 10);
+        timestamp = 11;
+        manager.BeginSmapiUpdate();
+        timestamp = 14;
+        manager.EndSmapiUpdate();
+        manager.CompleteTick(endTimestamp: 20);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        snapshot.Handlers.Should().BeEmpty();
+        TickPerformanceSnapshot tick = snapshot.RecentTicks.Should().ContainSingle().Subject;
+        tick.Tick.Should().Be(2);
+        tick.TimingPartitionIsValid.Should().BeTrue();
+        tick.SmapiUpdateTimingAvailable.Should().BeTrue();
+        tick.SmapiUpdateMilliseconds.Should().Be(3);
+    }
+
+    [Test]
+    public void SmapiUpdateBoundary_RejectsWrongThreadBeginAndEnd()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        Task.Run(manager.BeginSmapiUpdate).GetAwaiter().GetResult();
+        timestamp = 1;
+        manager.BeginSmapiUpdate();
+        timestamp = 2;
+        Task.Run(manager.EndSmapiUpdate).GetAwaiter().GetResult();
+        timestamp = 5;
+        manager.EndSmapiUpdate();
+        manager.CompleteTick(endTimestamp: 10);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.SmapiUpdateMilliseconds.Should().Be(4);
+        tick.TimingPartitionIsValid.Should().BeFalse();
+        tick.SmapiUpdateTimingAvailable.Should().BeFalse();
+    }
+
+    [Test]
+    public void SmapiUpdateBoundary_BackwardTimestampInvalidatesPartition()
+    {
+        long timestamp = 10;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 10);
+
+        timestamp = 12;
+        manager.BeginSmapiUpdate();
+        timestamp = 11;
+        manager.EndSmapiUpdate();
+        manager.CompleteTick(endTimestamp: 20);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.SmapiUpdateMilliseconds.Should().Be(-1);
+        tick.TimingPartitionIsValid.Should().BeFalse();
+        tick.SmapiUpdateTimingAvailable.Should().BeFalse();
+    }
+
+    [Test]
+    public void OwnedUpdateScopes_AccumulateSequentialSplitScreenWindows()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        timestamp = 1;
+        manager.BeginSmapiUpdate();
+        timestamp = 4;
+        manager.EndSmapiUpdate();
+        timestamp = 5;
+        manager.BeginGameUpdate();
+        timestamp = 10;
+        manager.EndGameUpdate();
+        timestamp = 12;
+        manager.BeginSmapiUpdate();
+        timestamp = 16;
+        manager.EndSmapiUpdate();
+        timestamp = 20;
+        manager.BeginGameUpdate();
+        timestamp = 28;
+        manager.EndGameUpdate();
+        manager.CompleteTick(endTimestamp: 40);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.SmapiUpdateMilliseconds.Should().Be(7);
+        tick.GameUpdateMilliseconds.Should().Be(13);
+        tick.ResidualMilliseconds.Should().Be(20);
+        tick.TimingPartitionIsValid.Should().BeTrue();
+        tick.SmapiUpdateTimingAvailable.Should().BeTrue();
+    }
+
+    [Test]
     public void GameUpdateBoundary_RejectsWrongThread()
     {
         ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);

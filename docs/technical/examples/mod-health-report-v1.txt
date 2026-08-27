@@ -67,6 +67,7 @@ Omissions and capacities
 
 Attribution and privacy limitations
 - SMAPI observes only named callback boundaries.
+- The SMAPI update-dispatch measurement is not total SMAPI CPU or proof of cause.
 - Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.
 - Allowed mod identity text is length-capped and structurally sanitized, but arbitrary author-chosen text cannot be semantically guaranteed private.
 - No report was transmitted automatically.

@@ -43,7 +43,7 @@ internal static class ModHealthReportFixtureFactory
             Capacities: ImmutableArray.Create(new ModHealthCapacity("callbacks", ModHealthReportLimits.MaxCallbacks, false)),
             Omissions: ImmutableArray.Create(new ModHealthOmission("callbacks", 0)),
             Privacy: new(true, false, ImmutableArray.Create("mod names", "mod IDs", "versions", "statuses"), ImmutableArray.Create("raw logs", "stack traces", "paths", "save data", "configuration")),
-            Limitations: ImmutableArray.Create("SMAPI observes only named callback boundaries.", "Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.")
+            Limitations: ImmutableArray.Create("SMAPI observes only named callback boundaries.", "The SMAPI update-dispatch measurement is not total SMAPI CPU or proof of cause.", "Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed.")
         );
     }
 }

@@ -249,6 +249,7 @@
   },
   "limitations": [
     "SMAPI observes only named callback boundaries.",
+    "The SMAPI update-dispatch measurement is not total SMAPI CPU or proof of cause.",
     "Background, native, Harmony, GPU, I/O, and operating-system work can remain unattributed."
   ]
 }

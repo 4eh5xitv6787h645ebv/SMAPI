@@ -123,7 +123,7 @@ internal sealed class ModHealthInsightAnalyzer
             ));
         }
 
-        if (!report.Capture.IsShortSample)
+        if (!report.Capture.IsShortSample && report.Capture.TimingValid)
         {
             this.AddDominanceFinding(report, findings);
             this.AddTimingCategoryFindings(report, findings);
@@ -185,6 +185,7 @@ internal sealed class ModHealthInsightAnalyzer
         return findings
             .Select(ModHealthInsightAnalyzer.NormalizeFinding)
             .OrderBy(finding => ModHealthInsightAnalyzer.GetSeverityOrder(finding.Severity))
+            .ThenBy(finding => ModHealthInsightAnalyzer.GetFindingOrder(finding.RuleId))
             .ThenBy(finding => finding.RuleId, StringComparer.Ordinal)
             .ThenBy(finding => finding.ModId, StringComparer.OrdinalIgnoreCase)
             .Take(ModHealthReportLimits.MaxFindings)
@@ -312,10 +313,14 @@ internal sealed class ModHealthInsightAnalyzer
                 "Most time in the retained slow update ticks remained uncategorized.",
                 $"The residual category contained {residual.ToString("0.###", CultureInfo.InvariantCulture)} of {total.ToString("0.###", CultureInfo.InvariantCulture)} ms in those ticks.",
                 "Use the normal SMAPI log and an external process or system profiler if this pattern continues.",
-                "Residual time is not assigned to a cause and can include arbitrary background/native work, waits, GC correlation, GPU/driver work, and operating-system scheduling."
+                "Residual time is not assigned to a cause. When owned SMAPI update-dispatch timing is unavailable, residual also includes that unseparated work; it can include arbitrary background/native work, waits, GC correlation, GPU/driver work, and operating-system scheduling."
             ));
         }
     }
+
+    private static int GetFindingOrder(string ruleId) => ruleId is "base-game-update-dominance" or "mostly-unattributed-slow-updates" or "smapi-update-dispatch-dominance"
+        ? 0
+        : 1;
 
     private static int GetSeverityOrder(ModHealthFindingSeverity severity) => severity switch
     {

@@ -53,7 +53,35 @@ internal sealed class ModHealthInsightAnalyzerTests
         ModHealthFinding finding = findings.Should().ContainSingle(entry => entry.RuleId == "smapi-update-dispatch-dominance").Which;
         finding.Summary.Should().Contain("SMAPI update dispatch observed outside the base-game update");
         finding.Limitation.Should().Contain("not total SMAPI CPU or proof of cause");
+        findings.Should().Contain(entry => entry.RuleId == "observed-mod-dominance");
+        findings.First(entry => entry.Severity == ModHealthFindingSeverity.Performance).RuleId.Should().Be("smapi-update-dispatch-dominance");
         findings.Should().NotContain(entry => entry.RuleId == "mostly-unattributed-slow-updates");
+    }
+
+    [Test]
+    public void Analyze_UnavailableSmapiTimingIsNamedAsAResidualPossibility()
+    {
+        ModHealthReport baseReport = ModHealthReportFixtureFactory.CreateCanonical();
+        ModHealthUpdate update = CreateSlowUpdate(1) with
+        {
+            BaseGameExclusiveMilliseconds = 5,
+            SmapiOtherMilliseconds = 0,
+            SmapiOtherTimingAvailable = false,
+            ResidualMilliseconds = 85
+        };
+        ModHealthReport report = baseReport with
+        {
+            Performance = baseReport.Performance with
+            {
+                SlowUpdateCount = 3,
+                WorstUpdates = ImmutableArray.Create(update, update with { UpdateTick = 2 }, update with { UpdateTick = 3 })
+            }
+        };
+
+        ImmutableArray<ModHealthFinding> findings = new ModHealthInsightAnalyzer().Analyze(report);
+
+        ModHealthFinding finding = findings.Should().ContainSingle(entry => entry.RuleId == "mostly-unattributed-slow-updates").Which;
+        finding.Limitation.Should().Contain("owned SMAPI update-dispatch timing is unavailable");
     }
 
     [Test]
@@ -92,7 +120,7 @@ internal sealed class ModHealthInsightAnalyzerTests
             Performance = baseReport.Performance with
             {
                 SlowUpdateCount = 3,
-                WorstUpdates = ImmutableArray.Create(CreateSlowUpdate(1) with { TimingValid = false }, CreateSlowUpdate(2) with { TimingValid = false }, CreateSlowUpdate(3) with { TimingValid = false })
+                WorstUpdates = ImmutableArray.Create(CreateSlowUpdate(1), CreateSlowUpdate(2), CreateSlowUpdate(3))
             }
         };
 
