@@ -79,7 +79,15 @@ internal sealed class ModHealthReportPresentationMapper
 
     private static bool IsProblemMod(ModHealthMod mod)
     {
-        return mod.Status != ModHealthModStatus.Loaded || mod.SessionErrorCount > 0 || mod.CallbackFailureCount > 0;
+        // Include the analyzer/pruner problem conditions plus explicit warning/update states
+        // which the presentation labels as needing user attention.
+        return mod.Status != ModHealthModStatus.Loaded
+            || mod.SessionWarningCount > 0
+            || mod.SessionErrorCount > 0
+            || mod.CaptureErrorCount > 0
+            || mod.CallbackFailureCount > 0
+            || !mod.WarningFlags.IsEmpty
+            || mod.UpdateStatus == ModHealthReportUpdateStatus.UpdateAvailable;
     }
 
     private static ModHealthModPresentation MapMod(ModHealthMod mod, bool hasTimingSample, bool timingValid)

@@ -16,6 +16,26 @@ namespace SMAPI.Tests.Framework.Health;
 internal sealed class ModHealthSessionCoordinatorTests
 {
     [Test]
+    public void ViewerActionState_IsAllocationFreeAndTracksCaptureTransitions()
+    {
+        Context context = new();
+        context.Coordinator.GetViewerActionState().CaptureState.Should().Be(ModHealthCaptureState.Inactive);
+        context.Coordinator.StartHealth();
+        context.Coordinator.GetViewerActionState().CaptureState.Should().Be(ModHealthCaptureState.Active);
+
+        _ = context.Coordinator.GetViewerActionState();
+        int performanceSnapshotsBefore = context.PerformanceTimestampReads;
+        int ledgerSnapshotsBefore = context.LedgerSnapshots;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++)
+            _ = context.Coordinator.GetViewerActionState();
+
+        (GC.GetAllocatedBytesForCurrentThread() - before).Should().Be(0);
+        context.PerformanceTimestampReads.Should().Be(performanceSnapshotsBefore, "the lightweight query must not freeze performance diagnostics");
+        context.LedgerSnapshots.Should().Be(ledgerSnapshotsBefore, "the lightweight query must not freeze the session ledger");
+    }
+
+    [Test]
     public void HealthStart_UsesHealthOwnerAndDefaultThreshold()
     {
         Context context = new();
@@ -295,7 +315,7 @@ internal sealed class ModHealthSessionCoordinatorTests
         ModHealthViewPreparation retried = context.Coordinator.PrepareHealthView();
 
         rejected.Operation.IsError.Should().BeTrue();
-        rejected.PreparedReport.Should().BeEquivalentTo(new ModHealthPreparedReportSnapshot(ModHealthPreparedReportState.Absent, rejected.RequestId));
+        rejected.PreparedReport.Should().BeEquivalentTo(new ModHealthPreparedReportSnapshot(ModHealthPreparedReportState.Rejected, rejected.RequestId));
         retried.RequestId.Should().NotBe(rejected.RequestId);
         retried.Operation.IsError.Should().BeFalse();
         context.Queue.Requests.Should().ContainSingle();
@@ -380,7 +400,7 @@ internal sealed class ModHealthSessionCoordinatorTests
 
         rejected.Operation.IsError.Should().BeTrue();
         rejected.RequestId.Should().NotBe(writing.RequestId).And.NotBe(pending.RequestId);
-        rejected.PreparedReport.Should().BeEquivalentTo(new ModHealthPreparedReportSnapshot(ModHealthPreparedReportState.Absent, rejected.RequestId));
+        rejected.PreparedReport.Should().BeEquivalentTo(new ModHealthPreparedReportSnapshot(ModHealthPreparedReportState.Rejected, rejected.RequestId));
         reopened.RequestId.Should().Be(pending.RequestId);
         reopened.PreparedReport.State.Should().Be(ModHealthPreparedReportState.Preparing);
 
@@ -771,6 +791,8 @@ internal sealed class ModHealthSessionCoordinatorTests
     private sealed class Context
     {
         public long Timestamp = 0;
+        public int PerformanceTimestampReads;
+        public int LedgerSnapshots;
         public ModPerformanceManager Manager { get; }
         public ModHealthLedger Ledger { get; }
         public FakeExportQueue Queue { get; } = new();
@@ -778,8 +800,12 @@ internal sealed class ModHealthSessionCoordinatorTests
 
         public Context(bool? isLifecycleTimingAvailable = null, uint? currentUpdateTick = null)
         {
-            this.Manager = new ModPerformanceManager(timestampFrequency: 1000, getTimestamp: () => this.Timestamp, getGcCollectionCount: _ => 0);
-            this.Ledger = new ModHealthLedger(timestampFrequency: 1000, getTimestamp: () => this.Timestamp);
+            this.Manager = new ModPerformanceManager(timestampFrequency: 1000, getTimestamp: () =>
+            {
+                this.PerformanceTimestampReads++;
+                return this.Timestamp;
+            }, getGcCollectionCount: _ => 0);
+            this.Ledger = new ModHealthLedger(timestampFrequency: 1000, getTimestamp: () => this.Timestamp, onSnapshotLocksReleased: () => this.LedgerSnapshots++);
             this.Coordinator = new ModHealthSessionCoordinator(
                 this.Manager,
                 this.Ledger,

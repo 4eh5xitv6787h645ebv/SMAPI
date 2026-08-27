@@ -28,4 +28,14 @@ internal sealed class ModHealthViewerHostPolicyTests
         ModHealthViewerHostPolicy.CanOpen(new(true, menuKind), out string refusal).Should().BeFalse();
         refusal.Should().Be(ModHealthViewerTranslationKeys.UnsafeState);
     }
+
+    [TestCase(true, false, false)]
+    [TestCase(false, true, false)]
+    [TestCase(false, false, true)]
+    [TestCase(true, true, true)]
+    public void CanOpen_RefusesLocationFadeAndWarpTransitions(bool location, bool fade, bool warp)
+    {
+        ModHealthViewerHostPolicy.CanOpen(new(false, ModHealthViewerRootMenuKind.None, location, fade, warp), out string refusal).Should().BeFalse();
+        refusal.Should().Be(ModHealthViewerTranslationKeys.UnsafeState);
+    }
 }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Text;
 using StardewModdingAPI.Framework.Health.Presentation;
 using StardewModdingAPI.Framework.Health.Viewer.Layout;
 
@@ -14,10 +15,15 @@ internal sealed class ModHealthViewerContentAdapter
     public const int MaxSummaryDetailCharacters = 360;
 
     private readonly ModHealthReportPresentation Report;
+    private readonly Func<string, string> Translate;
 
-    public ModHealthViewerContentAdapter(ModHealthReportPresentation report)
+    /// <summary>Create the adapter, optionally resolving adapter-owned visible text from stable translation keys.</summary>
+    /// <param name="report">The exact presentation model to render.</param>
+    /// <param name="translate">Resolve a translation key, or <see langword="null"/> to use the built-in English fallbacks.</param>
+    public ModHealthViewerContentAdapter(ModHealthReportPresentation report, Func<string, string>? translate = null)
     {
         this.Report = report ?? throw new ArgumentNullException(nameof(report));
+        this.Translate = translate ?? (static key => key);
     }
 
     /// <summary>Get the total display row count for a section without projecting its virtual rows.</summary>
@@ -118,7 +124,7 @@ internal sealed class ModHealthViewerContentAdapter
                     int take = Math.Min(end - cursor, this.Report.Errors.Logs.Count - relative);
                     ImmutableArray<ModHealthLogSummary> page = this.Report.Errors.Logs.GetPage(relative, take);
                     for (int index = 0; index < page.Length; index++)
-                        rows.Add(ClipSummary(FormatLog(page[index], relative + index)));
+                        rows.Add(ClipSummary(this.FormatLog(page[index], relative + index)));
                     cursor += take;
                     continue;
                 }
@@ -127,7 +133,7 @@ internal sealed class ModHealthViewerContentAdapter
                 int failureTake = Math.Min(end - cursor, this.Report.Errors.CallbackFailures.Count - relative);
                 ImmutableArray<ModHealthCallbackFailure> failures = this.Report.Errors.CallbackFailures.GetPage(relative, failureTake);
                 for (int index = 0; index < failures.Length; index++)
-                    rows.Add(ClipSummary(FormatFailure(failures[index], relative + index)));
+                    rows.Add(ClipSummary(this.FormatFailure(failures[index], relative + index)));
                 cursor += failureTake;
                 continue;
             }
@@ -156,7 +162,7 @@ internal sealed class ModHealthViewerContentAdapter
             int take = Math.Min(requested, performance.Callbacks.Count - relative);
             ImmutableArray<ModHealthCallback> page = performance.Callbacks.GetPage(relative, take);
             for (int index = 0; index < page.Length; index++)
-                rows.Add(ClipSummary(FormatCallback(page[index], relative + index)));
+                rows.Add(ClipSummary(this.FormatCallback(page[index], relative + index)));
             return take;
         }
         relative -= performance.Callbacks.Count;
@@ -166,7 +172,7 @@ internal sealed class ModHealthViewerContentAdapter
             int take = Math.Min(requested, performance.Episodes.Count - relative);
             ImmutableArray<ModHealthEpisode> page = performance.Episodes.GetPage(relative, take);
             for (int index = 0; index < page.Length; index++)
-                rows.Add(ClipSummary(FormatEpisode(page[index], relative + index)));
+                rows.Add(ClipSummary(this.FormatEpisode(page[index], relative + index)));
             return take;
         }
         relative -= performance.Episodes.Count;
@@ -176,7 +182,7 @@ internal sealed class ModHealthViewerContentAdapter
             int take = Math.Min(requested, performance.WorstUpdates.Count - relative);
             ImmutableArray<ModHealthUpdatePresentation> page = performance.WorstUpdates.GetPage(relative, take);
             foreach (ModHealthUpdatePresentation update in page)
-                rows.Add(ClipSummary(FormatUpdate(update, "Worst update", "worst-update")));
+                rows.Add(ClipSummary(this.FormatUpdate(update, "health-view.content.summary.worst-update.title", "Worst update {0}", "worst-update")));
             return take;
         }
         relative -= performance.WorstUpdates.Count;
@@ -184,7 +190,7 @@ internal sealed class ModHealthViewerContentAdapter
         int recentTake = Math.Min(requested, performance.RecentUpdates.Count - relative);
         ImmutableArray<ModHealthUpdatePresentation> recent = performance.RecentUpdates.GetPage(relative, recentTake);
         foreach (ModHealthUpdatePresentation update in recent)
-            rows.Add(ClipSummary(FormatUpdate(update, "Recent update", "recent-update")));
+            rows.Add(ClipSummary(this.FormatUpdate(update, "health-view.content.summary.recent-update.title", "Recent update {0}", "recent-update")));
         return recentTake;
     }
 
@@ -193,7 +199,7 @@ internal sealed class ModHealthViewerContentAdapter
         int take = Math.Min(requested, source.Count - offset);
         ImmutableArray<ModHealthModPresentation> page = source.GetPage(offset, take);
         foreach (ModHealthModPresentation mod in page)
-            rows.Add(ClipSummary(FormatMod(mod, attention, stablePrefix)));
+            rows.Add(ClipSummary(this.FormatMod(mod, attention, stablePrefix)));
         return take;
     }
 
@@ -204,7 +210,7 @@ internal sealed class ModHealthViewerContentAdapter
             ModHealthViewerSection.Overview => this.GetOverviewRow(index),
             ModHealthViewerSection.Findings => this.GetFindingRow(index),
             ModHealthViewerSection.Capture => this.GetCaptureRow(index),
-            ModHealthViewerSection.Attention => FormatMod(GetOne(this.Report.Attention.Mods, index), attention: true),
+            ModHealthViewerSection.Attention => this.FormatMod(GetOne(this.Report.Attention.Mods, index), attention: true),
             ModHealthViewerSection.Performance => this.GetPerformanceRow(index),
             ModHealthViewerSection.Errors => this.GetErrorsRow(index),
             ModHealthViewerSection.Inventory => this.GetInventoryRow(index),
@@ -219,8 +225,8 @@ internal sealed class ModHealthViewerContentAdapter
         if (index == 0)
         {
             return new(
-                $"Mod Health Report {overview.Header.ReportId}",
-                $"Schema {N(this.Report.SchemaVersion)}; generated {Utc(overview.Header.GeneratedUtc)}; truncated: {YesNo(overview.Header.IsTruncated)}; minimal fallback: {YesNo(overview.Header.IsMinimalFallback)}; write retry: {YesNo(overview.Header.WriteRetry)}.",
+                this.F("health-view.content.summary.report.title", "Mod Health Report {0}", overview.Header.ReportId),
+                this.F("health-view.content.summary.report.detail", "Schema {0}; generated {1}; truncated: {2}; minimal fallback: {3}; write retry: {4}.", N(this.Report.SchemaVersion), Utc(overview.Header.GeneratedUtc), this.YesNo(overview.Header.IsTruncated), this.YesNo(overview.Header.IsMinimalFallback), this.YesNo(overview.Header.WriteRetry)),
                 overview.Header.IsTruncated || overview.Header.IsMinimalFallback ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Neutral,
                 ModHealthViewerRowIconKey.Report,
                 overview.Header.ReportId
@@ -229,8 +235,8 @@ internal sealed class ModHealthViewerContentAdapter
         if (index == 1)
         {
             return new(
-                "Privacy summary",
-                $"Inspect before sharing: {YesNo(overview.Privacy.InspectBeforeSharing)}; automatic upload: {YesNo(overview.Privacy.AutomaticUpload)}; included identity field groups: {N(overview.Privacy.IncludedIdentityFields.Length)}; excluded source groups: {N(overview.Privacy.ExcludedSources.Length)}.",
+                this.T("health-view.content.summary.privacy.title", "Privacy summary"),
+                this.F("health-view.content.summary.privacy.detail", "Inspect before sharing: {0}; automatic upload: {1}; included identity field groups: {2}; excluded source groups: {3}.", this.YesNo(overview.Privacy.InspectBeforeSharing), this.YesNo(overview.Privacy.AutomaticUpload), N(overview.Privacy.IncludedIdentityFields.Length), N(overview.Privacy.ExcludedSources.Length)),
                 ModHealthViewerRowSeverity.Warning,
                 ModHealthViewerRowIconKey.Privacy,
                 "privacy-summary"
@@ -239,7 +245,7 @@ internal sealed class ModHealthViewerContentAdapter
 
         int notice = index - 2;
         return new(
-            "Privacy and sharing",
+            this.T("health-view.content.summary.privacy-notice.title", "Privacy and sharing"),
             overview.PrivacyNotices[notice],
             ModHealthViewerRowSeverity.Info,
             ModHealthViewerRowIconKey.Privacy,
@@ -255,19 +261,19 @@ internal sealed class ModHealthViewerContentAdapter
             if (this.Report.Findings.Rows.Length == 0)
             {
                 return new(
-                    "No findings were generated",
-                    "SMAPI did not generate a finding from the evidence retained in this report.",
+                    this.T("health-view.content.summary.no-findings.title", "No findings were generated"),
+                    this.T("health-view.content.summary.no-findings.detail", "SMAPI did not generate a finding from the evidence retained in this report."),
                     ModHealthViewerRowSeverity.Positive,
                     ModHealthViewerRowIconKey.Finding,
                     "finding-none"
                 );
             }
-            return FormatFinding(this.Report.Findings.Rows[index], index);
+            return this.FormatFinding(this.Report.Findings.Rows[index], index);
         }
 
         int actionIndex = index - findingRows;
         return new(
-            $"Suggested next step {N(actionIndex + 1)}",
+            this.F("health-view.content.summary.suggested-action.title", "Suggested next step {0}", N(actionIndex + 1)),
             this.Report.Findings.SuggestedActions[actionIndex],
             ModHealthViewerRowSeverity.Info,
             ModHealthViewerRowIconKey.Finding,
@@ -282,8 +288,8 @@ internal sealed class ModHealthViewerContentAdapter
         if (index == 0)
         {
             return new(
-                "Capture",
-                $"Mode: {CaptureMode(details.Mode)}; completion: {Completion(details.CompletionReason)}; started: {OptionalUtc(details.StartedUtc)}; ended: {OptionalUtc(details.EndedUtc)}; duration: {Ms(details.DurationMilliseconds)}; completed updates: {N(details.CompletedUpdateCount)}; slow-update threshold: {Ms(details.SlowUpdateThresholdMilliseconds)}.",
+                this.T("health-view.content.summary.capture.title", "Capture"),
+                this.F("health-view.content.summary.capture.detail", "Mode: {0}; completion: {1}; started: {2}; ended: {3}; duration: {4}; completed updates: {5}; slow-update threshold: {6}.", this.CaptureMode(details.Mode), this.Completion(details.CompletionReason), this.OptionalUtc(details.StartedUtc), this.OptionalUtc(details.EndedUtc), Ms(details.DurationMilliseconds), N(details.CompletedUpdateCount), Ms(details.SlowUpdateThresholdMilliseconds)),
                 details.Mode == ModHealthCaptureMode.LedgerOnly ? ModHealthViewerRowSeverity.Info : ModHealthViewerRowSeverity.Neutral,
                 ModHealthViewerRowIconKey.Capture,
                 "capture-summary"
@@ -293,8 +299,8 @@ internal sealed class ModHealthViewerContentAdapter
         {
             bool warning = details.IsShortSample || !details.TimingValid || capture.IsTruncated || capture.IsMinimalFallback || capture.WriteRetry || capture.PositiveOmissions.Length > 0;
             return new(
-                "Capture quality",
-                $"Short sample: {YesNo(details.IsShortSample)}; timing valid: {YesNo(details.TimingValid)}; truncated: {YesNo(capture.IsTruncated)}; minimal fallback: {YesNo(capture.IsMinimalFallback)}; write retry: {YesNo(capture.WriteRetry)}; marks: {N(details.Marks.Length)}; positive omissions: {N(capture.PositiveOmissions.Length)}.",
+                this.T("health-view.content.summary.capture-quality.title", "Capture quality"),
+                this.F("health-view.content.summary.capture-quality.detail", "Short sample: {0}; timing valid: {1}; truncated: {2}; minimal fallback: {3}; write retry: {4}; marks: {5}; positive omissions: {6}.", this.YesNo(details.IsShortSample), this.YesNo(details.TimingValid), this.YesNo(capture.IsTruncated), this.YesNo(capture.IsMinimalFallback), this.YesNo(capture.WriteRetry), N(details.Marks.Length), N(capture.PositiveOmissions.Length)),
                 warning ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Positive,
                 ModHealthViewerRowIconKey.Capture,
                 "capture-quality"
@@ -306,8 +312,8 @@ internal sealed class ModHealthViewerContentAdapter
         {
             ModHealthMark mark = details.Marks[relative];
             return new(
-                $"Mark {N(mark.Number)}",
-                $"Update tick {N(mark.UpdateTick)} at {Ms(mark.OffsetMilliseconds)} after capture start.",
+                this.F("health-view.content.summary.mark.title", "Mark {0}", N(mark.Number)),
+                this.F("health-view.content.summary.mark.detail", "Update tick {0} at {1} after capture start.", N(mark.UpdateTick), Ms(mark.OffsetMilliseconds)),
                 ModHealthViewerRowSeverity.Info,
                 ModHealthViewerRowIconKey.Mark,
                 $"mark-{N(mark.Number)}"
@@ -315,7 +321,7 @@ internal sealed class ModHealthViewerContentAdapter
         }
 
         ModHealthOmission omission = capture.PositiveOmissions[relative - details.Marks.Length];
-        return FormatOmission(omission, "capture-omission");
+        return this.FormatOmission(omission, "capture-omission");
     }
 
     private ModHealthViewerDisplayRow GetPerformanceRow(int index)
@@ -325,39 +331,39 @@ internal sealed class ModHealthViewerContentAdapter
         {
             ModHealthHistogram histogram = performance.Histogram;
             return new(
-                "Completed update timing",
-                $"Count: {N(histogram.Count)}; mean: {SafeAverage(histogram.SumMilliseconds, histogram.Count)}; minimum: {OptionalMs(histogram.MinimumMilliseconds)}; maximum: {OptionalMs(histogram.MaximumMilliseconds)}; p50/p95/p99: {OptionalMs(histogram.P50Milliseconds)} / {OptionalMs(histogram.P95Milliseconds)} / {OptionalMs(histogram.P99Milliseconds)}.",
+                this.T("health-view.content.summary.timing.title", "Completed update timing"),
+                this.F("health-view.content.summary.timing.detail", "Count: {0}; mean: {1}; minimum: {2}; maximum: {3}; p50/p95/p99: {4} / {5} / {6}.", N(histogram.Count), this.SafeAverage(histogram.SumMilliseconds, histogram.Count), this.OptionalMs(histogram.MinimumMilliseconds), this.OptionalMs(histogram.MaximumMilliseconds), this.OptionalMs(histogram.P50Milliseconds), this.OptionalMs(histogram.P95Milliseconds), this.OptionalMs(histogram.P99Milliseconds)),
                 ModHealthViewerRowSeverity.Neutral,
                 ModHealthViewerRowIconKey.Timing,
                 "performance-histogram"
             );
         }
         if (index == 1)
-            return FormatEvidence("Observed mod callbacks", performance.ObservedCallbacks, "performance-observed-callbacks");
+            return this.FormatEvidence("health-view.content.summary.observed-callbacks.title", "Observed mod callbacks", performance.ObservedCallbacks, "performance-observed-callbacks");
         if (index == 2)
-            return FormatEvidence("Base-game-exclusive update time", performance.BaseGameExclusive, "performance-base-game-exclusive");
+            return this.FormatEvidence("health-view.content.summary.base-game-exclusive.title", "Base-game-exclusive update time", performance.BaseGameExclusive, "performance-base-game-exclusive");
         if (index == 3)
-            return FormatEvidence(ModHealthPresentationText.SmapiUpdateDispatchLabel, performance.SmapiUpdateDispatch, "performance-smapi-update-dispatch");
+            return this.FormatEvidence("health-view.content.summary.smapi-dispatch.title", ModHealthPresentationText.SmapiUpdateDispatchLabel, performance.SmapiUpdateDispatch, "performance-smapi-update-dispatch");
         if (index == 4)
-            return FormatEvidence("Residual update time", performance.Residual, "performance-residual");
+            return this.FormatEvidence("health-view.content.summary.residual.title", "Residual update time", performance.Residual, "performance-residual");
         if (index == 5)
         {
             return new(
-                "Slow updates",
-                $"{N(performance.SlowUpdateCount)} completed updates met the report's slow-update threshold.",
+                this.T("health-view.content.summary.slow-updates.title", "Slow updates"),
+                this.F("health-view.content.summary.slow-updates.detail", "{0} completed updates met the report's slow-update threshold.", N(performance.SlowUpdateCount)),
                 performance.SlowUpdateCount > 0 ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Positive,
                 ModHealthViewerRowIconKey.Timing,
                 "performance-slow-updates"
             );
         }
         if (index == 6)
-            return FormatGc(performance.Gc, "performance-gc");
+            return this.FormatGc(performance.Gc, "performance-gc");
 
         int relative = index - 7;
         if (relative < performance.AttributionCaveats.Length)
         {
             return new(
-                "Timing limitation",
+                this.T("health-view.content.summary.timing-limitation.title", "Timing limitation"),
                 performance.AttributionCaveats[relative],
                 ModHealthViewerRowSeverity.Info,
                 ModHealthViewerRowIconKey.Limitation,
@@ -367,22 +373,22 @@ internal sealed class ModHealthViewerContentAdapter
         relative -= performance.AttributionCaveats.Length;
 
         if (relative < performance.ObservedMods.Count)
-            return FormatMod(GetOne(performance.ObservedMods, relative), attention: false, "observed-mod");
+            return this.FormatMod(GetOne(performance.ObservedMods, relative), attention: false, "observed-mod");
         relative -= performance.ObservedMods.Count;
 
         if (relative < performance.Callbacks.Count)
-            return FormatCallback(GetOne(performance.Callbacks, relative), relative);
+            return this.FormatCallback(GetOne(performance.Callbacks, relative), relative);
         relative -= performance.Callbacks.Count;
 
         if (relative < performance.Episodes.Count)
-            return FormatEpisode(GetOne(performance.Episodes, relative), relative);
+            return this.FormatEpisode(GetOne(performance.Episodes, relative), relative);
         relative -= performance.Episodes.Count;
 
         if (relative < performance.WorstUpdates.Count)
-            return FormatUpdate(GetOne(performance.WorstUpdates, relative), "Worst update", "worst-update");
+            return this.FormatUpdate(GetOne(performance.WorstUpdates, relative), "health-view.content.summary.worst-update.title", "Worst update {0}", "worst-update");
         relative -= performance.WorstUpdates.Count;
 
-        return FormatUpdate(GetOne(performance.RecentUpdates, relative), "Recent update", "recent-update");
+        return this.FormatUpdate(GetOne(performance.RecentUpdates, relative), "health-view.content.summary.recent-update.title", "Recent update {0}", "recent-update");
     }
 
     private ModHealthViewerDisplayRow GetErrorsRow(int index)
@@ -392,8 +398,8 @@ internal sealed class ModHealthViewerContentAdapter
         {
             bool hasErrors = HasErrors(errors.LogTotals.SinceLedgerStart) || HasErrors(errors.LogTotals.DuringCapture);
             return new(
-                "Log totals",
-                $"Since ledger start: {FormatSeverity(errors.LogTotals.SinceLedgerStart)}; during capture: {FormatSeverity(errors.LogTotals.DuringCapture)}.",
+                this.T("health-view.content.summary.log-totals.title", "Log totals"),
+                this.F("health-view.content.summary.log-totals.detail", "Since ledger start: {0}; during capture: {1}.", this.FormatSeverity(errors.LogTotals.SinceLedgerStart), this.FormatSeverity(errors.LogTotals.DuringCapture)),
                 hasErrors ? ModHealthViewerRowSeverity.Error : ModHealthViewerRowSeverity.Neutral,
                 ModHealthViewerRowIconKey.Log,
                 "log-totals"
@@ -403,8 +409,8 @@ internal sealed class ModHealthViewerContentAdapter
         {
             ModHealthCallbackFailureTotals totals = errors.CallbackFailureTotals;
             return new(
-                "Callback failure totals",
-                $"Since ledger start: {N(totals.SinceLedgerStart)}; during capture: {N(totals.DuringCapture)}.",
+                this.T("health-view.content.summary.callback-failures.title", "Callback failure totals"),
+                this.F("health-view.content.summary.callback-failures.detail", "Since ledger start: {0}; during capture: {1}.", N(totals.SinceLedgerStart), N(totals.DuringCapture)),
                 totals.SinceLedgerStart > 0 || totals.DuringCapture > 0 ? ModHealthViewerRowSeverity.Error : ModHealthViewerRowSeverity.Positive,
                 ModHealthViewerRowIconKey.Failure,
                 "callback-failure-totals"
@@ -413,9 +419,9 @@ internal sealed class ModHealthViewerContentAdapter
 
         int relative = index - 2;
         if (relative < errors.Logs.Count)
-            return FormatLog(GetOne(errors.Logs, relative), relative);
+            return this.FormatLog(GetOne(errors.Logs, relative), relative);
         relative -= errors.Logs.Count;
-        return FormatFailure(GetOne(errors.CallbackFailures, relative), relative);
+        return this.FormatFailure(GetOne(errors.CallbackFailures, relative), relative);
     }
 
     private ModHealthViewerDisplayRow GetInventoryRow(int index)
@@ -425,14 +431,14 @@ internal sealed class ModHealthViewerContentAdapter
             ModHealthModInventorySummary summary = this.Report.Inventory.Summary;
             bool warning = summary.Skipped > 0 || summary.Ignored > 0 || summary.Invalid > 0 || summary.Failed > 0;
             return new(
-                "Mod inventory",
-                $"Total discovered: {N(summary.TotalDiscovered)}; discovered: {N(summary.Discovered)}; loaded: {N(summary.Loaded)}; skipped: {N(summary.Skipped)}; ignored: {N(summary.Ignored)}; invalid: {N(summary.Invalid)}; failed: {N(summary.Failed)}; retained records: {N(summary.Retained)}.",
+                this.T("health-view.content.summary.inventory.title", "Mod inventory"),
+                this.F("health-view.content.summary.inventory.detail", "Total discovered: {0}; discovered: {1}; loaded: {2}; skipped: {3}; ignored: {4}; invalid: {5}; failed: {6}; retained records: {7}.", N(summary.TotalDiscovered), N(summary.Discovered), N(summary.Loaded), N(summary.Skipped), N(summary.Ignored), N(summary.Invalid), N(summary.Failed), N(summary.Retained)),
                 warning ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Neutral,
                 ModHealthViewerRowIconKey.Inventory,
                 "inventory-summary"
             );
         }
-        return FormatMod(GetOne(this.Report.Inventory.Mods, index - 1), attention: false);
+        return this.FormatMod(GetOne(this.Report.Inventory.Mods, index - 1), attention: false);
     }
 
     private ModHealthViewerDisplayRow GetContextRow(int index)
@@ -442,8 +448,8 @@ internal sealed class ModHealthViewerContentAdapter
         {
             ModHealthEnvironment environment = context.Environment;
             return new(
-                "Environment",
-                $"SMAPI {Clip(environment.SmapiVersion, 64)}; game {Clip(environment.GameVersion, 64)}; runtime {Clip(environment.RuntimeVersion, 64)}; {N(environment.ProcessBitness)}-bit {Clip(environment.ProcessArchitecture, 32)}; session {Clip(environment.SessionType, 32)}.",
+                this.T("health-view.content.summary.environment.title", "Environment"),
+                this.F("health-view.content.summary.environment.detail", "SMAPI {0}; game {1}; runtime {2}; {3}-bit {4}; session {5}.", Clip(environment.SmapiVersion, 64), Clip(environment.GameVersion, 64), Clip(environment.RuntimeVersion, 64), N(environment.ProcessBitness), Clip(environment.ProcessArchitecture, 32), Clip(environment.SessionType, 32)),
                 ModHealthViewerRowSeverity.Neutral,
                 ModHealthViewerRowIconKey.Environment,
                 "environment"
@@ -453,8 +459,8 @@ internal sealed class ModHealthViewerContentAdapter
         {
             ModHealthCompleteness completeness = context.Completeness;
             return new(
-                "Evidence boundary",
-                $"Ledger started {Utc(completeness.LedgerStartedUtc)}; startup observed: {YesNo(completeness.StartupObserved)}; lifecycle timing observed: {YesNo(completeness.LifecycleTimingObserved)}; boundary: {completeness.Boundary}",
+                this.T("health-view.content.summary.evidence-boundary.title", "Evidence boundary"),
+                this.F("health-view.content.summary.evidence-boundary.detail", "Ledger started {0}; startup observed: {1}; lifecycle timing observed: {2}; boundary: {3}", Utc(completeness.LedgerStartedUtc), this.YesNo(completeness.StartupObserved), this.YesNo(completeness.LifecycleTimingObserved), completeness.Boundary),
                 completeness.StartupObserved && completeness.LifecycleTimingObserved ? ModHealthViewerRowSeverity.Info : ModHealthViewerRowSeverity.Warning,
                 ModHealthViewerRowIconKey.Environment,
                 "completeness"
@@ -466,8 +472,8 @@ internal sealed class ModHealthViewerContentAdapter
         {
             ModHealthCapacity capacity = context.Capacities[relative];
             return new(
-                $"Capacity: {capacity.Name}",
-                $"Limit: {N(capacity.Limit)}; reached: {YesNo(capacity.Reached)}.",
+                this.F("health-view.content.summary.capacity.title", "Capacity: {0}", capacity.Name),
+                this.F("health-view.content.summary.capacity.detail", "Limit: {0}; reached: {1}.", N(capacity.Limit), this.YesNo(capacity.Reached)),
                 capacity.Reached ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Neutral,
                 ModHealthViewerRowIconKey.Capacity,
                 $"capacity-{capacity.Name}"
@@ -476,11 +482,11 @@ internal sealed class ModHealthViewerContentAdapter
         relative -= context.Capacities.Length;
 
         if (relative < context.Omissions.Length)
-            return FormatOmission(context.Omissions[relative], "context-omission");
+            return this.FormatOmission(context.Omissions[relative], "context-omission");
         relative -= context.Omissions.Length;
 
         return new(
-            "Report limitation",
+            this.T("health-view.content.summary.report-limitation.title", "Report limitation"),
             context.Limitations[relative],
             ModHealthViewerRowSeverity.Info,
             ModHealthViewerRowIconKey.Limitation,
@@ -488,7 +494,7 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatFinding(ModHealthFinding finding, int index)
+    private ModHealthViewerDisplayRow FormatFinding(ModHealthFinding finding, int index)
     {
         ModHealthViewerRowSeverity severity = finding.Severity switch
         {
@@ -499,20 +505,20 @@ internal sealed class ModHealthViewerContentAdapter
         };
         return new(
             finding.Summary,
-            $"Rule: {Clip(finding.RuleId, 64)}; severity: {FindingSeverity(finding.Severity)}; confidence: {Confidence(finding.Confidence)}; mod: {Clip(Optional(finding.ModId), 96)}. Select for evidence and next steps.",
+            this.F("health-view.content.summary.finding.detail", "Rule: {0}; severity: {1}; confidence: {2}; mod: {3}. Select for evidence and next steps.", Clip(finding.RuleId, 64), this.FindingSeverity(finding.Severity), this.Confidence(finding.Confidence), Clip(this.Optional(finding.ModId), 96)),
             severity,
             ModHealthViewerRowIconKey.Finding,
-            $"finding-{N(index + 1)}-{finding.RuleId}-{Optional(finding.ModId)}"
+            $"finding-{N(index + 1)}-{finding.RuleId}-{this.Optional(finding.ModId)}"
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatMod(ModHealthModPresentation mod, bool attention, string stablePrefix = "mod")
+    private ModHealthViewerDisplayRow FormatMod(ModHealthModPresentation mod, bool attention, string stablePrefix = "mod")
     {
-        bool error = mod.Status is ModHealthModStatus.Invalid or ModHealthModStatus.Failed || mod.SessionErrorCount > 0 || mod.CallbackFailureCount > 0;
-        bool warning = error || mod.Status != ModHealthModStatus.Loaded || mod.WarningFlags.Length > 0 || mod.UpdateStatus == ModHealthReportUpdateStatus.UpdateAvailable;
-        string detail = $"ID: {Clip(mod.Id, 96)}; {ModStatus(mod.Status)} {ModKind(mod.Kind)} v{Clip(mod.Version, 48)}; warnings/errors: {N(mod.SessionWarningCount)}/{N(mod.SessionErrorCount)}; callback failures: {N(mod.CallbackFailureCount)}; warning flags: {N(mod.WarningFlags.Length)}; dependencies: {N(mod.Dependencies.Length)}; update: {UpdateStatus(mod.UpdateStatus)}.";
+        bool error = mod.Status is ModHealthModStatus.Invalid or ModHealthModStatus.Failed || mod.SessionErrorCount > 0 || mod.CaptureErrorCount > 0 || mod.CallbackFailureCount > 0;
+        bool warning = error || mod.Status != ModHealthModStatus.Loaded || mod.SessionWarningCount > 0 || mod.WarningFlags.Length > 0 || mod.UpdateStatus == ModHealthReportUpdateStatus.UpdateAvailable;
+        string detail = this.F("health-view.content.summary.mod.detail", "ID: {0}; {1} {2} v{3}; warnings/errors: {4}/{5}; capture errors: {6}; callback failures: {7}; warning flags: {8}; dependencies: {9}; update: {10}.", Clip(mod.Id, 96), this.ModStatus(mod.Status), this.ModKind(mod.Kind), Clip(mod.Version, 48), N(mod.SessionWarningCount), N(mod.SessionErrorCount), N(mod.CaptureErrorCount), N(mod.CallbackFailureCount), N(mod.WarningFlags.Length), N(mod.Dependencies.Length), this.UpdateStatus(mod.UpdateStatus));
         return new(
-            attention ? $"Needs attention: {mod.Name}" : mod.Name,
+            attention ? this.F("health-view.content.summary.mod.attention-title", "Needs attention: {0}", mod.Name) : mod.Name,
             detail,
             error ? ModHealthViewerRowSeverity.Error : warning ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Neutral,
             ModHealthViewerRowIconKey.Mod,
@@ -520,33 +526,33 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatCallback(ModHealthCallback callback, int index)
+    private ModHealthViewerDisplayRow FormatCallback(ModHealthCallback callback, int index)
     {
         return new(
-            $"Callback: {callback.ModName}",
-            $"Mod ID: {Clip(callback.ModId, 96)}; {ExecutionPhase(callback.Phase)}/{Operation(callback.Operation)}; calls: {N(callback.CallCount)}; total/average/maximum: {Ms(callback.TotalMilliseconds)} / {SafeAverage(callback.TotalMilliseconds, callback.CallCount)} / {Ms(callback.MaximumMilliseconds)}; failures: {N(callback.FailureCount)}. Select for callback identity.",
+            this.F("health-view.content.summary.callback.title", "Callback: {0}", callback.ModName),
+            this.F("health-view.content.summary.callback.detail", "Mod ID: {0}; {1}/{2}; calls: {3}; total/average/maximum: {4} / {5} / {6}; failures: {7}. Select for callback identity.", Clip(callback.ModId, 96), this.ExecutionPhase(callback.Phase), this.Operation(callback.Operation), N(callback.CallCount), Ms(callback.TotalMilliseconds), this.SafeAverage(callback.TotalMilliseconds, callback.CallCount), Ms(callback.MaximumMilliseconds), N(callback.FailureCount)),
             callback.FailureCount > 0 ? ModHealthViewerRowSeverity.Error : ModHealthViewerRowSeverity.Neutral,
             ModHealthViewerRowIconKey.Callback,
             $"callback-{N(index + 1)}"
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatEpisode(ModHealthEpisode episode, int index)
+    private ModHealthViewerDisplayRow FormatEpisode(ModHealthEpisode episode, int index)
     {
         return new(
-            $"Slow episode {N(index + 1)}",
-            $"Updates {N(episode.FirstUpdateTick)}–{N(episode.LastUpdateTick)}; qualifying updates: {N(episode.QualifyingUpdateCount)}; maximum: {Ms(episode.MaximumMilliseconds)}; summed qualifying time: {Ms(episode.SummedQualifyingMilliseconds)}; representative update: {N(episode.RepresentativeUpdateTick)}; nearby mark: {OptionalNumber(episode.NearbyMark)}.",
+            this.F("health-view.content.summary.episode.title", "Slow episode {0}", N(index + 1)),
+            this.F("health-view.content.summary.episode.detail", "Updates {0}–{1}; qualifying updates: {2}; maximum: {3}; summed qualifying time: {4}; representative update: {5}; nearby mark: {6}.", N(episode.FirstUpdateTick), N(episode.LastUpdateTick), N(episode.QualifyingUpdateCount), Ms(episode.MaximumMilliseconds), Ms(episode.SummedQualifyingMilliseconds), N(episode.RepresentativeUpdateTick), this.OptionalNumber(episode.NearbyMark)),
             ModHealthViewerRowSeverity.Warning,
             ModHealthViewerRowIconKey.Episode,
             $"episode-{N(index + 1)}-{N(episode.RepresentativeUpdateTick)}"
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatUpdate(ModHealthUpdatePresentation update, string title, string stablePrefix)
+    private ModHealthViewerDisplayRow FormatUpdate(ModHealthUpdatePresentation update, string titleKey, string titleFormat, string stablePrefix)
     {
-        string detail = $"Tick {N(update.UpdateTick)}; total: {Ms(update.TotalMilliseconds)}; observed callbacks: {Evidence(update.ObservedCallbacks)}; residual: {Evidence(update.Residual)}; timing valid: {YesNo(update.TimingValid)}; phase: {Clip(update.Phase, 48)}; warnings/errors/failures: {N(update.WarningCount)}/{N(update.ErrorCount)}/{N(update.CallbackFailureCount)}; contributors: {N(update.Contributors.Length)}.";
+        string detail = this.F("health-view.content.summary.update.detail", "Tick {0}; total: {1}; observed callbacks: {2}; residual: {3}; timing valid: {4}; phase: {5}; warnings/errors/failures: {6}/{7}/{8}; contributors: {9}.", N(update.UpdateTick), Ms(update.TotalMilliseconds), this.Evidence(update.ObservedCallbacks), this.Evidence(update.Residual), this.YesNo(update.TimingValid), Clip(update.Phase, 48), N(update.WarningCount), N(update.ErrorCount), N(update.CallbackFailureCount), N(update.Contributors.Length));
         return new(
-            $"{title} {N(update.UpdateTick)}",
+            this.F(titleKey, titleFormat, N(update.UpdateTick)),
             detail,
             update.ErrorCount > 0 || update.CallbackFailureCount > 0 ? ModHealthViewerRowSeverity.Error : ModHealthViewerRowSeverity.Warning,
             ModHealthViewerRowIconKey.Update,
@@ -554,7 +560,7 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatLog(ModHealthLogSummary log, int index)
+    private ModHealthViewerDisplayRow FormatLog(ModHealthLogSummary log, int index)
     {
         ModHealthViewerRowSeverity severity = HasErrors(log.SinceLedgerStart) || HasErrors(log.DuringCapture)
             ? ModHealthViewerRowSeverity.Error
@@ -562,94 +568,94 @@ internal sealed class ModHealthViewerContentAdapter
                 ? ModHealthViewerRowSeverity.Warning
                 : ModHealthViewerRowSeverity.Neutral;
         return new(
-            $"Log source: {log.Source}",
-            $"Category: {LogCategory(log.SourceCategory)}; since ledger start: {FormatSeverity(log.SinceLedgerStart)}; during capture: {FormatSeverity(log.DuringCapture)}; peak: {N(log.PeakMessagesPerSecond)} messages/s, {N(log.PeakCharactersPerSecond)} characters/s; first offset: {OptionalMs(log.FirstOffsetMilliseconds)}; last offset: {OptionalMs(log.LastOffsetMilliseconds)}.",
+            this.F("health-view.content.summary.log.title", "Log source: {0}", log.Source),
+            this.F("health-view.content.summary.log.detail", "Category: {0}; since ledger start: {1}; during capture: {2}; peak: {3} messages/s, {4} characters/s; first offset: {5}; last offset: {6}.", this.LogCategory(log.SourceCategory), this.FormatSeverity(log.SinceLedgerStart), this.FormatSeverity(log.DuringCapture), N(log.PeakMessagesPerSecond), N(log.PeakCharactersPerSecond), this.OptionalMs(log.FirstOffsetMilliseconds), this.OptionalMs(log.LastOffsetMilliseconds)),
             severity,
             ModHealthViewerRowIconKey.Log,
             $"log-{N(index + 1)}-{log.Source}"
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatFailure(ModHealthCallbackFailure failure, int index)
+    private ModHealthViewerDisplayRow FormatFailure(ModHealthCallbackFailure failure, int index)
     {
         return new(
-            $"Callback failure: {failure.ModName}",
-            $"Mod ID: {Clip(failure.ModId, 96)}; {ExecutionPhase(failure.Phase)}/{Operation(failure.Operation)}; session/capture count: {N(failure.SessionCount)}/{N(failure.CaptureCount)}; first/last offset: {Ms(failure.FirstOffsetMilliseconds)} / {Ms(failure.LastOffsetMilliseconds)}. Select for callback and exception identities.",
+            this.F("health-view.content.summary.failure.title", "Callback failure: {0}", failure.ModName),
+            this.F("health-view.content.summary.failure.detail", "Mod ID: {0}; {1}/{2}; session/capture count: {3}/{4}; first/last offset: {5} / {6}. Select for callback and exception identities.", Clip(failure.ModId, 96), this.ExecutionPhase(failure.Phase), this.Operation(failure.Operation), N(failure.SessionCount), N(failure.CaptureCount), Ms(failure.FirstOffsetMilliseconds), Ms(failure.LastOffsetMilliseconds)),
             ModHealthViewerRowSeverity.Error,
             ModHealthViewerRowIconKey.Failure,
             $"failure-{N(index + 1)}-{failure.ModId}"
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatEvidence(string title, ModHealthMeasuredMilliseconds value, string stableId)
+    private ModHealthViewerDisplayRow FormatEvidence(string titleKey, string title, ModHealthMeasuredMilliseconds value, string stableId)
     {
         return new(
-            title,
-            Evidence(value),
+            this.T(titleKey, title),
+            this.Evidence(value),
             value.State == ModHealthEvidenceState.Invalid ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Info,
             ModHealthViewerRowIconKey.Timing,
             stableId
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatGc(ModHealthGcPresentation gc, string stableId)
+    private ModHealthViewerDisplayRow FormatGc(ModHealthGcPresentation gc, string stableId)
     {
         return new(
-            "GC collection correlation",
-            Gc(gc),
+            this.T("health-view.content.summary.gc.title", "GC collection correlation"),
+            this.Gc(gc),
             gc.State == ModHealthEvidenceState.Measured ? ModHealthViewerRowSeverity.Info : ModHealthViewerRowSeverity.Warning,
             ModHealthViewerRowIconKey.Timing,
             stableId
         );
     }
 
-    private static ModHealthViewerDisplayRow FormatOmission(ModHealthOmission omission, string stablePrefix)
+    private ModHealthViewerDisplayRow FormatOmission(ModHealthOmission omission, string stablePrefix)
     {
         return new(
-            $"Omitted: {omission.Section}",
-            $"{N(omission.Count)} entries were omitted from this bounded report section.",
+            this.F("health-view.content.summary.omission.title", "Omitted: {0}", omission.Section),
+            this.F("health-view.content.summary.omission.detail", "{0} entries were omitted from this bounded report section.", N(omission.Count)),
             omission.Count > 0 ? ModHealthViewerRowSeverity.Warning : ModHealthViewerRowSeverity.Neutral,
             ModHealthViewerRowIconKey.Omission,
             $"{stablePrefix}-{omission.Section}"
         );
     }
 
-    private static string Evidence(ModHealthMeasuredMilliseconds value)
+    private string Evidence(ModHealthMeasuredMilliseconds value)
     {
         return value.State switch
         {
-            ModHealthEvidenceState.Measured => $"{Ms(value.Value)} (measured)",
-            ModHealthEvidenceState.Unavailable => "Unavailable; the unseparated time is folded into residual.",
-            ModHealthEvidenceState.Invalid => "Invalid timing evidence; timing percentages are hidden.",
-            ModHealthEvidenceState.NotApplicable => "Not applicable; this ledger-only report has no timed capture.",
-            _ => "Unknown evidence state."
+            ModHealthEvidenceState.Measured => this.F("health-view.content.value.evidence.measured", "{0} (measured)", Ms(value.Value)),
+            ModHealthEvidenceState.Unavailable => this.T("health-view.content.value.evidence.unavailable", "Unavailable; the unseparated time is folded into residual."),
+            ModHealthEvidenceState.Invalid => this.T("health-view.content.value.evidence.invalid", "Invalid timing evidence; timing percentages are hidden."),
+            ModHealthEvidenceState.NotApplicable => this.T("health-view.content.value.evidence.not-applicable", "Not applicable; this ledger-only report has no timed capture."),
+            _ => this.T("health-view.content.value.evidence.unknown", "Unknown evidence state.")
         };
     }
 
-    private static string Ratio(ModHealthMeasuredRatio ratio)
+    private string Ratio(ModHealthMeasuredRatio ratio)
     {
         return ratio.State switch
         {
-            ModHealthEvidenceState.Measured => $"{Percent(ratio.Value)} (measured)",
-            ModHealthEvidenceState.Invalid => "invalid; percentage hidden",
-            ModHealthEvidenceState.NotApplicable => "not applicable; no timed capture",
-            _ => "unavailable"
+            ModHealthEvidenceState.Measured => this.F("health-view.content.value.ratio.measured", "{0} (measured)", Percent(ratio.Value)),
+            ModHealthEvidenceState.Invalid => this.T("health-view.content.value.ratio.invalid", "invalid; percentage hidden"),
+            ModHealthEvidenceState.NotApplicable => this.T("health-view.content.value.ratio.not-applicable", "not applicable; no timed capture"),
+            _ => this.T("health-view.content.value.unavailable", "unavailable")
         };
     }
 
-    private static string Gc(ModHealthGcPresentation gc)
+    private string Gc(ModHealthGcPresentation gc)
     {
         return gc.State switch
         {
-            ModHealthEvidenceState.Measured => $"Process-wide collections (measured correlation): gen0 {N(gc.Gen0Collections)}, gen1 {N(gc.Gen1Collections)}, gen2 {N(gc.Gen2Collections)}.",
-            ModHealthEvidenceState.NotApplicable => "Not applicable; this ledger-only report has no timed capture.",
-            _ => "Unavailable; collection counts are not presented as measured zeros."
+            ModHealthEvidenceState.Measured => this.F("health-view.content.value.gc.measured", "Process-wide collections (measured correlation): gen0 {0}, gen1 {1}, gen2 {2}.", N(gc.Gen0Collections), N(gc.Gen1Collections), N(gc.Gen2Collections)),
+            ModHealthEvidenceState.NotApplicable => this.T("health-view.content.value.gc.not-applicable", "Not applicable; this ledger-only report has no timed capture."),
+            _ => this.T("health-view.content.value.gc.unavailable", "Unavailable; collection counts are not presented as measured zeros.")
         };
     }
 
-    private static string FormatSeverity(ModHealthLogSeveritySummary summary)
+    private string FormatSeverity(ModHealthLogSeveritySummary summary)
     {
-        return $"trace {N(summary.TraceMessages)} messages/{N(summary.TraceCharacters)} chars, debug {N(summary.DebugMessages)}/{N(summary.DebugCharacters)}, info {N(summary.InfoMessages)}/{N(summary.InfoCharacters)}, warning {N(summary.WarningMessages)}/{N(summary.WarningCharacters)}, error {N(summary.ErrorMessages)}/{N(summary.ErrorCharacters)}, alert {N(summary.AlertMessages)}/{N(summary.AlertCharacters)}";
+        return this.F("health-view.content.value.log-severity", "trace {0} messages/{1} chars, debug {2}/{3}, info {4}/{5}, warning {6}/{7}, error {8}/{9}, alert {10}/{11}", N(summary.TraceMessages), N(summary.TraceCharacters), N(summary.DebugMessages), N(summary.DebugCharacters), N(summary.InfoMessages), N(summary.InfoCharacters), N(summary.WarningMessages), N(summary.WarningCharacters), N(summary.ErrorMessages), N(summary.ErrorCharacters), N(summary.AlertMessages), N(summary.AlertCharacters));
     }
 
     private static bool HasErrors(ModHealthLogSeveritySummary summary)
@@ -712,7 +718,7 @@ internal sealed class ModHealthViewerContentAdapter
         if (rowIndex < findingRows)
         {
             if (this.Report.Findings.Rows.Length == 0)
-                return FixedDetails(D("Finding", "No findings were generated from the retained evidence."));
+                return FixedDetails(D("Finding", this.T("health-view.content.value.no-findings", "No findings were generated from the retained evidence.")));
 
             ModHealthFinding finding = this.Report.Findings.Rows[rowIndex];
             return FixedDetails(
@@ -831,7 +837,7 @@ internal sealed class ModHealthViewerContentAdapter
             return FixedDetails(
                 D("Since ledger start", N(errors.CallbackFailureTotals.SinceLedgerStart)),
                 D("During capture", N(errors.CallbackFailureTotals.DuringCapture)),
-                D("Counting limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents.")
+                D("Counting limitation", this.T("health-view.content.value.counting-limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents."))
             );
         }
 
@@ -888,7 +894,7 @@ internal sealed class ModHealthViewerContentAdapter
         return FixedDetails(D("Report limitation", context.Limitations[relative]));
     }
 
-    private static DetailSource CreateHistogramDetails(ModHealthHistogram histogram, bool canShowTimingPercentages)
+    private DetailSource CreateHistogramDetails(ModHealthHistogram histogram, bool canShowTimingPercentages)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
             D("Count", N(histogram.Count)),
@@ -910,22 +916,22 @@ internal sealed class ModHealthViewerContentAdapter
             if (index < fixedRows.Length)
                 return fixedRows[index];
             ModHealthThresholdCount threshold = histogram.Thresholds[index - fixedRows.Length];
-            return D("Threshold", $"{Ms(threshold.Milliseconds)}: {N(threshold.Count)} update ticks", $"threshold-{N(index - fixedRows.Length + 1)}");
+            return D("Threshold", this.F("health-view.content.value.threshold", "{0}: {1} update ticks", Ms(threshold.Milliseconds), N(threshold.Count)), $"threshold-{N(index - fixedRows.Length + 1)}");
         });
     }
 
-    private static DetailSource CreateEvidenceDetails(ModHealthMeasuredMilliseconds evidence)
+    private DetailSource CreateEvidenceDetails(ModHealthMeasuredMilliseconds evidence)
     {
         return evidence.State == ModHealthEvidenceState.Measured
-            ? FixedDetails(D("Evidence state", "measured"), D("Measured value", Ms(evidence.Value)))
+            ? FixedDetails(D("Evidence state", this.T("health-view.content.value.measured", "measured")), D("Measured value", Ms(evidence.Value)))
             : FixedDetails(D("Evidence state", Evidence(evidence)));
     }
 
-    private static DetailSource CreateGcDetails(ModHealthGcPresentation gc)
+    private DetailSource CreateGcDetails(ModHealthGcPresentation gc)
     {
         return gc.State == ModHealthEvidenceState.Measured
             ? FixedDetails(
-                D("Evidence state", "measured process-wide correlation"),
+                D("Evidence state", this.T("health-view.content.value.measured-process-wide", "measured process-wide correlation")),
                 D("Generation 0 collections", N(gc.Gen0Collections)),
                 D("Generation 1 collections", N(gc.Gen1Collections)),
                 D("Generation 2 collections", N(gc.Gen2Collections))
@@ -933,7 +939,7 @@ internal sealed class ModHealthViewerContentAdapter
             : FixedDetails(D("Evidence state", Gc(gc)));
     }
 
-    private static DetailSource CreateModDetails(ModHealthModPresentation mod)
+    private DetailSource CreateModDetails(ModHealthModPresentation mod)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
             D("Mod ID", mod.Id),
@@ -961,7 +967,7 @@ internal sealed class ModHealthViewerContentAdapter
         return AppendedDetails(fixedRows, mod.WarningFlags, "Warning flag", mod.Dependencies, "Dependency ID");
     }
 
-    private static DetailSource CreateCallbackDetails(ModHealthCallback callback)
+    private DetailSource CreateCallbackDetails(ModHealthCallback callback)
     {
         return FixedDetails(
             D("Mod ID", callback.ModId),
@@ -979,7 +985,7 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static DetailSource CreateEpisodeDetails(ModHealthEpisode episode)
+    private DetailSource CreateEpisodeDetails(ModHealthEpisode episode)
     {
         return FixedDetails(
             D("First update tick", N(episode.FirstUpdateTick)),
@@ -992,7 +998,7 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static DetailSource CreateUpdateDetails(ModHealthUpdatePresentation update)
+    private DetailSource CreateUpdateDetails(ModHealthUpdatePresentation update)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
             D("Update tick", N(update.UpdateTick)),
@@ -1017,11 +1023,11 @@ internal sealed class ModHealthViewerContentAdapter
             if (index < fixedRows.Length)
                 return fixedRows[index];
             ModHealthContributor contributor = update.Contributors[index - fixedRows.Length];
-            return D("Observed contributor", $"{contributor.ModId}: {Ms(contributor.Milliseconds)}", $"contributor-{N(index - fixedRows.Length + 1)}");
+            return D("Observed contributor", this.F("health-view.content.value.contributor", "{0}: {1}", contributor.ModId, Ms(contributor.Milliseconds)), $"contributor-{N(index - fixedRows.Length + 1)}");
         });
     }
 
-    private static DetailSource CreateLogDetails(ModHealthLogSummary log)
+    private DetailSource CreateLogDetails(ModHealthLogSummary log)
     {
         ImmutableArray<ModHealthViewerDetailRow> fixedRows = ImmutableArray.Create(
             D("Source", log.Source),
@@ -1038,7 +1044,7 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static DetailSource CreateFailureDetails(ModHealthCallbackFailure failure)
+    private DetailSource CreateFailureDetails(ModHealthCallbackFailure failure)
     {
         return FixedDetails(
             D("Mod ID", failure.ModId),
@@ -1052,11 +1058,11 @@ internal sealed class ModHealthViewerContentAdapter
             D("Capture count", N(failure.CaptureCount)),
             D("First offset", Ms(failure.FirstOffsetMilliseconds)),
             D("Last offset", Ms(failure.LastOffsetMilliseconds)),
-            D("Counting limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents.")
+            D("Counting limitation", this.T("health-view.content.value.counting-limitation", "A failed callback may also emit an error; do not sum those columns as unique incidents."))
         );
     }
 
-    private static DetailSource CreateInventorySummaryDetails(ModHealthModInventorySummary summary)
+    private DetailSource CreateInventorySummaryDetails(ModHealthModInventorySummary summary)
     {
         return FixedDetails(
             D("Total discovered", N(summary.TotalDiscovered)),
@@ -1070,12 +1076,12 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static DetailSource CreateOmissionDetails(ModHealthOmission omission)
+    private DetailSource CreateOmissionDetails(ModHealthOmission omission)
     {
         return FixedDetails(D("Section", omission.Section), D("Omitted entry count", N(omission.Count)));
     }
 
-    private static ImmutableArray<ModHealthViewerDetailRow> CreateSeverityDetails(ModHealthLogSeveritySummary summary, string prefix)
+    private ImmutableArray<ModHealthViewerDetailRow> CreateSeverityDetails(ModHealthLogSeveritySummary summary, string prefix)
     {
         return ImmutableArray.Create(
             D($"{prefix} trace messages", N(summary.TraceMessages)),
@@ -1093,12 +1099,12 @@ internal sealed class ModHealthViewerContentAdapter
         );
     }
 
-    private static DetailSource FixedDetails(params ModHealthViewerDetailRow[] rows)
+    private DetailSource FixedDetails(params ModHealthViewerDetailRow[] rows)
     {
         return new(rows.Length, index => rows[index]);
     }
 
-    private static DetailSource AppendedDetails(ImmutableArray<ModHealthViewerDetailRow> fixedRows, ImmutableArray<ModHealthViewerDetailRow> first, ImmutableArray<ModHealthViewerDetailRow> second)
+    private DetailSource AppendedDetails(ImmutableArray<ModHealthViewerDetailRow> fixedRows, ImmutableArray<ModHealthViewerDetailRow> first, ImmutableArray<ModHealthViewerDetailRow> second)
     {
         return new DetailSource(Add(fixedRows.Length, first.Length, second.Length), index =>
         {
@@ -1111,7 +1117,7 @@ internal sealed class ModHealthViewerContentAdapter
         });
     }
 
-    private static DetailSource AppendedDetails(ImmutableArray<ModHealthViewerDetailRow> fixedRows, ImmutableArray<string> first, string firstLabel, ImmutableArray<string> second, string secondLabel)
+    private DetailSource AppendedDetails(ImmutableArray<ModHealthViewerDetailRow> fixedRows, ImmutableArray<string> first, string firstLabel, ImmutableArray<string> second, string secondLabel)
     {
         return new DetailSource(Add(fixedRows.Length, first.Length, second.Length), index =>
         {
@@ -1125,9 +1131,9 @@ internal sealed class ModHealthViewerContentAdapter
         });
     }
 
-    private static ModHealthViewerDetailRow D(string label, string value, string? stableId = null)
+    private ModHealthViewerDetailRow D(string label, string value, string? stableId = null)
     {
-        return new(label, value, stableId);
+        return new(this.T(GetLabelKey(label), label), value, stableId);
     }
 
     private sealed class DetailSource
@@ -1166,12 +1172,12 @@ internal sealed class ModHealthViewerContentAdapter
         return string.Concat(value.AsSpan(0, maximum - 3), "...");
     }
 
-    private static string SafeAverage(double total, long count)
+    private string SafeAverage(double total, long count)
     {
         if (count <= 0 || !double.IsFinite(total))
-            return "unavailable";
+            return this.T("health-view.content.value.unavailable", "unavailable");
         double average = total / count;
-        return double.IsFinite(average) && average >= 0 ? Ms(average) : "unavailable";
+        return double.IsFinite(average) && average >= 0 ? Ms(average) : this.T("health-view.content.value.unavailable", "unavailable");
     }
 
     private static int Add(params int[] values)
@@ -1182,26 +1188,71 @@ internal sealed class ModHealthViewerContentAdapter
         return result >= int.MaxValue ? int.MaxValue : (int)result;
     }
 
-    private static string Optional(string? value) => string.IsNullOrWhiteSpace(value) ? "none" : value;
-    private static string OptionalNumber(int? value) => value is null ? "none" : N(value.Value);
-    private static string OptionalMs(double? value) => value is null ? "unavailable" : Ms(value.Value);
-    private static string OptionalUtc(DateTimeOffset? value) => value is null ? "not available" : Utc(value.Value);
+    private string Optional(string? value) => string.IsNullOrWhiteSpace(value) ? this.T("health-view.content.value.none", "none") : value;
+    private string OptionalNumber(int? value) => value is null ? this.T("health-view.content.value.none", "none") : N(value.Value);
+    private string OptionalMs(double? value) => value is null ? this.T("health-view.content.value.unavailable", "unavailable") : Ms(value.Value);
+    private string OptionalUtc(DateTimeOffset? value) => value is null ? this.T("health-view.content.value.not-available", "not available") : Utc(value.Value);
     private static string Utc(DateTimeOffset value) => value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture);
     private static string N(long value) => value.ToString("0", CultureInfo.InvariantCulture);
     private static string N(uint value) => value.ToString("0", CultureInfo.InvariantCulture);
     private static string N(int value) => value.ToString("0", CultureInfo.InvariantCulture);
     private static string Ms(double value) => $"{value.ToString("0.###", CultureInfo.InvariantCulture)} ms";
     private static string Percent(double ratio) => $"{(ratio * 100).ToString("0.###", CultureInfo.InvariantCulture)}%";
-    private static string YesNo(bool value) => value ? "yes" : "no";
+    private string YesNo(bool value) => value ? this.T("health-view.content.value.yes", "yes") : this.T("health-view.content.value.no", "no");
 
-    private static string CaptureMode(ModHealthCaptureMode value) => value switch { ModHealthCaptureMode.LedgerOnly => "ledger only", ModHealthCaptureMode.Health => "health", _ => "performance" };
-    private static string Completion(ModHealthCompletionReason value) => value switch { ModHealthCompletionReason.NotStopped => "not stopped", ModHealthCompletionReason.UserStop => "user stop", ModHealthCompletionReason.PerformanceStop => "performance stop", ModHealthCompletionReason.NormalShutdown => "normal shutdown", _ => "interim report" };
-    private static string FindingSeverity(ModHealthFindingSeverity value) => value switch { ModHealthFindingSeverity.ActionNeeded => "action needed", ModHealthFindingSeverity.Performance => "performance", ModHealthFindingSeverity.Check => "check", _ => "info" };
-    private static string Confidence(ModHealthFindingConfidence value) => value switch { ModHealthFindingConfidence.Factual => "factual", ModHealthFindingConfidence.Likely => "likely", ModHealthFindingConfidence.Possible => "possible", _ => "limited" };
-    private static string ModKind(ModHealthModKind value) => value switch { ModHealthModKind.CodeMod => "code mod", ModHealthModKind.ContentPack => "content pack", _ => "invalid" };
-    private static string ModStatus(ModHealthModStatus value) => value.ToString().ToLowerInvariant();
-    private static string UpdateStatus(ModHealthReportUpdateStatus value) => value switch { ModHealthReportUpdateStatus.UpToDate => "up to date", ModHealthReportUpdateStatus.UpdateAvailable => "update available", _ => value.ToString().ToLowerInvariant() };
-    private static string ExecutionPhase(ModHealthExecutionPhase value) => value.ToString().ToLowerInvariant();
-    private static string Operation(ModHealthOperationKind value) => value switch { ModHealthOperationKind.ContentLoad => "content load", ModHealthOperationKind.ContentEdit => "content edit", ModHealthOperationKind.GetApi => "get API", _ => value.ToString().ToLowerInvariant() };
-    private static string LogCategory(ModHealthReportLogSourceCategory value) => value.ToString().ToLowerInvariant();
+    private string CaptureMode(ModHealthCaptureMode value) => this.EnumValue("capture-mode", value.ToString(), value switch { ModHealthCaptureMode.LedgerOnly => "ledger only", ModHealthCaptureMode.Health => "health", _ => "performance" });
+    private string Completion(ModHealthCompletionReason value) => this.EnumValue("completion", value.ToString(), value switch { ModHealthCompletionReason.NotStopped => "not stopped", ModHealthCompletionReason.UserStop => "user stop", ModHealthCompletionReason.PerformanceStop => "performance stop", ModHealthCompletionReason.NormalShutdown => "normal shutdown", _ => "interim report" });
+    private string FindingSeverity(ModHealthFindingSeverity value) => this.EnumValue("finding-severity", value.ToString(), value switch { ModHealthFindingSeverity.ActionNeeded => "action needed", ModHealthFindingSeverity.Performance => "performance", ModHealthFindingSeverity.Check => "check", _ => "info" });
+    private string Confidence(ModHealthFindingConfidence value) => this.EnumValue("confidence", value.ToString(), value switch { ModHealthFindingConfidence.Factual => "factual", ModHealthFindingConfidence.Likely => "likely", ModHealthFindingConfidence.Possible => "possible", _ => "limited" });
+    private string ModKind(ModHealthModKind value) => this.EnumValue("mod-kind", value.ToString(), value switch { ModHealthModKind.CodeMod => "code mod", ModHealthModKind.ContentPack => "content pack", _ => "invalid" });
+    private string ModStatus(ModHealthModStatus value) => this.EnumValue("mod-status", value.ToString(), value.ToString().ToLowerInvariant());
+    private string UpdateStatus(ModHealthReportUpdateStatus value) => this.EnumValue("update-status", value.ToString(), value switch { ModHealthReportUpdateStatus.UpToDate => "up to date", ModHealthReportUpdateStatus.UpdateAvailable => "update available", _ => value.ToString().ToLowerInvariant() });
+    private string ExecutionPhase(ModHealthExecutionPhase value) => this.EnumValue("execution-phase", value.ToString(), value.ToString().ToLowerInvariant());
+    private string Operation(ModHealthOperationKind value) => this.EnumValue("operation", value.ToString(), value switch { ModHealthOperationKind.ContentLoad => "content load", ModHealthOperationKind.ContentEdit => "content edit", ModHealthOperationKind.GetApi => "get API", _ => value.ToString().ToLowerInvariant() });
+    private string LogCategory(ModHealthReportLogSourceCategory value) => this.EnumValue("log-category", value.ToString(), value.ToString().ToLowerInvariant());
+
+    private string EnumValue(string group, string name, string fallback)
+    {
+        return this.T($"health-view.content.enum.{group}.{name.ToLowerInvariant()}", fallback);
+    }
+
+    private string T(string key, string fallback)
+    {
+        string translated = this.Translate(key);
+        return string.IsNullOrWhiteSpace(translated) || translated.Equals(key, StringComparison.Ordinal)
+            ? fallback
+            : translated;
+    }
+
+    private string F(string key, string fallback, params object[] arguments)
+    {
+        string format = this.T(key, fallback);
+        try
+        {
+            return string.Format(CultureInfo.InvariantCulture, format, arguments);
+        }
+        catch (FormatException)
+        {
+            return string.Format(CultureInfo.InvariantCulture, fallback, arguments);
+        }
+    }
+
+    private static string GetLabelKey(string label)
+    {
+        StringBuilder key = new("health-view.content.label.");
+        bool separator = false;
+        foreach (char character in label)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                if (separator && key[^1] != '.')
+                    key.Append('-');
+                key.Append(char.ToLowerInvariant(character));
+                separator = false;
+            }
+            else
+                separator = true;
+        }
+        return key.ToString();
+    }
 }

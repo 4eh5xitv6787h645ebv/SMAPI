@@ -30,6 +30,8 @@ using StardewModdingAPI.Framework.Events;
 using StardewModdingAPI.Framework.Exceptions;
 using StardewModdingAPI.Framework.Extensions;
 using StardewModdingAPI.Framework.Health;
+using StardewModdingAPI.Framework.Health.Viewer;
+using StardewModdingAPI.Framework.Health.Viewer.Game;
 using StardewModdingAPI.Framework.Input;
 using StardewModdingAPI.Framework.Logging;
 using StardewModdingAPI.Framework.Models;
@@ -118,6 +120,9 @@ internal class SCore : IDisposable
     /// <summary>Builds and publishes Linux desktop reports away from the update thread.</summary>
     private readonly ModHealthExportQueue? ModHealthExportQueue;
 
+    /// <summary>Owns the Linux desktop in-game health viewer independently for each local screen.</summary>
+    private readonly PerScreen<ModHealthViewerController?>? ModHealthViewerControllers;
+
     /// <summary>Prevents an export completion callback from crossing the final log-manager disposal boundary.</summary>
     private readonly object ModHealthExportCompletionSync = new();
 
@@ -175,6 +180,9 @@ internal class SCore : IDisposable
 
     /// <summary>A list of commands to execute on each screen.</summary>
     private readonly PerScreen<List<QueuedCommand>> ScreenCommandQueue = new(() => []);
+
+    /// <summary>A shared empty argument list for internal safe-boundary callbacks.</summary>
+    private static readonly string[] NoCommandArguments = [];
 
     /// <summary>The last <see cref="ProcessTicksElapsed"/> for which display events were raised.</summary>
     private readonly PerScreen<uint> LastRenderEventTick = new();
@@ -248,13 +256,15 @@ internal class SCore : IDisposable
                 getCurrentUpdateTick: () => SCore.TicksElapsed
             );
             this.ModHealthSessionCoordinator.ApplySettings(this.GetModHealthDiagnosticSettings(this.Settings), initialLoad: true);
+            this.ModHealthViewerControllers = new();
             this.CommandManager.Add(new PerformanceCommand(this.ModHealthSessionCoordinator), this.Monitor);
-            this.CommandManager.Add(new HealthCommand(this.ModHealthSessionCoordinator), this.Monitor);
+            this.CommandManager.Add(new HealthCommand(this.ModHealthSessionCoordinator, this.QueueModHealthViewerOpen), this.Monitor);
         }
         else
         {
             this.ModHealthExportQueue = null;
             this.ModHealthSessionCoordinator = null;
+            this.ModHealthViewerControllers = null;
             this.ModPerformanceManager.ApplySettings(this.Settings.EnableModPerformanceTracking, this.Settings.LogModPerformanceTicks, this.Settings.ModPerformanceTickThresholdMilliseconds);
             this.CommandManager.Add(new PerformanceCommand(this.ModPerformanceManager), this.Monitor);
         }
@@ -652,6 +662,42 @@ internal class SCore : IDisposable
 #endif
     }
 
+    /// <summary>Queue one screen's viewer open request without mutating game menu state in the console callback.</summary>
+    private ModHealthViewerActionDisposition QueueModHealthViewerOpen()
+    {
+        PerScreen<ModHealthViewerController?> controllers = this.ModHealthViewerControllers
+            ?? throw new InvalidOperationException("The mod health viewer is unavailable on this platform.");
+        ModHealthViewerController? controller = controllers.Value;
+        if (controller is null)
+        {
+            Command? drainCommand = null;
+            controller = new ModHealthViewerController(
+                this.ModHealthSessionCoordinator ?? throw new InvalidOperationException("The mod health coordinator is unavailable."),
+                key => this.Translator.Get(key).ToString(),
+                this.LogModHealthViewerNotice,
+                requestDrain: () =>
+                {
+                    drainCommand ??= new(
+                        mod: null,
+                        name: "health-view-drain",
+                        documentation: "",
+                        callback: (_, _) => controller!.DrainPendingActions()
+                    );
+                    this.ScreenCommandQueue.Value.Add(new(drainCommand, drainCommand.Name, SCore.NoCommandArguments));
+                }
+            );
+            controllers.Value = controller;
+        }
+        return controller.QueueOpen();
+    }
+
+    /// <summary>Log viewer workflow notices without feeding reporter output back into health evidence.</summary>
+    private void LogModHealthViewerNotice(string message)
+    {
+        using IDisposable reporterScope = ModHealthReporterLogScope.Enter();
+        this.Monitor.Log(message, LogLevel.Info);
+    }
+
     /// <summary>Get privacy-safe game context for one timed update tick.</summary>
     private ModHealthTickContext GetModHealthTickContext()
     {
@@ -933,8 +979,9 @@ internal class SCore : IDisposable
             if (this.ScreenCommandQueue.Value.Count > 0)
             {
                 var commandQueue = this.ScreenCommandQueue.Value;
-                foreach ((Command? command, string? name, string[]? args) in commandQueue)
+                for (int commandIndex = 0; commandIndex < commandQueue.Count; commandIndex++)
                 {
+                    (Command command, string name, string[] args) = commandQueue[commandIndex];
                     bool profile = command.Mod != null && this.ModPerformanceManager.IsTracking;
                     HandlerTimingToken timing = profile
                         ? this.ModPerformanceManager.BeginHandler(command.Mod!, $"ConsoleCommand.{command.Name}", $"{command.Callback.Method.DeclaringType?.FullName}.{command.Callback.Method.Name}", ModHealthExecutionPhase.Update, ModHealthOperationKind.Console, onBehalfOfModId: null)
@@ -975,7 +1022,6 @@ internal class SCore : IDisposable
                 }
                 commandQueue.Clear();
             }
-
 
             /*********
             ** Update input

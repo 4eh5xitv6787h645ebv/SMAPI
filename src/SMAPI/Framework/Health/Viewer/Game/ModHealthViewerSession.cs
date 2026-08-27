@@ -11,11 +11,12 @@ namespace StardewModdingAPI.Framework.Health.Viewer.Game;
 internal sealed class ModHealthViewerSession
 {
     private readonly Func<ModHealthViewerActionKind, Guid, Guid, ModHealthViewerActionDisposition> EnqueueAction;
+    private readonly Func<string, string>? TranslateContent;
     private readonly ModHealthViewerActionKind[] AvailableActions = new ModHealthViewerActionKind[ModHealthViewerLayout.MaximumActions];
 
     private ModHealthReport? MappedModel;
 
-    public ModHealthViewerSession(Guid viewerInstanceId, Guid requestId, Func<ModHealthViewerActionKind, Guid, Guid, ModHealthViewerActionDisposition> enqueueAction)
+    public ModHealthViewerSession(Guid viewerInstanceId, Guid requestId, Func<ModHealthViewerActionKind, Guid, Guid, ModHealthViewerActionDisposition> enqueueAction, Func<string, string>? translateContent = null)
     {
         if (viewerInstanceId == Guid.Empty)
             throw new ArgumentException("A viewer instance ID is required.", nameof(viewerInstanceId));
@@ -24,7 +25,8 @@ internal sealed class ModHealthViewerSession
         this.ViewerInstanceId = viewerInstanceId;
         this.RequestId = requestId;
         this.EnqueueAction = enqueueAction ?? throw new ArgumentNullException(nameof(enqueueAction));
-        this.RefreshAvailableActions(status: null);
+        this.TranslateContent = translateContent;
+        this.RefreshAvailableActions(captureState: null);
     }
 
     public Guid ViewerInstanceId { get; }
@@ -45,7 +47,9 @@ internal sealed class ModHealthViewerSession
 
     public int AvailableActionCount { get; private set; }
 
-    /// <summary>Changes whenever the exact request or its projected content changes.</summary>
+    public ModHealthViewerActionDisposition? LastActionDisposition { get; private set; }
+
+    /// <summary>Changes whenever the exact request or any displayed prepared/action state changes.</summary>
     public long ProjectionRevision { get; private set; }
 
     /// <summary>Switch explicitly to another exact request, clearing every projection from the old model.</summary>
@@ -63,8 +67,9 @@ internal sealed class ModHealthViewerSession
         this.TextPath = null;
         this.JsonPath = null;
         this.Error = null;
+        this.LastActionDisposition = null;
         this.ProjectionRevision++;
-        this.RefreshAvailableActions(status: null);
+        this.RefreshAvailableActions(captureState: null);
     }
 
     /// <summary>Apply only a snapshot for this session's exact request and map its immutable model at most once.</summary>
@@ -75,6 +80,13 @@ internal sealed class ModHealthViewerSession
         if (snapshot.RequestId is Guid snapshotRequestId && snapshotRequestId != this.RequestId)
             return;
 
+        ModHealthPreparedReportState oldState = this.PreparedState;
+        Guid? oldNewerRequestId = this.NewerRequestId;
+        string? oldTextPath = this.TextPath;
+        string? oldJsonPath = this.JsonPath;
+        string? oldError = this.Error;
+        ModHealthViewerContentAdapter? oldContent = this.Content;
+
         this.PreparedState = snapshot.State;
         this.NewerRequestId = snapshot.NewerRequestId;
         this.TextPath = KeepSafeRelativePath(snapshot.TextPath);
@@ -83,26 +95,32 @@ internal sealed class ModHealthViewerSession
         if (snapshot.Model is ModHealthReport model && !ReferenceEquals(model, this.MappedModel))
         {
             this.MappedModel = model;
-            this.Content = new ModHealthViewerContentAdapter(mapper.Map(model));
-            this.ProjectionRevision++;
+            this.Content = new ModHealthViewerContentAdapter(mapper.Map(model), this.TranslateContent);
         }
         else if (snapshot.Model is null && snapshot.State is ModHealthPreparedReportState.Absent
             or ModHealthPreparedReportState.FailedBeforeModel
             or ModHealthPreparedReportState.Superseded
             or ModHealthPreparedReportState.Canceled
-            or ModHealthPreparedReportState.Disposed)
+            or ModHealthPreparedReportState.Disposed
+            or ModHealthPreparedReportState.Rejected)
         {
-            bool hadProjection = this.MappedModel is not null || this.Content is not null;
             this.MappedModel = null;
             this.Content = null;
-            if (hadProjection)
-                this.ProjectionRevision++;
         }
-        this.RefreshAvailableActions(status: null);
+        if (oldState != this.PreparedState
+            || oldNewerRequestId != this.NewerRequestId
+            || oldTextPath != this.TextPath
+            || oldJsonPath != this.JsonPath
+            || oldError != this.Error
+            || !ReferenceEquals(oldContent, this.Content))
+        {
+            this.ProjectionRevision++;
+        }
+        this.RefreshAvailableActions(captureState: null);
     }
 
     /// <summary>Rebuild the fixed action pool from report and capture state.</summary>
-    public void RefreshAvailableActions(ModHealthSessionStatus? status)
+    public void RefreshAvailableActions(ModHealthCaptureState? captureState)
     {
         this.AvailableActionCount = 0;
         if (this.PreparedState is ModHealthPreparedReportState.WriteFailed or ModHealthPreparedReportState.FailedBeforeModel)
@@ -110,11 +128,11 @@ internal sealed class ModHealthViewerSession
         if (this.PreparedState == ModHealthPreparedReportState.Superseded && this.NewerRequestId.HasValue)
             this.AddAction(ModHealthViewerActionKind.ViewNewer);
 
-        if (status is not null)
+        if (captureState is not null)
         {
-            if (status.CaptureState == ModHealthCaptureState.Inactive)
+            if (captureState == ModHealthCaptureState.Inactive)
                 this.AddAction(ModHealthViewerActionKind.StartCapture);
-            else if (status.CaptureState == ModHealthCaptureState.Active)
+            else if (captureState == ModHealthCaptureState.Active)
             {
                 this.AddAction(ModHealthViewerActionKind.AddMark);
                 this.AddAction(ModHealthViewerActionKind.StopCapture);
@@ -135,7 +153,22 @@ internal sealed class ModHealthViewerSession
 
     public ModHealthViewerActionDisposition QueueAction(ModHealthViewerActionKind kind)
     {
-        return this.EnqueueAction(kind, this.ViewerInstanceId, this.RequestId);
+        ModHealthViewerActionDisposition disposition = this.EnqueueAction(kind, this.ViewerInstanceId, this.RequestId);
+        if (this.LastActionDisposition != disposition)
+        {
+            this.LastActionDisposition = disposition;
+            this.ProjectionRevision++;
+        }
+        return disposition;
+    }
+
+    /// <summary>Clear transient queue feedback once the next safe boundary has drained the queue.</summary>
+    public void AcknowledgeActionQueueDrained()
+    {
+        if (this.LastActionDisposition is null)
+            return;
+        this.LastActionDisposition = null;
+        this.ProjectionRevision++;
     }
 
     private void AddAction(ModHealthViewerActionKind kind)
@@ -146,8 +179,14 @@ internal sealed class ModHealthViewerSession
 
     private static string? KeepSafeRelativePath(string? path)
     {
-        if (string.IsNullOrWhiteSpace(path) || Path.IsPathRooted(path) || path.Contains(':', StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(path)
+            || path.Length > 4096
+            || Path.IsPathRooted(path)
+            || path.Contains(':', StringComparison.Ordinal)
+            || ContainsUnsafeDisplayCharacter(path))
+        {
             return null;
+        }
         string normalized = path.Replace('\\', '/');
         if (normalized.StartsWith("/", StringComparison.Ordinal)
             || normalized.StartsWith("~", StringComparison.Ordinal)
@@ -159,6 +198,21 @@ internal sealed class ModHealthViewerSession
             return null;
         }
         return path;
+    }
+
+    private static bool ContainsUnsafeDisplayCharacter(string value)
+    {
+        foreach (char character in value)
+        {
+            if (char.IsControl(character)
+                || character is '\u200E' or '\u200F'
+                || character is >= '\u202A' and <= '\u202E'
+                || character is >= '\u2066' and <= '\u2069')
+            {
+                return true;
+            }
+        }
+        return false;
     }
 }
 
@@ -176,6 +230,7 @@ internal static class ModHealthViewerTranslationKeys
     public const string Superseded = "health-view.state.superseded";
     public const string Canceled = "health-view.state.canceled";
     public const string Disposed = "health-view.state.disposed";
+    public const string Rejected = "health-view.state.rejected";
     public const string Absent = "health-view.state.absent";
     public const string NotSaved = "health-view.not-saved";
     public const string Details = "health-view.details";
@@ -216,6 +271,7 @@ internal static class ModHealthViewerTranslationKeys
         ModHealthPreparedReportState.Superseded => Superseded,
         ModHealthPreparedReportState.Canceled => Canceled,
         ModHealthPreparedReportState.Disposed => Disposed,
+        ModHealthPreparedReportState.Rejected => Rejected,
         _ => Absent
     };
 }

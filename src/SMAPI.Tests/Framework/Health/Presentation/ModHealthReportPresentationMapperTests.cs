@@ -156,17 +156,29 @@ internal sealed class ModHealthReportPresentationMapperTests
         ModHealthReport canonical = ModHealthReportFixtureFactory.CreateCanonical();
         ImmutableArray<ModHealthMod> mods = ImmutableArray.Create(
             canonical.Mods[0] with { Id = "loaded.clean", Name = "Clean" },
+            canonical.Mods[0] with { Id = "loaded.warning", Name = "Warning", SessionWarningCount = 1 },
             canonical.Mods[0] with { Id = "loaded.error", Name = "Error", SessionErrorCount = 1 },
+            canonical.Mods[0] with { Id = "loaded.capture-error", Name = "Capture error", CaptureErrorCount = 1 },
             canonical.Mods[0] with { Id = "loaded.failure", Name = "Failure", CallbackFailureCount = 1 },
+            canonical.Mods[0] with { Id = "loaded.warning-flag", Name = "Warning flag", WarningFlags = ImmutableArray.Create("obsolete") },
+            canonical.Mods[0] with { Id = "loaded.update", Name = "Update", UpdateStatus = ModHealthReportUpdateStatus.UpdateAvailable },
             canonical.Mods[0] with { Id = "skipped", Name = "Skipped", Status = ModHealthModStatus.Skipped }
         );
         ModHealthReport report = canonical with { Mods = mods };
 
         ModHealthReportPresentation result = this.Mapper.Map(CreatePayload(report));
 
-        result.Attention.Mods.Count.Should().Be(3);
-        result.Attention.Mods.GetPage(0, 50).Select(mod => mod.Id).Should().Equal("loaded.error", "loaded.failure", "skipped");
-        result.Inventory.Mods.Count.Should().Be(4);
+        result.Attention.Mods.Count.Should().Be(7);
+        result.Attention.Mods.GetPage(0, 50).Select(mod => mod.Id).Should().Equal(
+            "loaded.warning",
+            "loaded.error",
+            "loaded.capture-error",
+            "loaded.failure",
+            "loaded.warning-flag",
+            "loaded.update",
+            "skipped"
+        );
+        result.Inventory.Mods.Count.Should().Be(8);
     }
 
     [Test]

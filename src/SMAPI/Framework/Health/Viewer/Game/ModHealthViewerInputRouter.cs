@@ -1,3 +1,4 @@
+using System;
 using Microsoft.Xna.Framework.Input;
 
 namespace StardewModdingAPI.Framework.Health.Viewer.Game;
@@ -8,11 +9,14 @@ internal enum ModHealthViewerInputKind
     MoveFocus,
     CycleFocus,
     Activate,
+    ExpandStatus,
+    ExpandPrivacy,
     Close
 }
 
 internal enum ModHealthViewerCloseBehavior
 {
+    CloseExpanded,
     CloseDetails,
     CloseViewer
 }
@@ -26,9 +30,26 @@ internal readonly record struct ModHealthViewerInput(
 /// <summary>Pure keyboard/controller/wheel mapping used by the thin game menu.</summary>
 internal static class ModHealthViewerInputRouter
 {
-    public static ModHealthViewerCloseBehavior ResolveClose(bool showingDetails)
+    /// <summary>Whether an open detail/expanded view is no longer tied to displayable content for its exact request.</summary>
+    public static bool ShouldLeaveContentMode(
+        Guid displayedRequestId,
+        Guid currentRequestId,
+        long displayedProjectionRevision,
+        long currentProjectionRevision,
+        object? displayedContent,
+        object? currentContent
+    )
     {
-        return showingDetails ? ModHealthViewerCloseBehavior.CloseDetails : ModHealthViewerCloseBehavior.CloseViewer;
+        return displayedRequestId != currentRequestId
+            || displayedProjectionRevision != currentProjectionRevision
+            || !ReferenceEquals(displayedContent, currentContent);
+    }
+
+    public static ModHealthViewerCloseBehavior ResolveClose(bool showingDetails, bool showingExpanded = false)
+    {
+        return showingExpanded
+            ? ModHealthViewerCloseBehavior.CloseExpanded
+            : showingDetails ? ModHealthViewerCloseBehavior.CloseDetails : ModHealthViewerCloseBehavior.CloseViewer;
     }
 
     public static bool CanActivateRow(int rowIndex, int rowCount)
@@ -57,11 +78,13 @@ internal static class ModHealthViewerInputRouter
             Keys.Home => Navigate(ModHealthViewerNavigationCommand.FirstRow),
             Keys.End => Navigate(ModHealthViewerNavigationCommand.LastRow),
             Keys.Tab => new(ModHealthViewerInputKind.CycleFocus),
+            Keys.I => new(ModHealthViewerInputKind.ExpandStatus),
+            Keys.P => new(ModHealthViewerInputKind.ExpandPrivacy),
             Keys.Enter or Keys.Space => new(ModHealthViewerInputKind.Activate),
             _ => default
         };
         return key is Keys.Escape or Keys.Up or Keys.Down or Keys.Left or Keys.Right
-            or Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End or Keys.Tab or Keys.Enter or Keys.Space;
+            or Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End or Keys.Tab or Keys.I or Keys.P or Keys.Enter or Keys.Space;
     }
 
     public static bool TryMapButton(Buttons button, out ModHealthViewerInput input)
@@ -70,6 +93,8 @@ internal static class ModHealthViewerInputRouter
         {
             Buttons.B or Buttons.Back => new(ModHealthViewerInputKind.Close),
             Buttons.A => new(ModHealthViewerInputKind.Activate),
+            Buttons.Y => new(ModHealthViewerInputKind.ExpandStatus),
+            Buttons.X => new(ModHealthViewerInputKind.ExpandPrivacy),
             Buttons.DPadUp => Move(Layout.ModHealthViewerFocusDirection.Up),
             Buttons.DPadDown => Move(Layout.ModHealthViewerFocusDirection.Down),
             Buttons.DPadLeft => Move(Layout.ModHealthViewerFocusDirection.Left),
@@ -78,7 +103,7 @@ internal static class ModHealthViewerInputRouter
             Buttons.RightShoulder => Navigate(ModHealthViewerNavigationCommand.NextSection),
             _ => default
         };
-        return button is Buttons.B or Buttons.Back or Buttons.A or Buttons.DPadUp or Buttons.DPadDown
+        return button is Buttons.B or Buttons.Back or Buttons.A or Buttons.Y or Buttons.X or Buttons.DPadUp or Buttons.DPadDown
             or Buttons.DPadLeft or Buttons.DPadRight or Buttons.LeftShoulder or Buttons.RightShoulder;
     }
 

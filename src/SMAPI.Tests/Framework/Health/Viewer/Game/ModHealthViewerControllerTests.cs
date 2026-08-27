@@ -4,6 +4,7 @@ using NUnit.Framework;
 using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Health.Viewer;
 using StardewModdingAPI.Framework.Health.Viewer.Game;
+using StardewModdingAPI.Framework.Performance;
 
 namespace SMAPI.Tests.Framework.Health.Viewer.Game;
 
@@ -46,6 +47,21 @@ internal sealed class ModHealthViewerControllerTests
         host.OpenCalls.Should().Be(0);
         controller.LastNoticeTranslationKey.Should().Be(ModHealthViewerTranslationKeys.UnsafeState);
         notice.Should().Be(ModHealthViewerTranslationKeys.UnsafeState);
+    }
+
+    [Test]
+    public void Open_RejectedPreparationKeepsExplicitStateAndRefusalNotice()
+    {
+        FakeCoordinator coordinator = new() { RejectPreparation = true };
+        FakeHost host = new();
+        ModHealthViewerController controller = new(coordinator, host, key => key);
+
+        controller.QueueOpen();
+        controller.DrainPendingActions();
+
+        host.Session!.PreparedState.Should().Be(ModHealthPreparedReportState.Rejected);
+        controller.LastNoticeTranslationKey.Should().Be(ModHealthViewerTranslationKeys.OperationRefused);
+        host.IsOwned.Should().BeTrue("the exact rejected request remains visible instead of being silently substituted");
     }
 
     [Test]
@@ -154,10 +170,12 @@ internal sealed class ModHealthViewerControllerTests
         GetActions(host.Session!).Should().ContainInOrder(ModHealthViewerActionKind.StartCapture, ModHealthViewerActionKind.RefreshAndSaveSnapshot, ModHealthViewerActionKind.Close);
 
         coordinator.CaptureState = ModHealthCaptureState.Active;
+        int actionStateCallsBeforePoll = coordinator.GetViewerActionStateCalls;
         controller.UpdateOwnedViewer(host.Session!.ViewerInstanceId);
 
         GetActions(host.Session).Should().ContainInOrder(ModHealthViewerActionKind.AddMark, ModHealthViewerActionKind.StopCapture, ModHealthViewerActionKind.RefreshAndSaveSnapshot, ModHealthViewerActionKind.Close);
         GetActions(host.Session).Should().NotContain(ModHealthViewerActionKind.StartCapture);
+        coordinator.GetViewerActionStateCalls.Should().Be(actionStateCallsBeforePoll + 1);
     }
 
     [Test]
@@ -179,6 +197,87 @@ internal sealed class ModHealthViewerControllerTests
         allocated.Should().Be(0);
         coordinator.PrepareCalls.Should().Be(0);
         host.OpenCalls.Should().Be(0);
+    }
+
+    [Test]
+    public void PendingDrain_IsScheduledOncePerNonemptyQueueAndAgainAfterClose()
+    {
+        int drainRequests = 0;
+        FakeCoordinator coordinator = new();
+        FakeHost host = new();
+        ModHealthViewerController controller = new(coordinator, host, key => key, requestDrain: () => drainRequests++);
+
+        controller.QueueOpen().Should().Be(ModHealthViewerActionDisposition.Queued);
+        controller.QueueOpen().Should().Be(ModHealthViewerActionDisposition.Coalesced);
+        drainRequests.Should().Be(1);
+        controller.DrainPendingActions();
+
+        ModHealthViewerSession session = host.Session!;
+        session.QueueAction(ModHealthViewerActionKind.AddMark).Should().Be(ModHealthViewerActionDisposition.Queued);
+        session.QueueAction(ModHealthViewerActionKind.AddMark).Should().Be(ModHealthViewerActionDisposition.Queued);
+        drainRequests.Should().Be(2, "only the empty-to-nonempty transition schedules the existing safe command queue");
+        controller.DrainPendingActions();
+
+        session.QueueAction(ModHealthViewerActionKind.Close).Should().Be(ModHealthViewerActionDisposition.Queued);
+        drainRequests.Should().Be(3);
+        controller.DrainPendingActions();
+        controller.QueueOpen().Should().Be(ModHealthViewerActionDisposition.Queued);
+        drainRequests.Should().Be(4, "a closed controller schedules nothing until another explicit open request");
+    }
+
+    [Test]
+    public void QueueFullFeedback_ClearsAfterTheSafeDrainAppliesQueuedActions()
+    {
+        FakeCoordinator coordinator = new();
+        FakeHost host = new();
+        ModHealthViewerController controller = Open(coordinator, host);
+        ModHealthViewerSession session = host.Session!;
+
+        for (int index = 0; index < ModHealthViewerActionQueue.Capacity; index++)
+            session.QueueAction(ModHealthViewerActionKind.AddMark).Should().Be(ModHealthViewerActionDisposition.Queued);
+        session.QueueAction(ModHealthViewerActionKind.AddMark).Should().Be(ModHealthViewerActionDisposition.RejectedFull);
+        session.LastActionDisposition.Should().Be(ModHealthViewerActionDisposition.RejectedFull);
+
+        controller.DrainPendingActions();
+
+        coordinator.MarkCalls.Should().Be(ModHealthViewerActionQueue.Capacity);
+        session.LastActionDisposition.Should().BeNull();
+    }
+
+    [Test]
+    public void OpenViewerPolling_UsesLightweightStateWithoutFreezingDiagnosticsOrAllocating()
+    {
+        int performanceTimestampReads = 0;
+        int ledgerSnapshots = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () =>
+        {
+            performanceTimestampReads++;
+            return 0;
+        }, getGcCollectionCount: _ => 0);
+        ModHealthLedger ledger = new(timestampFrequency: 1000, getTimestamp: () => 0, onSnapshotLocksReleased: () => ledgerSnapshots++);
+        PollExportQueue queue = new();
+        ModHealthSessionCoordinator coordinator = new(
+            manager,
+            ledger,
+            queue,
+            getEnvironment: () => new ModHealthEnvironmentSnapshot("4.5.2", "abcdef0", "1.6.15", ".NET 10", "x64", 64, "Linux", "6.0", "wayland", "en", 8, "single-player", 1, false, false)
+        );
+        FakeHost host = new();
+        ModHealthViewerController controller = new(new ModHealthViewerCoordinatorAdapter(coordinator), host, static key => key);
+        controller.QueueOpen();
+        controller.DrainPendingActions();
+        Guid viewerId = host.Session!.ViewerInstanceId;
+
+        controller.UpdateOwnedViewer(viewerId);
+        int performanceReadsBefore = performanceTimestampReads;
+        int ledgerSnapshotsBefore = ledgerSnapshots;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++)
+            controller.UpdateOwnedViewer(viewerId);
+
+        (GC.GetAllocatedBytesForCurrentThread() - before).Should().Be(0);
+        performanceTimestampReads.Should().Be(performanceReadsBefore, "menu polling must not freeze performance diagnostics");
+        ledgerSnapshots.Should().Be(ledgerSnapshotsBefore, "menu polling must not freeze the session ledger");
     }
 
     private static ModHealthViewerController Open(FakeCoordinator coordinator, FakeHost host)
@@ -254,15 +353,24 @@ internal sealed class ModHealthViewerControllerTests
         public int PrepareCalls { get; private set; }
         public int GetPreparedCalls { get; private set; }
         public int RetryCalls { get; private set; }
+        public int MarkCalls { get; private set; }
+        public int GetViewerActionStateCalls { get; private set; }
         public Guid? LastRetriedId { get; private set; }
         public ModHealthCaptureState CaptureState { get; set; } = ModHealthCaptureState.Inactive;
+        public bool RejectPreparation { get; init; }
 
         public ModHealthViewPreparation PrepareHealthView(bool forceRefresh)
         {
             this.PrepareCalls++;
-            ModHealthPreparedReportSnapshot snapshot = new(ModHealthPreparedReportState.Preparing, this.InitialRequestId);
+            ModHealthPreparedReportSnapshot snapshot = new(
+                this.RejectPreparation ? ModHealthPreparedReportState.Rejected : ModHealthPreparedReportState.Preparing,
+                this.InitialRequestId
+            );
             this.Snapshots[this.InitialRequestId] = snapshot;
-            return new(this.InitialRequestId, Success(), snapshot);
+            ModHealthCoordinatorResult operation = this.RejectPreparation
+                ? new(ModHealthCoordinatorResultCode.Refused, "busy", IsError: true)
+                : Success();
+            return new(this.InitialRequestId, operation, snapshot);
         }
 
         public ModHealthPreparedReportSnapshot GetPreparedHealthReport(Guid requestId)
@@ -273,26 +381,19 @@ internal sealed class ModHealthViewerControllerTests
                 : new(ModHealthPreparedReportState.Absent, requestId);
         }
 
-        public ModHealthSessionStatus GetStatus() => new(
-            this.CaptureState,
-            ModHealthCaptureOwner.None,
-            null,
-            null,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            false,
-            ModHealthExportStatus.None,
-            false
-        );
+        public ModHealthViewerActionState GetViewerActionState()
+        {
+            this.GetViewerActionStateCalls++;
+            return new(this.CaptureState);
+        }
 
         public ModHealthCoordinatorResult StartHealth() => Success();
 
-        public ModHealthCoordinatorResult Mark() => Success();
+        public ModHealthCoordinatorResult Mark()
+        {
+            this.MarkCalls++;
+            return Success();
+        }
 
         public ModHealthCoordinatorResult StopHealth() => Success();
 
@@ -304,5 +405,28 @@ internal sealed class ModHealthViewerControllerTests
         }
 
         private static ModHealthCoordinatorResult Success() => new(ModHealthCoordinatorResultCode.ExportQueued, "ok");
+    }
+
+    private sealed class PollExportQueue : IModHealthExportQueue
+    {
+        private ModHealthPreparedReportSnapshot Prepared = ModHealthPreparedReportSnapshot.Absent;
+
+        public ModHealthExportQueueResult Enqueue(ModHealthExportRequest request)
+        {
+            this.Prepared = new(ModHealthPreparedReportState.Preparing, request.RequestId, request.IsFinal);
+            return new(ModHealthExportDisposition.Queued, new(ModHealthExportState.Queued, request.RequestId, request.IsFinal));
+        }
+
+        public ModHealthExportQueueResult Retry(Guid? requestId = null) => new(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
+
+        public void DiscardRetryable(Guid? requestId = null) { }
+
+        public ModHealthExportStatus GetStatus(Guid? requestId = null) => this.Prepared.RequestId is Guid id && (requestId is null || requestId == id)
+            ? new(ModHealthExportState.Queued, id, this.Prepared.IsFinal)
+            : ModHealthExportStatus.None;
+
+        public ModHealthPreparedReportSnapshot GetPreparedReport(Guid? requestId = null) => this.Prepared.RequestId is Guid id && (requestId is null || requestId == id)
+            ? this.Prepared
+            : ModHealthPreparedReportSnapshot.Absent;
     }
 }

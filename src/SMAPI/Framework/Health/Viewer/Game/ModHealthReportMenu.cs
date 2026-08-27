@@ -39,12 +39,19 @@ internal sealed class ModHealthReportMenu : IClickableMenu
     private long LastProjectionRevision = -1;
     private int SelectedSummaryRow = -1;
     private bool ShowingDetails;
+    private ModHealthViewerExpandedText? ExpandedText;
+    private Guid DisplayedRequestId;
+    private long DisplayedProjectionRevision;
+    private ModHealthViewerContentAdapter? DisplayedContent;
     private bool HasReleasedOwnership;
 
     public ModHealthReportMenu(ModHealthViewerSession session, Func<string, string> translate)
     {
         this.Session = session ?? throw new ArgumentNullException(nameof(session));
         this.Translate = translate ?? throw new ArgumentNullException(nameof(translate));
+        this.DisplayedRequestId = session.RequestId;
+        this.DisplayedProjectionRevision = session.ProjectionRevision;
+        this.DisplayedContent = session.Content;
         this.Recompute(force: true);
     }
 
@@ -88,6 +95,16 @@ internal sealed class ModHealthReportMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.Layout.PrivacyNoticeBounds.Contains(x, y))
+        {
+            this.OpenPrivacyExpanded();
+            return;
+        }
+        if (this.Layout.ContentHeaderBounds.Contains(x, y))
+        {
+            this.OpenStatusExpanded();
+            return;
+        }
         this.Activate(this.Layout.HitTest(x, y));
     }
 
@@ -115,8 +132,14 @@ internal sealed class ModHealthReportMenu : IClickableMenu
         Fill(b, this.Layout.HeaderBounds, HeaderColor);
         Fill(b, this.Layout.PrivacyNoticeBounds, PrivacyColor);
 
-        DrawText(b, this.Translate(ModHealthViewerTranslationKeys.Title), this.Layout.HeaderBounds, Color.White, 8, 4);
-        DrawText(b, this.Translate(ModHealthViewerTranslationKeys.CloseGlyph), this.Layout.CloseBounds, Color.White, this.Layout.CloseBounds.Width / 3, 4);
+        ModHealthLayoutRectangle titleBounds = new(
+            this.Layout.HeaderBounds.X,
+            this.Layout.HeaderBounds.Y,
+            Math.Max(0, this.Layout.CloseBounds.X - this.Layout.HeaderBounds.X - 4),
+            this.Layout.HeaderBounds.Height
+        );
+        DrawText(b, this.Translate(ModHealthViewerTranslationKeys.Title), titleBounds, Color.White, 8, 4);
+        DrawCenteredText(b, this.Translate(ModHealthViewerTranslationKeys.CloseGlyph), this.Layout.CloseBounds, Color.White);
         DrawText(b, this.Translate(ModHealthViewerTranslationKeys.Privacy), this.Layout.PrivacyNoticeBounds, Color.Wheat, 8, 4);
 
         for (int i = 0; i < ModHealthViewerLayout.SectionCount; i++)
@@ -127,15 +150,39 @@ internal sealed class ModHealthReportMenu : IClickableMenu
             DrawText(b, this.Translate(ModHealthViewerTranslationKeys.Section((ModHealthViewerSection)i)), bounds, Color.White, 6, 4);
         }
 
-        string stateText = this.ShowingDetails
-            ? this.Translate(ModHealthViewerTranslationKeys.Details)
-            : this.Translate(ModHealthViewerTranslationKeys.State(this.Session.PreparedState));
+        string stateText = this.Translate(ModHealthViewerTranslationKeys.State(this.Session.PreparedState));
+        if (this.ShowingDetails || this.ExpandedText is not null)
+            stateText += $" · {this.Translate(ModHealthViewerTranslationKeys.Details)}";
+        if (this.ExpandedText is not null)
+            stateText += $" · {this.ExpandedText.PageIndex + 1}/{this.ExpandedText.PageCount}";
         DrawText(b, stateText, this.Layout.ContentHeaderBounds, StateColor(this.Session.PreparedState), 8, 4);
-        DrawText(b, this.GetExactRequestLine(), this.Layout.ContentHeaderBounds, Color.LightGray, 8, 25);
+        bool actionRejected = this.Session.LastActionDisposition == ModHealthViewerActionDisposition.RejectedFull;
+        DrawText(
+            b,
+            actionRejected ? this.Translate(ModHealthViewerTranslationKeys.OperationRefused) : this.GetExactRequestLine(),
+            this.Layout.ContentHeaderBounds,
+            actionRejected ? Color.OrangeRed : Color.LightGray,
+            8,
+            Math.Max(0, this.Layout.ContentHeaderBounds.Height - Game1.smallFont.LineSpacing)
+        );
         if (this.Session.PreparedState == ModHealthPreparedReportState.WriteFailed)
             DrawText(b, this.Translate(ModHealthViewerTranslationKeys.NotSaved), this.Layout.PrivacyNoticeBounds, Color.OrangeRed, 8, 28);
 
-        if (this.ShowingDetails)
+        if (this.ExpandedText is not null)
+        {
+            int lineHeight = Math.Max(1, Game1.smallFont.LineSpacing);
+            for (int i = 0; i < this.ExpandedText.CurrentLineCount; i++)
+            {
+                ModHealthLayoutRectangle bounds = new(
+                    this.Layout.RowViewportBounds.X,
+                    this.Layout.RowViewportBounds.Y + i * lineHeight,
+                    this.Layout.RowViewportBounds.Width,
+                    lineHeight
+                );
+                DrawText(b, this.ExpandedText.GetCurrentLine(i), bounds, i == 0 ? Color.LightBlue : Color.White, 4, 0);
+            }
+        }
+        else if (this.ShowingDetails)
         {
             for (int i = 0; i < this.VisibleDetails.Length; i++)
             {
@@ -157,7 +204,7 @@ internal sealed class ModHealthReportMenu : IClickableMenu
                 ModHealthViewerFocusTarget target = new(ModHealthViewerTargetKind.Row, absoluteIndex);
                 Fill(b, bounds, this.Navigation.RowIndex == absoluteIndex ? SelectedColor : this.Hover == target || this.Focus == target ? HoverColor : PanelColor);
                 ModHealthViewerDisplayRow row = this.VisibleRows[i];
-                DrawText(b, row.Title, bounds, RowColor(row.Severity), 8, 3);
+                DrawText(b, $"{ModHealthViewerText.GetRowCue(row.Severity, row.IconKey)} {row.Title}", bounds, RowColor(row.Severity), 8, 3);
                 DrawText(b, row.Detail, bounds, Color.LightGray, 8, 25);
             }
         }
@@ -198,7 +245,7 @@ internal sealed class ModHealthReportMenu : IClickableMenu
                 if (this.ShowingDetails)
                 {
                     this.DetailNavigation.SelectVisibleRow(target.Index - this.DetailNavigation.FirstVisibleRow, this.GetCurrentRowCount());
-                    this.Recompute(force: true);
+                    this.OpenSelectedExpanded();
                 }
                 else
                 {
@@ -218,6 +265,29 @@ internal sealed class ModHealthReportMenu : IClickableMenu
 
     private void ApplyInput(ModHealthViewerInput input)
     {
+        if (this.ExpandedText is not null)
+        {
+            if (input.Kind == ModHealthViewerInputKind.Navigate)
+            {
+                this.ExpandedText.Apply(input.Navigation);
+                this.Recompute(force: true);
+            }
+            else if (input.Kind == ModHealthViewerInputKind.MoveFocus)
+            {
+                this.ExpandedText.Apply(input.FocusDirection is ModHealthViewerFocusDirection.Up or ModHealthViewerFocusDirection.Left
+                    ? ModHealthViewerNavigationCommand.PreviousRow
+                    : ModHealthViewerNavigationCommand.NextRow);
+                this.Recompute(force: true);
+            }
+            else if (input.Kind is ModHealthViewerInputKind.Close or ModHealthViewerInputKind.Activate)
+                this.CloseExpanded();
+            else if (input.Kind == ModHealthViewerInputKind.ExpandStatus)
+                this.OpenStatusExpanded();
+            else if (input.Kind == ModHealthViewerInputKind.ExpandPrivacy)
+                this.OpenPrivacyExpanded();
+            return;
+        }
+
         switch (input.Kind)
         {
             case ModHealthViewerInputKind.Navigate:
@@ -231,9 +301,15 @@ internal sealed class ModHealthReportMenu : IClickableMenu
                 break;
             case ModHealthViewerInputKind.Activate:
                 if (this.ShowingDetails && this.Focus.Kind == ModHealthViewerTargetKind.Row)
-                    this.CloseDetails();
+                    this.OpenSelectedExpanded();
                 else
                     this.Activate(this.Focus);
+                break;
+            case ModHealthViewerInputKind.ExpandStatus:
+                this.OpenStatusExpanded();
+                break;
+            case ModHealthViewerInputKind.ExpandPrivacy:
+                this.OpenPrivacyExpanded();
                 break;
             case ModHealthViewerInputKind.Close:
                 this.RequestClose();
@@ -279,6 +355,7 @@ internal sealed class ModHealthReportMenu : IClickableMenu
 
     private void SelectSection(int sectionIndex)
     {
+        this.ExpandedText = null;
         this.ShowingDetails = false;
         this.SelectedSummaryRow = -1;
         this.Navigation.SelectSection(sectionIndex, ModHealthViewerLayout.SectionCount, this.GetRowCount((ModHealthViewerSection)sectionIndex));
@@ -288,10 +365,11 @@ internal sealed class ModHealthReportMenu : IClickableMenu
 
     private void Recompute(bool force)
     {
+        this.SynchronizeModeWithSession();
         int viewportWidth = Math.Max(1, Game1.uiViewport.Width);
         int viewportHeight = Math.Max(1, Game1.uiViewport.Height);
         float uiScale = Game1.options?.uiScale ?? 1;
-        int rowCount = this.GetCurrentRowCount();
+        int rowCount = this.ExpandedText is null ? this.GetCurrentRowCount() : 0;
         if (!force
             && viewportWidth == this.LastViewportWidth
             && viewportHeight == this.LastViewportHeight
@@ -309,12 +387,21 @@ internal sealed class ModHealthReportMenu : IClickableMenu
         int preferredNavigationWidth = this.MeasurePreferredNavigationWidth();
         int preferredActionWidth = this.MeasurePreferredActionWidth();
         this.Layout.Recompute(new(viewportWidth, viewportHeight, uiScale, rowCount, activeNavigation.FirstVisibleRow, this.Session.AvailableActionCount, preferredNavigationWidth, preferredActionWidth));
-        activeNavigation.SetVisibleRowCount(this.Layout.VisibleRowCapacity, rowCount);
-        if (this.Layout.FirstVisibleRow != activeNavigation.FirstVisibleRow)
+        if (this.ExpandedText is null)
         {
-            this.Layout.Recompute(new(viewportWidth, viewportHeight, uiScale, rowCount, activeNavigation.FirstVisibleRow, this.Session.AvailableActionCount, preferredNavigationWidth, preferredActionWidth));
+            activeNavigation.SetVisibleRowCount(this.Layout.VisibleRowCapacity, rowCount);
+            if (this.Layout.FirstVisibleRow != activeNavigation.FirstVisibleRow)
+                this.Layout.Recompute(new(viewportWidth, viewportHeight, uiScale, rowCount, activeNavigation.FirstVisibleRow, this.Session.AvailableActionCount, preferredNavigationWidth, preferredActionWidth));
         }
-        if (this.ShowingDetails && this.Session.Content is ModHealthViewerContentAdapter content)
+        if (this.ExpandedText is not null)
+        {
+            int lineHeight = Math.Max(1, Game1.smallFont.LineSpacing);
+            int linesPerPage = Math.Max(1, this.Layout.RowViewportBounds.Height / lineHeight);
+            this.ExpandedText.Reflow(Math.Max(1, this.Layout.RowViewportBounds.Width - 8), linesPerPage, MeasureSmallText);
+            this.VisibleRows = ImmutableArray<ModHealthViewerDisplayRow>.Empty;
+            this.VisibleDetails = ImmutableArray<ModHealthViewerDetailRow>.Empty;
+        }
+        else if (this.ShowingDetails && this.Session.Content is ModHealthViewerContentAdapter content)
         {
             this.VisibleDetails = content.GetDetailPage((ModHealthViewerSection)this.Navigation.SectionIndex, this.SelectedSummaryRow, this.Layout.FirstVisibleRow, this.Layout.VisibleRowCount);
             this.VisibleRows = ImmutableArray<ModHealthViewerDisplayRow>.Empty;
@@ -376,14 +463,87 @@ internal sealed class ModHealthReportMenu : IClickableMenu
 
     private void CloseDetails()
     {
+        this.ExpandedText = null;
         this.ShowingDetails = false;
         this.SelectedSummaryRow = -1;
         this.Focus = new(ModHealthViewerTargetKind.Row, this.Navigation.RowIndex);
         this.Recompute(force: true);
     }
 
+    private void OpenSelectedExpanded()
+    {
+        if (this.Session.Content is not ModHealthViewerContentAdapter content || !this.ShowingDetails)
+            return;
+        ImmutableArray<ModHealthViewerDetailRow> selected = content.GetDetailPage(
+            (ModHealthViewerSection)this.Navigation.SectionIndex,
+            this.SelectedSummaryRow,
+            this.DetailNavigation.RowIndex,
+            1
+        );
+        if (selected.Length == 0)
+            return;
+        this.ExpandedText = new(selected[0].Label, selected[0].Value);
+        this.Recompute(force: true);
+    }
+
+    private void OpenStatusExpanded()
+    {
+        this.ExpandedText = new(
+            this.Translate(ModHealthViewerTranslationKeys.State(this.Session.PreparedState)),
+            this.GetExactRequestLine()
+        );
+        this.Recompute(force: true);
+    }
+
+    private void OpenPrivacyExpanded()
+    {
+        this.ExpandedText = new(
+            this.Translate(ModHealthViewerTranslationKeys.Privacy),
+            this.Session.PreparedState == ModHealthPreparedReportState.WriteFailed
+                ? this.Translate(ModHealthViewerTranslationKeys.NotSaved)
+                : string.Empty
+        );
+        this.Recompute(force: true);
+    }
+
+    private void CloseExpanded()
+    {
+        this.ExpandedText = null;
+        this.Focus = this.ShowingDetails
+            ? new(ModHealthViewerTargetKind.Row, this.DetailNavigation.RowIndex)
+            : new(ModHealthViewerTargetKind.Row, this.Navigation.RowIndex);
+        this.Recompute(force: true);
+    }
+
+    private void SynchronizeModeWithSession()
+    {
+        bool contentModeInvalid = ModHealthViewerInputRouter.ShouldLeaveContentMode(
+            this.DisplayedRequestId,
+            this.Session.RequestId,
+            this.DisplayedProjectionRevision,
+            this.Session.ProjectionRevision,
+            this.DisplayedContent,
+            this.Session.Content
+        );
+        if (contentModeInvalid && (this.ShowingDetails || this.ExpandedText is not null))
+        {
+            this.ExpandedText = null;
+            this.ShowingDetails = false;
+            this.SelectedSummaryRow = -1;
+            this.Focus = new(ModHealthViewerTargetKind.Section, this.Navigation.SectionIndex);
+        }
+        this.DisplayedRequestId = this.Session.RequestId;
+        this.DisplayedProjectionRevision = this.Session.ProjectionRevision;
+        this.DisplayedContent = this.Session.Content;
+    }
+
     private void RequestClose()
     {
+        if (this.ExpandedText is not null)
+        {
+            this.CloseExpanded();
+            return;
+        }
         if (ModHealthViewerInputRouter.ResolveClose(this.ShowingDetails) == ModHealthViewerCloseBehavior.CloseDetails)
             this.CloseDetails();
         else
@@ -402,11 +562,15 @@ internal sealed class ModHealthReportMenu : IClickableMenu
     {
         if (this.Session.NewerRequestId is Guid newerId)
             return $"{this.Translate(ModHealthViewerTranslationKeys.NewerRequest)} {newerId:N}";
-        if (this.Session.TextPath is not null && this.Session.JsonPath is not null)
+        if (this.Session.TextPath is not null)
         {
-            return $"{this.Translate(ModHealthViewerTranslationKeys.TextArtifact)} {this.Session.TextPath} · "
-                + $"{this.Translate(ModHealthViewerTranslationKeys.JsonArtifact)} {this.Session.JsonPath}";
+            string text = $"{this.Translate(ModHealthViewerTranslationKeys.TextArtifact)} {this.Session.TextPath}";
+            return this.Session.JsonPath is null
+                ? text
+                : $"{text} · {this.Translate(ModHealthViewerTranslationKeys.JsonArtifact)} {this.Session.JsonPath}";
         }
+        if (this.Session.JsonPath is not null)
+            return $"{this.Translate(ModHealthViewerTranslationKeys.JsonArtifact)} {this.Session.JsonPath}";
         return $"{this.Translate(ModHealthViewerTranslationKeys.Request)} {this.Session.RequestId:N}";
     }
 
@@ -436,17 +600,33 @@ internal sealed class ModHealthReportMenu : IClickableMenu
     {
         if (bounds.Width <= 0 || bounds.Height <= 0 || string.IsNullOrEmpty(text))
             return;
-        int maximumCharacters = Math.Max(1, (bounds.Width - offsetX * 2) / 8);
-        string visible = text.Length <= maximumCharacters ? text : string.Concat(text.AsSpan(0, Math.Max(1, maximumCharacters - 1)), "…");
+        int availableWidth = Math.Max(0, bounds.Width - offsetX * 2);
+        int availableHeight = bounds.Height - offsetY;
+        if (availableWidth <= 0 || availableHeight < Game1.smallFont.LineSpacing)
+            return;
+        string visible = ModHealthViewerText.ClipToWidth(text, availableWidth, MeasureSmallText);
+        if (visible.Length == 0)
+            return;
         b.DrawString(Game1.smallFont, visible, new Vector2(bounds.X + offsetX, bounds.Y + offsetY), color);
     }
+
+    private static void DrawCenteredText(SpriteBatch b, string text, ModHealthLayoutRectangle bounds, Color color)
+    {
+        string visible = ModHealthViewerText.ClipToWidth(text, Math.Max(0, bounds.Width - 8), MeasureSmallText);
+        if (visible.Length == 0 || bounds.Height < Game1.smallFont.LineSpacing)
+            return;
+        Vector2 size = Game1.smallFont.MeasureString(visible);
+        b.DrawString(Game1.smallFont, visible, new Vector2(bounds.X + Math.Max(4, (bounds.Width - size.X) / 2), bounds.Y + Math.Max(0, (bounds.Height - size.Y) / 2)), color);
+    }
+
+    private static float MeasureSmallText(string text) => Game1.smallFont.MeasureString(text).X;
 
     private static Color StateColor(ModHealthPreparedReportState state)
     {
         return state switch
         {
             ModHealthPreparedReportState.Saved or ModHealthPreparedReportState.ReadyBeforeWrite => Color.LightGreen,
-            ModHealthPreparedReportState.WriteFailed or ModHealthPreparedReportState.FailedBeforeModel => Color.OrangeRed,
+            ModHealthPreparedReportState.WriteFailed or ModHealthPreparedReportState.FailedBeforeModel or ModHealthPreparedReportState.Rejected => Color.OrangeRed,
             ModHealthPreparedReportState.Superseded or ModHealthPreparedReportState.Canceled or ModHealthPreparedReportState.Disposed => Color.Orange,
             _ => Color.White
         };

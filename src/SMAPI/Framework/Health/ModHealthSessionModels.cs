@@ -121,6 +121,9 @@ internal sealed record ModHealthSessionStatus(
     bool HasPendingConfiguration
 );
 
+/// <summary>The minimal allocation-free coordinator state needed to choose viewer actions.</summary>
+internal readonly record struct ModHealthViewerActionState(ModHealthCaptureState CaptureState);
+
 /// <summary>Persistent diagnostic settings which must be applied atomically by the session coordinator.</summary>
 internal readonly record struct ModHealthDiagnosticSettings(
     bool EnableHealthOnLaunch,

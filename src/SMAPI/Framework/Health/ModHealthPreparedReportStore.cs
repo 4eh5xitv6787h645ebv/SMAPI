@@ -16,7 +16,8 @@ internal enum ModHealthPreparedReportState
     Retrying,
     Superseded,
     Canceled,
-    Disposed
+    Disposed,
+    Rejected
 }
 
 /// <summary>An immutable exact-request view of the single prepared report model.</summary>

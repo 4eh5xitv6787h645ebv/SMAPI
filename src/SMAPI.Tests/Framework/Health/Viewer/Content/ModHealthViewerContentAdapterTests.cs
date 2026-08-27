@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Linq;
 using FluentAssertions;
+using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using StardewModdingAPI.Framework.Health;
 using StardewModdingAPI.Framework.Health.Presentation;
@@ -367,6 +369,124 @@ internal sealed class ModHealthViewerContentAdapterTests
             CultureInfo.CurrentCulture = originalCulture;
             CultureInfo.CurrentUICulture = originalUiCulture;
         }
+    }
+
+    [Test]
+    public void TranslationBoundary_DelegatesGeneratedContentAndPreservesCanonicalReportText()
+    {
+        ModHealthFinding finding = new(
+            "canonical-rule",
+            ModHealthFindingSeverity.ActionNeeded,
+            ModHealthFindingConfidence.Factual,
+            "Example.Mod",
+            "Canonical summary",
+            "Canonical evidence",
+            "Canonical suggested action",
+            "Canonical limitation"
+        );
+        ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical() with
+        {
+            Findings = ImmutableArray.Create(finding)
+        };
+        List<string> requestedKeys = new();
+        string Translate(string key)
+        {
+            requestedKeys.Add(key);
+            return key switch
+            {
+                "health-view.content.summary.report.title" => "Translated report {0}",
+                "health-view.content.summary.finding.detail" => "Translated rule {0}; severity {1}; confidence {2}; mod {3}.",
+                "health-view.content.enum.finding-severity.actionneeded" => "translated action needed",
+                "health-view.content.enum.confidence.factual" => "translated factual",
+                "health-view.content.label.evidence" => "Translated evidence label",
+                _ => key
+            };
+        }
+        ModHealthViewerContentAdapter adapter = new(new ModHealthReportPresentationMapper().Map(report), Translate);
+
+        ImmutableArray<ModHealthViewerDisplayRow> overviewRows = adapter.GetPage(ModHealthViewerSection.Overview, 0, 50);
+        ModHealthViewerDisplayRow overview = overviewRows[0];
+        ModHealthViewerDisplayRow findingRow = adapter.GetPage(ModHealthViewerSection.Findings, 0, 1)[0];
+        ImmutableArray<ModHealthViewerDetailRow> details = adapter.GetDetailPage(ModHealthViewerSection.Findings, 0, 0, 50);
+        ImmutableArray<ModHealthViewerDisplayRow> timingCaveats = adapter.GetPage(ModHealthViewerSection.Performance, 7, ModHealthPresentationText.TimingCaveats.Length);
+
+        overview.Title.Should().StartWith("Translated report ").And.EndWith(report.Header.ReportId);
+        findingRow.Title.Should().Be("Canonical summary", "schema-v1 finding prose is report-owned canonical text");
+        findingRow.Detail.Should().Contain("severity translated action needed").And.Contain("confidence translated factual");
+        details.Should().Contain(row => row.Label == "Translated evidence label" && row.Value == "Canonical evidence")
+            .And.Contain(row => row.Value == "Canonical suggested action")
+            .And.Contain(row => row.Value == "Canonical limitation");
+        overviewRows.Skip(2).Select(row => row.Detail).Should().Equal(ModHealthPresentationText.PrivacyNotices);
+        timingCaveats.Select(row => row.Detail).Should().Equal(ModHealthPresentationText.TimingCaveats);
+        requestedKeys.Should().Contain("health-view.content.summary.report.title")
+            .And.Contain("health-view.content.summary.finding.detail")
+            .And.Contain("health-view.content.enum.finding-severity.actionneeded")
+            .And.Contain("health-view.content.label.evidence");
+        requestedKeys.Should().OnlyContain(key => key.StartsWith("health-view.content.", StringComparison.Ordinal));
+    }
+
+    [Test]
+    public void FrozenReport_PreservesFindingSemanticsAcrossViewerTextAndJson()
+    {
+        ImmutableArray<ModHealthFinding> findings = ImmutableArray.Create(
+            new ModHealthFinding("rule-first", ModHealthFindingSeverity.Check, ModHealthFindingConfidence.Possible, "First.Mod", "First summary", "First evidence", "First action", "First limitation"),
+            new ModHealthFinding("rule-second", ModHealthFindingSeverity.ActionNeeded, ModHealthFindingConfidence.Factual, null, "Second summary", "Second evidence", "Second action", "Second limitation")
+        );
+        ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical() with { Findings = findings };
+
+        string textReport = new ModHealthReportTextFormatter().Format(report);
+        JObject jsonReport = JObject.Parse(new ModHealthReportJsonSerializer().Serialize(report));
+        ModHealthViewerContentAdapter viewer = CreateAdapter(report);
+        ImmutableArray<ModHealthViewerDisplayRow> viewerRows = viewer.GetPage(ModHealthViewerSection.Findings, 0, 50);
+
+        jsonReport.Value<string>("schemaVersion").Should().Be(report.SchemaVersion.ToString(CultureInfo.InvariantCulture));
+        jsonReport["header"]!.Value<string>("reportId").Should().Be(report.Header.ReportId);
+        textReport.Should().Contain($"Report ID: {report.Header.ReportId}");
+        viewer.GetPage(ModHealthViewerSection.Overview, 0, 1)[0].Title.Should().Contain(report.Header.ReportId);
+        viewerRows.Take(findings.Length).Select(row => row.Title).Should().Equal(findings.Select(finding => finding.Summary));
+
+        JArray jsonFindings = (JArray)jsonReport["findings"]!;
+        jsonFindings.Should().HaveCount(findings.Length);
+        for (int index = 0; index < findings.Length; index++)
+        {
+            ModHealthFinding finding = findings[index];
+            JObject jsonFinding = (JObject)jsonFindings[index]!;
+            ImmutableArray<ModHealthViewerDetailRow> viewerDetails = viewer.GetDetailPage(ModHealthViewerSection.Findings, index, 0, 50);
+
+            jsonFinding.Value<string>("ruleId").Should().Be(finding.RuleId);
+            jsonFinding.Value<string>("summary").Should().Be(finding.Summary);
+            jsonFinding.Value<string>("evidence").Should().Be(finding.Evidence);
+            jsonFinding.Value<string>("suggestedAction").Should().Be(finding.SuggestedAction);
+            jsonFinding.Value<string>("limitation").Should().Be(finding.Limitation);
+            textReport.Should().Contain(finding.Summary).And.Contain(finding.Evidence).And.Contain(finding.SuggestedAction).And.Contain(finding.Limitation);
+            viewerRows[index].Detail.Should().Contain(finding.RuleId);
+            viewerDetails.Should().Contain(row => row.Label == "Evidence" && row.Value == finding.Evidence)
+                .And.Contain(row => row.Label == "Suggested action" && row.Value == finding.SuggestedAction)
+                .And.Contain(row => row.Label == "Limitation" && row.Value == finding.Limitation);
+        }
+        textReport.IndexOf(findings[0].Summary, StringComparison.Ordinal).Should().BeLessThan(textReport.IndexOf(findings[1].Summary, StringComparison.Ordinal));
+        viewerRows.Skip(findings.Length).Select(row => row.Detail).Should().Equal(findings.Select(finding => finding.SuggestedAction));
+    }
+
+    [Test]
+    public void TranslationBoundary_UsesNonEnglishValuesAndFallsBackForMissingOrMalformedFormats()
+    {
+        ModHealthReport report = ModHealthReportFixtureFactory.CreateCanonical();
+
+        ModHealthViewerContentAdapter translated = new(
+            new ModHealthReportPresentationMapper().Map(report),
+            key => key switch
+            {
+                "health-view.content.summary.report.title" => "Bericht {0}",
+                "health-view.content.summary.report.detail" => "Fehlerhaft {9}",
+                _ => key
+            }
+        );
+
+        ModHealthViewerDisplayRow row = translated.GetPage(ModHealthViewerSection.Overview, 0, 1)[0];
+        row.Title.Should().Be($"Bericht {report.Header.ReportId}");
+        row.Detail.Should().StartWith($"Schema {report.SchemaVersion};", "a malformed translated format must use the complete built-in fallback");
+        translated.GetPage(ModHealthViewerSection.Overview, 1, 1)[0].Title.Should().Be("Privacy summary", "a missing translation key must use the built-in fallback");
     }
 
     private static ModHealthViewerDisplayRow GetSmapiTimingRow(ModHealthReport report)

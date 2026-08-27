@@ -491,6 +491,13 @@ internal sealed class ModHealthSessionCoordinator
         }
     }
 
+    /// <summary>Get the minimal state needed to choose in-game viewer actions without building diagnostic snapshots.</summary>
+    public ModHealthViewerActionState GetViewerActionState()
+    {
+        lock (this.SyncRoot)
+            return new(this.State);
+    }
+
     /// <summary>Get the current or frozen performance snapshot for the advanced report command.</summary>
     public ModPerformanceSnapshot GetPerformanceSnapshot()
     {
@@ -684,7 +691,10 @@ internal sealed class ModHealthSessionCoordinator
 
     private ModHealthViewPreparation CreateViewPreparation(Guid requestId, ModHealthCoordinatorResult operation)
     {
-        return new(requestId, operation, this.ExportQueue.GetPreparedReport(requestId));
+        ModHealthPreparedReportSnapshot prepared = this.ExportQueue.GetPreparedReport(requestId);
+        if (operation.IsError && prepared.State == ModHealthPreparedReportState.Absent)
+            prepared = new(ModHealthPreparedReportState.Rejected, requestId, operation.Export?.IsFinal ?? false);
+        return new(requestId, operation, prepared);
     }
 
     private Guid? GetCurrentViewRequestId()

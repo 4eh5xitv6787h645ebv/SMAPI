@@ -1,3 +1,4 @@
+using System;
 using FluentAssertions;
 using Microsoft.Xna.Framework.Input;
 using NUnit.Framework;
@@ -20,6 +21,8 @@ internal sealed class ModHealthViewerInputRouterTests
     [TestCase(Keys.End, ModHealthViewerInputKind.Navigate, ModHealthViewerNavigationCommand.LastRow)]
     [TestCase(Keys.Enter, ModHealthViewerInputKind.Activate, default(ModHealthViewerNavigationCommand))]
     [TestCase(Keys.Tab, ModHealthViewerInputKind.CycleFocus, default(ModHealthViewerNavigationCommand))]
+    [TestCase(Keys.I, ModHealthViewerInputKind.ExpandStatus, default(ModHealthViewerNavigationCommand))]
+    [TestCase(Keys.P, ModHealthViewerInputKind.ExpandPrivacy, default(ModHealthViewerNavigationCommand))]
     [TestCase(Keys.Escape, ModHealthViewerInputKind.Close, default(ModHealthViewerNavigationCommand))]
     public void Keyboard_MapsRequiredNavigation(Keys key, ModHealthViewerInputKind kind, ModHealthViewerNavigationCommand command)
     {
@@ -29,6 +32,8 @@ internal sealed class ModHealthViewerInputRouterTests
     }
 
     [TestCase(Buttons.A, ModHealthViewerInputKind.Activate)]
+    [TestCase(Buttons.Y, ModHealthViewerInputKind.ExpandStatus)]
+    [TestCase(Buttons.X, ModHealthViewerInputKind.ExpandPrivacy)]
     [TestCase(Buttons.B, ModHealthViewerInputKind.Close)]
     [TestCase(Buttons.LeftShoulder, ModHealthViewerInputKind.Navigate)]
     [TestCase(Buttons.RightShoulder, ModHealthViewerInputKind.Navigate)]
@@ -53,7 +58,7 @@ internal sealed class ModHealthViewerInputRouterTests
     public void UnrelatedInput_IsNotClaimed()
     {
         ModHealthViewerInputRouter.TryMapKey(Keys.F12, out _).Should().BeFalse();
-        ModHealthViewerInputRouter.TryMapButton(Buttons.X, out _).Should().BeFalse();
+        ModHealthViewerInputRouter.TryMapButton(Buttons.RightStick, out _).Should().BeFalse();
     }
 
     [Test]
@@ -70,5 +75,19 @@ internal sealed class ModHealthViewerInputRouterTests
     {
         ModHealthViewerInputRouter.ResolveClose(showingDetails: true).Should().Be(ModHealthViewerCloseBehavior.CloseDetails);
         ModHealthViewerInputRouter.ResolveClose(showingDetails: false).Should().Be(ModHealthViewerCloseBehavior.CloseViewer);
+        ModHealthViewerInputRouter.ResolveClose(showingDetails: true, showingExpanded: true).Should().Be(ModHealthViewerCloseBehavior.CloseExpanded);
+    }
+
+    [Test]
+    public void ContentMode_LeavesOnExactRequestStateOrContentChange()
+    {
+        Guid requestId = Guid.NewGuid();
+        object content = new();
+
+        ModHealthViewerInputRouter.ShouldLeaveContentMode(requestId, Guid.NewGuid(), 1, 1, content, content).Should().BeTrue();
+        ModHealthViewerInputRouter.ShouldLeaveContentMode(requestId, requestId, 1, 1, content, null).Should().BeTrue();
+        ModHealthViewerInputRouter.ShouldLeaveContentMode(requestId, requestId, 1, 2, content, content).Should().BeTrue("Preparing to Saved on one exact request invalidates copied status text");
+        ModHealthViewerInputRouter.ShouldLeaveContentMode(requestId, requestId, 2, 2, content, new object()).Should().BeTrue("a same-request replacement invalidates the selected semantic row");
+        ModHealthViewerInputRouter.ShouldLeaveContentMode(requestId, requestId, 2, 2, content, content).Should().BeFalse();
     }
 }

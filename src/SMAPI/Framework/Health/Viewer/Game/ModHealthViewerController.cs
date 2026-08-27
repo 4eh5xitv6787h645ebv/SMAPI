@@ -25,7 +25,7 @@ internal interface IModHealthViewerCoordinator
 
     ModHealthPreparedReportSnapshot GetPreparedHealthReport(Guid requestId);
 
-    ModHealthSessionStatus GetStatus();
+    ModHealthViewerActionState GetViewerActionState();
 
     ModHealthCoordinatorResult StartHealth();
 
@@ -50,7 +50,7 @@ internal sealed class ModHealthViewerCoordinatorAdapter : IModHealthViewerCoordi
 
     public ModHealthPreparedReportSnapshot GetPreparedHealthReport(Guid requestId) => this.Coordinator.GetPreparedHealthReport(requestId);
 
-    public ModHealthSessionStatus GetStatus() => this.Coordinator.GetStatus();
+    public ModHealthViewerActionState GetViewerActionState() => this.Coordinator.GetViewerActionState();
 
     public ModHealthCoordinatorResult StartHealth() => this.Coordinator.StartHealth();
 
@@ -71,6 +71,7 @@ internal sealed class ModHealthViewerController
     private readonly IModHealthViewerHost Host;
     private readonly Func<string, string> Translate;
     private readonly Action<string>? Notify;
+    private readonly Action? RequestDrain;
     private readonly ModHealthReportPresentationMapper Mapper = new();
     private readonly ModHealthViewerActionQueue Actions = new();
 
@@ -78,18 +79,19 @@ internal sealed class ModHealthViewerController
     private Guid PendingOpenViewerId;
 
     /// <summary>Construct a controller backed by the real game menu host.</summary>
-    public ModHealthViewerController(ModHealthSessionCoordinator coordinator, Func<string, string> translate, Action<string>? notify = null)
-        : this(new ModHealthViewerCoordinatorAdapter(coordinator), new StardewModHealthViewerHost(), translate, notify)
+    public ModHealthViewerController(ModHealthSessionCoordinator coordinator, Func<string, string> translate, Action<string>? notify = null, Action? requestDrain = null)
+        : this(new ModHealthViewerCoordinatorAdapter(coordinator), new StardewModHealthViewerHost(), translate, notify, requestDrain)
     {
     }
 
     /// <summary>Construct a controller with pure seams for safety and ownership tests.</summary>
-    internal ModHealthViewerController(IModHealthViewerCoordinator coordinator, IModHealthViewerHost host, Func<string, string> translate, Action<string>? notify = null)
+    internal ModHealthViewerController(IModHealthViewerCoordinator coordinator, IModHealthViewerHost host, Func<string, string> translate, Action<string>? notify = null, Action? requestDrain = null)
     {
         this.Coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
         this.Host = host ?? throw new ArgumentNullException(nameof(host));
         this.Translate = translate ?? throw new ArgumentNullException(nameof(translate));
         this.Notify = notify;
+        this.RequestDrain = requestDrain;
     }
 
     /// <summary>Whether this screen has actions waiting for the safe pre-update drain.</summary>
@@ -106,7 +108,7 @@ internal sealed class ModHealthViewerController
 
         if (this.PendingOpenViewerId == Guid.Empty)
             this.PendingOpenViewerId = Guid.NewGuid();
-        ModHealthViewerActionDisposition disposition = this.Actions.Enqueue(new(ModHealthViewerActionKind.Open, this.PendingOpenViewerId));
+        ModHealthViewerActionDisposition disposition = this.Enqueue(new(ModHealthViewerActionKind.Open, this.PendingOpenViewerId));
         if (disposition == ModHealthViewerActionDisposition.RejectedFull)
             this.PendingOpenViewerId = Guid.Empty;
         return disposition;
@@ -125,6 +127,7 @@ internal sealed class ModHealthViewerController
             else
                 this.ApplyOwnedAction(action);
         }
+        this.Session?.AcknowledgeActionQueueDrained();
     }
 
     /// <summary>Poll the exact prepared model during an owned menu update without blocking or reading disk/live diagnostic sources.</summary>
@@ -141,7 +144,7 @@ internal sealed class ModHealthViewerController
 
         ModHealthPreparedReportSnapshot prepared = this.Coordinator.GetPreparedHealthReport(session.RequestId);
         session.ApplyPreparedSnapshot(prepared, this.Mapper);
-        session.RefreshAvailableActions(this.Coordinator.GetStatus());
+        this.RefreshAvailableActions(session);
     }
 
     /// <summary>Release references when the game closes or replaces the open menu outside the viewer action queue.</summary>
@@ -158,7 +161,7 @@ internal sealed class ModHealthViewerController
     {
         if (kind == ModHealthViewerActionKind.Open)
             return ModHealthViewerActionDisposition.RejectedFull;
-        return this.Actions.Enqueue(new(kind, viewerInstanceId, expectedRequestId));
+        return this.Enqueue(new(kind, viewerInstanceId, expectedRequestId));
     }
 
     private void Open(Guid viewerInstanceId)
@@ -179,9 +182,9 @@ internal sealed class ModHealthViewerController
 
         // Safety is checked before PrepareHealthView so an unsafe menu never queues report work.
         ModHealthViewPreparation prepared = this.Coordinator.PrepareHealthView(forceRefresh: false);
-        ModHealthViewerSession session = new(viewerInstanceId, prepared.RequestId, this.QueueOwnedAction);
+        ModHealthViewerSession session = new(viewerInstanceId, prepared.RequestId, this.QueueOwnedAction, this.Translate);
         session.ApplyPreparedSnapshot(prepared.PreparedReport, this.Mapper);
-        session.RefreshAvailableActions(this.Coordinator.GetStatus());
+        this.RefreshAvailableActions(session);
         if (!this.Host.TryOpen(session, this, this.Translate, out refusalKey))
         {
             this.SetNotice(refusalKey);
@@ -189,7 +192,10 @@ internal sealed class ModHealthViewerController
         }
 
         this.Session = session;
-        this.SetNotice(ModHealthViewerTranslationKeys.Opened);
+        if (prepared.Operation.IsError)
+            this.SetOperationNotice(prepared.Operation);
+        else
+            this.SetNotice(ModHealthViewerTranslationKeys.Opened);
     }
 
     private void ApplyOwnedAction(ModHealthViewerAction action)
@@ -211,7 +217,7 @@ internal sealed class ModHealthViewerController
 
             case ModHealthViewerActionKind.AddMark:
                 this.SetOperationNotice(this.Coordinator.Mark());
-                session.RefreshAvailableActions(this.Coordinator.GetStatus());
+                this.RefreshAvailableActions(session);
                 break;
 
             case ModHealthViewerActionKind.RefreshAndSaveSnapshot:
@@ -225,7 +231,7 @@ internal sealed class ModHealthViewerController
             case ModHealthViewerActionKind.RetrySave:
                 this.SetOperationNotice(this.Coordinator.RetryHealthExport(session.RequestId));
                 session.ApplyPreparedSnapshot(this.Coordinator.GetPreparedHealthReport(session.RequestId), this.Mapper);
-                session.RefreshAvailableActions(this.Coordinator.GetStatus());
+                this.RefreshAvailableActions(session);
                 break;
 
             case ModHealthViewerActionKind.ViewNewer:
@@ -233,7 +239,7 @@ internal sealed class ModHealthViewerController
                 {
                     session.SwitchRequest(newerRequestId);
                     session.ApplyPreparedSnapshot(this.Coordinator.GetPreparedHealthReport(newerRequestId), this.Mapper);
-                    session.RefreshAvailableActions(this.Coordinator.GetStatus());
+                    this.RefreshAvailableActions(session);
                 }
                 break;
 
@@ -251,7 +257,7 @@ internal sealed class ModHealthViewerController
         if (!operation.IsError)
             this.SwitchRequest(session, this.Coordinator.PrepareHealthView(forceRefresh: true));
         else
-            session.RefreshAvailableActions(this.Coordinator.GetStatus());
+            this.RefreshAvailableActions(session);
     }
 
     private void SwitchRequest(ModHealthViewerSession session, ModHealthViewPreparation preparation)
@@ -259,7 +265,21 @@ internal sealed class ModHealthViewerController
         this.SetOperationNotice(preparation.Operation);
         session.SwitchRequest(preparation.RequestId);
         session.ApplyPreparedSnapshot(preparation.PreparedReport, this.Mapper);
-        session.RefreshAvailableActions(this.Coordinator.GetStatus());
+        this.RefreshAvailableActions(session);
+    }
+
+    private void RefreshAvailableActions(ModHealthViewerSession session)
+    {
+        session.RefreshAvailableActions(this.Coordinator.GetViewerActionState().CaptureState);
+    }
+
+    private ModHealthViewerActionDisposition Enqueue(ModHealthViewerAction action)
+    {
+        bool wasEmpty = !this.Actions.HasPendingActions;
+        ModHealthViewerActionDisposition disposition = this.Actions.Enqueue(action);
+        if (wasEmpty && this.Actions.HasPendingActions)
+            this.RequestDrain?.Invoke();
+        return disposition;
     }
 
     private void SetOperationNotice(ModHealthCoordinatorResult operation)

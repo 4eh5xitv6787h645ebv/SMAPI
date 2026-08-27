@@ -11,14 +11,20 @@ internal enum ModHealthViewerRootMenuKind
     Other
 }
 
-internal readonly record struct ModHealthViewerHostState(bool IsUnsafeTransition, ModHealthViewerRootMenuKind RootMenuKind);
+internal readonly record struct ModHealthViewerHostState(
+    bool IsUnsafeTransition,
+    ModHealthViewerRootMenuKind RootMenuKind,
+    bool IsLocationTransition = false,
+    bool IsFadeTransition = false,
+    bool IsWarpTransition = false
+);
 
 /// <summary>Pure policy for deciding whether opening can preserve all current game/menu ownership.</summary>
 internal static class ModHealthViewerHostPolicy
 {
     public static bool CanOpen(ModHealthViewerHostState state, out string refusalTranslationKey)
     {
-        if (state.IsUnsafeTransition)
+        if (state.IsUnsafeTransition || state.IsLocationTransition || state.IsFadeTransition || state.IsWarpTransition)
         {
             refusalTranslationKey = ModHealthViewerTranslationKeys.UnsafeState;
             return false;
@@ -46,6 +52,9 @@ internal sealed class StardewModHealthViewerHost : IModHealthViewerHost
             || Game1.currentMinigame is not null
             || Game1.dialogueUp
             || Game1.eventUp;
+        bool locationTransition = Context.IsWorldReady && (Game1.currentLocation is null || Game1.player?.currentLocation is null);
+        bool fadeTransition = Game1.fadeToBlack || Game1.fadeToBlackAlpha > 0;
+        bool warpTransition = Game1.locationRequest is not null;
 
         IClickableMenu? active = Game1.activeClickableMenu;
         ModHealthViewerRootMenuKind menuKind = active switch
@@ -53,7 +62,7 @@ internal sealed class StardewModHealthViewerHost : IModHealthViewerHost
             null => ModHealthViewerRootMenuKind.None,
             _ => ModHealthViewerRootMenuKind.Other
         };
-        return ModHealthViewerHostPolicy.CanOpen(new(unsafeTransition, menuKind), out refusalTranslationKey);
+        return ModHealthViewerHostPolicy.CanOpen(new(unsafeTransition, menuKind, locationTransition, fadeTransition, warpTransition), out refusalTranslationKey);
     }
 
     public bool TryOpen(ModHealthViewerSession session, ModHealthViewerController controller, Func<string, string> translate, out string refusalTranslationKey)

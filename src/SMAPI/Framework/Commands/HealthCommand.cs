@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using StardewModdingAPI.Framework.Health;
+using StardewModdingAPI.Framework.Health.Viewer;
 using StardewModdingAPI.Framework.Performance;
 
 namespace StardewModdingAPI.Framework.Commands;
@@ -9,6 +10,7 @@ namespace StardewModdingAPI.Framework.Commands;
 internal sealed class HealthCommand : IInternalCommand
 {
     private readonly ModHealthSessionCoordinator Coordinator;
+    private readonly Func<ModHealthViewerActionDisposition>? QueueViewerOpen;
 
     /// <inheritdoc />
     public string Name { get; } = "health";
@@ -26,6 +28,9 @@ internal sealed class HealthCommand : IInternalCommand
 
         Usage: health status
         Show separate session-ledger, timed-capture, capacity, and export state.
+
+        Usage: health view
+        Open the private Mod Health Report viewer in-game on Linux desktop.
 
         Usage: health mark
         Add a numbered reproduction mark. Free-text marks are deliberately unsupported.
@@ -46,9 +51,10 @@ internal sealed class HealthCommand : IInternalCommand
         """;
 
     /// <summary>Construct an instance.</summary>
-    public HealthCommand(ModHealthSessionCoordinator coordinator)
+    public HealthCommand(ModHealthSessionCoordinator coordinator, Func<ModHealthViewerActionDisposition>? queueViewerOpen = null)
     {
         this.Coordinator = coordinator;
+        this.QueueViewerOpen = queueViewerOpen;
     }
 
     /// <inheritdoc />
@@ -73,6 +79,11 @@ internal sealed class HealthCommand : IInternalCommand
             case "status":
                 if (RequireExactArguments(args, 1, monitor, "Usage: health status"))
                     this.LogStatus(monitor);
+                break;
+
+            case "view":
+                if (RequireExactArguments(args, 1, monitor, "Usage: health view"))
+                    this.OpenViewer(monitor);
                 break;
 
             case "mark":
@@ -105,7 +116,32 @@ internal sealed class HealthCommand : IInternalCommand
                 break;
 
             default:
-                monitor.Log($"Unknown health action '{args[0]}'. Valid actions: start, status, mark, report, stop, retry, reset confirm.", LogLevel.Error);
+                monitor.Log($"Unknown health action '{args[0]}'. Valid actions: start, status, view, mark, report, stop, retry, reset confirm.", LogLevel.Error);
+                break;
+        }
+    }
+
+    private void OpenViewer(IMonitor monitor)
+    {
+        if (this.QueueViewerOpen is null)
+        {
+            monitor.Log("The in-game Mod Health Report viewer is only available in Linux desktop SMAPI.", LogLevel.Error);
+            return;
+        }
+
+        ModHealthViewerActionDisposition result = this.QueueViewerOpen();
+        switch (result)
+        {
+            case ModHealthViewerActionDisposition.Queued:
+                monitor.Log("Opening the Mod Health Report viewer on the next safe game update.", LogLevel.Info);
+                break;
+
+            case ModHealthViewerActionDisposition.Coalesced:
+                monitor.Log("The Mod Health Report viewer is already open or queued for this screen.", LogLevel.Info);
+                break;
+
+            default:
+                monitor.Log("The Mod Health Report viewer request queue is full. Try 'health view' again after the next game update.", LogLevel.Error);
                 break;
         }
     }
@@ -122,7 +158,7 @@ internal sealed class HealthCommand : IInternalCommand
             ModHealthCaptureState.StoppedRetained => "Enter 'health report' to save the retained sample, or 'health reset confirm' to discard it.",
             _ => "Enter 'health start', reproduce the problem, then enter 'health stop'."
         };
-        monitor.Log($"Mod health capture is {FormatCaptureState(status)}. {next}", LogLevel.Info);
+        monitor.Log($"Mod health capture is {FormatCaptureState(status)}. {next} Enter 'health view' to open the in-game report viewer.", LogLevel.Info);
     }
 
     private void LogStatus(IMonitor monitor)
@@ -135,7 +171,7 @@ internal sealed class HealthCommand : IInternalCommand
         string capacity = status.CapacityReached ? " One or more bounded capacities were reached; omissions will be listed in the report." : " No capacity omissions are currently recorded.";
         string pending = status.HasPendingConfiguration ? " Persistent start/stop settings are pending until the manual sample ends." : "";
         monitor.Log(
-            $"Session ledger: {status.SessionWarningCount.ToString("N0", CultureInfo.InvariantCulture)} warnings/alerts and {status.SessionErrorCount.ToString("N0", CultureInfo.InvariantCulture)} errors since managed core initialization. {captureDetails} Export: {status.Export.State.ToString().ToLowerInvariant()}.{capacity}{pending}",
+            $"Session ledger: {status.SessionWarningCount.ToString("N0", CultureInfo.InvariantCulture)} warnings/alerts and {status.SessionErrorCount.ToString("N0", CultureInfo.InvariantCulture)} errors since managed core initialization. {captureDetails} Export: {status.Export.State.ToString().ToLowerInvariant()}.{capacity}{pending} Enter 'health view' to open the in-game report viewer.",
             LogLevel.Info
         );
     }
