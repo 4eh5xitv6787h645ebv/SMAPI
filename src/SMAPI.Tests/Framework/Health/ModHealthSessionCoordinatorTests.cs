@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI;
@@ -334,6 +337,58 @@ internal sealed class ModHealthSessionCoordinatorTests
     }
 
     [Test]
+    public async Task PrepareHealthView_RealQueueFinalSupersedesPendingInterim()
+    {
+        BlockingTestPublisher publisher = new();
+        using RealQueueContext context = new(publisher);
+        context.Coordinator.StartHealth();
+        ModHealthViewPreparation writing = context.Coordinator.PrepareHealthView();
+        publisher.Started.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        ModHealthViewPreparation pending = context.Coordinator.PrepareHealthView(forceRefresh: true);
+
+        ModHealthCoordinatorResult stopped = context.Coordinator.StopHealth();
+        Guid finalId = stopped.Export!.RequestId!.Value;
+        ModHealthViewPreparation final = context.Coordinator.PrepareHealthView();
+
+        context.Queue.GetPreparedReport(pending.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot =>
+            snapshot.State == ModHealthPreparedReportState.Superseded
+            && snapshot.RequestId == pending.RequestId
+            && snapshot.NewerRequestId == finalId
+            && snapshot.Model == null
+        );
+        final.RequestId.Should().Be(finalId);
+        final.RequestId.Should().NotBe(writing.RequestId);
+        final.PreparedReport.Should().Match<ModHealthPreparedReportSnapshot>(snapshot => snapshot.State == ModHealthPreparedReportState.Preparing && snapshot.IsFinal);
+
+        publisher.Release.Set();
+        (await context.Queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        publisher.RequestIds.Should().Equal(writing.RequestId, finalId);
+    }
+
+    [Test]
+    public async Task PrepareHealthView_RealQueueBusyRefreshPreservesLastAcceptedRequest()
+    {
+        BlockingTestPublisher publisher = new();
+        using RealQueueContext context = new(publisher);
+        context.Coordinator.StartHealth();
+        ModHealthViewPreparation writing = context.Coordinator.PrepareHealthView();
+        publisher.Started.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        ModHealthViewPreparation pending = context.Coordinator.PrepareHealthView(forceRefresh: true);
+
+        ModHealthViewPreparation rejected = context.Coordinator.PrepareHealthView(forceRefresh: true);
+        ModHealthViewPreparation reopened = context.Coordinator.PrepareHealthView();
+
+        rejected.Operation.IsError.Should().BeTrue();
+        rejected.RequestId.Should().NotBe(writing.RequestId).And.NotBe(pending.RequestId);
+        rejected.PreparedReport.Should().BeEquivalentTo(new ModHealthPreparedReportSnapshot(ModHealthPreparedReportState.Absent, rejected.RequestId));
+        reopened.RequestId.Should().Be(pending.RequestId);
+        reopened.PreparedReport.State.Should().Be(ModHealthPreparedReportState.Preparing);
+
+        publisher.Release.Set();
+        (await context.Queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+    }
+
+    [Test]
     public void HealthReset_RequiresConfirmationAtCommandLayerAndRestartsActiveHealthWindow()
     {
         Context context = new();
@@ -445,6 +500,51 @@ internal sealed class ModHealthSessionCoordinatorTests
         exact.Code.Should().Be(ModHealthCoordinatorResultCode.Reset);
         context.Coordinator.GetStatus().CaptureState.Should().Be(ModHealthCaptureState.Active);
         context.Coordinator.GetPreparedHealthReport(view.RequestId).State.Should().Be(ModHealthPreparedReportState.Absent);
+    }
+
+    [Test]
+    public async Task RetryHealthExport_RealQueueRetriesExactWriteFailedModel()
+    {
+        FailingOnceTestPublisher publisher = new();
+        using RealQueueContext context = new(publisher);
+        context.Coordinator.StartHealth();
+        ModHealthViewPreparation view = context.Coordinator.PrepareHealthView();
+        (await context.Queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        ModHealthPreparedReportSnapshot failed = context.Coordinator.GetPreparedHealthReport(view.RequestId);
+
+        failed.State.Should().Be(ModHealthPreparedReportState.WriteFailed);
+        failed.Model.Should().NotBeNull();
+        ModHealthCoordinatorResult stale = context.Coordinator.RetryHealthExport(Guid.NewGuid());
+        ModHealthCoordinatorResult retry = context.Coordinator.RetryHealthExport(view.RequestId);
+        stale.Code.Should().Be(ModHealthCoordinatorResultCode.NothingToRetry);
+        stale.Export!.Should().Be(ModHealthExportStatus.None);
+        retry.Code.Should().Be(ModHealthCoordinatorResultCode.ExportRetried);
+
+        (await context.Queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        ModHealthPreparedReportSnapshot saved = context.Coordinator.GetPreparedHealthReport(view.RequestId);
+        saved.State.Should().Be(ModHealthPreparedReportState.Saved);
+        saved.Model.Should().BeSameAs(failed.Model);
+        publisher.RequestIds.Should().Equal(view.RequestId, view.RequestId);
+    }
+
+    [Test]
+    public async Task ResetHealth_RealQueueDiscardsExactUnsavedModelAndRetry()
+    {
+        AlwaysFailTestPublisher publisher = new();
+        using RealQueueContext context = new(publisher);
+        context.Coordinator.StartHealth();
+        ModHealthViewPreparation view = context.Coordinator.PrepareHealthView();
+        (await context.Queue.DrainAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        context.Coordinator.GetPreparedHealthReport(view.RequestId).Should().Match<ModHealthPreparedReportSnapshot>(snapshot =>
+            snapshot.State == ModHealthPreparedReportState.WriteFailed && snapshot.Model != null
+        );
+
+        ModHealthCoordinatorResult reset = context.Coordinator.ResetHealth(view.RequestId);
+
+        reset.Code.Should().Be(ModHealthCoordinatorResultCode.Reset);
+        context.Coordinator.GetStatus().CaptureState.Should().Be(ModHealthCaptureState.Active);
+        context.Coordinator.GetPreparedHealthReport(view.RequestId).Should().BeEquivalentTo(new ModHealthPreparedReportSnapshot(ModHealthPreparedReportState.Absent, view.RequestId));
+        context.Queue.Retry(view.RequestId).Disposition.Should().Be(ModHealthExportDisposition.NoRetryableExport);
     }
 
     [TestCase(ModHealthExportDisposition.Coalesced, ModHealthCoordinatorResultCode.ExportPending, false)]
@@ -692,6 +792,34 @@ internal sealed class ModHealthSessionCoordinatorTests
         }
     }
 
+    private sealed class RealQueueContext : IDisposable
+    {
+        public ModPerformanceManager Manager { get; }
+        public ModHealthLedger Ledger { get; }
+        public ModHealthExportQueue Queue { get; }
+        public ModHealthSessionCoordinator Coordinator { get; }
+
+        public RealQueueContext(IModHealthReportPublisher publisher)
+        {
+            this.Manager = new ModPerformanceManager(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+            this.Ledger = new ModHealthLedger(timestampFrequency: 1000, getTimestamp: () => 0);
+            ModHealthReportPayload payload = new ModHealthReportPayloadFactory().Create(ModHealthReportFixtureFactory.CreateCanonical());
+            this.Queue = new ModHealthExportQueue((_, _) => payload, publisher);
+            this.Coordinator = new ModHealthSessionCoordinator(
+                this.Manager,
+                this.Ledger,
+                this.Queue,
+                getUtcNow: () => new DateTimeOffset(2026, 8, 26, 0, 0, 0, TimeSpan.Zero),
+                getEnvironment: () => new ModHealthEnvironmentSnapshot("4.5.2", "abcdef0", "1.6.15", ".NET 10", "x64", 64, "Linux", "6.0", "wayland", "en", 8, "single-player", 1, false, false)
+            );
+        }
+
+        public void Dispose()
+        {
+            this.Queue.Dispose();
+        }
+    }
+
     private sealed class FakeExportQueue : IModHealthExportQueue
     {
         private readonly Dictionary<Guid, ModHealthExportStatus> Statuses = [];
@@ -747,9 +875,9 @@ internal sealed class ModHealthSessionCoordinatorTests
 
         public ModHealthExportStatus GetStatus(Guid? requestId = null)
         {
-            if (requestId is Guid id && this.Statuses.TryGetValue(id, out ModHealthExportStatus? status))
-                return status;
-            return this.LastRequest != null && this.Statuses.TryGetValue(this.LastRequest.RequestId, out status)
+            if (requestId is Guid id)
+                return this.Statuses.TryGetValue(id, out ModHealthExportStatus? exact) ? exact : ModHealthExportStatus.None;
+            return this.LastRequest != null && this.Statuses.TryGetValue(this.LastRequest.RequestId, out ModHealthExportStatus? status)
                 ? status
                 : ModHealthExportStatus.None;
         }
@@ -772,6 +900,7 @@ internal sealed class ModHealthSessionCoordinatorTests
                 state == ModHealthExportState.Succeeded ? ModHealthPreparedReportState.Saved : state == ModHealthExportState.Failed ? ModHealthPreparedReportState.WriteFailed : ModHealthPreparedReportState.Preparing,
                 request.RequestId,
                 request.IsFinal,
+                Model: state is ModHealthExportState.Succeeded or ModHealthExportState.Failed ? ModHealthReportFixtureFactory.CreateCanonical() : null,
                 TextPath: textPath,
                 JsonPath: jsonPath,
                 Error: state == ModHealthExportState.Failed ? "test failure" : null
@@ -792,6 +921,42 @@ internal sealed class ModHealthSessionCoordinatorTests
         public void SetNextEnqueueResult(ModHealthExportDisposition disposition)
         {
             this.NextEnqueueDisposition = disposition;
+        }
+    }
+
+    private sealed class BlockingTestPublisher : IModHealthReportPublisher
+    {
+        public ManualResetEventSlim Started { get; } = new(false);
+        public ManualResetEventSlim Release { get; } = new(false);
+        public ConcurrentQueue<Guid> RequestIds { get; } = new();
+
+        public ModHealthPublishedReport Publish(ModHealthExportRequest request, ModHealthReportPayload payload, CancellationToken cancellationToken)
+        {
+            this.RequestIds.Enqueue(request.RequestId);
+            this.Started.Set();
+            this.Release.Wait(cancellationToken);
+            return new("ErrorLogs/HealthReports/report.txt", "ErrorLogs/HealthReports/report.json");
+        }
+    }
+
+    private sealed class FailingOnceTestPublisher : IModHealthReportPublisher
+    {
+        public ConcurrentQueue<Guid> RequestIds { get; } = new();
+
+        public ModHealthPublishedReport Publish(ModHealthExportRequest request, ModHealthReportPayload payload, CancellationToken cancellationToken)
+        {
+            this.RequestIds.Enqueue(request.RequestId);
+            if (this.RequestIds.Count == 1)
+                throw new InvalidOperationException("injected write failure");
+            return new("ErrorLogs/HealthReports/report.txt", "ErrorLogs/HealthReports/report.json");
+        }
+    }
+
+    private sealed class AlwaysFailTestPublisher : IModHealthReportPublisher
+    {
+        public ModHealthPublishedReport Publish(ModHealthExportRequest request, ModHealthReportPayload payload, CancellationToken cancellationToken)
+        {
+            throw new InvalidOperationException("injected write failure");
         }
     }
 }
