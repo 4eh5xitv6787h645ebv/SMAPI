@@ -66,14 +66,24 @@ internal readonly record struct ModHealthUpdatePerformanceSnapshot(
     bool GcCollectionDataIsValid,
     IReadOnlyList<ModHealthTickContributorSnapshot> Contributors,
     long OmittedContributorIdentities,
-    long OmittedContributorObservations
+    long OmittedContributorObservations,
+    double SmapiUpdateMilliseconds = 0,
+    double InstrumentedDuringSmapiUpdateMilliseconds = 0,
+    bool SmapiUpdateTimingAvailable = false
 )
 {
     /// <summary>Base game update time excluding observed callbacks which ran within it.</summary>
     public double GameUpdateExclusiveMilliseconds => this.GameUpdateMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds;
 
-    /// <summary>Residual time outside the measured game update and observed callback boundaries.</summary>
-    public double ResidualMilliseconds => this.TotalMilliseconds - this.GameUpdateMilliseconds - (this.InstrumentedModMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds);
+    /// <summary>Separately measured SMAPI update time excluding observed callbacks which ran within it.</summary>
+    public double SmapiUpdateExclusiveMilliseconds => this.SmapiUpdateMilliseconds - this.InstrumentedDuringSmapiUpdateMilliseconds;
+
+    /// <summary>Residual time outside the measured game, SMAPI update, and observed callback boundaries.</summary>
+    public double ResidualMilliseconds =>
+        this.TotalMilliseconds
+        - this.GameUpdateMilliseconds
+        - this.SmapiUpdateMilliseconds
+        - (this.InstrumentedModMilliseconds - this.InstrumentedDuringGameUpdateMilliseconds - this.InstrumentedDuringSmapiUpdateMilliseconds);
 }
 
 /// <summary>One observed mod contributor retained for a slow update.</summary>

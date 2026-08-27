@@ -14,11 +14,13 @@ namespace SMAPI.Tests.Framework.Commands;
 internal sealed class PerformanceCommandTests
 {
     [Test]
-    public void Description_DoesNotClaimUnavailableSmapiOtherTimingIsMeasured()
+    public void Description_ExplainsMeasuredSmapiUpdateDispatchWithoutCpuOrCausationClaims()
     {
         PerformanceCommand command = new(new ModPerformanceManager(timestampFrequency: 1000, getTimestamp: () => 0));
 
-        command.Description.Should().Contain("SMAPI/other update timing is unavailable");
+        command.Description.Should().Contain("SMAPI update dispatch observed outside the base-game update");
+        command.Description.Should().Contain("not total SMAPI CPU or proof of cause");
+        command.Description.Should().Contain("waiting, scheduling, and unobserved nested work");
         command.Description.Should().NotContain("SMAPI dispatch & other time");
     }
 

@@ -51,16 +51,18 @@ internal sealed class ModHealthReportTextFormatter
             text.Append("Report detail was truncated; see omissions below.\n");
 
         text.Append("\nSlow update overview\n")
-            .Append("Definitions: a callback is mod-owned code observed at a named SMAPI boundary; unattributed time is work outside those measured boundaries and is not assigned to a cause.\n")
+            .Append("Definitions: a callback is mod-owned code observed at a named SMAPI boundary; residual time is outside the categorized update boundaries and is not assigned to a cause.\n")
+            .Append("Timing is elapsed wall-clock correlation, not proof of CPU ownership or cause. Base-game-exclusive time can include Harmony patches and direct mod API work invoked by the game.\n")
             .Append("Slow update threshold: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Capture.SlowUpdateThresholdMilliseconds)).Append(" ms\n")
             .Append("Slow update ticks: ").Append(report.Performance.SlowUpdateCount.ToString(CultureInfo.InvariantCulture)).Append('\n')
             .Append("Observed mod callbacks: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalObservedModMilliseconds)).Append(" ms\n")
             .Append("Base-game update (exclusive): ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalBaseGameExclusiveMilliseconds)).Append(" ms\n");
         if (report.Performance.SmapiOtherTimingAvailable)
-            text.Append("Separately measured SMAPI/other update work: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalSmapiOtherMilliseconds)).Append(" ms\n");
+            text.Append("SMAPI update dispatch observed outside the base-game update: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalSmapiOtherMilliseconds)).Append(" ms\n")
+                .Append("This is not total SMAPI CPU; the measured boundary can include waiting, scheduling, and unobserved nested work.\n");
         else
-            text.Append("Separately measured SMAPI/other update work: unavailable; no owned measurement boundary was active.\n");
-        text.Append("Remaining unattributed time: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalResidualMilliseconds)).Append(" ms\n");
+            text.Append("SMAPI update dispatch observed outside the base-game update: unavailable; no valid owned measurement boundary was active for every completed tick.\n");
+        text.Append("Remaining uncategorized residual time: ").Append(ModHealthReportTextFormatter.FormatMilliseconds(report.Performance.TotalResidualMilliseconds)).Append(" ms\n");
         ModHealthHistogram histogram = report.Performance.Histogram;
         if (histogram.Count > 0)
         {
@@ -114,10 +116,10 @@ internal sealed class ModHealthReportTextFormatter
         {
             text.Append("- Update tick ").Append(update.UpdateTick.ToString(CultureInfo.InvariantCulture)).Append(": ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.TotalMilliseconds)).Append(" ms total; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ObservedModMilliseconds)).Append(" ms observed mod callbacks; ").Append(ModHealthReportTextFormatter.FormatMilliseconds(update.BaseGameExclusiveMilliseconds)).Append(" ms base-game exclusive; ");
             if (update.SmapiOtherTimingAvailable)
-                text.Append(ModHealthReportTextFormatter.FormatMilliseconds(update.SmapiOtherMilliseconds)).Append(" ms SMAPI/other;");
+                text.Append(ModHealthReportTextFormatter.FormatMilliseconds(update.SmapiOtherMilliseconds)).Append(" ms SMAPI update dispatch observed outside the base-game update;");
             else
-                text.Append("SMAPI/other not separately measured;");
-            text.Append(' ').Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ResidualMilliseconds)).Append(" ms remaining unattributed; ");
+                text.Append("SMAPI update dispatch outside the base-game update unavailable;");
+            text.Append(' ').Append(ModHealthReportTextFormatter.FormatMilliseconds(update.ResidualMilliseconds)).Append(" ms uncategorized residual; ");
             if (update.GcCollectionDataValid)
                 text.Append("GC ").Append(update.Gen0Collections.ToString(CultureInfo.InvariantCulture)).Append('/').Append(update.Gen1Collections.ToString(CultureInfo.InvariantCulture)).Append('/').Append(update.Gen2Collections.ToString(CultureInfo.InvariantCulture)).Append(" process-wide");
             else

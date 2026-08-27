@@ -788,6 +788,7 @@ internal class SCore : IDisposable
         {
             long performanceTickStart = Stopwatch.GetTimestamp();
             this.ModPerformanceManager.BeginTick(SCore.TicksElapsed, performanceTickStart, this.GetModHealthTickContext());
+            this.ModPerformanceManager.BeginSmapiUpdate();
         }
 
         try
@@ -861,7 +862,17 @@ internal class SCore : IDisposable
             /*********
             ** Run game update
             *********/
-            runGameUpdate(gameTime);
+            if (profileTick)
+                this.ModPerformanceManager.EndSmapiUpdate();
+            try
+            {
+                runGameUpdate(gameTime);
+            }
+            finally
+            {
+                if (profileTick)
+                    this.ModPerformanceManager.BeginSmapiUpdate();
+            }
 
             /*********
             ** Reset crash timer
@@ -881,6 +892,7 @@ internal class SCore : IDisposable
         {
             if (profileTick)
             {
+                this.ModPerformanceManager.EndSmapiUpdate();
                 TickPerformanceSnapshot? tick = this.ModPerformanceManager.CompleteTick(Stopwatch.GetTimestamp());
                 if (tick.HasValue)
                     this.Monitor.Log(ModPerformanceReportFormatter.FormatTick(tick.Value), LogLevel.Info);
@@ -897,11 +909,13 @@ internal class SCore : IDisposable
     /// <param name="runUpdate">Invoke the game's update logic for the given timing state.</param>
     private void OnPlayerInstanceUpdating(SGame instance, GameTime gameTime, Action<GameTime> runUpdate)
     {
-        EventManager events = this.EventManager;
-        bool verbose = this.Monitor.IsVerbose;
+        this.ModPerformanceManager.BeginSmapiUpdate();
 
         try
         {
+            EventManager events = this.EventManager;
+            bool verbose = this.Monitor.IsVerbose;
+
             /*********
             ** Reapply overrides
             *********/
@@ -1446,6 +1460,10 @@ internal class SCore : IDisposable
             if (!this.UpdateCrashTimer.Decrement())
                 this.ExitGameImmediately("The game crashed when updating, and SMAPI was unable to recover the game.");
         }
+        finally
+        {
+            this.ModPerformanceManager.EndSmapiUpdate();
+        }
     }
 
     /// <summary>Run one base game update, measuring the owned boundary without allocating a wrapper delegate per tick.</summary>
@@ -1460,6 +1478,7 @@ internal class SCore : IDisposable
             return;
         }
 
+        performanceManager.EndSmapiUpdate();
         performanceManager.BeginGameUpdate();
         try
         {
@@ -1468,6 +1487,7 @@ internal class SCore : IDisposable
         finally
         {
             performanceManager.EndGameUpdate();
+            performanceManager.BeginSmapiUpdate();
         }
     }
 

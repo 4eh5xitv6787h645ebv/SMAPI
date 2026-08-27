@@ -208,6 +208,143 @@ internal sealed class ModPerformanceManagerTests
     }
 
     [Test]
+    public void SmapiUpdate_ProducesExactFourBucketPartition()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        timestamp = 2;
+        manager.BeginSmapiUpdate();
+        timestamp = 4;
+        HandlerTimingToken smapiHandler = manager.BeginHandler("Smapi.Mod", "SMAPI Mod", "Event", "Smapi.Mod.Run");
+        timestamp = 8;
+        manager.EndHandler(smapiHandler, failed: false);
+        timestamp = 12;
+        manager.EndSmapiUpdate();
+
+        timestamp = 14;
+        manager.BeginGameUpdate();
+        timestamp = 16;
+        HandlerTimingToken gameHandler = manager.BeginHandler("Game.Mod", "Game Mod", "Event", "Game.Mod.Run");
+        timestamp = 19;
+        manager.EndHandler(gameHandler, failed: false);
+        timestamp = 24;
+        manager.EndGameUpdate();
+
+        timestamp = 25;
+        HandlerTimingToken unownedHandler = manager.BeginHandler("Other.Mod", "Other Mod", "Event", "Other.Mod.Run");
+        timestamp = 27;
+        manager.EndHandler(unownedHandler, failed: false);
+        manager.CompleteTick(endTimestamp: 30);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        TickPerformanceSnapshot tick = snapshot.RecentTicks.Should().ContainSingle().Subject;
+        tick.Should().Match<TickPerformanceSnapshot>(value =>
+            value.TotalMilliseconds == 30
+            && value.GameUpdateMilliseconds == 10
+            && value.InstrumentedDuringGameUpdateMilliseconds == 3
+            && value.SmapiUpdateMilliseconds == 10
+            && value.InstrumentedDuringSmapiUpdateMilliseconds == 4
+            && value.InstrumentedModMilliseconds == 9
+            && value.TimingPartitionIsValid
+            && value.SmapiUpdateTimingAvailable
+        );
+        tick.GameUpdateExclusiveMilliseconds.Should().Be(7);
+        tick.SmapiUpdateExclusiveMilliseconds.Should().Be(6);
+        tick.ResidualMilliseconds.Should().Be(8);
+        (tick.GameUpdateExclusiveMilliseconds + tick.SmapiUpdateExclusiveMilliseconds + tick.InstrumentedModMilliseconds + tick.ResidualMilliseconds).Should().Be(tick.TotalMilliseconds);
+
+        snapshot.GameUpdateExclusiveMilliseconds.Should().Be(7);
+        snapshot.SmapiUpdateExclusiveMilliseconds.Should().Be(6);
+        snapshot.TickInstrumentedMilliseconds.Should().Be(9);
+        snapshot.ResidualMilliseconds.Should().Be(8);
+        snapshot.SmapiUpdateTimingAvailable.Should().BeTrue();
+
+        ModHealthUpdatePerformanceSnapshot health = snapshot.Health!.RecentUpdates.Should().ContainSingle().Subject;
+        health.SmapiUpdateExclusiveMilliseconds.Should().Be(6);
+        health.ResidualMilliseconds.Should().Be(8);
+        health.SmapiUpdateTimingAvailable.Should().BeTrue();
+    }
+
+    [Test]
+    public void SmapiUpdate_AggregateAvailabilityRequiresEveryCompletedTick()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+        manager.CompleteTick(endTimestamp: 10);
+
+        manager.BeginTick(tick: 2, startTimestamp: 10);
+        timestamp = 12;
+        manager.BeginSmapiUpdate();
+        timestamp = 18;
+        manager.EndSmapiUpdate();
+        manager.CompleteTick(endTimestamp: 20);
+
+        ModPerformanceSnapshot snapshot = manager.GetSnapshot();
+        snapshot.RecentTicks.Should().SatisfyRespectively(
+            first => first.SmapiUpdateTimingAvailable.Should().BeFalse(),
+            second => second.SmapiUpdateTimingAvailable.Should().BeTrue()
+        );
+        snapshot.SmapiUpdateMilliseconds.Should().Be(6);
+        snapshot.SmapiUpdateTimingAvailable.Should().BeFalse();
+        snapshot.ResidualMilliseconds.Should().Be(14);
+        snapshot.OutsideGameUpdateMilliseconds.Should().Be(20);
+    }
+
+    [Test]
+    public void SmapiAndGameUpdateScopes_CannotOverlap()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        timestamp = 1;
+        manager.BeginSmapiUpdate();
+        timestamp = 2;
+        manager.BeginGameUpdate();
+        timestamp = 3;
+        manager.EndGameUpdate();
+        timestamp = 4;
+        manager.EndSmapiUpdate();
+        manager.CompleteTick(endTimestamp: 5);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.TimingPartitionIsValid.Should().BeFalse();
+        tick.SmapiUpdateTimingAvailable.Should().BeFalse();
+    }
+
+    [Test]
+    public void HandlerCrossingOwnedDomainBoundary_InvalidatesPartition()
+    {
+        long timestamp = 0;
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => timestamp, getGcCollectionCount: _ => 0);
+        manager.Start();
+        manager.BeginTick(tick: 1, startTimestamp: 0);
+
+        timestamp = 1;
+        manager.BeginSmapiUpdate();
+        timestamp = 2;
+        HandlerTimingToken handler = manager.BeginHandler("Example.Mod", "Example", "Event", "Example.Run");
+        timestamp = 5;
+        manager.EndSmapiUpdate();
+        timestamp = 6;
+        manager.EndHandler(handler, failed: false);
+        manager.CompleteTick(endTimestamp: 10);
+
+        TickPerformanceSnapshot tick = manager.GetSnapshot().RecentTicks.Should().ContainSingle().Subject;
+        tick.InstrumentedModMilliseconds.Should().Be(4);
+        tick.InstrumentedDuringSmapiUpdateMilliseconds.Should().Be(0);
+        tick.TimingPartitionIsValid.Should().BeFalse();
+        tick.SmapiUpdateTimingAvailable.Should().BeFalse();
+    }
+
+    [Test]
     public void GameUpdateBoundary_RejectsWrongThread()
     {
         ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
@@ -362,6 +499,27 @@ internal sealed class ModPerformanceManagerTests
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         allocated.Should().Be(0);
+    }
+
+    [Test]
+    public void DisabledSmapiUpdateBoundary_DoesNotAllocateAfterWarmup()
+    {
+        ModPerformanceManager manager = new(timestampFrequency: 1000, getTimestamp: () => 0, getGcCollectionCount: _ => 0);
+
+        for (int i = 0; i < 10_000; i++)
+        {
+            manager.BeginSmapiUpdate();
+            manager.EndSmapiUpdate();
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++)
+        {
+            manager.BeginSmapiUpdate();
+            manager.EndSmapiUpdate();
+        }
+
+        (GC.GetAllocatedBytesForCurrentThread() - before).Should().Be(0);
     }
 
     [Test]

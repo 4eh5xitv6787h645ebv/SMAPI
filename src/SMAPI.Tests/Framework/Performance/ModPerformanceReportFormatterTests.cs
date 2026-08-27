@@ -28,7 +28,7 @@ internal sealed class ModPerformanceReportFormatterTests
             ],
             RecentTicks:
             [
-                new TickPerformanceSnapshot(99, 20, 8, "Slow.Mod", "Slow Mod", 8, 1, GameUpdateMilliseconds: 10, InstrumentedDuringGameUpdateMilliseconds: 2, Gen0Collections: 1)
+                new TickPerformanceSnapshot(99, 20, 8, "Slow.Mod", "Slow Mod", 8, 1, GameUpdateMilliseconds: 10, InstrumentedDuringGameUpdateMilliseconds: 2, Gen0Collections: 1, SmapiUpdateMilliseconds: 3, InstrumentedDuringSmapiUpdateMilliseconds: 1, SmapiUpdateTimingAvailable: true)
             ],
             OmittedHandlerInvocations: 0,
             LogIndividualTicks: false,
@@ -42,17 +42,21 @@ internal sealed class ModPerformanceReportFormatterTests
             Gen2Collections: 5,
             CaptureGen0Collections: 550,
             CaptureGen1Collections: 55,
-            CaptureGen2Collections: 6
+            CaptureGen2Collections: 6,
+            SmapiUpdateMilliseconds: 6000,
+            InstrumentedDuringSmapiUpdateMilliseconds: 1000,
+            SmapiUpdateTimingAvailable: true
         );
 
         string report = ModPerformanceReportFormatter.Format(snapshot, limit: 1);
 
         report.Should().Contain("Slow Mod (Slow.Mod): 120.0ms total");
         report.Should().Contain("1 warnings, 2 errors, 2 failed callbacks");
-        report.Should().Contain("Measured tick time: 36000.0ms total (20.000ms/tick): base game update excluding observed callbacks 15000.0ms (8.333ms/tick), observed mod callbacks 12000.0ms (6.667ms/tick), residual outside measured game/callback boundaries 9000.0ms (5.000ms/tick).");
+        report.Should().Contain("Measured tick time: 36000.0ms total (20.000ms/tick): base game update excluding observed callbacks 15000.0ms (8.333ms/tick), observed mod callbacks 12000.0ms (6.667ms/tick), SMAPI update dispatch observed outside the base-game update 5000.0ms (2.778ms/tick), true residual outside categorized boundaries 4000.0ms (2.222ms/tick).");
         report.Should().Contain("Process-wide GC collections during measured ticks: 500 gen0, 50 gen1, 5 gen2.");
         report.Should().Contain("Process-wide GC collections across the sample: 550 gen0, 55 gen1, 6 gen2 (correlation only, not mod attribution).");
-        report.Should().Contain("tick 99: 20.000ms total; 8.000ms base game update excluding observed callbacks; 8.000ms observed mod callbacks; 4.000ms residual outside measured boundaries; GC 1/0/0 process-wide");
+        report.Should().Contain("tick 99: 20.000ms total; 8.000ms base game update excluding observed callbacks; 8.000ms observed mod callbacks; 2.000ms SMAPI update dispatch observed outside the base-game update; 2.000ms true residual outside categorized boundaries; GC 1/0/0 process-wide");
+        report.Should().Contain("not total SMAPI CPU or proof of cause");
         report.Should().Contain("Harmony patches");
         report.Should().NotContain("Fast Mod");
     }
@@ -62,7 +66,7 @@ internal sealed class ModPerformanceReportFormatterTests
     {
         string result = ModPerformanceReportFormatter.FormatTick(new TickPerformanceSnapshot(12, 18, 0, null, null, 0, 0));
 
-        result.Should().Be("tick 12: 18.000ms total; 0.000ms base game update excluding observed callbacks; 0.000ms observed mod callbacks; 18.000ms residual outside measured boundaries; GC 0/0/0 process-wide; slowest mod none; 0 mod errors");
+        result.Should().Be("tick 12: 18.000ms total; 0.000ms base game update excluding observed callbacks; 0.000ms observed mod callbacks; SMAPI update dispatch outside the base-game update unavailable; 18.000ms residual outside measured game/callback boundaries (not labeled as SMAPI work); GC 0/0/0 process-wide; slowest mod none; 0 mod errors");
     }
 
     [Test]
