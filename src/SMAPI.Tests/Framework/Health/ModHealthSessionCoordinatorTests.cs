@@ -202,6 +202,138 @@ internal sealed class ModHealthSessionCoordinatorTests
     }
 
     [Test]
+    public void PrepareHealthView_ActiveCaptureReusesCurrentGenerationAndRefreshesExplicitly()
+    {
+        Context context = new();
+        context.Coordinator.StartHealth();
+
+        ModHealthViewPreparation first = context.Coordinator.PrepareHealthView();
+        ModHealthViewPreparation reopened = context.Coordinator.PrepareHealthView();
+        ModHealthViewPreparation refreshed = context.Coordinator.PrepareHealthView(forceRefresh: true);
+
+        first.RequestId.Should().Be(reopened.RequestId);
+        refreshed.RequestId.Should().NotBe(first.RequestId);
+        context.Queue.Requests.Should().HaveCount(2);
+        context.Queue.Requests.Should().OnlyContain(request => request.Performance != null && !request.IsFinal);
+        context.Coordinator.GetStatus().CaptureState.Should().Be(ModHealthCaptureState.Active);
+    }
+
+    [Test]
+    public void PrepareHealthView_ReusesInterimPreviouslyQueuedByHealthReport()
+    {
+        Context context = new();
+        context.Coordinator.StartHealth();
+        context.Coordinator.ReportHealth();
+        Guid reportId = context.Queue.LastRequest!.RequestId;
+
+        ModHealthViewPreparation view = context.Coordinator.PrepareHealthView();
+
+        view.RequestId.Should().Be(reportId);
+        context.Queue.Requests.Should().ContainSingle();
+    }
+
+    [Test]
+    public void PrepareHealthView_InactiveCaptureReusesLedgerOnlyAndRefreshesExplicitly()
+    {
+        Context context = new();
+
+        ModHealthViewPreparation first = context.Coordinator.PrepareHealthView();
+        ModHealthViewPreparation reopened = context.Coordinator.PrepareHealthView();
+        ModHealthViewPreparation refreshed = context.Coordinator.PrepareHealthView(forceRefresh: true);
+
+        reopened.RequestId.Should().Be(first.RequestId);
+        refreshed.RequestId.Should().NotBe(first.RequestId);
+        context.Queue.Requests.Should().HaveCount(2);
+        context.Queue.Requests.Should().OnlyContain(request => request.Performance == null && !request.IsFinal);
+    }
+
+    [Test]
+    public void PrepareHealthView_StoppedCaptureReusesItsExactFinalEvenWhenRefreshRequested()
+    {
+        Context context = new();
+        context.Coordinator.StartHealth();
+        context.Coordinator.StopHealth();
+        Guid finalId = context.Queue.LastRequest!.RequestId;
+        context.Queue.SetLastState(ModHealthExportState.Succeeded);
+
+        ModHealthViewPreparation first = context.Coordinator.PrepareHealthView();
+        ModHealthViewPreparation refreshed = context.Coordinator.PrepareHealthView(forceRefresh: true);
+
+        first.RequestId.Should().Be(finalId);
+        refreshed.RequestId.Should().Be(finalId);
+        first.PreparedReport.IsFinal.Should().BeTrue();
+        context.Queue.Requests.Should().ContainSingle();
+    }
+
+    [Test]
+    public void PrepareHealthView_AfterStopSelectsFinalInsteadOfActiveInterim()
+    {
+        Context context = new();
+        context.Coordinator.StartHealth();
+        ModHealthViewPreparation interim = context.Coordinator.PrepareHealthView();
+
+        context.Coordinator.StopHealth();
+        Guid finalId = context.Queue.LastRequest!.RequestId;
+        ModHealthViewPreparation final = context.Coordinator.PrepareHealthView();
+
+        final.RequestId.Should().Be(finalId);
+        final.RequestId.Should().NotBe(interim.RequestId);
+        final.PreparedReport.IsFinal.Should().BeTrue();
+        context.Coordinator.GetPreparedHealthReport(interim.RequestId).RequestId.Should().Be(interim.RequestId);
+    }
+
+    [Test]
+    public void PrepareHealthView_RejectedRequestIsExplicitAndIsNotReused()
+    {
+        Context context = new();
+        context.Queue.SetNextEnqueueResult(ModHealthExportDisposition.RejectedBusy);
+
+        ModHealthViewPreparation rejected = context.Coordinator.PrepareHealthView();
+        ModHealthViewPreparation retried = context.Coordinator.PrepareHealthView();
+
+        rejected.Operation.IsError.Should().BeTrue();
+        rejected.PreparedReport.Should().BeEquivalentTo(new ModHealthPreparedReportSnapshot(ModHealthPreparedReportState.Absent, rejected.RequestId));
+        retried.RequestId.Should().NotBe(rejected.RequestId);
+        retried.Operation.IsError.Should().BeFalse();
+        context.Queue.Requests.Should().ContainSingle();
+    }
+
+    [Test]
+    public void PreparedHealthReport_QueryNeverSubstitutesLatestRequest()
+    {
+        Context context = new();
+        ModHealthViewPreparation first = context.Coordinator.PrepareHealthView();
+        ModHealthViewPreparation second = context.Coordinator.PrepareHealthView(forceRefresh: true);
+        context.Queue.SetPrepared(first.RequestId, ModHealthPreparedReportState.Superseded, newerRequestId: second.RequestId);
+        context.Queue.SetPrepared(second.RequestId, ModHealthPreparedReportState.Saved);
+
+        ModHealthPreparedReportSnapshot exact = context.Coordinator.GetPreparedHealthReport(first.RequestId);
+
+        exact.RequestId.Should().Be(first.RequestId);
+        exact.State.Should().Be(ModHealthPreparedReportState.Superseded);
+        exact.NewerRequestId.Should().Be(second.RequestId);
+    }
+
+    [Test]
+    public void PrepareHealthView_ReopensSupersededExactRequestWithoutSilentSwitch()
+    {
+        Context context = new();
+        context.Coordinator.StartHealth();
+        ModHealthViewPreparation first = context.Coordinator.PrepareHealthView();
+        Guid newerId = Guid.NewGuid();
+        context.Queue.SetPrepared(first.RequestId, ModHealthPreparedReportState.Superseded, newerRequestId: newerId);
+
+        ModHealthViewPreparation reopened = context.Coordinator.PrepareHealthView();
+
+        reopened.RequestId.Should().Be(first.RequestId);
+        reopened.PreparedReport.State.Should().Be(ModHealthPreparedReportState.Superseded);
+        reopened.PreparedReport.NewerRequestId.Should().Be(newerId);
+        reopened.Operation.IsError.Should().BeTrue();
+        reopened.Operation.Message.Should().Contain(newerId.ToString());
+        context.Queue.Requests.Should().ContainSingle();
+    }
+
+    [Test]
     public void HealthReset_RequiresConfirmationAtCommandLayerAndRestartsActiveHealthWindow()
     {
         Context context = new();
@@ -275,6 +407,44 @@ internal sealed class ModHealthSessionCoordinatorTests
 
         result.Code.Should().Be(ModHealthCoordinatorResultCode.ExportRetried);
         context.Queue.LastRequest.Should().BeSameAs(original);
+    }
+
+    [Test]
+    public void Retry_WithExactRequestIdNeverRetriesAnotherFailedReport()
+    {
+        Context context = new();
+        context.Coordinator.StartHealth();
+        context.Coordinator.StopHealth();
+        Guid retryableId = context.Queue.LastRequest!.RequestId;
+        context.Queue.SetLastState(ModHealthExportState.Failed);
+        Guid staleId = Guid.NewGuid();
+        context.Queue.SetPrepared(staleId, ModHealthPreparedReportState.Superseded, newerRequestId: retryableId);
+
+        ModHealthCoordinatorResult stale = context.Coordinator.RetryHealthExport(staleId);
+        ModHealthCoordinatorResult exact = context.Coordinator.RetryHealthExport(retryableId);
+
+        stale.Code.Should().Be(ModHealthCoordinatorResultCode.NothingToRetry);
+        stale.Message.Should().Contain(retryableId.ToString());
+        exact.Code.Should().Be(ModHealthCoordinatorResultCode.ExportRetried);
+        context.Queue.LastRetriedRequestId.Should().Be(retryableId);
+    }
+
+    [Test]
+    public void ResetHealth_WithExactRequestRefusesStaleViewerAndDiscardsMatchingFailure()
+    {
+        Context context = new();
+        context.Coordinator.StartHealth();
+        ModHealthViewPreparation view = context.Coordinator.PrepareHealthView();
+        context.Queue.SetLastState(ModHealthExportState.Failed);
+
+        ModHealthCoordinatorResult stale = context.Coordinator.ResetHealth(Guid.NewGuid());
+        ModHealthCoordinatorResult exact = context.Coordinator.ResetHealth(view.RequestId);
+
+        stale.IsError.Should().BeTrue();
+        context.Queue.LastDiscardedRequestId.Should().Be(view.RequestId);
+        exact.Code.Should().Be(ModHealthCoordinatorResultCode.Reset);
+        context.Coordinator.GetStatus().CaptureState.Should().Be(ModHealthCaptureState.Active);
+        context.Coordinator.GetPreparedHealthReport(view.RequestId).State.Should().Be(ModHealthPreparedReportState.Absent);
     }
 
     [TestCase(ModHealthExportDisposition.Coalesced, ModHealthCoordinatorResultCode.ExportPending, false)]
@@ -525,21 +695,31 @@ internal sealed class ModHealthSessionCoordinatorTests
     private sealed class FakeExportQueue : IModHealthExportQueue
     {
         private readonly Dictionary<Guid, ModHealthExportStatus> Statuses = [];
+        private readonly Dictionary<Guid, ModHealthPreparedReportSnapshot> Prepared = [];
         private ModHealthExportRequest? Retryable;
         private ModHealthExportQueueResult? NextRetryResult;
+        private ModHealthExportDisposition? NextEnqueueDisposition;
 
         public List<ModHealthExportRequest> Requests { get; } = [];
         public ModHealthExportRequest? LastRequest => this.Requests.Count > 0 ? this.Requests[^1] : null;
+        public Guid? LastRetriedRequestId { get; private set; }
+        public Guid? LastDiscardedRequestId { get; private set; }
 
         public ModHealthExportQueueResult Enqueue(ModHealthExportRequest request)
         {
+            if (this.NextEnqueueDisposition is ModHealthExportDisposition disposition)
+            {
+                this.NextEnqueueDisposition = null;
+                return new ModHealthExportQueueResult(disposition, new ModHealthExportStatus(ModHealthExportState.Queued, Guid.NewGuid(), IsFinal: false));
+            }
             this.Requests.Add(request);
             ModHealthExportStatus status = new(ModHealthExportState.Queued, request.RequestId, request.IsFinal);
             this.Statuses[request.RequestId] = status;
+            this.Prepared[request.RequestId] = new(ModHealthPreparedReportState.Preparing, request.RequestId, request.IsFinal);
             return new ModHealthExportQueueResult(ModHealthExportDisposition.Queued, status);
         }
 
-        public ModHealthExportQueueResult Retry()
+        public ModHealthExportQueueResult Retry(Guid? requestId = null)
         {
             if (this.NextRetryResult is ModHealthExportQueueResult result)
             {
@@ -548,13 +728,20 @@ internal sealed class ModHealthSessionCoordinatorTests
             }
             if (this.Retryable == null)
                 return new ModHealthExportQueueResult(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
+            if (requestId.HasValue && requestId != this.Retryable.RequestId)
+                return new ModHealthExportQueueResult(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
+            this.LastRetriedRequestId = this.Retryable.RequestId;
             ModHealthExportStatus status = new(ModHealthExportState.Queued, this.Retryable.RequestId, this.Retryable.IsFinal);
             this.Statuses[this.Retryable.RequestId] = status;
             return new ModHealthExportQueueResult(ModHealthExportDisposition.Retried, status);
         }
 
-        public void DiscardRetryable()
+        public void DiscardRetryable(Guid? requestId = null)
         {
+            if (this.Retryable == null || (requestId.HasValue && requestId != this.Retryable.RequestId))
+                return;
+            this.LastDiscardedRequestId = this.Retryable.RequestId;
+            this.Prepared.Remove(this.Retryable.RequestId);
             this.Retryable = null;
         }
 
@@ -567,16 +754,44 @@ internal sealed class ModHealthSessionCoordinatorTests
                 : ModHealthExportStatus.None;
         }
 
+        public ModHealthPreparedReportSnapshot GetPreparedReport(Guid? requestId = null)
+        {
+            if (requestId is Guid id)
+                return this.Prepared.TryGetValue(id, out ModHealthPreparedReportSnapshot? exact) ? exact : new(ModHealthPreparedReportState.Absent, id);
+            return this.LastRequest != null && this.Prepared.TryGetValue(this.LastRequest.RequestId, out ModHealthPreparedReportSnapshot? latest)
+                ? latest
+                : ModHealthPreparedReportSnapshot.Absent;
+        }
+
         public void SetLastState(ModHealthExportState state, string? textPath = null, string? jsonPath = null)
         {
             ModHealthExportRequest request = this.LastRequest!;
             this.Statuses[request.RequestId] = new ModHealthExportStatus(state, request.RequestId, request.IsFinal, textPath, jsonPath, state == ModHealthExportState.Failed ? "test failure" : null);
             this.Retryable = state == ModHealthExportState.Failed ? request : null;
+            this.Prepared[request.RequestId] = new(
+                state == ModHealthExportState.Succeeded ? ModHealthPreparedReportState.Saved : state == ModHealthExportState.Failed ? ModHealthPreparedReportState.WriteFailed : ModHealthPreparedReportState.Preparing,
+                request.RequestId,
+                request.IsFinal,
+                TextPath: textPath,
+                JsonPath: jsonPath,
+                Error: state == ModHealthExportState.Failed ? "test failure" : null
+            );
+        }
+
+        public void SetPrepared(Guid requestId, ModHealthPreparedReportState state, Guid? newerRequestId = null)
+        {
+            bool isFinal = this.Requests.Find(request => request.RequestId == requestId)?.IsFinal ?? false;
+            this.Prepared[requestId] = new(state, requestId, isFinal, NewerRequestId: newerRequestId);
         }
 
         public void SetNextRetryResult(ModHealthExportDisposition disposition, ModHealthExportState state)
         {
             this.NextRetryResult = new ModHealthExportQueueResult(disposition, new ModHealthExportStatus(state, Guid.NewGuid(), IsFinal: true));
+        }
+
+        public void SetNextEnqueueResult(ModHealthExportDisposition disposition)
+        {
+            this.NextEnqueueDisposition = disposition;
         }
     }
 }

@@ -111,8 +111,9 @@ internal sealed class PerformanceCommandTests
             return new ModHealthExportQueueResult(ModHealthExportDisposition.Queued, status);
         }
 
-        public ModHealthExportQueueResult Retry() => new(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
-        public void DiscardRetryable() { }
+        public ModHealthExportQueueResult Retry(System.Guid? requestId = null) => new(ModHealthExportDisposition.NoRetryableExport, ModHealthExportStatus.None);
+        public void DiscardRetryable(System.Guid? requestId = null) { }
         public ModHealthExportStatus GetStatus(System.Guid? requestId = null) => ModHealthExportStatus.None;
+        public ModHealthPreparedReportSnapshot GetPreparedReport(System.Guid? requestId = null) => ModHealthPreparedReportSnapshot.Absent;
     }
 }

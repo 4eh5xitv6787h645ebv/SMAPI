@@ -199,9 +199,10 @@ internal sealed class HealthCommandTests
             return new ModHealthExportQueueResult(ModHealthExportDisposition.Queued, status);
         }
 
-        public ModHealthExportQueueResult Retry() => this.RetryResult;
-        public void DiscardRetryable() { }
+        public ModHealthExportQueueResult Retry(System.Guid? requestId = null) => this.RetryResult;
+        public void DiscardRetryable(System.Guid? requestId = null) { }
         public ModHealthExportStatus GetStatus(System.Guid? requestId = null) => requestId is null || requestId == this.Status.RequestId ? this.Status : ModHealthExportStatus.None;
+        public ModHealthPreparedReportSnapshot GetPreparedReport(System.Guid? requestId = null) => ModHealthPreparedReportSnapshot.Absent;
 
         public void SetLastStatus(ModHealthExportState state, string? textPath = null, string? jsonPath = null)
         {

@@ -10,11 +10,14 @@ internal interface IModHealthExportQueue
     ModHealthExportQueueResult Enqueue(ModHealthExportRequest request);
 
     /// <summary>Retry the exact frozen request retained after the most recent failed export.</summary>
-    ModHealthExportQueueResult Retry();
+    ModHealthExportQueueResult Retry(Guid? requestId = null);
 
     /// <summary>Discard any failed request retained for retry.</summary>
-    void DiscardRetryable();
+    void DiscardRetryable(Guid? requestId = null);
 
     /// <summary>Get the latest status, optionally for one specific request.</summary>
     ModHealthExportStatus GetStatus(Guid? requestId = null);
+
+    /// <summary>Get the latest prepared-report state, or one exact request without substituting another model.</summary>
+    ModHealthPreparedReportSnapshot GetPreparedReport(Guid? requestId = null);
 }
