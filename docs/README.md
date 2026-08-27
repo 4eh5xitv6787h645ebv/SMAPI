@@ -42,6 +42,7 @@ developers and other modders!
 
 ### For players
 * [Player guide](https://stardewvalleywiki.com/Modding:Player_Guide)
+* [Mod Health Report guide](mod-health-report.md)
 
 ### For modders
 * [Modding documentation](https://smapi.io/docs)
