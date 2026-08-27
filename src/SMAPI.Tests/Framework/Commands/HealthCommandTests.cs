@@ -24,7 +24,15 @@ internal sealed class HealthCommandTests
         command.HandleCommand([], monitor.Object);
 
         messages.Should().ContainSingle(message => message.Contains("health start") && message.Contains("health view"));
-        command.Description.Should().Contain("health view").And.Contain("at most five complete report pairs").And.Contain("30 days");
+        command.Description.Should()
+            .Contain("health view")
+            .And.Contain("mouse")
+            .And.Contain("controller")
+            .And.Contain("never uploads")
+            .And.Contain("fall back to English")
+            .And.Contain("canonical English")
+            .And.Contain("at most five complete report pairs")
+            .And.Contain("30 days");
     }
 
     [TestCase(ModHealthViewerActionDisposition.Queued, "next safe game update", LogLevel.Info)]

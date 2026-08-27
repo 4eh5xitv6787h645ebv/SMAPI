@@ -30,7 +30,10 @@ internal sealed class HealthCommand : IInternalCommand
         Show separate session-ledger, timed-capture, capacity, and export state.
 
         Usage: health view
-        Open the private Mod Health Report viewer in-game on Linux desktop.
+        Open the current session's private Mod Health Report in-game on Linux desktop.
+        Use mouse click/wheel; keyboard arrows, Page Up/Down, Home/End, Tab, Enter, I/P, and Escape; or controller D-pad, shoulders, A/B/X/Y (confirm/back/privacy/status).
+        The viewer shows only the sanitized in-memory report and stable local relative paths. It never uploads, copies, opens external apps, or changes mods, saves, or settings. Inspect reports before sharing.
+        Viewer labels fall back to English when a translation is unavailable; schema-v1 finding text remains canonical English.
 
         Usage: health mark
         Add a numbered reproduction mark. Free-text marks are deliberately unsupported.
