@@ -13,15 +13,15 @@ internal sealed class ModHealthViewerActionQueueTests
     {
         ModHealthViewerActionQueue queue = new();
         Guid owner = Guid.NewGuid();
-        ModHealthViewerAction duplicate = new(ModHealthViewerActionKind.SaveSnapshot, owner, Guid.NewGuid());
+        ModHealthViewerAction duplicate = new(ModHealthViewerActionKind.RefreshAndSaveSnapshot, owner, Guid.NewGuid());
 
-        queue.TryEnqueue(duplicate).Should().BeTrue();
-        queue.TryEnqueue(duplicate).Should().BeTrue();
+        queue.Enqueue(duplicate).Should().Be(ModHealthViewerActionDisposition.Queued);
+        queue.Enqueue(duplicate).Should().Be(ModHealthViewerActionDisposition.Coalesced);
         for (int i = 1; i < ModHealthViewerActionQueue.Capacity; i++)
-            queue.TryEnqueue(new(ModHealthViewerActionKind.Open, Guid.NewGuid())).Should().BeTrue();
+            queue.Enqueue(new(ModHealthViewerActionKind.Open, Guid.NewGuid())).Should().Be(ModHealthViewerActionDisposition.Queued);
 
         queue.PendingCount.Should().Be(ModHealthViewerActionQueue.Capacity);
-        queue.TryEnqueue(new(ModHealthViewerActionKind.AddMark, Guid.NewGuid())).Should().BeFalse();
+        queue.Enqueue(new(ModHealthViewerActionKind.AddMark, Guid.NewGuid())).Should().Be(ModHealthViewerActionDisposition.RejectedFull);
     }
 
     [Test]
@@ -29,11 +29,11 @@ internal sealed class ModHealthViewerActionQueueTests
     {
         ModHealthViewerActionQueue queue = new();
         Guid owner = Guid.NewGuid();
-        queue.TryEnqueue(new(ModHealthViewerActionKind.SaveSnapshot, owner));
-        queue.TryEnqueue(new(ModHealthViewerActionKind.RetrySave, owner));
+        queue.Enqueue(new(ModHealthViewerActionKind.RefreshAndSaveSnapshot, owner));
+        queue.Enqueue(new(ModHealthViewerActionKind.RetrySave, owner));
 
         ModHealthViewerAction close = new(ModHealthViewerActionKind.Close, owner);
-        queue.TryEnqueue(close).Should().BeTrue();
+        queue.Enqueue(close).Should().Be(ModHealthViewerActionDisposition.Queued);
 
         queue.PendingCount.Should().Be(1);
         queue.TryDequeue(out ModHealthViewerAction actual).Should().BeTrue();
@@ -49,15 +49,54 @@ internal sealed class ModHealthViewerActionQueueTests
         ModHealthViewerAction first = new(ModHealthViewerActionKind.Open, owner);
         ModHealthViewerAction second = new(ModHealthViewerActionKind.AddMark, owner);
         ModHealthViewerAction third = new(ModHealthViewerActionKind.StopCapture, owner);
-        queue.TryEnqueue(first);
-        queue.TryEnqueue(second);
+        queue.Enqueue(first);
+        queue.Enqueue(second);
         queue.TryDequeue(out _);
-        queue.TryEnqueue(third);
+        queue.Enqueue(third);
 
         queue.TryDequeue(out ModHealthViewerAction actualSecond).Should().BeTrue();
         queue.TryDequeue(out ModHealthViewerAction actualThird).Should().BeTrue();
 
         actualSecond.Should().Be(second);
         actualThird.Should().Be(third);
+    }
+
+    [Test]
+    public void StaleClose_DoesNotDiscardCurrentViewerActions()
+    {
+        ModHealthViewerActionQueue queue = new();
+        Guid current = Guid.NewGuid();
+        Guid stale = Guid.NewGuid();
+        ModHealthViewerAction save = new(ModHealthViewerActionKind.RefreshAndSaveSnapshot, current);
+        ModHealthViewerAction staleClose = new(ModHealthViewerActionKind.Close, stale);
+        queue.Enqueue(save);
+
+        queue.Enqueue(staleClose).Should().Be(ModHealthViewerActionDisposition.Queued);
+
+        queue.TryDequeue(out ModHealthViewerAction first).Should().BeTrue();
+        queue.TryDequeue(out ModHealthViewerAction second).Should().BeTrue();
+        first.Should().Be(save);
+        second.Should().Be(staleClose);
+    }
+
+    [Test]
+    public void RepeatedMarksAndStateTransitions_PreserveFifoSemantics()
+    {
+        ModHealthViewerActionQueue queue = new();
+        Guid owner = Guid.NewGuid();
+        ModHealthViewerAction mark = new(ModHealthViewerActionKind.AddMark, owner);
+        ModHealthViewerAction stop = new(ModHealthViewerActionKind.StopCapture, owner);
+
+        queue.Enqueue(mark).Should().Be(ModHealthViewerActionDisposition.Queued);
+        queue.Enqueue(mark).Should().Be(ModHealthViewerActionDisposition.Queued);
+        queue.Enqueue(stop).Should().Be(ModHealthViewerActionDisposition.Queued);
+        queue.Enqueue(mark).Should().Be(ModHealthViewerActionDisposition.Queued);
+
+        queue.PendingCount.Should().Be(4);
+        queue.TryDequeue(out ModHealthViewerAction first);
+        queue.TryDequeue(out ModHealthViewerAction second);
+        queue.TryDequeue(out ModHealthViewerAction third);
+        queue.TryDequeue(out ModHealthViewerAction fourth);
+        new[] { first, second, third, fourth }.Should().Equal(mark, mark, stop, mark);
     }
 }
