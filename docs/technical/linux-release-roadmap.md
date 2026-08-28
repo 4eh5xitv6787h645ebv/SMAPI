@@ -167,10 +167,11 @@ Scope constraints apply throughout:
 - [x] Generate and view a Mod Health Report ([schema, privacy, and visual verification](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
 - [x] Uninstall or roll back successfully ([public-package uninstall and exact-candidate rollback evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
 - [x] Record clean-room verification results without private fixture data ([sanitized validation record](linux-alpha-release-validation.md)).
-- [ ] Update the README with the downloadable prerelease.
-- [ ] Update GitHub Pages with the downloadable prerelease.
-- [ ] Remove inaccurate “no tagged release” wording.
-- [ ] Verify `develop` equals `origin/develop` after the phase.
+- [x] Update the README with the downloadable prerelease ([merged publication update](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/af6e23bc856c8e35c054ad8c784514a7c70248de)).
+- [x] Update GitHub Pages with the downloadable prerelease ([successful deployment](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33179582509); important pages and committed assets verified HTTP 200).
+- [x] Remove inaccurate “no tagged release” wording ([independent stale-wording review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/173#issuecomment-5453648737)).
+- [x] Open, review, fix, pass required checks for, merge, and close the focused Phase 3 publication follow-up [PR #173](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/173) ([independent review and CI evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/173#issuecomment-5453648737); [`af6e23bc`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/af6e23bc856c8e35c054ad8c784514a7c70248de)).
+- [x] Verify `develop` equals `origin/develop` after the phase (`af6e23bc856c8e35c054ad8c784514a7c70248de`).
 
 ## Phase 4 — Linux graphical installer/updater
 

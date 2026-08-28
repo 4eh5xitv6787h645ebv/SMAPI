@@ -89,5 +89,10 @@ The unrelated .NET 10 menu-click issue is not a release gate and is not included
 ## Public documentation and asset checks
 
 The release page and all three public assets returned HTTP 200 during publication verification.
-The documentation follow-up records its GitHub Pages build and HTTP checks after this page is
-merged, so it does not claim deployment before the published site contains this exact revision.
+After the documentation follow-up merged as `af6e23bc`, the
+[GitHub Pages deployment](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33179582509)
+passed. Fresh HTTP checks returned 200 for the documentation home, getting-started guide,
+comparison, release notes, alpha guide, validation record, and every committed screenshot. The
+deployed pages contained the release tag link, public SHA-256, distinct prerelease identity, and
+updated installation path; a repository-wide stale-wording check found no remaining inaccurate
+no-release or pending-publication claim.
