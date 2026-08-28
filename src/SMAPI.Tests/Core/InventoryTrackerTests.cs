@@ -187,6 +187,8 @@ internal class InventoryTrackerTests
     }
 
     [Test(Description = "Assert that an unchanged normal inventory has an allocation-free observed-tick path.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
     public void Update_NormalIdlePathDoesNotAllocate()
     {
         Chest chest = new();

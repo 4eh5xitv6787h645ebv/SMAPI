@@ -29,6 +29,8 @@ internal class ReflectorTests
     }
 
     [Test(Description = "Assert that a cached reflection lookup and target-bound wrapper don't allocate.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
     public void GetField_CacheHitAvoidsLookupAllocations()
     {
         ReflectionTarget target = new();
@@ -45,6 +47,36 @@ internal class ReflectorTests
         long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
 
         allocatedBytes.Should().Be(0, "cache hits should reuse their key, callback, and target-bound wrapper");
+    }
+
+    [Test(Description = "Assert that cached property and method lookups reuse target-bound wrappers without allocating.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void GetPropertyAndMethod_CacheHitsAvoidLookupAllocations()
+    {
+        ReflectionTarget target = new();
+        Reflector reflector = new();
+
+        for (int i = 0; i < 10_000; i++)
+        {
+            reflector.GetProperty<int>(target, nameof(ReflectionTarget.Property));
+            reflector.GetMethod(target, nameof(ReflectionTarget.GetValue));
+        }
+
+        const int iterations = 10_000;
+        IReflectedProperty<int>? property = null;
+        IReflectedMethod? method = null;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+        {
+            property = reflector.GetProperty<int>(target, nameof(ReflectionTarget.Property));
+            method = reflector.GetMethod(target, nameof(ReflectionTarget.GetValue));
+        }
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        property!.GetValue().Should().Be(42);
+        method!.Invoke<int>().Should().Be(42);
+        allocatedBytes.Should().Be(0, "warmed metadata and wrapper cache hits should be allocation-free");
     }
 
     [Test(Description = "Assert that target-bound wrappers are reused within an interval and released from the cache for a new interval.")]
@@ -76,5 +108,12 @@ internal class ReflectorTests
     private sealed class ReflectionTarget
     {
         public int Value = 42;
+
+        public int Property => this.Value;
+
+        public int GetValue()
+        {
+            return this.Value;
+        }
     }
 }

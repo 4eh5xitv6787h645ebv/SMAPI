@@ -27,6 +27,7 @@ internal class TickCacheDictionaryTests
     }
 
     [Test]
+    [Category("PerformanceRegression")]
     public void RemoveWhere_ClearsMultipleNamesInOnePass()
     {
         TickCacheDictionary<(string Name, Type Type), int> cache = new();
@@ -52,5 +53,29 @@ internal class TickCacheDictionaryTests
         cache.GetOrSet(("First", typeof(object)), static () => 6).Should().Be(6);
         cache.GetOrSet(("Second", typeof(string)), static () => 7).Should().Be(7);
         cache.GetOrSet(("Other", typeof(string)), static () => 8).Should().Be(4);
+    }
+
+    [Test(Description = "Assert that a warmed stateful operation-cache invalidation scan doesn't allocate.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void RemoveWhere_WarmedNonmatchingPassDoesNotAllocate()
+    {
+        TickCacheDictionary<(string Name, Type Type), int> cache = new();
+        cache.GetOrSet(("Other", typeof(string)), static () => 1);
+        HashSet<string> invalidatedNames = ["First", "Second"];
+        Func<(string Name, Type Type), HashSet<string>, bool> shouldRemove = static (key, names) => names.Contains(key.Name);
+
+        for (int i = 0; i < 10_000; i++)
+            cache.RemoveWhere(invalidatedNames, shouldRemove);
+
+        const int iterations = 10_000;
+        int removed = 0;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+            removed += cache.RemoveWhere(invalidatedNames, shouldRemove);
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        removed.Should().Be(0);
+        allocatedBytes.Should().Be(0, "the invalidated-name set and static predicate should be passed without closures or iterator objects");
     }
 }

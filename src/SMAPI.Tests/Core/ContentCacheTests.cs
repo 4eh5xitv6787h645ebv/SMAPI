@@ -43,6 +43,8 @@ internal class ContentCacheTests
     }
 
     [Test(Description = "Assert that warmed cache-entry enumeration doesn't allocate.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
     public void GetEntries_DoesNotAllocate()
     {
         ContentCache cache = new(new Dictionary<string, object> { ["asset"] = new object() });
@@ -65,6 +67,7 @@ internal class ContentCacheTests
     }
 
     [Test(Description = "Assert that removing a cache entry performs one key lookup and reports whether it existed.")]
+    [Category("PerformanceRegression")]
     public void Remove_UsesOneLookupAndReportsSuccess()
     {
         CountingStringComparer comparer = new();

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using FluentAssertions;
 using NUnit.Framework;
@@ -198,6 +199,73 @@ internal class OptimizedTmxFormatTests
         Action action = () => OptimizedTmxFormat.LoadTile(layer, source, 101);
 
         action.Should().Throw<Exception>().WithMessage("Invalid tile gid: 101");
+    }
+
+    [Test(Description = "Assert that dense synthetic TMX conversion avoids the bundled format's per-tile metadata allocations.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void Load_DenseSyntheticMapReducesAllocation()
+    {
+        const int width = 64;
+        const int height = 64;
+        string tileData = string.Join(',', Enumerable.Repeat("1", width * height));
+        string xml = $$"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <map version="1.10" tiledversion="1.11.2" orientation="orthogonal" renderorder="right-down" width="{{width}}" height="{{height}}" tilewidth="16" tileheight="16" infinite="0" nextlayerid="2">
+              <tileset firstgid="1" name="sheet" tilewidth="16" tileheight="16" tilecount="1" columns="1">
+                <image source="sheet.png" width="16" height="16"/>
+              </tileset>
+              <layer id="1" name="Back" width="{{width}}" height="{{height}}">
+                <data encoding="csv">{{tileData}}</data>
+              </layer>
+            </map>
+            """;
+        byte[] data = Encoding.UTF8.GetBytes(xml);
+        IMapFormat bundledFormat = new TMXFormat(16, 16, 4, 4);
+        IMapFormat optimizedFormat = new OptimizedTmxFormat(16, 16, 4, 4);
+
+        // Warm parsing, conversion, and runtime-generated accessors before measuring.
+        _ = LoadAndMeasureAllocations(bundledFormat, data);
+        _ = LoadAndMeasureAllocations(optimizedFormat, data);
+
+        (Map bundled, long bundledAllocated) = LoadAndMeasureAllocations(bundledFormat, data);
+        (Map optimized, long optimizedAllocated) = LoadAndMeasureAllocations(optimizedFormat, data);
+
+        Layer bundledLayer = bundled.GetLayer("Back");
+        Layer optimizedLayer = optimized.GetLayer("Back");
+        int bundledTiles = 0;
+        int optimizedTiles = 0;
+        for (int x = 0; x < width; x++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                if (bundledLayer.Tiles[x, y] is not null)
+                    bundledTiles++;
+                if (optimizedLayer.Tiles[x, y] is Tile optimizedTile)
+                {
+                    optimizedTiles++;
+                    optimizedTile.Properties.Should().NotContainKey("@Rotation");
+                    optimizedTile.Properties.Should().NotContainKey("@Flip");
+                }
+            }
+        }
+
+        optimizedTiles.Should().Be(width * height);
+        bundledTiles.Should().Be(optimizedTiles);
+        optimizedAllocated.Should().BeLessThan(
+            bundledAllocated * 3 / 4,
+            "the indexed converter should avoid the bundled converter's LINQ searches and identity-transform properties"
+        );
+    }
+
+    /// <summary>Load a map and measure allocations made by the synchronous parse-and-convert call.</summary>
+    private static (Map Map, long AllocatedBytes) LoadAndMeasureAllocations(IMapFormat format, byte[] data)
+    {
+        using MemoryStream input = new(data, writable: false);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Map map = format.Load(input);
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        return (map, allocatedBytes);
     }
 
     /// <summary>Create matching parsed TMX and target xTile maps.</summary>
