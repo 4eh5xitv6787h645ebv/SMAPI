@@ -183,11 +183,13 @@ public sealed class LinuxInstallerEngine
         IVerifiedPackageContentAuthority targetPackage = sourceInspection.TargetPackageContent
             ?? throw new ExecutionCompilationException(ExecutionCompilationError.StaleManifest, "The repair inspection has no live package authority.");
 
-        ModifiedFileReplacementCandidate[] selected = selectedCandidates.ToArray();
+        List<ModifiedFileReplacementCandidate> selected = new();
         HashSet<ModifiedFileReplacementCandidate> unique = new(ReferenceEqualityComparer.Instance);
-        foreach (ModifiedFileReplacementCandidate? candidate in selected)
+        foreach (ModifiedFileReplacementCandidate? candidate in selectedCandidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (selected.Count >= sourceInspection.ModifiedFileReplacementCandidates.Count)
+                throw new ArgumentException("The repair-candidate selection exceeds the bounded issued set.", nameof(selectedCandidates));
             if (candidate is null)
                 throw new ArgumentException("A selected repair candidate can't be null.", nameof(selectedCandidates));
             if (!unique.Add(candidate))
@@ -202,7 +204,9 @@ public sealed class LinuxInstallerEngine
                     "A selected repair candidate wasn't issued by this exact inspection."
                 );
             }
+            selected.Add(candidate);
         }
+        sourceInspection.AssertUsable();
 
         using InstallerInspectionLease inspection = InstallerInspectionLease.Open(sourceInspection.GameRoot.CanonicalPath);
         if (inspection.RootIdentity != sourceInspection.GameRoot || inspection.Generation != sourceInspection.OperationGeneration)
@@ -248,6 +252,7 @@ public sealed class LinuxInstallerEngine
         {
             state.AssertUsable(inspection.Game, inspection.RootIdentity);
             inspection.AssertStable();
+            sourceInspection.AssertUsable();
             return result;
         }
         catch

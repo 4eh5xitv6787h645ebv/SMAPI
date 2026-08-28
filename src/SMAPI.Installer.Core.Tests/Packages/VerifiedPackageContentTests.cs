@@ -280,6 +280,70 @@ public sealed class VerifiedPackageContentTests
     }
 
     [Test]
+    public async Task ApproveRepair_DisposeDuringCandidateEnumerationRejects()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "dispose-during-approval-game");
+        Directory.CreateDirectory(game);
+        await File.WriteAllTextAsync(Path.Combine(game, "StardewValley"), "vanilla launcher");
+        File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)493);
+        LinuxInstallerEngine engine = new();
+        using (InspectedInstallationState install = await engine.InspectAsync(game, InstallationAction.Install, content))
+            await engine.ExecuteAsync(install, install.ConfirmationDigest);
+        await File.WriteAllTextAsync(Path.Combine(game, "smapi-internal/a.dll"), "modified");
+        InspectedInstallationState blocked = await engine.InspectAsync(game, InstallationAction.Repair, content);
+        ModifiedFileReplacementCandidate candidate = blocked.ModifiedFileReplacementCandidates.Single();
+
+        IEnumerable<ModifiedFileReplacementCandidate> DisposeThenYield()
+        {
+            blocked.Dispose();
+            yield return candidate;
+        }
+        Func<Task> approve = () => engine.ApproveRepairAsync(blocked, DisposeThenYield());
+
+        await approve.Should().ThrowAsync<ObjectDisposedException>();
+        (await File.ReadAllTextAsync(Path.Combine(game, "smapi-internal/a.dll"))).Should().Be("modified");
+    }
+
+    [Test]
+    public async Task ApproveRepair_UnboundedCandidateEnumerableRejectsAtIssuedCount()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "bounded-approval-game");
+        Directory.CreateDirectory(game);
+        await File.WriteAllTextAsync(Path.Combine(game, "StardewValley"), "vanilla launcher");
+        File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)493);
+        LinuxInstallerEngine engine = new();
+        using (InspectedInstallationState install = await engine.InspectAsync(game, InstallationAction.Install, content))
+            await engine.ExecuteAsync(install, install.ConfirmationDigest);
+        await File.WriteAllTextAsync(Path.Combine(game, "smapi-internal/a.dll"), "modified");
+        using InspectedInstallationState blocked = await engine.InspectAsync(game, InstallationAction.Repair, content);
+        ModifiedFileReplacementCandidate candidate = blocked.ModifiedFileReplacementCandidates.Single();
+
+        IEnumerable<ModifiedFileReplacementCandidate> RepeatForever()
+        {
+            while (true)
+                yield return candidate;
+        }
+        Func<Task> approve = () => engine.ApproveRepairAsync(blocked, RepeatForever());
+
+        await approve.Should().ThrowAsync<ArgumentException>().WithMessage("*bounded issued set*");
+        (await File.ReadAllTextAsync(Path.Combine(game, "smapi-internal/a.dll"))).Should().Be("modified");
+    }
+
+    [Test]
     public async Task PublicExecution_StaleFailureDoesNotDisposeBorrowedPackage()
     {
         Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
