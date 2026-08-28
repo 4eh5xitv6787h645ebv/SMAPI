@@ -28,8 +28,8 @@ Scope constraints apply throughout:
 - [x] Obtain an [independent roadmap final-diff review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169#issuecomment-5448507702).
 - [x] Address every actionable roadmap review finding (`22baae38`).
 - [x] Pass applicable roadmap PR checks (`git diff --check`; no repository checks configured for this documentation-only branch).
-- [ ] Merge roadmap PR #169 into `develop` and close it.
-- [ ] Verify `develop` equals `origin/develop` after the roadmap merge.
+- [x] Merge roadmap PR [#169](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169) into `develop` and close it (`44ba3bda`).
+- [x] Verify `develop` equals `origin/develop` after the roadmap merge (`44ba3bda`).
 - [ ] Keep both checklists synchronized as evidence is verified.
 
 ## Phase 1 — Current upstream comparison and reproducible benchmarks
