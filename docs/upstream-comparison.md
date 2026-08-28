@@ -21,9 +21,8 @@ Harmony patch, GPU workload, or operating-system stall disappear.
 This snapshot compares upstream commit
 [`79f9bbbe`](https://github.com/Pathoschild/SMAPI/commit/79f9bbbe3edbb7ca3369e7ad0d3dd45131b34fc0)
 with fork commit
-[`fd62edca`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/fd62edca6bd28c5a368cb403af59603f655a8eee),
-before this documentation refresh. Both identify as SMAPI 4.5.2; the fork snapshot was 217 commits
-ahead and zero commits behind that upstream base.
+[`3c98eadd`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/3c98eadd2bddc24d43c889afb11b155e92469882),
+the exact B build used for the current benchmark. Both identify as SMAPI 4.5.2.
 
 | Area | Official SMAPI 4.5.2 | This Linux fork |
 | --- | --- | --- |
@@ -62,14 +61,68 @@ uploads data automatically.
 
 ## Performance evidence
 
+### Current 4.5.2 whole-workload comparison
+
+The current controlled comparison ran on one Linux workstation (AMD Ryzen Threadripper 2920X,
+62.8 GiB reported memory, kernel 6.18.33-1-MANJARO) with 132 loaded code mods, 176 loaded content
+packs, one expected skip, and an authorized private save. Official and fork processes shared the
+same vanilla game assembly, .NET 6.0.32 runtime, mod/save trees, configured controls, 1280×720 Xvfb
+session, llvmpipe renderer, null audio backend, launch wrapper, six selected logical CPUs, 60-second
+warm-up, and scripted save/warp scenario. Tiered compilation was disabled identically to avoid a
+reproducible native .NET 6 JIT crash in this workload.
+
+Five fixed-order A/B pairs ran official A then fork B, with at least 180 seconds of measured steady
+gameplay in every separate process. Values below are the median across the five per-run statistics.
+
+| Metric | Official SMAPI 4.5.2 | Fork, diagnostics disabled |
+| --- | ---: | ---: |
+| Mean update elapsed duration | 14.596 ms | 7.228 ms |
+| p50 update | 11.799 ms | 4.632 ms |
+| p95 update | 26.265 ms | 18.546 ms |
+| p99 update | 35.659 ms | 26.681 ms |
+| Maximum update | 548.410 ms | 100.893 ms |
+| Mean framework envelope | 10.422 ms | 3.348 ms |
+| Main-thread allocation/update | 1,384.6 KiB | 887.6 KiB |
+| Process allocation/update | 1,432.0 KiB | 905.7 KiB |
+| Updates over 16.667 ms | 22.27% | 14.93% |
+| Updates over 33.333 ms | 1.61% | 0.20% |
+| Updates over 50 ms | 0.183% | 0.009% |
+| Game launched to save loaded | 165.570 s | 129.805 s |
+
+The framework envelope is outer-update elapsed duration minus the measured base-game update window.
+It includes descheduling, identical probe overhead, and observed mod callbacks dispatched outside
+that window; it is not pure SMAPI CPU time or causal attribution to the fork changes.
+
+Mean update time was lower in all five pairs; paired differences ranged from −53.9% to −46.1%
+(mean −49.8%). In the separate diagnostics comparison, enabled-vs-disabled paired mean-update
+overhead ranged from 1.3% to 8.3% (mean 4.0%), with negligible allocation change in these captures.
+
+<div class="notice warning" markdown="1">
+**Limits:** these are descriptive one-machine results, not universal FPS, CPU-use, power, or latency
+claims. A always preceded B, so product and within-pair cache/order effects are confounded,
+especially for save loading. Xvfb/llvmpipe draw cadence is not desktop FPS, and accumulated
+update-plus-draw values are elapsed duration spent in measured update/draw calls per draw interval
+rather than frame latency. Selected-core busy time was higher for the fork in all five pairs;
+process Gen1 collections were 2–5 higher, and Farm-observed warp timing was slower in four pairs.
+Those last two signals lack pause-duration or stable transition evidence and are not classified as
+confirmed regressions.
+</div>
+
+The repository retains the [human-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.md),
+[machine-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.json),
+and [complete sanitized result bundle](https://github.com/4eh5xitv6787h645ebv/SMAPI/tree/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results)
+with raw numeric JSONL, environment/runtime provenance, exact commits, calculation method, and
+run-to-run variation. The commit-pinned [benchmark harness directory](https://github.com/4eh5xitv6787h645ebv/SMAPI/tree/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world)
+contains the scripts. The private modpack and save are not included.
+
 ### Historical whole-workload comparison
 
 The direct end-to-end comparison was contributed with
 [PR #158](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/158). It used a Framework Laptop 13
 (Intel i5-1340P, Iris Xe, 64 GB RAM), Arch Linux, native Stardew Valley under gamescope at 3440×1440,
-308 mods (129 code mods and 179 content packs), and the mid/late-game Blossom save. Each steady-state
-sample lasted 180 seconds, with external instrumentation around `SGame.Update`, `Game1.Update`, and
-mod handlers.
+308 mods (129 code mods and 179 content packs), and an authorized mid/late-game private save. Each
+steady-state sample lasted 180 seconds, with external instrumentation around `SGame.Update`,
+`Game1.Update`, and mod handlers.
 
 | Metric | Stock SMAPI 4.5.1 | Tested fork build | Difference |
 | --- | ---: | ---: | ---: |
@@ -79,10 +132,9 @@ mod handlers.
 | `SGame.Update` + `Draw` per frame | 14.696 ms | 6.785 ms | **−53.8%** |
 
 <div class="notice" markdown="1">
-**How to read this table:** it is strong evidence for that exact historical setup, not a current
-4.5.2-vs-4.5.2 release benchmark. The save, mod set, and sample duration were controlled, but the
-result came from one machine and no confidence intervals were recorded. A fresh repeated comparison
-against stock 4.5.2 is still needed before treating these percentages as a current release claim.
+**How to read this table:** it is evidence for that exact historical setup, not the current
+4.5.2-vs-4.5.2 benchmark above. The save, mod set, and sample duration were controlled, but the
+result came from one machine and no confidence intervals were recorded.
 </div>
 
 ### Isolated A/B benchmarks
@@ -117,7 +169,8 @@ The complete scenarios, correctness checks, risks, and rejected ideas are preser
 
 - They do not promise a particular FPS, startup time, or percentage improvement for another player.
 - Microbenchmarks isolate code paths and can overstate their share of a real frame.
-- The historical whole-workload baseline is stock 4.5.1, not the current 4.5.2 release.
+- The historical table uses stock 4.5.1; only the current table compares official 4.5.2 with the
+  exact fork benchmark commit.
 - SMAPI-owned timing cannot fully attribute Harmony patches, direct calls, GPU work, native work,
   background threads, scheduling, or I/O outside its boundaries.
 - Some optimizations trade memory for reuse through explicit bounded caches; the audit documents

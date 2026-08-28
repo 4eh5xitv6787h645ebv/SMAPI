@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "harnessCommit": "3c98eadd2bddc24d43c889afb11b155e92469882",
+  "suiteEnvironmentSha256": "81e8efe0227354ee638a07a64cf7a3cc93283edeb9c0e6ec863290f9a976f965",
+  "verifierScriptSha256": "fc01573a3f2a9f8dd281db97d897c64420f9eb170b05dc1eaefd32d67e8bfe99",
+  "verifiedProducts": [
+    "official",
+    "fork"
+  ],
+  "framework": "Microsoft.NETCore.App",
+  "version": "6.0.32",
+  "tieredCompilationFromRuntimeConfig": false,
+  "gameAssemblySha256": "f3e97f01d3fd2b1e6094fc8d2b59950aa6cb9d6cd1bf1b39d72d58edda8aad12",
+  "coreclrSha256": "0e7f0c6a491855480a079d3a0686973c9fe7410189c01b4f2b4debe2c55e4951",
+  "hostfxrSha256": "9bd58782f42fbba459fa4ce384475cd56bb18062a87386cefed0246946a2ea6b",
+  "verificationMethod": "SHA-256 and runtime-config fields independently matched across the post-suite official and fork gold game trees; the suite environment digest matches all 20 public raw samples."
+}

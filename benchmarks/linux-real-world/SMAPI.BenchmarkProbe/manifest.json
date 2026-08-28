@@ -1,0 +1,9 @@
+{
+  "Name": "SMAPI Linux Benchmark Probe",
+  "Author": "SMAPI Linux fork maintainers",
+  "Version": "1.0.0",
+  "Description": "Fixture-free telemetry and deterministic scenario driver for isolated SMAPI comparisons.",
+  "UniqueID": "SMAPILinux.BenchmarkProbe",
+  "EntryDll": "SMAPI.BenchmarkProbe.dll",
+  "MinimumApiVersion": "4.0.0"
+}
