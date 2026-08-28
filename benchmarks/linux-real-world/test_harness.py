@@ -154,6 +154,23 @@ class HarnessTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "invalid private preflight"):
                         runner.load_workload_baseline(path)
 
+    def test_runtime_probe_config_accepts_serialization_only_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            probe = Path(temporary)
+            config = dict(runner.EXPECTED_PROBE_CONFIG)
+            config["WarmupSeconds"] = 60.0
+            config["MeasurementSeconds"] = 180.0
+            (probe / "config.json").write_text(json.dumps(config), encoding="utf-8")
+            (probe / "manifest.json").write_text("manifest\n", encoding="utf-8")
+            metadata = {"probeManifestSha256": runner.sha256(probe / "manifest.json")}
+            runner.validate_runtime_probe_files(probe, metadata)
+            config["MeasurementSeconds"] = 179.0
+            (probe / "config.json").write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "configuration semantics"):
+                runner.validate_runtime_probe_files(probe, metadata)
+            with self.assertRaisesRegex(ValueError, "configuration semantics"):
+                runner.validate_probe_acceptance(probe, probe / "missing-probe.jsonl", metadata)
+
     def test_tree_manifest_is_deterministic_and_rejects_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

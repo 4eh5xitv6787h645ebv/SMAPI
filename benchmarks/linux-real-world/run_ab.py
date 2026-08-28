@@ -28,6 +28,13 @@ MIN_STEADY_DRAWS = 300
 MIN_TRANSITION_DRAWS = 10
 MAX_STEADY_DRAW_EDGE_GAP_SECONDS = 5
 MAX_TRANSITION_DRAW_EDGE_GAP_SECONDS = 2
+EXPECTED_PROBE_CONFIG = {
+    "WarmupSeconds": 60,
+    "MeasurementSeconds": 180,
+    "TransitionSettleTicks": 300,
+    "MaximumUpdates": 30000,
+    "MaximumDraws": 30000,
+}
 REQUIRED_STARTUP_PHASES = (
     "logStarted", "waitingForGame", "maliciousScan", "metadataLoad", "assemblyLoad", "entryLaunch", "modsReady", "contentReady",
 )
@@ -95,6 +102,23 @@ def load_workload_baseline(path: Path) -> str:
     if not isinstance(baseline, dict) or baseline.get("schema") != 1 or not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
         raise ValueError("invalid private preflight workload identity baseline")
     return identity
+
+
+def validate_runtime_probe_files(probe: Path, metadata: dict[str, Any]) -> None:
+    config_path = probe / "config.json"
+    manifest_path = probe / "manifest.json"
+    for path in (config_path, manifest_path):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"runtime probe file is not a regular file: {path.name}")
+    if load_jsonc(config_path) != EXPECTED_PROBE_CONFIG:
+        raise ValueError("runtime probe configuration semantics differ from the prepared input")
+    if sha256(manifest_path) != metadata["probeManifestSha256"]:
+        raise ValueError("runtime probe manifest differs from prepared metadata")
+
+
+def validate_probe_acceptance(probe: Path, result_path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    validate_runtime_probe_files(probe, metadata)
+    return probe_summary(result_path)
 
 
 def environment_metadata(cpu_list: str, display: str) -> dict[str, Any]:
@@ -541,13 +565,11 @@ def validate_saved_sample(
     }
     if critical != prepared_critical:
         raise ValueError("saved sample critical files differ from prepared immutable metadata")
-    if sha256(probe / "config.json") != metadata["probeConfigSha256"] or sha256(probe / "manifest.json") != metadata["probeManifestSha256"]:
-        raise ValueError("saved sample probe configuration or manifest differs from prepared metadata")
     if sha256(game / "StardewModdingAPI") != metadata["commonLauncherSha256"]:
         raise ValueError("saved sample common launcher hash mismatch")
     if sha256(game / "StardewModdingAPI.deps.json") != metadata["commonDepsSha256"]:
         raise ValueError("saved sample common runtime deps hash mismatch")
-    summary = probe_summary(run_root / "probe.jsonl")
+    summary = validate_probe_acceptance(probe, run_root / "probe.jsonl", metadata)
     if saved.get("probe") != summary:
         raise ValueError("saved sample probe acceptance summary mismatch")
     log_path = run_root / "home" / ".config" / "StardewValley" / "ErrorLogs" / "SMAPI-latest.txt"
@@ -705,7 +727,7 @@ def run_sample(
     during_busy = cpu_busy_between(cpu_before, read_cpu_snapshot(cpus), cpus)
     if exit_code != 0:
         raise ValueError(f"sample exited with code {exit_code}")
-    summary = probe_summary(result_path)
+    summary = validate_probe_acceptance(probe_root, result_path, metadata)
     log_path = home / ".config" / "StardewValley" / "ErrorLogs" / "SMAPI-latest.txt"
     log_metadata = selected_log_metadata(log_path)
     expected_identity = None
