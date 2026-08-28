@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using FluentAssertions;
@@ -219,7 +220,17 @@ public sealed class ReleasePackageVerifierTests
     {
         const string expectedRoot = "SMAPI synthetic Linux installer";
         (string path, byte[] bytes, string hash) = this.CreateZipPackage(expectedRoot, "verified");
-        VerifiedReleasePackage verified = await new ReleasePackageVerifier().VerifyAsync(
+        int? observedDirectoryMode = null;
+        int? observedFileMode = null;
+        ReleasePackageVerifier verifier = new(new ReleasePackageVerifierFaults(BeforeStagingUnlink: (directory, file) =>
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                observedDirectoryMode = Convert.ToInt32(File.GetUnixFileMode(directory) & (UnixFileMode)0x1ff);
+                observedFileMode = Convert.ToInt32(File.GetUnixFileMode(file) & (UnixFileMode)0x1ff);
+            }
+        }));
+        VerifiedReleasePackage verified = await verifier.VerifyAsync(
             path,
             $"{hash}  {this.Identity.PackageAssetName}\n",
             this.CreateMetadata(hash, bytes.Length),
@@ -230,10 +241,10 @@ public sealed class ReleasePackageVerifierTests
         string stagingPath = GetPrivatePath(verified, "StagingPath");
         if (OperatingSystem.IsLinux())
         {
-            Convert.ToInt32(File.GetUnixFileMode(stagingDirectory) & (UnixFileMode)0x1ff)
-                .Should().Be(Convert.ToInt32("700", 8));
-            Convert.ToInt32(File.GetUnixFileMode(stagingPath) & (UnixFileMode)0x1ff)
-                .Should().Be(Convert.ToInt32("600", 8));
+            observedDirectoryMode.Should().Be(Convert.ToInt32("700", 8));
+            observedFileMode.Should().Be(Convert.ToInt32("600", 8));
+            Directory.Exists(stagingDirectory).Should().BeFalse("the retained Linux package is unlinked before authority publication");
+            File.Exists(stagingPath).Should().BeFalse();
         }
 
         File.WriteAllBytes(path, CreateZipBytes(expectedRoot, "replacement"));
@@ -258,6 +269,103 @@ public sealed class ReleasePackageVerifierTests
 
         await verified.DisposeAsync();
         Directory.Exists(stagingDirectory).Should().BeFalse();
+    }
+
+    [TestCase("replacement")]
+    [TestCase("symlink")]
+    [TestCase("fifo")]
+    [TestCase("hardlink")]
+    [Platform("Linux")]
+    [CancelAfter(5000)]
+    public async Task VerifyAsync_StagingNameChangedBeforeUnlink_RejectsAndCleansUp(string kind)
+    {
+        (string path, byte[] bytes, string hash) = this.CreatePackage();
+        string? stagingDirectory = null;
+        ReleasePackageVerifier verifier = new(new ReleasePackageVerifierFaults(BeforeStagingUnlink: (directory, stagedPath) =>
+        {
+            stagingDirectory = directory;
+            string retained = stagedPath + ".retained";
+            switch (kind)
+            {
+                case "replacement":
+                    File.Move(stagedPath, retained);
+                    File.WriteAllBytes(stagedPath, bytes);
+                    break;
+                case "symlink":
+                    File.Move(stagedPath, retained);
+                    File.CreateSymbolicLink(stagedPath, retained);
+                    break;
+                case "fifo":
+                    File.Move(stagedPath, retained);
+                    mkfifo(stagedPath, 0x180).Should().Be(0, $"mkfifo(2) failed with errno {Marshal.GetLastWin32Error()}");
+                    break;
+                case "hardlink":
+                    link(stagedPath, retained).Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
+                    break;
+                default:
+                    throw new AssertionException($"Unknown staging attack '{kind}'.");
+            }
+        }));
+
+        Func<Task> action = () => verifier.VerifyAsync(
+            path,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
+        stagingDirectory.Should().NotBeNull();
+        Directory.Exists(stagingDirectory).Should().BeFalse();
+    }
+
+    [Test]
+    [Platform("Linux")]
+    public async Task UseVerifiedStream_MutationAfterPreUseHash_IsImpossibleAndNamedReplacementIsIgnored()
+    {
+        const string expectedRoot = "SMAPI synthetic Linux installer";
+        (string path, byte[] bytes, string hash) = this.CreateZipPackage(expectedRoot, "verified");
+        bool faultReached = false;
+        string? replacementStagingDirectory = null;
+        ReleasePackageVerifier verifier = new(new ReleasePackageVerifierFaults(AfterPreUseHash: (stream, stagedPath) =>
+        {
+            faultReached = true;
+            stream.CanWrite.Should().BeFalse();
+            Action mutateAuthority = () => stream.WriteByte(0x41);
+            mutateAuthority.Should().Throw<NotSupportedException>();
+            File.Exists(stagedPath).Should().BeFalse();
+            replacementStagingDirectory = Path.GetDirectoryName(stagedPath)!;
+            Directory.CreateDirectory(replacementStagingDirectory);
+            File.WriteAllBytes(stagedPath, CreateZipBytes(expectedRoot, "replacement"));
+        }));
+        VerifiedReleasePackage verified = await verifier.VerifyAsync(
+            path,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+        string extraction = Path.Combine(this.TempRoot, "immutable-extraction");
+
+        try
+        {
+            await new BoundedZipPackage().InspectAndExtractAsync(
+                verified,
+                expectedRoot,
+                extraction,
+                new ZipPackageLimits(1024 * 1024, 10, 10, 1024, 4096, 1000)
+            );
+
+            faultReached.Should().BeTrue();
+            File.ReadAllText(Path.Combine(extraction, expectedRoot, "payload.txt")).Should().Be("verified");
+        }
+        finally
+        {
+            await verified.DisposeAsync();
+        }
+        Directory.Exists(replacementStagingDirectory).Should().BeTrue("authority disposal must not delete a concurrently reused Linux path");
+        Directory.Delete(replacementStagingDirectory!, recursive: true);
     }
 
     [Test]
@@ -469,4 +577,10 @@ public sealed class ReleasePackageVerifierTests
             .GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(package)!;
     }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int link(string existingPath, string newPath);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int mkfifo(string path, uint mode);
 }

@@ -52,9 +52,11 @@ public sealed record PackageVerificationLimits
 /// </summary>
 public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
 {
-    private readonly FileStream Stream;
+    private readonly Stream Stream;
     private readonly string StagingDirectory;
     private readonly string StagingPath;
+    private readonly bool CleanupStagingPath;
+    private readonly Action<Stream, string>? AfterPreUseHash;
     private readonly SemaphoreSlim UseLock = new(1, 1);
     private readonly IReadOnlyDictionary<string, VerifiedReleaseArtifactIdentity> Artifacts;
     private bool Disposed;
@@ -89,7 +91,9 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         IEnumerable<VerifiedReleaseArtifactIdentity> artifacts,
         string stagingDirectory,
         string stagingPath,
-        FileStream stream
+        Stream stream,
+        bool cleanupStagingPath = true,
+        Action<Stream, string>? afterPreUseHash = null
     )
     {
         this.Identity = identity;
@@ -113,7 +117,9 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         );
         this.StagingDirectory = stagingDirectory;
         this.StagingPath = stagingPath;
+        this.CleanupStagingPath = cleanupStagingPath;
         this.Stream = stream;
+        this.AfterPreUseHash = afterPreUseHash;
     }
 
     internal VerifiedReleaseArtifactIdentity GetArtifact(string exactName)
@@ -147,6 +153,10 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
                 throw new PackageSecurityException("The private staged package no longer matches its verified identity.");
 
             this.Stream.Position = 0;
+            this.AfterPreUseHash?.Invoke(this.Stream, this.StagingPath);
+            if (!this.Stream.CanRead || this.Stream.CanWrite || !this.Stream.CanSeek || this.Stream.Length != this.SizeBytes)
+                throw new PackageSecurityException("The private verified package authority changed before consumption.");
+            this.Stream.Position = 0;
             return await action(this.Stream, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -167,8 +177,11 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
                 return;
             this.Disposed = true;
             this.Stream.Dispose();
-            PrivatePackageStaging.TryDeleteFile(this.StagingPath);
-            PrivatePackageStaging.TryDeleteDirectory(this.StagingDirectory);
+            if (this.CleanupStagingPath)
+            {
+                PrivatePackageStaging.TryDeleteFile(this.StagingPath);
+                PrivatePackageStaging.TryDeleteDirectory(this.StagingDirectory);
+            }
         }
         finally
         {
@@ -184,9 +197,18 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
     }
 }
 
+/// <summary>Deterministic test seams around private staging authority publication and consumption.</summary>
+internal sealed record ReleasePackageVerifierFaults(
+    Action<string, string>? BeforeStagingUnlink = null,
+    Action<Stream, string>? AfterPreUseHash = null
+);
+
 /// <summary>Verifies that package bytes, SHA256SUMS, metadata, and release identity all agree.</summary>
 public sealed class ReleasePackageVerifier
 {
+    private const string StagingFilename = "verified-package.zip";
+    private readonly ReleasePackageVerifierFaults? Faults;
+
     /// <summary>The exact checksum asset filename accepted from an untrusted caller-selected path.</summary>
     public const string ChecksumAssetName = "SHA256SUMS";
 
@@ -202,6 +224,16 @@ public sealed class ReleasePackageVerifier
 
     private static readonly Regex CommitPattern = new(@"\A[0-9a-f]{40}\z", RegexOptions.CultureInvariant);
     private static readonly Regex Sha256Pattern = new(@"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant);
+
+    /// <summary>Create a release-package verifier.</summary>
+    public ReleasePackageVerifier()
+    {
+    }
+
+    internal ReleasePackageVerifier(ReleasePackageVerifierFaults faults)
+    {
+        this.Faults = faults ?? throw new ArgumentNullException(nameof(faults));
+    }
 
     /// <summary>
     /// Open and verify a caller-selected package, SHA256SUMS, and build-metadata file through retained regular-file
@@ -276,10 +308,37 @@ public sealed class ReleasePackageVerifier
 
         string? stagingDirectory = null;
         string? stagingPath = null;
+        LinuxAnchoredFileSystem? stagingFileSystem = null;
+        LinuxAnchoredFile? stagingFile = null;
+        FileStream? stagingStream = null;
         try
         {
             stagingDirectory = PrivatePackageStaging.CreateDirectory();
-            stagingPath = Path.Combine(stagingDirectory, "verified-package.zip");
+            stagingPath = Path.Combine(stagingDirectory, ReleasePackageVerifier.StagingFilename);
+
+            if (OperatingSystem.IsLinux())
+            {
+                stagingFileSystem = new LinuxAnchoredFileSystem(stagingDirectory);
+                stagingFile = stagingFileSystem.CreateNewFile(ReleasePackageVerifier.StagingFilename, Convert.ToInt32("600", 8));
+                stagingStream = new FileStream(
+                    stagingFile.Handle,
+                    FileAccess.ReadWrite,
+                    bufferSize: 128 * 1024,
+                    isAsync: false
+                );
+            }
+            else
+            {
+                stagingStream = new FileStream(
+                    stagingPath,
+                    FileMode.CreateNew,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 128 * 1024,
+                    options: FileOptions.Asynchronous | FileOptions.SequentialScan
+                );
+                PrivatePackageStaging.SetFileMode(stagingPath);
+            }
 
             long size;
             string packageHash;
@@ -289,19 +348,9 @@ public sealed class ReleasePackageVerifier
                 if (size <= 0 || size > limits.MaxPackageBytes)
                     throw new PackageSecurityException("The selected installer package has an invalid or excessive size.");
 
-                await using FileStream output = new(
-                    stagingPath,
-                    FileMode.CreateNew,
-                    FileAccess.Write,
-                    FileShare.None,
-                    bufferSize: 128 * 1024,
-                    options: FileOptions.Asynchronous | FileOptions.SequentialScan
-                );
-                PrivatePackageStaging.SetFileMode(stagingPath);
-
-                packageHash = await source.CopyAndHashAsync(output, limits.MaxPackageBytes, cancellationToken).ConfigureAwait(false);
-                await output.FlushAsync(cancellationToken).ConfigureAwait(false);
-                output.Flush(flushToDisk: true);
+                packageHash = await source.CopyAndHashAsync(stagingStream, limits.MaxPackageBytes, cancellationToken).ConfigureAwait(false);
+                await stagingStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                stagingStream.Flush(flushToDisk: true);
             }
 
             this.AssertMetadata(metadata, identity, size, expectedSourceCommit);
@@ -310,14 +359,51 @@ public sealed class ReleasePackageVerifier
             if (!string.Equals(packageHash, metadata.Artifact.Sha256, StringComparison.Ordinal))
                 throw new PackageSecurityException("The installer package doesn't match build-metadata.json.");
 
-            FileStream verifiedStream = new(
-                stagingPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 128 * 1024,
-                options: FileOptions.Asynchronous | FileOptions.SequentialScan
-            );
+            if (OperatingSystem.IsLinux())
+            {
+                try
+                {
+                    this.Faults?.BeforeStagingUnlink?.Invoke(stagingDirectory, stagingPath);
+                    LinuxFileIdentity named = stagingFileSystem!.Stat(ReleasePackageVerifier.StagingFilename)
+                        ?? throw new PackageSecurityException("The private staged package disappeared before its authority was retained.");
+                    if (!named.IsSameObject(stagingFile!.Identity) || named.Size != size)
+                        throw new PackageSecurityException("The private staged package identity changed before its authority was retained.");
+                    stagingFileSystem.UnlinkFile(ReleasePackageVerifier.StagingFilename, named);
+                }
+                catch (PackageSecurityException)
+                {
+                    throw;
+                }
+                catch (IOException ex)
+                {
+                    throw new PackageSecurityException("The private staged package name became unsafe before authority publication.", ex);
+                }
+            }
+
+            stagingStream.Position = 0;
+            using (SHA256 retainedHasher = SHA256.Create())
+            {
+                byte[] retainedHash = await retainedHasher.ComputeHashAsync(stagingStream, cancellationToken).ConfigureAwait(false);
+                if (
+                    stagingStream.Position != size
+                    || !string.Equals(Convert.ToHexString(retainedHash).ToLowerInvariant(), packageHash, StringComparison.Ordinal)
+                )
+                {
+                    throw new PackageSecurityException("The exact retained staging handle changed before authority publication.");
+                }
+            }
+            stagingStream.Position = 0;
+
+            if (OperatingSystem.IsLinux())
+            {
+                stagingFileSystem!.Dispose();
+                stagingFileSystem = null;
+                stagingFile = null; // the retained stream owns the same SafeFileHandle instance
+                Directory.Delete(stagingDirectory);
+            }
+
+            Stream verifiedStream = new ReadOnlyRetainedStream(stagingStream);
+            stagingStream = null;
             try
             {
                 if (verifiedStream.Length != size)
@@ -334,7 +420,9 @@ public sealed class ReleasePackageVerifier
                     metadata.Artifacts.Select(artifact => new VerifiedReleaseArtifactIdentity(artifact.Name, artifact.SizeBytes, artifact.Sha256)),
                     stagingDirectory,
                     stagingPath,
-                    verifiedStream
+                    verifiedStream,
+                    cleanupStagingPath: !OperatingSystem.IsLinux(),
+                    afterPreUseHash: this.Faults?.AfterPreUseHash
                 );
                 stagingDirectory = null;
                 stagingPath = null;
@@ -356,6 +444,9 @@ public sealed class ReleasePackageVerifier
         }
         finally
         {
+            stagingStream?.Dispose();
+            stagingFile?.Dispose();
+            stagingFileSystem?.Dispose();
             if (stagingPath != null)
                 PrivatePackageStaging.TryDeleteFile(stagingPath);
             if (stagingDirectory != null)
@@ -638,6 +729,51 @@ public sealed class ReleasePackageVerifier
     private sealed record SourceSection(string Repository, string Commit, string Tree);
     private sealed record BuildSection(string Workflow, string Configuration, string RuntimeIdentifier);
     private sealed record ArtifactSection(string Name, long SizeBytes, string Sha256);
+}
+
+/// <summary>A read-only view which exclusively owns the exact retained staging stream.</summary>
+internal sealed class ReadOnlyRetainedStream : Stream
+{
+    private readonly Stream Inner;
+
+    public override bool CanRead => this.Inner.CanRead;
+    public override bool CanSeek => this.Inner.CanSeek;
+    public override bool CanWrite => false;
+    public override long Length => this.Inner.Length;
+    public override long Position { get => this.Inner.Position; set => this.Inner.Position = value; }
+
+    public ReadOnlyRetainedStream(Stream inner)
+    {
+        this.Inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        if (!inner.CanRead || !inner.CanSeek)
+            throw new ArgumentException("The retained staging stream must be readable and seekable.", nameof(inner));
+    }
+
+    public override void Flush()
+    {
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => this.Inner.Read(buffer, offset, count);
+    public override int Read(Span<byte> buffer) => this.Inner.Read(buffer);
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => this.Inner.ReadAsync(buffer, cancellationToken);
+    public override long Seek(long offset, SeekOrigin origin) => this.Inner.Seek(offset, origin);
+    public override void SetLength(long value) => throw new NotSupportedException("The verified package authority is read-only.");
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException("The verified package authority is read-only.");
+    public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException("The verified package authority is read-only.");
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) => ValueTask.FromException(new NotSupportedException("The verified package authority is read-only."));
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            this.Inner.Dispose();
+        base.Dispose(disposing);
+    }
+
+    public override async ValueTask DisposeAsync()
+    {
+        await this.Inner.DisposeAsync().ConfigureAwait(false);
+        GC.SuppressFinalize(this);
+    }
 }
 
 internal static class PrivatePackageStaging
