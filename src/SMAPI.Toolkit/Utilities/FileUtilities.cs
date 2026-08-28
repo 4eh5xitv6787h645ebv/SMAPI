@@ -15,20 +15,28 @@ public static class FileUtilities
     /// <param name="entry">The file or folder to reset.</param>
     public static void ForceDelete(FileSystemInfo entry)
     {
-        // ignore if already deleted
+        // Resolve the entry itself, but never traverse a symbolic link, junction, or other
+        // reparse point. In particular, recursively enumerating a directory link here could
+        // delete files outside the caller's intended tree.
         entry.Refresh();
-        if (!entry.Exists)
+        bool isLink = entry.LinkTarget != null;
+        if (!entry.Exists && !isLink)
             return;
 
+        if (!isLink)
+            isLink = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
+
         // delete children
-        if (entry is DirectoryInfo folder)
+        if (entry is DirectoryInfo folder && !isLink)
         {
             foreach (FileSystemInfo child in folder.GetFileSystemInfos())
                 FileUtilities.ForceDelete(child);
         }
 
         // reset permissions & delete
-        entry.Attributes = FileAttributes.Normal;
+        // Don't set attributes through a link, since the platform may apply that to its target.
+        if (!isLink)
+            entry.Attributes = FileAttributes.Normal;
         entry.Delete();
 
         // wait for deletion to finish

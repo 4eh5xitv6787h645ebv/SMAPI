@@ -40,6 +40,7 @@ fi
 unzip -q "$archive_path" -d "$temp_root/extracted"
 package_root="$temp_root/extracted/$expected_root"
 test -x "$package_root/install on Linux.sh"
+grep -F 'must not be run as root or with sudo' "$package_root/install on Linux.sh" >/dev/null
 test -f "$package_root/README.txt"
 test -f "$package_root/internal/linux/SMAPI.Installer"
 test -f "$package_root/internal/linux/install.dat"

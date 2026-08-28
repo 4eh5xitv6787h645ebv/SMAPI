@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
 
 namespace StardewModdingApi.Installer;
 
@@ -29,6 +30,14 @@ internal class Program
     /// <param name="args">The command line arguments.</param>
     public static int Main(string[] args)
     {
+        // A normal Linux installation must never need elevated privileges. Refuse them before
+        // extracting or touching any files, including when the binary is invoked directly.
+        if (OperatingSystem.IsLinux() && Program.GetEffectiveUserId() == 0)
+        {
+            Console.Error.WriteLine("The SMAPI installer must not be run as root or with sudo. Run it as your normal desktop user instead.");
+            return 2;
+        }
+
         // find install bundle
         FileInfo zipFile = new(Path.Combine(Program.InstallerPath, "install.dat"));
         if (!zipFile.Exists)
@@ -78,6 +87,10 @@ internal class Program
     /*********
     ** Private methods
     *********/
+    /// <summary>Get the effective Unix user ID.</summary>
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
     /// <summary>Method called when assembly resolution fails, which may return a manually resolved assembly.</summary>
     /// <param name="sender">The event sender.</param>
     /// <param name="e">The event arguments.</param>

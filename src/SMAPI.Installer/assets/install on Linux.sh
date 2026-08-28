@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if [ "$(id -u)" -eq 0 ]; then
+    printf '%s\n' "The SMAPI installer must not be run as root or with sudo. Run it as your normal desktop user instead." >&2
+    exit 2
+fi
+
 function open_in_terminal { # Checks for a few different terminal emulators to launch the installer through
     if which konsole 2>&1 >/dev/null; then # KDE Konsole
         konsole -e $1

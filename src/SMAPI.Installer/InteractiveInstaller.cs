@@ -357,7 +357,7 @@ internal class InteractiveInstaller
             if (context.IsUnix && File.Exists(paths.BackupLaunchScriptPath))
             {
                 this.PrintDebug("Removing SMAPI launcher...");
-                this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput);
+                this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput, paths.GamePath);
                 File.Move(paths.BackupLaunchScriptPath, paths.VanillaLaunchScriptPath);
             }
 
@@ -369,7 +369,7 @@ internal class InteractiveInstaller
             {
                 this.PrintDebug(action == ScriptAction.Install ? "Removing previous SMAPI files..." : "Removing SMAPI files...");
                 foreach (string path in removePaths)
-                    this.InteractivelyDelete(path, allowUserInput);
+                    this.InteractivelyDelete(path, allowUserInput, paths.GamePath);
             }
 
             // move global save data folder (changed in 3.2)
@@ -381,7 +381,7 @@ internal class InteractiveInstaller
                 if (oldDir.Exists)
                 {
                     if (newDir.Exists)
-                        this.InteractivelyDelete(oldDir.FullName, allowUserInput);
+                        this.InteractivelyDelete(oldDir.FullName, allowUserInput, dataPath);
                     else
                         oldDir.MoveTo(newDir.FullName);
                 }
@@ -399,7 +399,7 @@ internal class InteractiveInstaller
                     if (!this.ShouldCopy(sourceEntry))
                         continue;
 
-                    this.InteractivelyDelete(Path.Combine(paths.GameDir.FullName, sourceEntry.Name), allowUserInput);
+                    this.InteractivelyDelete(Path.Combine(paths.GameDir.FullName, sourceEntry.Name), allowUserInput, paths.GamePath);
                     this.RecursiveCopy(sourceEntry, paths.GameDir);
                 }
 
@@ -414,7 +414,7 @@ internal class InteractiveInstaller
                         if (!File.Exists(paths.BackupLaunchScriptPath))
                             File.Move(paths.VanillaLaunchScriptPath, paths.BackupLaunchScriptPath);
                         else
-                            this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput);
+                            this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput, paths.GamePath);
                     }
 
                     // add new launcher
@@ -534,7 +534,7 @@ internal class InteractiveInstaller
                                 );
                             }
 
-                            this.InteractivelyDelete(targetDir.FullName, allowUserInput);
+                            this.InteractivelyDelete(targetDir.FullName, allowUserInput, paths.GamePath);
                             this.RecursiveCopy(fromDir, parentDir, filter: this.ShouldCopy);
                         }
 
@@ -546,7 +546,7 @@ internal class InteractiveInstaller
                             this.PrintDebug($"   adding {modName}...");
 
                             if (targetDir.Exists)
-                                this.InteractivelyDelete(targetDir.FullName, allowUserInput);
+                                this.InteractivelyDelete(targetDir.FullName, allowUserInput, paths.GamePath);
 
                             this.RecursiveCopy(fromDir, parentDir, filter: this.ShouldCopy);
                         }
@@ -687,12 +687,14 @@ internal class InteractiveInstaller
     /// <summary>Interactively delete a file or folder path, and block until deletion completes.</summary>
     /// <param name="path">The file or folder path.</param>
     /// <param name="allowUserInput">Whether the installer can ask for user input from the terminal.</param>
-    private void InteractivelyDelete(string path, bool allowUserInput)
+    /// <param name="allowedRootPath">The trusted root which must lexically contain the path, with no linked parent below that root.</param>
+    private void InteractivelyDelete(string path, bool allowUserInput, string allowedRootPath)
     {
         while (true)
         {
             try
             {
+                this.AssertDeleteIsConfined(path, allowedRootPath);
                 FileUtilities.ForceDelete(Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path));
                 break;
             }
@@ -705,6 +707,43 @@ internal class InteractiveInstaller
                 this.PrintError("Try rebooting your computer and then run the installer again. If that doesn't work, try deleting it yourself then press any key to retry.");
                 this.AwaitConfirmation(allowUserInput);
             }
+        }
+    }
+
+    /// <summary>Assert that deleting a path can't traverse a linked parent outside its trusted root.</summary>
+    /// <param name="path">The prospective deletion path.</param>
+    /// <param name="allowedRootPath">The trusted root selected by the installer.</param>
+    private void AssertDeleteIsConfined(string path, string allowedRootPath)
+    {
+        string rootPath = Path.GetFullPath(allowedRootPath);
+        string targetPath = Path.GetFullPath(path);
+        string relativePath = Path.GetRelativePath(rootPath, targetPath);
+        if (
+            relativePath == "."
+            || Path.IsPathRooted(relativePath)
+            || relativePath == ".."
+            || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)
+        )
+        {
+            throw new IOException($"Refusing to delete '{path}' because it is outside the expected folder '{allowedRootPath}'.");
+        }
+
+        string currentPath = rootPath;
+        string[] segments = relativePath.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < segments.Length - 1; i++)
+        {
+            currentPath = Path.Combine(currentPath, segments[i]);
+            FileSystemInfo entry = Directory.Exists(currentPath)
+                ? new DirectoryInfo(currentPath)
+                : new FileInfo(currentPath);
+            entry.Refresh();
+
+            bool isLink = entry.LinkTarget != null;
+            if (!isLink && entry.Exists)
+                isLink = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
+            if (isLink)
+                throw new IOException($"Refusing to delete '{path}' because its parent '{currentPath}' is a symbolic link or reparse point.");
         }
     }
 
