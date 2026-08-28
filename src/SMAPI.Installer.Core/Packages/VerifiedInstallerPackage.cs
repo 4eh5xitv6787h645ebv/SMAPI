@@ -96,38 +96,11 @@ public sealed class VerifiedInstallerPackageFactory
             throw new PackageSecurityException("The selected install-manifest filename doesn't match its release identity.");
 
         byte[] bytes;
-        try
+        using (RetainedReleaseAssetFile file = RetainedReleaseAssetFile.Open(fullPath, "install manifest"))
         {
-            await using FileStream stream = new(
-                fullPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 64 * 1024,
-                options: FileOptions.Asynchronous | FileOptions.SequentialScan
-            );
-            if (stream.Length != expected.SizeBytes || stream.Length <= 0 || stream.Length > limits.MaxDocumentBytes)
+            if (file.Size != expected.SizeBytes || file.Size <= 0 || file.Size > limits.MaxDocumentBytes)
                 throw new PackageSecurityException("The selected install manifest doesn't match its verified size.");
-
-            bytes = new byte[checked((int)stream.Length)];
-            int total = 0;
-            while (total < bytes.Length)
-            {
-                int read = await stream.ReadAsync(bytes.AsMemory(total), cancellationToken).ConfigureAwait(false);
-                if (read == 0)
-                    throw new PackageSecurityException("The selected install manifest ended before its verified size.");
-                total += read;
-            }
-            if (await stream.ReadAsync(new byte[1], cancellationToken).ConfigureAwait(false) != 0 || stream.Length != expected.SizeBytes)
-                throw new PackageSecurityException("The selected install manifest changed while it was being read.");
-        }
-        catch (FileNotFoundException ex)
-        {
-            throw new PackageSecurityException("The selected install manifest doesn't exist.", ex);
-        }
-        catch (DirectoryNotFoundException ex)
-        {
-            throw new PackageSecurityException("The selected install-manifest directory doesn't exist.", ex);
+            bytes = await file.ReadAllBytesAsync(limits.MaxDocumentBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
         }
 
         string actualSha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();

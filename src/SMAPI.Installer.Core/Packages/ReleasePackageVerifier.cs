@@ -187,6 +187,12 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
 /// <summary>Verifies that package bytes, SHA256SUMS, metadata, and release identity all agree.</summary>
 public sealed class ReleasePackageVerifier
 {
+    /// <summary>The exact checksum asset filename accepted from an untrusted caller-selected path.</summary>
+    public const string ChecksumAssetName = "SHA256SUMS";
+
+    /// <summary>The exact build-metadata asset filename accepted from an untrusted caller-selected path.</summary>
+    public const string BuildMetadataAssetName = "build-metadata.json";
+
     private const int MetadataMaxDepth = 8;
 
     private static readonly Regex ChecksumLinePattern = new(
@@ -196,6 +202,45 @@ public sealed class ReleasePackageVerifier
 
     private static readonly Regex CommitPattern = new(@"\A[0-9a-f]{40}\z", RegexOptions.CultureInvariant);
     private static readonly Regex Sha256Pattern = new(@"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Open and verify a caller-selected package, SHA256SUMS, and build-metadata file through retained regular-file
+    /// handles. Use this overload for filesystem paths; the string overload is for already-retained trusted in-memory
+    /// document bytes.
+    /// </summary>
+    public async Task<VerifiedReleasePackage> VerifyFilesAsync(
+        string packagePath,
+        string checksumPath,
+        string metadataPath,
+        ForkReleaseIdentity identity,
+        string expectedSourceCommit,
+        PackageVerificationLimits? limits = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(identity);
+        limits ??= PackageVerificationLimits.Default;
+        AssertExactFilename(checksumPath, ReleasePackageVerifier.ChecksumAssetName, "checksum document");
+        AssertExactFilename(metadataPath, ReleasePackageVerifier.BuildMetadataAssetName, "build metadata");
+
+        string checksums;
+        using (RetainedReleaseAssetFile file = RetainedReleaseAssetFile.Open(checksumPath, "checksum document"))
+            checksums = await file.ReadUtf8TextAsync(limits.MaxChecksumBytes, cancellationToken).ConfigureAwait(false);
+        string metadata;
+        using (RetainedReleaseAssetFile file = RetainedReleaseAssetFile.Open(metadataPath, "build metadata"))
+            metadata = await file.ReadUtf8TextAsync(limits.MaxMetadataBytes, cancellationToken).ConfigureAwait(false);
+
+        return await this.VerifyAsync(
+            packagePath,
+            checksums,
+            metadata,
+            identity,
+            expectedSourceCommit,
+            limits,
+            cancellationToken
+        ).ConfigureAwait(false);
+    }
 
     /// <summary>Verify a release into private staging and retain the exact verified read handle.</summary>
     public async Task<VerifiedReleasePackage> VerifyAsync(
@@ -238,16 +283,9 @@ public sealed class ReleasePackageVerifier
 
             long size;
             string packageHash;
-            await using (FileStream source = new(
-                fullPackagePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 128 * 1024,
-                options: FileOptions.Asynchronous | FileOptions.SequentialScan
-            ))
+            using (RetainedReleaseAssetFile source = RetainedReleaseAssetFile.Open(fullPackagePath, "installer package"))
             {
-                size = source.Length;
+                size = source.Size;
                 if (size <= 0 || size > limits.MaxPackageBytes)
                     throw new PackageSecurityException("The selected installer package has an invalid or excessive size.");
 
@@ -261,24 +299,7 @@ public sealed class ReleasePackageVerifier
                 );
                 PrivatePackageStaging.SetFileMode(stagingPath);
 
-                using SHA256 hasher = SHA256.Create();
-                byte[] buffer = new byte[128 * 1024];
-                long copied = 0;
-                while (true)
-                {
-                    int read = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
-                    if (read == 0)
-                        break;
-                    copied = checked(copied + read);
-                    if (copied > limits.MaxPackageBytes || copied > size)
-                        throw new PackageSecurityException("The installer package changed or exceeded its size limit while staging.");
-                    hasher.TransformBlock(buffer, 0, read, null, 0);
-                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                }
-                hasher.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                if (copied != size || source.Length != size)
-                    throw new PackageSecurityException("The installer package changed while it was being staged.");
-                packageHash = Convert.ToHexString(hasher.Hash!).ToLowerInvariant();
+                packageHash = await source.CopyAndHashAsync(output, limits.MaxPackageBytes, cancellationToken).ConfigureAwait(false);
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
                 output.Flush(flushToDisk: true);
             }
@@ -340,6 +361,15 @@ public sealed class ReleasePackageVerifier
             if (stagingDirectory != null)
                 PrivatePackageStaging.TryDeleteDirectory(stagingDirectory);
         }
+    }
+
+    private static void AssertExactFilename(string path, string expectedName, string description)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException($"The {description} path is required.", nameof(path));
+        string fullPath = Path.GetFullPath(path);
+        if (!string.Equals(Path.GetFileName(fullPath), expectedName, StringComparison.Ordinal))
+            throw new PackageSecurityException($"The selected {description} filename must be exactly '{expectedName}'.");
     }
 
     private void AssertTextBound(string text, int maxBytes, string description)
