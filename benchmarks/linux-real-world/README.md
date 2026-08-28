@@ -1,0 +1,48 @@
+# Linux real-world A/B benchmark
+
+This harness compares exact SMAPI commits with the same native Linux game build, trusted external workload, configuration, probe, session, resolution, launch wrapper, warm-up, steady-state duration, and transition scenario. The private PR #158 modpack and save are never stored in this repository or emitted by the probe.
+
+The common probe patches the same runtime boundaries in both products without modifying their assemblies. It captures outer SMAPI-runner updates, base-game update windows, outer draws, main-thread allocation deltas, process-wide allocation/GC phase totals, GC collections coincident with outer updates, and fixed scenario markers. Its bounded arrays are allocated before the save loads, and telemetry is written only during normal shutdown. “Framework envelope” means the outer update minus the base-game update window; it includes observed mod callbacks dispatched outside the base-game window and is not pure SMAPI CPU attribution. Harmony timers and probes add identical observer overhead to both builds, so absolute timings include that shared cost.
+
+Each accepted sample uses a fresh copy (using filesystem reflinks when supported) of immutable game, mod, save, HOME, and XDG inputs. The wrapper runs with an empty environment in a bubblewrap PID/network/IPC/UTS namespace. It exposes read-only `/usr` runtime files and font configuration, a private `/proc`, basic devices, the dedicated Xvfb socket, and the writable sample root; host identity data in `/etc` and `/sys`, host homes, the repository, live game data, user runtime sockets, and networking are unavailable. The workload auto-loads its configured save, which the probe checks privately without emitting its identifier. After a 60-second warm-up, the probe records at least 180 wall-clock seconds of stationary, unpaused, menu-free gameplay and rejects state/location/position changes, then performs verified local-player warps to vanilla `Town` and `Farm` locations and exits without saving. The benchmark copy raises the workload's idle-pause timeout to one hour identically for all products so the capture cannot pause.
+
+The minimum main sequence is five uninterrupted strict alternating samples per product (`A1, B1, …, A5, B5`; the starting side is preregistered). Diagnostics overhead then uses five separate fork-disabled controls paired with five fork-enabled samples; individual tick logging stays disabled and disabled/enabled order alternates between pairs. A run fails on a wrong tree/file hash, incomplete workload count, framework load failure, wrong save/state, missing or reordered marker, invalid timing partition, buffer overflow, insufficient measured duration, wrong resolution, or abnormal exit. Gold input manifests are verified before and after the suite.
+
+Each suite must complete in one runner invocation; resuming would create a new Xvfb/runtime session and invalidate the common-session claim. Every accepted sample pins its suite environment/session metadata digest. If a final run fails, archive the incomplete private `runs` and `diagnostic-runs` directories together with `environment.json`, then restart the entire final sequence. Preflight uses separate `preflight-runs` and `preflight-environment.json`; archive both before restarting an interrupted disposable pair. Analysis never consumes preflight data.
+
+Private preparation example:
+
+```bash
+python3 benchmarks/linux-real-world/prepare.py \
+  --repo "$PWD" \
+  --private-root /outside/repository/private-benchmark \
+  --game-source /outside/repository/clean-native-game \
+  --modpack-archive /outside/repository/Mods-fixture.tar.zst \
+  --save-archive /outside/repository/Save-fixture.tar.xz \
+  --fork-commit COMMIT
+```
+
+Run the preregistered sequence:
+
+```bash
+python3 benchmarks/linux-real-world/run_ab.py \
+  --private-root /outside/repository/private-benchmark \
+  --samples 5 \
+  --start a \
+  --cpu-list 7,8,9,19,20,21
+```
+
+Before the final sequence, run one full-duration sample per product in a separate namespace which analysis never consumes:
+
+```bash
+python3 benchmarks/linux-real-world/run_ab.py \
+  --private-root /outside/repository/private-benchmark \
+  --preflight \
+  --cpu-list 7,8,9,19,20,21
+```
+
+The scripts reject private sources or outputs which overlap the repository, detected Steam game trees, or the live Stardew save/config directory. Preparation verifies both fixture archives and extracts them itself through the containment auditor; caller-supplied extracted trees are never accepted. Deterministic gold tree manifests are then verified before and after the suite. Raw consoles, SMAPI logs, configs, fixture trees, and other private runtime outputs remain in the private root. Only `analyze.py`'s numeric, allowlisted output is eligible for `results/`; generation fails if private path/save canaries appear.
+
+Both product assemblies run on the native game's .NET 6 runtime through the same byte-identical official 4.5.2 apphost, copied and hashed during preparation. The outer Python/taskset/bubblewrap wrapper and arguments are also identical, so the fork dispatcher isn't part of this code-path comparison. SMAPI log startup boundaries have one-second resolution, while probe-entry-to-game-launch and game-launch-to-save-load boundaries use the monotonic high-resolution clock. The probe cannot observe native launcher/runtime work before mod entry. The selected config keys common to both commits are canonicalized to official values and hashed; fork-only diagnostics keys are disabled except in explicitly labeled enabled samples.
+
+One-machine results are descriptive evidence for this hardware and workload. They are not universal FPS claims. Filesystem caches cannot be globally reset safely, shared-host noise cannot be eliminated completely, and five pairs are too few for broad population claims; publish per-run distributions and variation rather than treating pooled ticks as independent machines.

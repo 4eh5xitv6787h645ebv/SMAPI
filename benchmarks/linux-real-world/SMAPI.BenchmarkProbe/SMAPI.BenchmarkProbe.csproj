@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>SMAPI.BenchmarkProbe</AssemblyName>
+    <RootNamespace>SMAPI.BenchmarkProbe</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="StardewModdingAPI" HintPath="$(GamePath)/StardewModdingAPI.dll" Private="False" />
+    <Reference Include="SMAPI.Toolkit.CoreInterfaces" HintPath="$(GamePath)/smapi-internal/SMAPI.Toolkit.CoreInterfaces.dll" Private="False" />
+    <Reference Include="Stardew Valley" HintPath="$(GamePath)/Stardew Valley.dll" Private="False" />
+    <Reference Include="MonoGame.Framework" HintPath="$(GamePath)/MonoGame.Framework.dll" Private="False" />
+    <Reference Include="0Harmony" HintPath="$(GamePath)/smapi-internal/0Harmony.dll" Private="False" />
+  </ItemGroup>
+</Project>

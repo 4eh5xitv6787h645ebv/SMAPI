@@ -1,0 +1,7 @@
+{
+  "WarmupSeconds": 60,
+  "MeasurementSeconds": 180,
+  "TransitionSettleTicks": 300,
+  "MaximumUpdates": 30000,
+  "MaximumDraws": 30000
+}
