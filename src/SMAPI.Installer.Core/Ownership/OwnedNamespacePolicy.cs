@@ -64,6 +64,49 @@ public static class OwnedNamespacePolicy
         return RecognizedLegacyFiles.Contains(entry.Path.Value);
     }
 
+    /// <summary>Map one exact nested-package source path to its compiled installation destination and kind.</summary>
+    internal static bool TryMapPackageSource(
+        string sourcePath,
+        out NormalizedRelativePath? destination,
+        out OwnedEntryKind kind
+    )
+    {
+        if (sourcePath == "unix-launcher.sh")
+        {
+            destination = NormalizedRelativePath.Parse("StardewValley");
+            kind = OwnedEntryKind.Launcher;
+            return true;
+        }
+
+        NormalizedRelativePath parsed;
+        try
+        {
+            parsed = NormalizedRelativePath.Parse(sourcePath);
+        }
+        catch (ArgumentException)
+        {
+            destination = null;
+            kind = default;
+            return false;
+        }
+
+        if (OwnedNamespacePolicy.RuntimeFiles.Contains(sourcePath))
+            kind = OwnedEntryKind.RuntimeFile;
+        else if (sourcePath.StartsWith("smapi-internal/", StringComparison.Ordinal) && sourcePath != "smapi-internal/config.user.json")
+            kind = OwnedEntryKind.InternalFile;
+        else if (sourcePath.StartsWith("Mods/ConsoleCommands/", StringComparison.Ordinal) || sourcePath.StartsWith("Mods/SaveBackup/", StringComparison.Ordinal))
+            kind = OwnedEntryKind.BundledModFile;
+        else
+        {
+            destination = null;
+            kind = default;
+            return false;
+        }
+
+        destination = parsed;
+        return true;
+    }
+
     /// <summary>Get whether a path is in the complete compiled transaction destination allowlist.</summary>
     /// <remarks>This is intentionally independent of package or receipt input. Transaction execution must fail closed even if a caller bypasses the planner.</remarks>
     public static bool IsAllowedTransactionDestination(NormalizedRelativePath path)

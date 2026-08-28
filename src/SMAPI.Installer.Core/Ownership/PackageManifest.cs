@@ -49,6 +49,10 @@ public sealed class GeneratedFileRecipe
 
     internal GeneratedFileRecipe Resolve(RecoveryFileIdentity identity)
         => new(this.Path, this.Recipe, this.SourcePath, identity);
+
+    /// <summary>Create the unresolved release template for the one supported game-derived file.</summary>
+    internal static GeneratedFileRecipe CreateCopyGameDepsTemplate()
+        => new(ExpectedPath, CopyGameDepsRecipe, ExpectedSourcePath);
 }
 
 /// <summary>One regular file the verified package intends to own at its installation destination.</summary>

@@ -1,0 +1,229 @@
+using System.IO.Compression;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using FluentAssertions;
+using NUnit.Framework;
+using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Security;
+
+namespace StardewModdingAPI.Installer.PackageTool.Tests;
+
+[TestFixture]
+public sealed class ReleaseAssetSetTests
+{
+    private string TempRoot = null!;
+    private ForkReleaseIdentity Identity = null!;
+    private ReleaseAssetSetInputs Inputs = null!;
+
+    [SetUp]
+    public void SetUp()
+    {
+        this.TempRoot = Path.Combine(Path.GetTempPath(), $"smapi-package-tool-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(this.TempRoot);
+        this.Identity = ForkReleaseIdentity.Parse("fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2");
+        this.Inputs = new ReleaseAssetSetInputs(
+            this.Identity,
+            new string('1', 40),
+            new string('2', 40),
+            $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@refs/tags/{this.Identity.Tag}",
+            "https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/12/attempts/1",
+            "ubuntu24-20260824.1",
+            "X64",
+            new string('3', 40),
+            "2026-08-29T01:02:03Z",
+            ".NET SDK synthetic\nVersion: 10.0.108"
+        );
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        if (Directory.Exists(this.TempRoot))
+            Directory.Delete(this.TempRoot, recursive: true);
+    }
+
+    [Test]
+    public async Task CreateAsync_EmitsDeterministicQuartetAndPassesFullAuthorityChain()
+    {
+        string package = this.CreatePackage();
+        string first = Path.Combine(this.TempRoot, "first");
+        string second = Path.Combine(this.TempRoot, "second");
+        ReleaseAssetSet tool = new();
+
+        await tool.CreateAsync(package, first, this.Inputs);
+        await tool.CreateAsync(package, second, this.Inputs);
+
+        Directory.GetFiles(first).Select(Path.GetFileName).Should().BeEquivalentTo(
+            this.Identity.PackageAssetName,
+            VerifiedInstallerPackageFactory.GetManifestAssetName(this.Identity),
+            "SHA256SUMS",
+            "build-metadata.json"
+        );
+        foreach (string name in Directory.GetFiles(first).Select(Path.GetFileName).Select(name => name!))
+            File.ReadAllBytes(Path.Combine(first, name)).Should().Equal(File.ReadAllBytes(Path.Combine(second, name)));
+        string manifestName = VerifiedInstallerPackageFactory.GetManifestAssetName(this.Identity);
+        string[] checksumLines = File.ReadAllLines(Path.Combine(first, "SHA256SUMS"));
+        checksumLines.Should().HaveCount(2);
+        checksumLines[0].Should().EndWith($"  {manifestName}");
+        checksumLines[1].Should().EndWith($"  {this.Identity.PackageAssetName}");
+        using JsonDocument metadata = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "build-metadata.json")));
+        metadata.RootElement.TryGetProperty("artifact", out _).Should().BeFalse();
+        metadata.RootElement.GetProperty("artifacts").EnumerateArray().Select(value => value.GetProperty("name").GetString())
+            .Should().Equal(manifestName, this.Identity.PackageAssetName);
+        await tool.VerifyReleaseAsync(first, this.GetVerificationInputs());
+    }
+
+    [Test]
+    public async Task VerifyReleaseAsync_RejectsTamperedMetadata()
+    {
+        string package = this.CreatePackage();
+        string output = Path.Combine(this.TempRoot, "tamper");
+        ReleaseAssetSet tool = new();
+        await tool.CreateAsync(package, output, this.Inputs);
+        string metadata = Path.Combine(output, "build-metadata.json");
+        byte[] original = File.ReadAllBytes(metadata);
+        original[^1] ^= 1;
+        File.WriteAllBytes(metadata, original);
+
+        Func<Task> action = () => tool.VerifyReleaseAsync(output, this.GetVerificationInputs());
+
+        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*strict bounded release metadata*");
+    }
+
+    [Test]
+    public async Task CreateAsync_RefusesCandidateWorkflowAndLeavesNoQuartet()
+    {
+        string package = this.CreatePackage();
+        string output = Path.Combine(this.TempRoot, "candidate");
+        ReleaseAssetSetInputs candidate = this.Inputs with
+        {
+            Workflow = $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@refs/pull/177/merge"
+        };
+
+        Func<Task> action = () => new ReleaseAssetSet().CreateAsync(package, output, candidate);
+
+        await action.Should().ThrowAsync<ArgumentException>().WithMessage("*exact reviewed tag workflow*");
+        Directory.Exists(output).Should().BeFalse();
+    }
+
+    [Test]
+    public async Task VerifyReleaseAsync_RejectsPackageTamperingBeforeAuthority()
+    {
+        string package = this.CreatePackage();
+        string output = Path.Combine(this.TempRoot, "package-tamper");
+        ReleaseAssetSet tool = new();
+        await tool.CreateAsync(package, output, this.Inputs);
+        await File.AppendAllTextAsync(Path.Combine(output, this.Identity.PackageAssetName), "tampered", Encoding.UTF8);
+
+        Func<Task> action = () => tool.VerifyReleaseAsync(output, this.GetVerificationInputs());
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
+    }
+
+    [Test]
+    public async Task VerifyReleaseAsync_DoesNotRequireOriginalInformativeRunnerInputs()
+    {
+        string package = this.CreatePackage();
+        string output = Path.Combine(this.TempRoot, "informative");
+        ReleaseAssetSet tool = new();
+        await tool.CreateAsync(package, output, this.Inputs);
+        string metadataPath = Path.Combine(output, "build-metadata.json");
+        string metadata = await File.ReadAllTextAsync(metadataPath);
+        await File.WriteAllTextAsync(metadataPath, metadata.Replace("ubuntu24-20260824.1", "ubuntu24-downloaded", StringComparison.Ordinal));
+
+        await tool.VerifyReleaseAsync(output, this.GetVerificationInputs());
+    }
+
+    [Test]
+    public async Task CreateAndVerify_RejectSymlinkHardlinkDirectoryAndFifoWithoutBlocking()
+    {
+        string package = this.CreatePackage();
+        ReleaseAssetSet tool = new();
+        string symlinkDirectory = Path.Combine(this.TempRoot, "symlink-source");
+        Directory.CreateDirectory(symlinkDirectory);
+        string symlink = Path.Combine(symlinkDirectory, this.Identity.PackageAssetName);
+        File.CreateSymbolicLink(symlink, package);
+        Func<Task> linkedCreate = () => tool.CreateAsync(symlink, Path.Combine(this.TempRoot, "symlink-output"), this.Inputs);
+        await linkedCreate.Should().ThrowAsync<PackageSecurityException>().WithMessage("*single-link regular file*");
+
+        string hardlinkDirectory = Path.Combine(this.TempRoot, "hardlink-source");
+        Directory.CreateDirectory(hardlinkDirectory);
+        string hardlink = Path.Combine(hardlinkDirectory, this.Identity.PackageAssetName);
+        link(package, hardlink).Should().Be(0);
+        Func<Task> hardlinkedCreate = () => tool.CreateAsync(hardlink, Path.Combine(this.TempRoot, "hardlink-output"), this.Inputs);
+        await hardlinkedCreate.Should().ThrowAsync<PackageSecurityException>().WithMessage("*single-link regular file*");
+        File.Delete(hardlink);
+
+        string directoryOutput = Path.Combine(this.TempRoot, "directory-output");
+        await tool.CreateAsync(this.CreatePackage(), directoryOutput, this.Inputs);
+        string directoryChecksum = Path.Combine(directoryOutput, "SHA256SUMS");
+        File.Delete(directoryChecksum);
+        Directory.CreateDirectory(directoryChecksum);
+        Func<Task> directoryVerify = () => tool.VerifyReleaseAsync(directoryOutput, this.GetVerificationInputs());
+        await directoryVerify.Should().ThrowAsync<PackageSecurityException>();
+
+        string fifoOutput = Path.Combine(this.TempRoot, "fifo-output");
+        await tool.CreateAsync(this.CreatePackage(), fifoOutput, this.Inputs);
+        string fifoChecksum = Path.Combine(fifoOutput, "SHA256SUMS");
+        File.Delete(fifoChecksum);
+        mkfifo(fifoChecksum, Convert.ToUInt32("600", 8)).Should().Be(0);
+        Func<Task> fifoVerify = () => tool.VerifyReleaseAsync(fifoOutput, this.GetVerificationInputs());
+        await fifoVerify.Should().ThrowAsync<PackageSecurityException>();
+    }
+
+    private string CreatePackage()
+    {
+        string package = Path.Combine(this.TempRoot, this.Identity.PackageAssetName);
+        byte[] nested = CreateNestedArchive();
+        string root = $"SMAPI {this.Identity.EmbeddedVersion} Linux installer";
+        using FileStream stream = File.Create(package);
+        using ZipArchive archive = new(stream, ZipArchiveMode.Create);
+        AddFile(archive, $"{root}/README.txt", "README", 420);
+        AddFile(archive, $"{root}/install on Linux.sh", "#!/bin/sh", 493);
+        AddFile(archive, $"{root}/internal/linux/SMAPI.Installer", "installer", 493);
+        AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
+        return package;
+    }
+
+    private ReleaseVerificationInputs GetVerificationInputs()
+    {
+        return new ReleaseVerificationInputs(this.Identity, this.Inputs.SourceCommit, this.Inputs.SourceTree);
+    }
+
+    private static byte[] CreateNestedArchive()
+    {
+        using MemoryStream stream = new();
+        using (ZipArchive archive = new(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            AddFile(archive, "unix-launcher.sh", "launcher", 493);
+            AddFile(archive, "StardewModdingAPI", "runtime", 493);
+            AddFile(archive, "StardewModdingAPI.dll", "assembly", 420);
+            AddFile(archive, "StardewModdingAPI.deps.json", "{}", 420);
+            AddFile(archive, "smapi-internal/config.json", "{}", 420);
+            AddFile(archive, "Mods/ConsoleCommands/ConsoleCommands.dll", "console", 420);
+            AddFile(archive, "Mods/SaveBackup/SaveBackup.dll", "backup", 420);
+        }
+        return stream.ToArray();
+    }
+
+    private static void AddFile(ZipArchive archive, string path, string contents, int mode)
+    {
+        AddFile(archive, path, Encoding.UTF8.GetBytes(contents), mode);
+    }
+
+    private static void AddFile(ZipArchive archive, string path, byte[] contents, int mode)
+    {
+        ZipArchiveEntry entry = archive.CreateEntry(path, CompressionLevel.NoCompression);
+        entry.LastWriteTime = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        entry.ExternalAttributes = (0x8000 | mode) << 16;
+        using Stream output = entry.Open();
+        output.Write(contents);
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int mkfifo(string path, uint mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int link(string oldPath, string newPath);
+}
