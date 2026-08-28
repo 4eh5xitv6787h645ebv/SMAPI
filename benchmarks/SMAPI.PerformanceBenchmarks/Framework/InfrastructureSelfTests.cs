@@ -46,6 +46,27 @@ internal static class InfrastructureSelfTests
         InfrastructureSelfTests.Require(BaselineComparer.CompareRuntime(new BaselineRuntime("net6.0", "6.0.36", "linux-x64"), runtime).Count == 0, "An exact runtime should pass.");
         InfrastructureSelfTests.Require(BaselineComparer.CompareRuntime(new BaselineRuntime("net6.0", "6.0.35", "linux-x64"), runtime).Count == 1, "A runtime patch mismatch should fail.");
 
+        const string baselineWithUnknownProperty = """
+            {
+              "schemaVersion": 1,
+              "runtime": { "framework": "net6.0", "runtimeVersion": "6.0.36", "rid": "linux-x64" },
+              "scenarios": {
+                "self-test": {
+                  "operations": 1,
+                  "warmupOperations": 1,
+                  "expectedDigest": "000000000000002a",
+                  "maxAllocatedBytesPerOperation": 0,
+                  "informationalMedianNanosecondsPerOperation": null,
+                  "unknown": true
+                }
+              }
+            }
+            """;
+        InfrastructureSelfTests.RequireThrows(
+            () => BaselineStore.Parse(baselineWithUnknownProperty),
+            "An unknown baseline property should be rejected."
+        );
+
         Dictionary<string, ScenarioBaseline> continuationBaselines = new(StringComparer.Ordinal)
         {
             ["self-test.pass"] = baseline,
@@ -72,6 +93,21 @@ internal static class InfrastructureSelfTests
     {
         if (!condition)
             throw new InvalidOperationException($"Infrastructure self-test failed: {message}");
+    }
+
+    /// <summary>Require an action to reject invalid input.</summary>
+    private static void RequireThrows(Action action, string message)
+    {
+        try
+        {
+            action();
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"Infrastructure self-test failed: {message}");
     }
 
     /// <summary>A fixed-result scenario for exercising runner behavior.</summary>

@@ -43,22 +43,6 @@ namespace StardewModdingAPI.Framework.Content;
 internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
 {
     /*********
-    ** Fields
-    *********/
-    /// <summary>The horizontal tile-flip bit used by Tiled global tile IDs.</summary>
-    private const uint FlippedHorizontallyFlag = 0x80000000;
-
-    /// <summary>The vertical tile-flip bit used by Tiled global tile IDs.</summary>
-    private const uint FlippedVerticallyFlag = 0x40000000;
-
-    /// <summary>The diagonal tile-flip bit used by Tiled global tile IDs.</summary>
-    private const uint FlippedDiagonallyFlag = 0x20000000;
-
-    /// <summary>The combined tile-flip bits which aren't part of a tilesheet index.</summary>
-    private const uint FlipMask = OptimizedTmxFormat.FlippedHorizontallyFlag | OptimizedTmxFormat.FlippedVerticallyFlag | OptimizedTmxFormat.FlippedDiagonallyFlag;
-
-
-    /*********
     ** Public methods
     *********/
     /// <summary>Construct an instance.</summary>
@@ -247,10 +231,8 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
         if (rawGid == 0)
             return null;
 
-        bool flippedHorizontally = (rawGid & OptimizedTmxFormat.FlippedHorizontallyFlag) != 0;
-        bool flippedVertically = (rawGid & OptimizedTmxFormat.FlippedVerticallyFlag) != 0;
-        bool flippedDiagonally = (rawGid & OptimizedTmxFormat.FlippedDiagonallyFlag) != 0;
-        uint gid = rawGid & ~OptimizedTmxFormat.FlipMask;
+        DecodedTmxTileTransform transform = OptimizedTmxTileTransform.Decode(rawGid);
+        uint gid = transform.Gid;
 
         if (!index.TryGetRange(gid, out SheetRange range))
             throw new Exception($"Invalid tile gid: {gid}");
@@ -268,13 +250,11 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
         else
             result = new StaticTile(layer, range.TileSheet, BlendMode.Alpha, tileIndex);
 
-        int rotation = GetRotationForFlippedTile(flippedHorizontally, flippedVertically, flippedDiagonally);
-        if (rotation != 0)
-            result.SetRotationValue(rotation);
+        if (transform.Rotation != 0)
+            result.SetRotationValue(transform.Rotation);
 
-        int flip = GetEffectForFlippedTile(flippedHorizontally, flippedVertically, flippedDiagonally);
-        if (flip != 0)
-            result.SetFlip(flip);
+        if (transform.Flip != 0)
+            result.SetFlip(transform.Flip);
 
         return result;
     }
@@ -301,50 +281,6 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
             _ => property.StringValue
         };
     }
-
-    /// <summary>Get the xTile flip effect for Tiled flip flags.</summary>
-    private static int GetEffectForFlippedTile(bool horizontal, bool vertical, bool diagonal)
-    {
-        if (diagonal)
-        {
-            if (!vertical && !horizontal)
-                return 2;
-            if (horizontal && vertical)
-                return 2;
-            if (horizontal || vertical)
-                return 0;
-        }
-
-        if (horizontal && vertical)
-            return 0;
-        if (horizontal)
-            return 1;
-        if (vertical)
-            return 2;
-
-        return 0;
-    }
-
-    /// <summary>Get the xTile rotation for Tiled flip flags.</summary>
-    private static int GetRotationForFlippedTile(bool horizontal, bool vertical, bool diagonal)
-    {
-        if (diagonal)
-        {
-            if (!vertical && !horizontal)
-                return 90;
-            if (horizontal && vertical)
-                return -90;
-            if (horizontal)
-                return 90;
-            if (vertical)
-                return -90;
-        }
-
-        return horizontal && vertical
-            ? 180
-            : 0;
-    }
-
 
     /*********
     ** Private models

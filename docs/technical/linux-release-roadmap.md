@@ -329,41 +329,43 @@ Scope constraints apply throughout:
 
 ## Phase 7 — Upstream-ready optimizations (deferred by user)
 
-The user explicitly deferred all Phase 7 work on 2026-08-28. The checked items below verify that each
-original requirement was recorded as out of scope for the remainder of this goal; no upstream review,
-branch change, or pull request was performed.
+The user explicitly deferred all Phase 7 work on 2026-08-28. The scope decision is checked below, while
+the original requirements remain unchecked and visibly deferred; no upstream review, branch change,
+or pull request was performed.
+
+- [x] Record the user's 2026-08-28 decision to defer Phase 7 for now.
 
 ### Selection and preparation
 
-- [x] Deferred by user: fetch and review the complete fork delta against current `Pathoschild/SMAPI` `develop`.
-- [x] Deferred by user: identify low-risk, platform-neutral correctness or performance improvements that separate cleanly from Linux-only features.
-- [x] Deferred by user: keep Linux-only or high-risk experimental changes in this fork.
-- [x] Deferred by user: document Linux-only or high-risk experimental changes not submitted upstream and explain why.
-- [x] Deferred by user: rebase every selected change onto current upstream `develop`.
-- [x] Deferred by user: minimize every selected upstream diff.
-- [x] Deferred by user: add upstream-appropriate correctness tests.
-- [x] Deferred by user: add upstream-appropriate benchmarks or performance evidence.
-- [x] Deferred by user: preserve upstream style.
-- [x] Deferred by user: preserve upstream platform and API compatibility.
-- [x] Deferred by user: ensure no private fixture data appears in commits, test assets, PR bodies, or artifacts.
+- [ ] Deferred/out of current scope: fetch and review the complete fork delta against current `Pathoschild/SMAPI` `develop`.
+- [ ] Deferred/out of current scope: identify low-risk, platform-neutral correctness or performance improvements that separate cleanly from Linux-only features.
+- [ ] Deferred/out of current scope: keep Linux-only or high-risk experimental changes in this fork.
+- [ ] Deferred/out of current scope: document Linux-only or high-risk experimental changes not submitted upstream and explain why.
+- [ ] Deferred/out of current scope: rebase every selected change onto current upstream `develop`.
+- [ ] Deferred/out of current scope: minimize every selected upstream diff.
+- [ ] Deferred/out of current scope: add upstream-appropriate correctness tests.
+- [ ] Deferred/out of current scope: add upstream-appropriate benchmarks or performance evidence.
+- [ ] Deferred/out of current scope: preserve upstream style.
+- [ ] Deferred/out of current scope: preserve upstream platform and API compatibility.
+- [ ] Deferred/out of current scope: ensure no private fixture data appears in commits, test assets, PR bodies, or artifacts.
 
 ### Submission and follow-through
 
-- [x] Deferred by user: obtain an independent Phase 7 upstream-readiness review.
-- [x] Deferred by user: obtain an independent Phase 7 architecture review.
-- [x] Deferred by user: obtain an independent Phase 7 performance review.
-- [x] Deferred by user: obtain an independent Phase 7 testing review.
-- [x] Deferred by user: obtain an independent Phase 7 documentation review.
-- [x] Deferred by user: obtain an independent Phase 7 final-diff review.
-- [x] Deferred by user: address every actionable Phase 7 review finding.
-- [x] Deferred by user: submit a focused upstream GitHub pull request for each justified change.
-- [x] Deferred by user: verify every submitted upstream PR is valid and CI-clean.
-- [x] Deferred by user: respond to actionable upstream review or CI findings received during this goal.
-- [x] Deferred by user: mark maintainer-only approval or merge items **externally pending** when applicable.
-- [x] Deferred by user: open a focused Phase 7 documentation/integration pull request on the fork.
-- [x] Deferred by user: pass required fork CI and repository checks.
-- [x] Deferred by user: merge the Phase 7 fork pull request into `develop` and close it.
-- [x] Deferred by user: verify `develop` equals `origin/develop` after the merge.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 upstream-readiness review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 architecture review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 performance review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 testing review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 documentation review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 final-diff review.
+- [ ] Deferred/out of current scope: address every actionable Phase 7 review finding.
+- [ ] Deferred/out of current scope: submit a focused upstream GitHub pull request for each justified change.
+- [ ] Deferred/out of current scope: verify every submitted upstream PR is valid and CI-clean.
+- [ ] Deferred/out of current scope: respond to actionable upstream review or CI findings received during this goal.
+- [ ] Deferred/out of current scope: mark maintainer-only approval or merge items **externally pending** when applicable.
+- [ ] Deferred/out of current scope: open a focused Phase 7 documentation/integration pull request on the fork.
+- [ ] Deferred/out of current scope: pass required fork CI and repository checks.
+- [ ] Deferred/out of current scope: merge the Phase 7 fork pull request into `develop` and close it.
+- [ ] Deferred/out of current scope: verify `develop` equals `origin/develop` after the merge.
 
 ## Final definition of done
 

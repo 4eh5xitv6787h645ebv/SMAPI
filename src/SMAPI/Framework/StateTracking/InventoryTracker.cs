@@ -192,10 +192,7 @@ internal sealed class InventoryTracker : IDisposable
 
         // Besides avoiding unnecessary diff work, this preserves an allocation-free idle path despite the
         // enumerable-based compatibility API used to build nonempty snapshots.
-        if (
-            !this.IsTrackingChanges
-            || (this.Added.Count == 0 && this.Removed.Count == 0 && this.DirtyStacks.Count == 0 && this.EventStackSizes.Count == 0)
-        )
+        if (!InventoryTrackerHotPath.HasChanges(this.IsTrackingChanges, this.Added.Count, this.Removed.Count, this.DirtyStacks.Count, this.EventStackSizes.Count))
         {
             changes = null;
             return false;

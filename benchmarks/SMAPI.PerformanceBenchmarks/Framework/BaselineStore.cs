@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -25,9 +26,36 @@ internal static class BaselineStore
         if (!File.Exists(path))
             throw new InvalidOperationException($"The baseline file '{path}' does not exist.");
 
-        PerformanceBaseline? baseline = JsonSerializer.Deserialize<PerformanceBaseline>(File.ReadAllText(path), BaselineStore.JsonOptions);
+        return BaselineStore.Parse(File.ReadAllText(path));
+    }
+
+    /// <summary>Parse and validate one baseline document.</summary>
+    internal static PerformanceBaseline Parse(string json)
+    {
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement root = document.RootElement;
+        BaselineStore.ValidateProperties(root, "baseline", "schemaVersion", "runtime", "scenarios");
+        if (root.TryGetProperty("runtime", out JsonElement runtime))
+            BaselineStore.ValidateProperties(runtime, "baseline runtime", "framework", "runtimeVersion", "rid");
+        if (root.TryGetProperty("scenarios", out JsonElement scenarios) && scenarios.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty scenario in scenarios.EnumerateObject())
+            {
+                BaselineStore.ValidateProperties(
+                    scenario.Value,
+                    $"scenario '{scenario.Name}'",
+                    "operations",
+                    "warmupOperations",
+                    "expectedDigest",
+                    "maxAllocatedBytesPerOperation",
+                    "informationalMedianNanosecondsPerOperation"
+                );
+            }
+        }
+
+        PerformanceBaseline? baseline = JsonSerializer.Deserialize<PerformanceBaseline>(json, BaselineStore.JsonOptions);
         if (baseline is null)
-            throw new InvalidOperationException($"The baseline file '{path}' is empty.");
+            throw new InvalidOperationException("The baseline document is empty.");
         BaselineStore.Validate(baseline);
         return baseline;
     }
@@ -35,6 +63,10 @@ internal static class BaselineStore
     /// <summary>Validate a parsed baseline.</summary>
     public static void Validate(PerformanceBaseline baseline)
     {
+        if (baseline.Runtime is null)
+            throw new InvalidOperationException("The baseline runtime is missing.");
+        if (baseline.Scenarios is null)
+            throw new InvalidOperationException("The baseline scenarios are missing.");
         if (baseline.SchemaVersion != BaselineStore.SchemaVersion)
             throw new InvalidOperationException($"Unsupported baseline schema {baseline.SchemaVersion}; expected {BaselineStore.SchemaVersion}.");
         if (string.IsNullOrWhiteSpace(baseline.Runtime.Framework) || string.IsNullOrWhiteSpace(baseline.Runtime.RuntimeVersion) || string.IsNullOrWhiteSpace(baseline.Runtime.Rid))
@@ -46,6 +78,8 @@ internal static class BaselineStore
         {
             if (string.IsNullOrWhiteSpace(id))
                 throw new InvalidOperationException("A baseline scenario ID is empty.");
+            if (scenario is null)
+                throw new InvalidOperationException($"Scenario '{id}' is null.");
             if (scenario.Operations <= 0)
                 throw new InvalidOperationException($"Scenario '{id}' must run at least one operation.");
             if (scenario.WarmupOperations < 0)
@@ -58,6 +92,23 @@ internal static class BaselineStore
                 throw new InvalidOperationException($"Scenario '{id}' must specify a lowercase 16-character hexadecimal digest.");
             if (scenario.InformationalMedianNanosecondsPerOperation is < 0)
                 throw new InvalidOperationException($"Scenario '{id}' has a negative timing reference.");
+        }
+    }
+
+    /// <summary>Reject duplicate or unknown properties before model deserialization.</summary>
+    private static void ValidateProperties(JsonElement element, string description, params string[] allowedProperties)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException($"The {description} must be a JSON object.");
+
+        HashSet<string> allowed = new(allowedProperties, StringComparer.Ordinal);
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        foreach (JsonProperty property in element.EnumerateObject())
+        {
+            if (!seen.Add(property.Name))
+                throw new InvalidOperationException($"The {description} contains duplicate property '{property.Name}'.");
+            if (!allowed.Contains(property.Name))
+                throw new InvalidOperationException($"The {description} contains unknown property '{property.Name}'.");
         }
     }
 

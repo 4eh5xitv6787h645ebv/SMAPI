@@ -252,6 +252,11 @@ internal class OptimizedTmxFormatTests
 
         optimizedTiles.Should().Be(width * height);
         bundledTiles.Should().Be(optimizedTiles);
+        const long maxOptimizedAllocatedBytes = 2 * 1024 * 1024;
+        optimizedAllocated.Should().BeLessThanOrEqualTo(
+            maxOptimizedAllocatedBytes,
+            "a fixed dense map should stay within its absolute allocation budget"
+        );
         optimizedAllocated.Should().BeLessThan(
             bundledAllocated * 3 / 4,
             "the indexed converter should avoid the bundled converter's LINQ searches and identity-transform properties"

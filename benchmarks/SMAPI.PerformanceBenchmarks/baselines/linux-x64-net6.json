@@ -6,12 +6,33 @@
     "rid": "linux-x64"
   },
   "scenarios": {
+    "asset.name-parsing": {
+      "operations": 10000,
+      "warmupOperations": 10000,
+      "expectedDigest": "7ce343cc7517247d",
+      "maxAllocatedBytesPerOperation": 64,
+      "informationalMedianNanosecondsPerOperation": 61.7744
+    },
     "content.cache-enumeration": {
       "operations": 10000,
       "warmupOperations": 10000,
       "expectedDigest": "d6299e93fce57b65",
       "maxAllocatedBytesPerOperation": 0,
       "informationalMedianNanosecondsPerOperation": 385.3702
+    },
+    "content.invalidation-scan": {
+      "operations": 10000,
+      "warmupOperations": 10000,
+      "expectedDigest": "ebfb5766b642eda5",
+      "maxAllocatedBytesPerOperation": 32,
+      "informationalMedianNanosecondsPerOperation": 352.8066
+    },
+    "event.cached-dispatch": {
+      "operations": 10000,
+      "warmupOperations": 10000,
+      "expectedDigest": "54b5800a826caed5",
+      "maxAllocatedBytesPerOperation": 0,
+      "informationalMedianNanosecondsPerOperation": 46.3712
     },
     "infrastructure.canary": {
       "operations": 10000,
@@ -47,6 +68,20 @@
       "expectedDigest": "8f5e52dd0f7b57c5",
       "maxAllocatedBytesPerOperation": 0,
       "informationalMedianNanosecondsPerOperation": 351.5078
+    },
+    "tmx.tile-transform": {
+      "operations": 10000,
+      "warmupOperations": 10000,
+      "expectedDigest": "cb2dcf49ada7018d",
+      "maxAllocatedBytesPerOperation": 0,
+      "informationalMedianNanosecondsPerOperation": 11.2153
+    },
+    "tracking.inventory-chest-idle": {
+      "operations": 10000,
+      "warmupOperations": 10000,
+      "expectedDigest": "f541f86352b51b45",
+      "maxAllocatedBytesPerOperation": 0,
+      "informationalMedianNanosecondsPerOperation": 2.7382
     }
   }
 }

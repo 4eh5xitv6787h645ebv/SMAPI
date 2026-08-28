@@ -16,8 +16,13 @@ internal static class Program
         new CanonicalPathScenario(),
         new PathNormalizationScenario(),
         new JsonStreamingScenario(),
+        new AssetNameParsingScenario(),
         new ReflectorWrapperCacheHitScenario(),
-        new ContentCacheEnumerationScenario()
+        new EventDispatchScenario(),
+        new InventoryChestIdleScenario(),
+        new ContentCacheEnumerationScenario(),
+        new ContentInvalidationScenario(),
+        new TmxTileTransformScenario()
     ];
 
     /// <summary>Run the benchmark command.</summary>

@@ -65,28 +65,8 @@ internal class AssetName : IAssetName
     /// <exception cref="ArgumentException">The <paramref name="rawName"/> is null or empty.</exception>
     public static AssetName Parse(string rawName, Func<string, LocalizedContentManager.LanguageCode?> parseLocale)
     {
-        if (string.IsNullOrWhiteSpace(rawName))
-            throw new ArgumentException("The asset name can't be null or empty.", nameof(rawName));
-
-        string baseName = rawName;
-        string? localeCode = null;
-        LocalizedContentManager.LanguageCode? languageCode = null;
-
-        int lastPeriodIndex = rawName.LastIndexOf('.');
-        if (lastPeriodIndex > 0 && rawName.Length > lastPeriodIndex + 1)
-        {
-            string possibleLocaleCode = rawName[(lastPeriodIndex + 1)..];
-            LocalizedContentManager.LanguageCode? possibleLanguageCode = parseLocale(possibleLocaleCode);
-
-            if (possibleLanguageCode != null)
-            {
-                baseName = rawName[..lastPeriodIndex];
-                localeCode = possibleLocaleCode;
-                languageCode = possibleLanguageCode;
-            }
-        }
-
-        return new AssetName(baseName, localeCode, languageCode);
+        ParsedAssetName<LocalizedContentManager.LanguageCode> parsed = AssetNameParser.Parse(rawName, parseLocale);
+        return new AssetName(parsed.BaseName, parsed.LocaleCode, parsed.LanguageCode);
     }
 
     /// <inheritdoc />

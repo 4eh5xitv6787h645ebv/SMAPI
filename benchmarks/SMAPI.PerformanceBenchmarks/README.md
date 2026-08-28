@@ -33,23 +33,24 @@ paths that must execute through the test host in an isolated game environment.
 
 | Area | Blocking coverage |
 | --- | --- |
-| map/TMX conversion | synthetic dense-map correctness and allocation comparison in NUnit |
+| map/TMX conversion | exact-zero console gate for the production per-tile transform path; absolute and relative allocation gates for full synthetic conversion in NUnit |
 | canonical paths | exact-zero console gate and NUnit gate; allocating normalization has an absolute console ceiling |
 | JSON streaming | console ceiling for a one-megabyte file and NUnit large-versus-small allocation delta |
-| parsed asset names | exact-zero NUnit cache-hit and localized base-name gates |
+| parsed asset names | absolute console parser ceiling; exact-zero NUnit cache-hit and localized base-name gates |
 | cached reflection | exact-zero console and NUnit field/property/method wrapper gates |
-| event dispatch | warmed stateful multi-handler NUnit gate |
-| inventory and chest idle tracking | allocation-free NUnit gates for a 36-slot inventory and 32 representative chests |
-| content invalidation | predicate-cache, operation-cache, and content-cache NUnit gates plus exact-zero console enumeration |
+| event dispatch | exact-zero console cached-callback gate and warmed stateful multi-handler NUnit gate |
+| inventory and chest idle tracking | exact-zero console idle-state gate plus NUnit gates for a 36-slot inventory and 32 representative chests |
+| content invalidation | absolute console scan and enumeration gates plus predicate/operation/content-cache NUnit gates |
 | runner infrastructure | digest, allocation, runtime, timing-non-gate, and deterministic writer self-tests |
 
-Run the focused test layer with the same public reference assemblies:
+Run the focused test layer against an executable isolated game copy (reference assemblies are
+compile-only and intentionally can't host NUnit discovery):
 
 ```sh
 dotnet test src/SMAPI.Tests/SMAPI.Tests.csproj \
   -c Release \
   --filter "TestCategory=PerformanceRegression" \
-  -p:GamePath=/path/to/game-reference-assemblies \
+  -p:GamePath=/path/to/isolated/game-copy \
   -p:CopyToGameFolder=false \
   -p:AllowMissingPrunePackageData=true
 ```
@@ -69,10 +70,10 @@ Every console run writes:
 
 The workflow appends the Markdown report to the job summary and uploads both result files even when a
 required gate fails. It uses read-only repository permissions and downloads only the public reference
-assemblies pinned in the workflow. Those assemblies are intentionally compile-only, so CI builds the
-game-bound NUnit gates but executes only the standalone scenarios and infrastructure checks. The full
-focused NUnit category is run in the isolated release-qualification environment. CI does not contain,
-fetch, or inspect any private benchmark fixture, modpack, or save.
+assemblies pinned in the workflow. CI executes standalone production seams for every required hot-path
+area, and builds the more complete game-bound NUnit gates. The full focused NUnit category is run in the
+isolated release-qualification environment because public reference assemblies can't host test
+discovery. CI does not contain, fetch, or inspect any private benchmark fixture, modpack, or save.
 
 ## Intentional regression and stability validation
 
@@ -82,8 +83,8 @@ committed:
 1. Bypass mixed-separator detection in `PathUtilities.NormalizePath`; `path.normalize` must fail its
    deterministic digest gate.
 2. Restore that exact change and verify the file is clean.
-3. Make the canonical fast path return a copied string; `path.canonical` must retain its digest but
-   fail its zero-allocation gate.
+3. Add a retained transient allocation (for example `GC.KeepAlive(new object())`) before returning the
+   original canonical string; `path.canonical` must retain its digest but fail its zero-allocation gate.
 4. Restore that exact change and verify the file is clean.
 5. Run the clean suite repeatedly. Digests and allocation samples must remain stable; timing may vary.
 
