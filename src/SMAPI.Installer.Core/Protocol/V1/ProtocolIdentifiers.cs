@@ -122,8 +122,10 @@ public sealed record ProtocolPlanDigest
             writer.WriteString("action", operation.ToString().ToLowerInvariant());
             writer.WriteStartObject("game_root");
             writer.WriteString("canonical_path", gameRoot.CanonicalPath);
-            writer.WriteNumber("device_id", gameRoot.DeviceId);
+            writer.WriteNumber("device_major", gameRoot.DeviceMajor);
+            writer.WriteNumber("device_minor", gameRoot.DeviceMinor);
             writer.WriteNumber("inode", gameRoot.Inode);
+            writer.WriteNumber("operation_generation", gameRoot.OperationGeneration);
             writer.WriteEndObject();
             ProtocolPlanDigest.WriteRelease(writer, "current_release", currentRelease);
             ProtocolPlanDigest.WriteRelease(writer, "target_release", targetRelease);

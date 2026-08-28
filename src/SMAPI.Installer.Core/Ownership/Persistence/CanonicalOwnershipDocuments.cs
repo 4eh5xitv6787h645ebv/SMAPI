@@ -5,7 +5,7 @@ using StardewModdingAPI.Installer.Core.Planning;
 namespace StardewModdingAPI.Installer.Core.Ownership.Persistence;
 
 /// <summary>Strict canonical codecs and trust-boundary validation for persisted ownership state.</summary>
-public static class CanonicalOwnershipDocuments
+internal static class CanonicalOwnershipDocuments
 {
     /// <summary>The rollback schema which first binds content length, mode, and file type.</summary>
     public const int RollbackSchemaVersion = 2;

@@ -12,7 +12,7 @@ internal sealed class ProtocolSessionStateMachineTests
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private static readonly ProtocolPlanDigest ExecutionBindingDigest = ProtocolPlanDigest.Parse("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
-    private static readonly ProtocolGameRootIdentity GameRoot = new("/game", 10, 20);
+    private static readonly ProtocolGameRootIdentity GameRoot = new("/game", 10, 11, 20, 7);
 
     [Test]
     public void Session_HappyPathRequiresHandshakePlanConfirmationAndExecution()

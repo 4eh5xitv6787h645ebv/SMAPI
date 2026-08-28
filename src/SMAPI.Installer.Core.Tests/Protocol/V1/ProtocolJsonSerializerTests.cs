@@ -12,7 +12,7 @@ internal sealed class ProtocolJsonSerializerTests
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private static readonly ProtocolPlanDigest ExecutionBindingDigest = ProtocolPlanDigest.Parse("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
-    private static readonly ProtocolGameRootIdentity GameRoot = new("/game", 10, 20);
+    private static readonly ProtocolGameRootIdentity GameRoot = new("/game", 10, 11, 20, 7);
 
     [Test]
     public void SerializeLine_UsesDeterministicEnvelopeAndPropertyOrder()
@@ -90,7 +90,7 @@ internal sealed class ProtocolJsonSerializerTests
 
         json.Should().Contain(
             $"\"planDigest\":\"{digest.Value}\",\"executionBindingDigest\":\"{ExecutionBindingDigest.Value}\",\"operation\":\"update\","
-            + "\"gameRoot\":{\"canonicalPath\":\"/game\",\"deviceId\":10,\"inode\":20},\"currentRelease\":{\"repository\":\"https://github.com/4eh5xitv6787h645ebv/SMAPI\","
+            + "\"gameRoot\":{\"canonicalPath\":\"/game\",\"deviceMajor\":10,\"deviceMinor\":11,\"inode\":20,\"operationGeneration\":7},\"currentRelease\":{\"repository\":\"https://github.com/4eh5xitv6787h645ebv/SMAPI\","
         );
         json.Should().Contain(
             $"\"operations\":[{{\"kind\":\"create\",\"path\":\"smapi-internal/a.dll\",\"expectedCurrentSha256\":null,\"resultSha256\":\"{HashA}\"}},"

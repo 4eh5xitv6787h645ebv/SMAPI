@@ -204,7 +204,7 @@ internal sealed class LinuxAnchoredOwnershipDocumentStorage : IOwnershipDocument
 }
 
 /// <summary>Typed ownership persistence which cannot load a receipt or rollback snapshot without its verified parent state.</summary>
-public sealed class OwnershipDocumentStore : IDisposable
+internal sealed class OwnershipDocumentStore : IDisposable
 {
     private readonly IOwnershipDocumentStorage Storage;
     private readonly OwnershipPersistenceLimits Limits;

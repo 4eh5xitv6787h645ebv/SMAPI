@@ -278,7 +278,7 @@ public sealed record RecoveryFileIdentity
     public int UnixMode { get; }
     public RecoveryFileType FileType { get; }
 
-    public RecoveryFileIdentity(Sha256Digest sha256, long sizeBytes, int unixMode, RecoveryFileType fileType = RecoveryFileType.RegularFile)
+    internal RecoveryFileIdentity(Sha256Digest sha256, long sizeBytes, int unixMode, RecoveryFileType fileType = RecoveryFileType.RegularFile)
     {
         ArgumentNullException.ThrowIfNull(sha256);
         if (sizeBytes < 0)
@@ -301,7 +301,7 @@ public sealed record RecoveryFileObservation
     public NormalizedRelativePath Path { get; }
     public RecoveryFileIdentity? Identity { get; }
 
-    public RecoveryFileObservation(NormalizedRelativePath path, RecoveryFileIdentity? identity)
+    internal RecoveryFileObservation(NormalizedRelativePath path, RecoveryFileIdentity? identity)
     {
         ArgumentNullException.ThrowIfNull(path);
         this.Path = path;
@@ -321,7 +321,7 @@ public sealed class RollbackSnapshotEntry
     public Sha256Digest? ExpectedCurrentSha256 => this.ExpectedCurrent?.Sha256;
     public Sha256Digest? BackupSha256 => this.Backup?.Sha256;
 
-    public RollbackSnapshotEntry(
+    internal RollbackSnapshotEntry(
         NormalizedRelativePath path,
         OwnedEntryKind ownedKind,
         RollbackEntryKind kind,
@@ -355,7 +355,7 @@ public sealed class RollbackSnapshot
 
     public IReadOnlyList<RollbackSnapshotEntry> Entries { get; }
 
-    public RollbackSnapshot(
+    internal RollbackSnapshot(
         Sha256Digest? expectedCurrentReceiptSha256,
         Sha256Digest? previousReceiptSha256,
         IEnumerable<RollbackSnapshotEntry> entries
@@ -376,7 +376,7 @@ public sealed class RollbackSnapshot
 }
 
 /// <summary>All immutable inputs needed for one pure planning operation.</summary>
-public sealed class InstallationPlanningRequest
+internal sealed class InstallationPlanningRequest
 {
     public InstallationAction Action { get; }
     public InstallationInventory Inventory { get; }
@@ -386,7 +386,7 @@ public sealed class InstallationPlanningRequest
     public RollbackSnapshot? RollbackSnapshot { get; }
     public IReadOnlyList<RecoveryFileObservation> RecoveryObservations { get; }
 
-    public InstallationPlanningRequest(
+    internal InstallationPlanningRequest(
         InstallationAction action,
         InstallationInventory inventory,
         LauncherState launcher,

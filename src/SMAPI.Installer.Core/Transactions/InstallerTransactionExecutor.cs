@@ -1,11 +1,12 @@
 using System.Text;
+using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Transactions;
 
 /// <summary>Applies immutable Linux file plans through anchored descriptors with durable exact rollback.</summary>
-public sealed class InstallerTransactionExecutor
+internal sealed class InstallerTransactionExecutor
 {
     private const string WorkspaceName = ".smapi-installer";
     private const string TransactionsName = "transactions";
@@ -32,14 +33,63 @@ public sealed class InstallerTransactionExecutor
         string canonicalPayloadRoot = TransactionPath.GetCanonicalRoot(payloadRoot, nameof(payloadRoot));
         ValidatePlan(plan);
 
-        using LinuxAnchoredFileSystem game = new(canonicalGameRoot);
         using LinuxAnchoredFileSystem payload = new(canonicalPayloadRoot);
         this.Progress.Report(new(TransactionStage.AcquiringLock, 0, plan.Operations.Count));
-        using LinuxAnchoredFileSystem workspace = EnsureWorkspace(game);
-        using LinuxAnchoredFile operationLock = AcquireLock(workspace);
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(canonicalGameRoot);
+        LinuxAnchoredFileSystem game = lease.Game;
+        LinuxAnchoredFileSystem workspace = lease.Workspace;
 
         this.Progress.Report(new(TransactionStage.Recovering, 0, plan.Operations.Count));
         this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
+        lease.ReserveNextGeneration(lease.Generation);
+        return this.ApplyLockedCore(lease, payload, plan, cancellationToken);
+    }
+
+    /// <summary>Apply through the same exclusive root lease which was revalidated against user confirmation.</summary>
+    internal TransactionResult ApplyLocked(
+        InstallerOperationLease lease,
+        LinuxAnchoredFileSystem payload,
+        TransactionPlan plan,
+        GameRootIdentity expectedRoot,
+        ulong expectedGeneration,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(payload);
+        ArgumentNullException.ThrowIfNull(plan);
+        ValidatePlan(plan);
+        lease.AssertRootAndGeneration(expectedRoot, expectedGeneration);
+        this.Progress.Report(new(TransactionStage.Recovering, 0, plan.Operations.Count));
+        IReadOnlyList<TransactionResult> recovered = this.RecoverIncompleteTransactionsLocked(
+            lease.Game,
+            lease.Workspace,
+            lease.CanonicalGameRoot
+        );
+        if (recovered.Count > 0)
+        {
+            lease.ReserveNextGeneration(expectedGeneration);
+            throw new InstallerTransactionException(
+                TransactionErrorCode.PathChanged,
+                "Crash recovery invalidated the confirmed installer operation generation. Inspect and confirm the new plan."
+            );
+        }
+        lease.AssertRootAndGeneration(expectedRoot, expectedGeneration);
+        lease.ReserveNextGeneration(expectedGeneration);
+        return this.ApplyLockedCore(lease, payload, plan, cancellationToken);
+    }
+
+    private TransactionResult ApplyLockedCore(
+        InstallerOperationLease lease,
+        LinuxAnchoredFileSystem payload,
+        TransactionPlan plan,
+        CancellationToken cancellationToken
+    )
+    {
+        LinuxAnchoredFileSystem game = lease.Game;
+        LinuxAnchoredFileSystem workspace = lease.Workspace;
+        string canonicalGameRoot = lease.CanonicalGameRoot;
 
         TransactionJournal journal = BuildJournal(game, canonicalGameRoot, plan);
         string transactionName = plan.TransactionId.ToString("N");
@@ -131,10 +181,12 @@ public sealed class InstallerTransactionExecutor
     {
         LinuxPrivilegeGuard.AssertNotRoot();
         string canonicalGameRoot = TransactionPath.GetCanonicalRoot(gameRoot, nameof(gameRoot));
-        using LinuxAnchoredFileSystem game = new(canonicalGameRoot);
-        using LinuxAnchoredFileSystem workspace = EnsureWorkspace(game);
-        using LinuxAnchoredFile operationLock = AcquireLock(workspace);
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(canonicalGameRoot);
+        LinuxAnchoredFileSystem game = lease.Game;
+        LinuxAnchoredFileSystem workspace = lease.Workspace;
         IReadOnlyList<TransactionResult> results = this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
+        if (results.Count > 0)
+            lease.ReserveNextGeneration(lease.Generation);
         this.TrimFinalTransactions(game, workspace, canonicalGameRoot);
         return results;
     }
@@ -503,7 +555,7 @@ public sealed class InstallerTransactionExecutor
         TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RolledBack);
     }
 
-    private static LinuxAnchoredFileSystem EnsureWorkspace(LinuxAnchoredFileSystem game)
+    internal static LinuxAnchoredFileSystem EnsureWorkspace(LinuxAnchoredFileSystem game)
     {
         try
         {
@@ -547,7 +599,7 @@ public sealed class InstallerTransactionExecutor
         }
     }
 
-    private static LinuxAnchoredFile AcquireLock(LinuxAnchoredFileSystem workspace)
+    internal static LinuxAnchoredFile AcquireLock(LinuxAnchoredFileSystem workspace)
     {
         try
         {

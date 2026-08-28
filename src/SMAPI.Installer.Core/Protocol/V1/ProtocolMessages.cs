@@ -162,7 +162,13 @@ public sealed record ProtocolReleaseIdentity(
 );
 
 /// <summary>The canonical selected Linux game-root identity observed during inspection.</summary>
-public sealed record ProtocolGameRootIdentity(string CanonicalPath, ulong DeviceId, ulong Inode);
+public sealed record ProtocolGameRootIdentity(
+    string CanonicalPath,
+    uint DeviceMajor,
+    uint DeviceMinor,
+    ulong Inode,
+    ulong OperationGeneration
+);
 
 /// <summary>One structured, deterministically ordered execution-plan operation.</summary>
 public sealed record ProtocolPlanOperation(

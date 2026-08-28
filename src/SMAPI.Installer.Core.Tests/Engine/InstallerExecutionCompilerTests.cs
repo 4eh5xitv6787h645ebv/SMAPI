@@ -11,6 +11,8 @@ namespace StardewModdingAPI.Installer.Core.Tests.Engine;
 public class InstallerExecutionCompilerTests
 {
     private static readonly Guid TransactionId = Guid.Parse("12345678-1234-1234-1234-123456789abc");
+    private static readonly GameRootIdentity GameRoot = new("/game", 8, 1, 1234);
+    private const ulong OperationGeneration = 7;
     private readonly InstallationPlanner Planner = new();
     private readonly InstallerExecutionCompiler Compiler = new();
 
@@ -363,7 +365,7 @@ public class InstallerExecutionCompilerTests
     public void BoundPlan_RejectsRecoveryMetadataTamperingEvenWhenPlanHashesAreUnchanged()
     {
         (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration);
         RecoveryFileObservation[] tampered = request.RecoveryObservations
             .Select(observation => observation.Path.Value == "StardewValley"
                 ? new RecoveryFileObservation(
@@ -396,14 +398,26 @@ public class InstallerExecutionCompilerTests
     public void BindAndPrepare_RejectNonExecutableStaleAndMismatchedState()
     {
         (InstallationPlanningRequest firstRequest, InstallationPlan firstPlan) = this.CreateFreshInstallRequest('2', size: 10);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest, GameRoot, OperationGeneration);
+        BoundInstallationPlan changedRootBinding = this.Compiler.BindPlan(
+            firstPlan,
+            firstRequest,
+            new GameRootIdentity(GameRoot.CanonicalPath, GameRoot.DeviceMajor, GameRoot.DeviceMinor, GameRoot.Inode + 1),
+            OperationGeneration
+        );
+        BoundInstallationPlan changedGenerationBinding = this.Compiler.BindPlan(
+            firstPlan,
+            firstRequest,
+            GameRoot,
+            OperationGeneration + 1
+        );
 
         (InstallationPlanningRequest changedPlanRequest, InstallationPlan changedPlan) = this.CreateFreshInstallRequest('3', size: 10);
         Action stalePlan = () => this.Compiler.Prepare(binding, changedPlan, changedPlanRequest, TransactionId);
 
         (InstallationPlanningRequest changedManifestRequest, InstallationPlan samePlan) = this.CreateFreshInstallRequest('2', size: 11);
         samePlan.GetCanonicalDigest().Should().Be(firstPlan.GetCanonicalDigest(), "manifest sizes aren't represented as file-operation digests");
-        BoundInstallationPlan changedManifestBinding = this.Compiler.BindPlan(samePlan, changedManifestRequest);
+        BoundInstallationPlan changedManifestBinding = this.Compiler.BindPlan(samePlan, changedManifestRequest, GameRoot, OperationGeneration);
         Action staleManifest = () => this.Compiler.Prepare(binding, firstPlan, changedManifestRequest, TransactionId);
 
         PackageManifest collisionManifest = OwnershipTestData.Manifest(
@@ -418,11 +432,13 @@ public class InstallerExecutionCompilerTests
             targetManifest: collisionManifest
         );
         InstallationPlan conflictPlan = this.Planner.Plan(collisionRequest);
-        Action nonExecutable = () => this.Compiler.BindPlan(conflictPlan, collisionRequest);
+        Action nonExecutable = () => this.Compiler.BindPlan(conflictPlan, collisionRequest, GameRoot, OperationGeneration);
 
         stalePlan.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StalePlan);
         staleManifest.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StaleManifest);
         changedManifestBinding.GetCanonicalDigest().Should().NotBe(binding.GetCanonicalDigest(), "confirmation must bind the complete manifest identity");
+        changedRootBinding.GetCanonicalDigest().Should().NotBe(binding.GetCanonicalDigest(), "confirmation must bind the anchored root object");
+        changedGenerationBinding.GetCanonicalDigest().Should().NotBe(binding.GetCanonicalDigest(), "confirmation must bind the operation generation");
         nonExecutable.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.NonExecutablePlan);
     }
 
@@ -445,7 +461,7 @@ public class InstallerExecutionCompilerTests
         InstallationPlan firstPlan = this.Planner.Plan(firstRequest);
         InstallationPlan secondPlan = this.Planner.Plan(secondRequest);
         secondPlan.GetCanonicalDigest().Should().Be(firstPlan.GetCanonicalDigest());
-        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest, GameRoot, OperationGeneration);
 
         Action prepare = () => this.Compiler.Prepare(binding, firstPlan, secondRequest, TransactionId);
 
@@ -457,7 +473,7 @@ public class InstallerExecutionCompilerTests
     {
         (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
         InstallationExecutionPreparation preparation = this.Compiler.Prepare(
-            this.Compiler.BindPlan(plan, request),
+            this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration),
             plan,
             request,
             TransactionId
@@ -476,7 +492,7 @@ public class InstallerExecutionCompilerTests
     {
         request = AddRequiredRecoveryObservations(request);
         InstallationPlan plan = this.Planner.Plan(request);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration);
         return (plan, this.Compiler.Prepare(binding, plan, request, TransactionId));
     }
 

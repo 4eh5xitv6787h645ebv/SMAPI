@@ -37,6 +37,8 @@ public sealed class ExecutionCompilationException : Exception
 public sealed class BoundInstallationPlan
 {
     public InstallationAction Action { get; }
+    public GameRootIdentity GameRoot { get; }
+    public ulong OperationGeneration { get; }
     public Sha256Digest PlanSha256 { get; }
     public Sha256Digest? ManifestSha256 { get; }
     public Sha256Digest? InstalledReceiptSha256 { get; }
@@ -45,6 +47,8 @@ public sealed class BoundInstallationPlan
 
     internal BoundInstallationPlan(
         InstallationAction action,
+        GameRootIdentity gameRoot,
+        ulong operationGeneration,
         Sha256Digest planSha256,
         Sha256Digest? manifestSha256,
         Sha256Digest? installedReceiptSha256,
@@ -52,7 +56,10 @@ public sealed class BoundInstallationPlan
         Sha256Digest? recoveryObservationsSha256
     )
     {
+        ArgumentNullException.ThrowIfNull(gameRoot);
         this.Action = action;
+        this.GameRoot = gameRoot;
+        this.OperationGeneration = operationGeneration;
         this.PlanSha256 = planSha256;
         this.ManifestSha256 = manifestSha256;
         this.InstalledReceiptSha256 = installedReceiptSha256;
@@ -71,6 +78,13 @@ public sealed class BoundInstallationPlan
         {
             writer.WriteStartObject();
             writer.WriteString("action", this.Action.ToString().ToLowerInvariant());
+            writer.WriteStartObject("game_root");
+            writer.WriteString("canonical_path", this.GameRoot.CanonicalPath);
+            writer.WriteNumber("device_major", this.GameRoot.DeviceMajor);
+            writer.WriteNumber("device_minor", this.GameRoot.DeviceMinor);
+            writer.WriteNumber("inode", this.GameRoot.Inode);
+            writer.WriteNumber("operation_generation", this.OperationGeneration);
+            writer.WriteEndObject();
             writer.WriteString("plan_sha256", this.PlanSha256.Value);
             WriteNullableDigest(writer, "manifest_sha256", this.ManifestSha256);
             WriteNullableDigest(writer, "installed_receipt_sha256", this.InstalledReceiptSha256);

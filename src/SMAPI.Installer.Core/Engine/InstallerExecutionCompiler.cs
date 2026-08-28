@@ -11,17 +11,23 @@ namespace StardewModdingAPI.Installer.Core.Engine;
 /// Binds pure planner output to the state which produced it, then compiles every planner operation into a closed
 /// source and preparation instruction without touching a path.
 /// </summary>
-public sealed class InstallerExecutionCompiler
+internal sealed class InstallerExecutionCompiler
 {
     private static readonly NormalizedRelativePath LauncherPath = NormalizedRelativePath.Parse("StardewValley");
     private static readonly NormalizedRelativePath LauncherBackupPath = NormalizedRelativePath.Parse("StardewValley-original");
     private readonly InstallationPlanner Planner = new();
 
     /// <summary>Capture the exact canonical identities which must still agree when execution is prepared.</summary>
-    public BoundInstallationPlan BindPlan(InstallationPlan plan, InstallationPlanningRequest request)
+    internal BoundInstallationPlan BindPlan(
+        InstallationPlan plan,
+        InstallationPlanningRequest request,
+        GameRootIdentity gameRoot,
+        ulong operationGeneration
+    )
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(gameRoot);
         if (!plan.CanExecute)
             throw Error(ExecutionCompilationError.NonExecutablePlan, "A plan with conflicts can't be bound for execution.");
         if (plan.Action != request.Action)
@@ -35,6 +41,8 @@ public sealed class InstallerExecutionCompiler
 
         return new BoundInstallationPlan(
             plan.Action,
+            gameRoot,
+            operationGeneration,
             plan.GetCanonicalDigest(),
             request.TargetManifest?.GetCanonicalDigest(),
             request.InstalledReceipt?.GetCanonicalDigest(),
@@ -44,7 +52,7 @@ public sealed class InstallerExecutionCompiler
     }
 
     /// <summary>Compile a previously bound plan after proving that the complete planning state is still exact.</summary>
-    public InstallationExecutionPreparation Prepare(
+    internal InstallationExecutionPreparation Prepare(
         BoundInstallationPlan binding,
         InstallationPlan plan,
         InstallationPlanningRequest currentRequest,

@@ -169,7 +169,11 @@ public static class ProtocolJsonSerializer
         if (kind != ProtocolMessageKind.PlanEvent)
             return;
 
-        ProtocolJsonSerializer.AssertExactObject(payload.GetProperty("gameRoot"), ["canonicalPath", "deviceId", "inode"], "plan game-root identity");
+        ProtocolJsonSerializer.AssertExactObject(
+            payload.GetProperty("gameRoot"),
+            ["canonicalPath", "deviceMajor", "deviceMinor", "inode", "operationGeneration"],
+            "plan game-root identity"
+        );
         ProtocolJsonSerializer.AssertOptionalReleaseObject(payload.GetProperty("currentRelease"), "current release identity");
         ProtocolJsonSerializer.AssertOptionalReleaseObject(payload.GetProperty("targetRelease"), "target release identity");
         ProtocolJsonSerializer.AssertObjectArray(

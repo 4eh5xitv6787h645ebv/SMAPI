@@ -22,7 +22,7 @@ public enum TransactionOperationKind
 /// <param name="PayloadRelativePath">The normalized path relative to the payload root for a write.</param>
 /// <param name="ExpectedResultSha256">The expected payload/result SHA-256 for a write.</param>
 /// <param name="ResultUnixMode">The Unix permission bits (for example <c>0755</c>) to set on a written file, if any.</param>
-public sealed record TransactionFileOperation(
+internal sealed record TransactionFileOperation(
     TransactionOperationKind Kind,
     string RelativePath,
     string? ExpectedExistingSha256,
@@ -32,7 +32,7 @@ public sealed record TransactionFileOperation(
 );
 
 /// <summary>An immutable set of ordered operations.</summary>
-public sealed class TransactionPlan
+internal sealed class TransactionPlan
 {
     internal const string CoreReceiptRelativePath = ".smapi-installer/ownership/receipt.json";
     /// <summary>The maximum bounded operation count accepted by one transaction.</summary>

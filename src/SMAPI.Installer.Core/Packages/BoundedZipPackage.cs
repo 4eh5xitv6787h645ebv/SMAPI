@@ -62,7 +62,7 @@ public sealed record ZipPackageLimits
 public sealed record ZipPackageInspection(int EntryCount, long TotalExpandedBytes, string ExpectedRoot);
 
 /// <summary>Inspects and extracts ZIP packages without accepting ambiguous or special filesystem entries.</summary>
-public sealed class BoundedZipPackage
+internal sealed class BoundedZipPackage
 {
     private static readonly Regex WindowsDrivePattern = new(@"\A[A-Za-z]:", RegexOptions.CultureInvariant);
 

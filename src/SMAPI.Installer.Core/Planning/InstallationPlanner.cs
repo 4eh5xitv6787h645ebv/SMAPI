@@ -3,7 +3,7 @@ using StardewModdingAPI.Installer.Core.Ownership;
 namespace StardewModdingAPI.Installer.Core.Planning;
 
 /// <summary>Creates deterministic, side-effect-free ownership plans for every supported installer action.</summary>
-public sealed class InstallationPlanner
+internal sealed class InstallationPlanner
 {
     private static readonly NormalizedRelativePath LauncherPath = NormalizedRelativePath.Parse("StardewValley");
     private static readonly NormalizedRelativePath LauncherBackupPath = NormalizedRelativePath.Parse("StardewValley-original");
