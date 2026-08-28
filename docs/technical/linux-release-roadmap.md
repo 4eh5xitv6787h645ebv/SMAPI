@@ -19,15 +19,15 @@ Scope constraints apply throughout:
 
 ## Tracking and governance
 
-- [ ] Create this repository roadmap with a checkbox for every phase, requirement, test, review, pull request, release, and definition-of-done item.
+- [x] Create this repository roadmap with a checkbox for every phase, requirement, test, review, pull request, release, and definition-of-done item ([independent review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169#issuecomment-5448507702)).
 - [x] Create [umbrella GitHub issue #168](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168) with the mirrored checklist.
 - [x] Link the umbrella issue from this roadmap.
 - [x] Commit and push the initial roadmap immediately ([`cb0830b1`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/cb0830b1)).
 - [x] Open and link roadmap pull request [#169](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169).
-- [ ] Obtain an independent roadmap documentation/completeness review.
-- [ ] Obtain an independent roadmap final-diff review.
-- [ ] Address every actionable roadmap review finding.
-- [ ] Pass applicable roadmap PR checks.
+- [x] Obtain an [independent roadmap documentation/completeness review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169#issuecomment-5448499270).
+- [x] Obtain an [independent roadmap final-diff review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169#issuecomment-5448507702).
+- [x] Address every actionable roadmap review finding (`22baae38`).
+- [x] Pass applicable roadmap PR checks (`git diff --check`; no repository checks configured for this documentation-only branch).
 - [ ] Merge roadmap PR #169 into `develop` and close it.
 - [ ] Verify `develop` equals `origin/develop` after the roadmap merge.
 - [ ] Keep both checklists synchronized as evidence is verified.
