@@ -88,6 +88,23 @@ internal sealed class LinuxInstallerProtocolServiceTests
     }
 
     [Test]
+    public async Task ConcurrentOuterCancellationCannotReclassifyAnUnrelatedCoreCancellationAsSafe()
+    {
+        FakeEngine engine = new() { ThrowUnrequestedRecoveryCancellation = true, BlockUnrequestedRecoveryCancellation = true };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        using CancellationTokenSource outer = new();
+        Task<ProtocolEvent?> recovery = service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game"), outer.Token);
+        await engine.UnrequestedRecoveryCancellationReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        outer.Cancel(); engine.ReleaseUnrequestedRecoveryCancellation.TrySetResult();
+        RecoveryFailureEvent failure = (RecoveryFailureEvent)(await recovery)!;
+
+        failure.ErrorCode.Should().Be("RecoveryFailed"); failure.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
+    }
+
+    [Test]
     public async Task TypedPartialRecoveryFailurePreservesExactKnownAndUnknownProgressWithoutPaths()
     {
         FakeEngine engine = new() { ThrowPartialRecovery = true };
@@ -756,6 +773,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public TaskCompletionSource ReturnWhileProgressIsBlocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool ThrowRecovery { get; set; }
         public bool ThrowUnrequestedRecoveryCancellation { get; set; }
+        public bool BlockUnrequestedRecoveryCancellation { get; set; }
         public bool ThrowPartialRecovery { get; set; }
         public bool BlockRecoveryUntilCancellation { get; set; }
         public bool BlockRecoveryInitiation { get; set; }
@@ -764,9 +782,11 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public TaskCompletionSource ExecutionInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource PruneInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource RecoveryInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource UnrequestedRecoveryCancellationReady { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseExecutionInitiation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleasePruneInitiation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseRecoveryInitiation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseUnrequestedRecoveryCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly Guid First = Guid.ParseExact("11111111111111111111111111111111", "N");
         private readonly Guid Second = Guid.ParseExact("22222222222222222222222222222222", "N");
         private readonly Guid Pending = Guid.ParseExact("33333333333333333333333333333333", "N");
@@ -783,7 +803,12 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public async Task<InterruptedOperationRecoveryResult> RecoverInterruptedOperationAsync(string gameRoot, CancellationToken cancellationToken)
         {
             if (this.BlockRecoveryInitiation) { this.RecoveryInitiationStarted.TrySetResult(); this.ReleaseRecoveryInitiation.Task.GetAwaiter().GetResult(); }
-            if (this.ThrowUnrequestedRecoveryCancellation) throw new OperationCanceledException("core-origin cancellation");
+            if (this.ThrowUnrequestedRecoveryCancellation)
+            {
+                this.UnrequestedRecoveryCancellationReady.TrySetResult();
+                if (this.BlockUnrequestedRecoveryCancellation) await this.ReleaseUnrequestedRecoveryCancellation.Task;
+                throw new OperationCanceledException("core-origin cancellation", null, CancellationToken.None);
+            }
             if (this.ThrowPartialRecovery) throw new InterruptedOperationRecoveryException(Root, 7, null, null, [new(Guid.NewGuid(), TransactionStatus.Recovered, 2)], TransactionErrorCode.RecoveryFailed, "Partial recovery failed safely.", new IOException("private-partial-failure"));
             if (this.ThrowRecovery) throw new InvalidOperationException("private-secret");
             this.Progress.Report(new(TransactionStage.AcquiringLock, 0, null)); this.RecoveryStarted.TrySetResult();

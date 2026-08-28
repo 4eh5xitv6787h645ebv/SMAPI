@@ -279,7 +279,9 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
         catch (Exception exception)
         {
-            bool cancelled = exception is OperationCanceledException && active.IsCancellationRequested;
+            bool cancelled = exception is OperationCanceledException cancellation
+                && active.IsCancellationRequested
+                && cancellation.CancellationToken == active.Token;
             InterruptedOperationRecoveryException? partial = exception as InterruptedOperationRecoveryException;
             string code = cancelled ? "RecoveryCancelled" : partial?.ErrorCode.ToString() ?? "RecoveryFailed";
             string message = cancelled ? "Interrupted-operation recovery was cancelled before recovery began." : partial?.SafeMessage ?? "Interrupted-operation recovery stopped without a completed result.";
