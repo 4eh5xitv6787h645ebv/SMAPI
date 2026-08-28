@@ -312,6 +312,17 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
                 offset = checked(offset + count);
             }
             Fsync(destination.Handle);
+
+            LinuxFileIdentity sourceAfter = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
+            LinuxFileIdentity destinationAfter = GetHandleIdentity(destination.Handle, requireSingleLinkRegularFile: true);
+            if (sourceAfter != sourceBefore)
+                throw new IOException("The source identity changed while it was copied.");
+            if (
+                destinationAfter.Size != sourceAfter.Size
+                || this.ComputeSha256(source, cancellationToken) != this.ComputeSha256(destination, cancellationToken)
+            )
+                throw new IOException("The anchored copy failed byte-for-byte verification.");
+            return destinationAfter;
         }
         catch
         {
@@ -330,17 +341,6 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
-
-        LinuxFileIdentity sourceAfter = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
-        LinuxFileIdentity destinationAfter = GetHandleIdentity(destination.Handle, requireSingleLinkRegularFile: true);
-        if (sourceAfter != sourceBefore)
-            throw new IOException("The source identity changed while it was copied.");
-        if (
-            destinationAfter.Size != sourceAfter.Size
-            || this.ComputeSha256(source, cancellationToken) != this.ComputeSha256(destination, cancellationToken)
-        )
-            throw new IOException("The anchored copy failed byte-for-byte verification.");
-        return destinationAfter;
     }
 
     /// <summary>Compute SHA-256 from an already-open stable single-link regular-file handle.</summary>
