@@ -238,6 +238,19 @@ Scope constraints apply throughout:
 - [x] Merge and close focused [PR #177](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177) into `develop` ([`42eb00ff`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/42eb00ffcaff75d4d583655677d10a2e80f54b7d)).
 - [x] Delete the merged dispatcher feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` ([branch/ref evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/178#issuecomment-5458223201); `42eb00ffcaff75d4d583655677d10a2e80f54b7d`).
 
+### Release manifest and package-workflow authority
+
+- [x] Generate the canonical external Linux install-manifest companion from the exact finalized installer ZIP without modifying that ZIP ([merged PR #179](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179); [`c289d998`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/c289d9989250d4e51a2c9890de13466b35af733d)).
+- [x] Emit and fully verify the exact next-alpha quartet of installer ZIP, manifest, two-subject `SHA256SUMS`, and plural-artifact build metadata only on the annotated-tag workflow path ([workflow and authority review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
+- [x] Keep pull-request and pre-tag dispatch artifacts explicitly non-authoritative, with actual-workflow candidate metadata and no manifest companion ([clean exact-head workflow review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
+- [x] Inspect the exact prepared candidate ZIP through the shared bounded outer/nested layout, path, type, mode, allowlist, and canonicalization checks before a tag exists, without emitting authority artifacts (real 52 MB artifact: 107 outer support files, 252 payload files, 95,010,744 expanded bytes; [verification record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
+- [x] Reject hostile paths, collisions, special files and modes, corrupt or missing nested payloads, resource-bound violations, linked inputs, non-executable launchers, tampered quartet members, and mismatched release identity ([516-case Core and 21-case PackageTool results](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
+- [x] Verify both checksummed subjects after workflow-artifact transfer, attest both subjects, and publish exactly the four named files on a tagged next-alpha run ([independent security/workflow review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
+- [x] Document the non-cryptographic environment guard, two-attestation provenance boundary, unauthenticated informational build fields, external companion model, and immutable alpha.1 history ([clean documentation re-review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
+- [x] Pass required Linux qualification and deterministic performance checks on the exact reviewed head ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33218511989); [performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33218511910)).
+- [x] Address every actionable release-authority architecture, installer, security/privacy, testing, workflow, documentation, and final-diff finding and obtain clean exact-head reviews ([review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
+- [x] Merge and close focused [PR #179](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179), delete its feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`c289d9989250d4e51a2c9890de13466b35af733d`; origin contained only `develop`).
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
