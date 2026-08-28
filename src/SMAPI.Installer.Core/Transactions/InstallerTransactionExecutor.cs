@@ -551,6 +551,7 @@ internal sealed class InstallerTransactionExecutor
             if (operation.ResultUnixMode is { } expectedMode && identity.UnixMode != expectedMode)
                 throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A written destination has incorrect permissions.");
         }
+        RevalidatePreconditions(game, plan.Preconditions);
     }
 
     private IReadOnlyList<TransactionResult> RecoverIncompleteTransactionsLocked(
@@ -755,7 +756,7 @@ internal sealed class InstallerTransactionExecutor
             if (directoryIdentity.Kind != LinuxAnchoredEntryKind.Directory)
                 throw RecoveryError("A finalized transaction payload directory changed type.");
             using LinuxAnchoredFileSystem directory = transaction.OpenSubdirectory(directoryName);
-            foreach (string name in directory.EnumerateEntryNames())
+            foreach (string name in directory.EnumerateEntryNames(maximumEntries: TransactionPlan.MaximumOperationCount))
             {
                 if (name.Length != 8 || name.Any(character => character is < '0' or > '9'))
                     throw RecoveryError("A finalized transaction contains an unknown payload entry.");
@@ -771,7 +772,7 @@ internal sealed class InstallerTransactionExecutor
             transaction.RemoveEmptyDirectory(directoryName, emptiedIdentity);
         }
         HashSet<string> expected = new(StringComparer.Ordinal) { TransactionJournalStore.PlanFileName, TransactionJournalStore.EventsFileName };
-        if (transaction.EnumerateEntryNames().Any(name => !expected.Contains(name)))
+        if (transaction.EnumerateEntryNames(maximumEntries: expected.Count).Any(name => !expected.Contains(name)))
             throw RecoveryError("A finalized transaction contains unknown state and was preserved for inspection.");
     }
 
@@ -790,7 +791,7 @@ internal sealed class InstallerTransactionExecutor
                 TransactionJournalStore.PlanFileName,
                 TransactionJournalStore.EventsFileName
             };
-            IReadOnlyList<string> entries = preparation.EnumerateEntryNames();
+            IReadOnlyList<string> entries = preparation.EnumerateEntryNames(maximumEntries: known.Count);
             if (entries.Any(entry => !known.Contains(entry)))
                 throw RecoveryError("An unpublished transaction contains unknown state and was preserved.");
             foreach (string directoryName in new[] { "staged", "backups" })
@@ -802,7 +803,7 @@ internal sealed class InstallerTransactionExecutor
                     throw RecoveryError("An unpublished transaction payload directory is unsafe.");
                 using (LinuxAnchoredFileSystem directory = preparation.OpenSubdirectory(directoryName))
                 {
-                    foreach (string fileName in directory.EnumerateEntryNames())
+                    foreach (string fileName in directory.EnumerateEntryNames(maximumEntries: TransactionPlan.MaximumOperationCount))
                     {
                         if (fileName.Length != 8 || fileName.Any(character => character is < '0' or > '9'))
                             throw RecoveryError("An unpublished transaction contains an unknown payload entry.");
@@ -826,7 +827,7 @@ internal sealed class InstallerTransactionExecutor
                     throw RecoveryError("An unpublished transaction state file isn't a regular file.");
                 preparation.UnlinkFile(fileName, fileIdentity);
             }
-            if (preparation.EnumerateEntryNames().Count != 0)
+            if (preparation.EnumerateEntryNames(maximumEntries: 1).Count != 0)
                 throw RecoveryError("An unpublished transaction contains unknown residual state.");
         }
         LinuxFileIdentity currentIdentity = transactions.Stat(name)

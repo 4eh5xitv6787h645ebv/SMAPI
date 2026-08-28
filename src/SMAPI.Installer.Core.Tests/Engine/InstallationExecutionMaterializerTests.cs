@@ -255,6 +255,36 @@ public sealed class InstallationExecutionMaterializerTests
     }
 
     [Test]
+    public void Execute_RetainedModeDriftAfterMutation_DoesNotCommitReceipt()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        LinuxInstallerEngine installer = new();
+        Execute(this.Inspect(installer, game, InstallationAction.Install, package), installer);
+        string runtime = Path.Combine(game, "StardewModdingAPI.dll");
+        bool changed = false;
+        InstallerTransactionExecutor executor = new(faultInjector: new CallbackFaultInjector(
+            after: () =>
+            {
+                if (changed)
+                    return;
+                File.SetUnixFileMode(runtime, (UnixFileMode)0x1ed);
+                changed = true;
+            }
+        ));
+        LinuxInstallerEngine repair = new(executor);
+        using InspectedInstallationState inspection = this.Inspect(repair, game, InstallationAction.Repair, package);
+
+        Action execute = () => repair.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult();
+
+        execute.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.ExistingFileMismatch);
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.Pointer!.Action.Should().Be(InstallationAction.Install);
+    }
+
+    [Test]
     public void RecoveryHistory_AtCapacity_CanBeListedPrunedAndUsedAgain()
     {
         string game = this.CreateDirectory();
@@ -408,14 +438,16 @@ public sealed class InstallationExecutionMaterializerTests
 
     private sealed class CallbackFaultInjector : ITransactionFaultInjector
     {
-        private readonly Action Callback;
+        private readonly Action? Before;
+        private readonly Action? After;
 
-        public CallbackFaultInjector(Action callback)
+        public CallbackFaultInjector(Action? before = null, Action? after = null)
         {
-            this.Callback = callback;
+            this.Before = before;
+            this.After = after;
         }
 
-        public void BeforeMutation(Guid transactionId, int operationIndex) => this.Callback();
-        public void AfterMutation(Guid transactionId, int operationIndex) { }
+        public void BeforeMutation(Guid transactionId, int operationIndex) => this.Before?.Invoke();
+        public void AfterMutation(Guid transactionId, int operationIndex) => this.After?.Invoke();
     }
 }
