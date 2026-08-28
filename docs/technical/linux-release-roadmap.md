@@ -86,37 +86,37 @@ Scope constraints apply throughout:
 
 ### Deterministic coverage
 
-- [ ] Convert stable map/TMX conversion hot paths into reproducible tests or benchmarks.
-- [ ] Cover canonical path handling.
-- [ ] Cover JSON streaming allocation.
-- [ ] Cover asset-name parsing.
-- [ ] Cover cached reflection.
-- [ ] Cover event dispatch.
-- [ ] Cover inventory/chest idle tracking.
-- [ ] Cover content invalidation.
-- [ ] Cover other suitable deterministic audited hot paths.
-- [ ] Make deterministic correctness assertions blocking gates.
-- [ ] Make deterministic allocation assertions blocking gates.
-- [ ] Keep noisy wall-clock thresholds informational on shared CI unless a statistically defensible stable gate is demonstrated.
-- [ ] Record machine-readable baselines.
-- [ ] Produce readable comparison artifacts.
+- [x] Convert stable map/TMX conversion hot paths into reproducible tests or benchmarks ([merged implementation](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171); [final TMX review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451991695)).
+- [x] Cover canonical path handling ([suite documentation and baseline](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171/files)).
+- [x] Cover JSON streaming allocation ([suite documentation and baseline](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171/files)).
+- [x] Cover asset-name parsing ([suite documentation and baseline](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171/files)).
+- [x] Cover cached reflection ([suite documentation and baseline](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171/files)).
+- [x] Cover event dispatch ([production-core review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Cover inventory/chest idle tracking ([production-core review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Cover content invalidation ([production-core review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Cover other suitable deterministic audited hot paths ([11-scenario hosted artifact](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33166744493)).
+- [x] Make deterministic correctness assertions blocking gates ([three-attempt hosted run](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33166744493)).
+- [x] Make deterministic allocation assertions blocking gates ([three-attempt hosted run](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33166744493)).
+- [x] Keep noisy wall-clock thresholds informational on shared CI unless a statistically defensible stable gate is demonstrated ([methodology and final evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Record machine-readable baselines ([versioned schema and baseline](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171/files)).
+- [x] Produce readable comparison artifacts ([verified JSON and Markdown artifact](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33166744493)).
 
 ### Phase 2 validation and integration
 
-- [ ] Add CI execution that neither embeds nor downloads the private modpack/save.
-- [ ] Verify the suite detects intentional correctness regressions.
-- [ ] Verify the suite detects intentional allocation regressions.
-- [ ] Revert all intentional regression probes after verification.
-- [ ] Repeatedly run required checks to verify they are stable and non-flaky.
-- [ ] Open a focused Phase 2 fork pull request.
-- [ ] Obtain an independent Phase 2 architecture review.
-- [ ] Obtain an independent Phase 2 performance review.
-- [ ] Obtain an independent Phase 2 testing review.
-- [ ] Obtain an independent Phase 2 final-diff review.
-- [ ] Address every actionable Phase 2 review finding.
-- [ ] Pass required CI and repository checks.
-- [ ] Merge the Phase 2 pull request into `develop` and close it.
-- [ ] Verify `develop` equals `origin/develop` after the merge.
+- [x] Add CI execution that neither embeds nor downloads the private modpack/save ([pinned read-only workflow and privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451991695)).
+- [x] Verify the suite detects intentional correctness regressions ([probe evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Verify the suite detects intentional allocation regressions ([probe evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Revert all intentional regression probes after verification ([clean-tree evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Repeatedly run required checks to verify they are stable and non-flaky ([three hosted attempts and ten local repeats](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Open a focused [Phase 2 fork pull request #171](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171).
+- [x] Obtain an independent Phase 2 architecture review ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Obtain an independent Phase 2 performance review ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Obtain an independent Phase 2 testing review ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Obtain an independent Phase 2 final-diff review ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451991695)).
+- [x] Address every actionable Phase 2 review finding ([fix and re-review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171#issuecomment-5451947272)).
+- [x] Pass required CI and repository checks ([strict required check, three successful attempts](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33166744493)).
+- [x] Merge Phase 2 pull request [#171](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/171) into `develop` and close it ([`298c77ae`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/298c77ae5b91f10ede15eb0c9a4ba34e36af4bb9)).
+- [x] Verify local `develop` equals `origin/develop` after the merge (`298c77ae`).
 
 ## Phase 3 — First Linux alpha release
 
