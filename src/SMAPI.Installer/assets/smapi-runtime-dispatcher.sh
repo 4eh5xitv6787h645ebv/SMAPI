@@ -307,28 +307,69 @@ fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit $?
 
-# The game-runtime host needs an exact copy of the game's deps file before CoreCLR starts. This also
-# repairs manual installs and game updates without first starting against stale dependency metadata.
+# Read one bounded, unique regular-file identity without following a symbolic-link leaf. The caller
+# compares the identity again after reading so a concurrent replacement fails closed. This dispatcher
+# never repairs files: the installer core owns all mutation, journaling, and rollback behavior.
+inspect_unique_regular_file() {
+    local path=$1 minimum_size=$2 maximum_size=$3 require_executable=$4
+    local metadata file_type link_count size_bytes identity remainder
+
+    [ ! -L "$path" ] || return 1
+    metadata=$(LC_ALL=C stat --printf='%F\n%h\n%s\n%d:%i:%h:%s:%f:%y:%z' -- "$path" 2>/dev/null) || return 1
+    file_type=${metadata%%$'\n'*}
+    remainder=${metadata#*$'\n'}
+    link_count=${remainder%%$'\n'*}
+    remainder=${remainder#*$'\n'}
+    size_bytes=${remainder%%$'\n'*}
+    identity=${remainder#*$'\n'}
+
+    [ "$file_type" = "regular file" ] || return 1
+    [ "$link_count" = "1" ] || return 1
+    [[ "$size_bytes" =~ ^[0-9]+$ ]] || return 1
+    (( size_bytes >= minimum_size && size_bytes <= maximum_size )) || return 1
+    if [ "$require_executable" = "yes" ] && [ ! -x "$path" ]; then
+        return 1
+    fi
+    printf '%s\n' "$identity"
+}
+
+print_dependency_repair_guidance() {
+    printf '%s\n' "SMAPI can't safely launch with the game's .NET runtime because dependency metadata is missing, unsafe, or out of date." >&2
+    printf '%s\n' "Run the Linux installer with --repair --game-path \"<your game folder>\", then try again." >&2
+}
+
+# The game-runtime host needs an exact installer-owned copy of the game's deps file before CoreCLR
+# starts. Only the transactional installer may create or repair that copy.
 if [ "$runtime" = "net6" ]; then
     source_deps="$script_dir/Stardew Valley.deps.json"
     target_deps="$script_dir/StardewModdingAPI-net6.deps.json"
-    if [ ! -r "$source_deps" ]; then
-        printf "SMAPI can't find the game's dependency metadata: %s\n" "$source_deps" >&2
+    maximum_deps_bytes=$((16 * 1024 * 1024))
+    source_identity=$(inspect_unique_regular_file "$source_deps" 1 "$maximum_deps_bytes" no) || {
+        print_dependency_repair_guidance
+        exit 1
+    }
+    target_identity=$(inspect_unique_regular_file "$target_deps" 1 "$maximum_deps_bytes" no) || {
+        print_dependency_repair_guidance
+        exit 1
+    }
+    if ! timeout --signal=KILL 5s cmp -s -- "$source_deps" "$target_deps"; then
+        print_dependency_repair_guidance
         exit 1
     fi
-    if [ ! -f "$target_deps" ] || ! cmp -s -- "$source_deps" "$target_deps"; then
-        temp_deps="$target_deps.tmp.$$"
-        if ! (umask 022 && cp -- "$source_deps" "$temp_deps") || ! mv -f -- "$temp_deps" "$target_deps"; then
-            rm -f -- "$temp_deps"
-            printf "SMAPI couldn't update its game-runtime dependency metadata: %s\n" "$target_deps" >&2
-            exit 1
-        fi
+    if [ "$(inspect_unique_regular_file "$source_deps" 1 "$maximum_deps_bytes" no)" != "$source_identity" ] \
+        || [ "$(inspect_unique_regular_file "$target_deps" 1 "$maximum_deps_bytes" no)" != "$target_identity" ]; then
+        print_dependency_repair_guidance
+        exit 1
     fi
 fi
 
 host_path="$script_dir/StardewModdingAPI-$runtime"
-if [ ! -x "$host_path" ]; then
+host_identity=$(inspect_unique_regular_file "$host_path" 1 9223372036854775807 yes) || {
     printf "SMAPI's %s runtime host is missing or isn't executable: %s\n" "$runtime" "$host_path" >&2
+    exit 1
+}
+if [ "$(inspect_unique_regular_file "$host_path" 1 9223372036854775807 yes)" != "$host_identity" ]; then
+    printf "SMAPI's %s runtime host changed during launch validation: %s\n" "$runtime" "$host_path" >&2
     exit 1
 fi
 

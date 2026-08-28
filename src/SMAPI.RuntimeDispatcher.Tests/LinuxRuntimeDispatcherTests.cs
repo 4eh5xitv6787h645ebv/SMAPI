@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
@@ -13,6 +15,11 @@ namespace SMAPI.Tests.Core;
 [TestFixture]
 internal class LinuxRuntimeDispatcherTests
 {
+    private const long MaximumDependencyMetadataBytes = 16L * 1024 * 1024;
+    private const string DependencyRepairGuidance =
+        "SMAPI can't safely launch with the game's .NET runtime because dependency metadata is missing, unsafe, or out of date.\n"
+        + "Run the Linux installer with --repair --game-path \"<your game folder>\", then try again.\n";
+
     private static readonly string[] NativeGcSettings =
     {
         "DOTNET_gcServer",
@@ -32,7 +39,7 @@ internal class LinuxRuntimeDispatcherTests
         string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
         try
         {
-            await LinuxRuntimeDispatcherTests.WriteGameDeps(root, "current dependency metadata\n");
+            await LinuxRuntimeDispatcherTests.WriteMatchingDeps(root, "current dependency metadata\n");
             await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "printf '%s\\n' 'net6'");
             await LinuxRuntimeDispatcherTests.WriteHost(root, "net10", "printf '%s\\n' 'net10'");
 
@@ -99,7 +106,7 @@ internal class LinuxRuntimeDispatcherTests
         try
         {
             if (runtime == "net6")
-                await LinuxRuntimeDispatcherTests.WriteGameDeps(root, "dependency metadata\n");
+                await LinuxRuntimeDispatcherTests.WriteMatchingDeps(root, "dependency metadata\n");
             if (createNonExecutableHost)
                 await LinuxRuntimeDispatcherTests.WriteHost(root, runtime, "exit 0", executable: false);
 
@@ -116,49 +123,29 @@ internal class LinuxRuntimeDispatcherTests
         }
     }
 
-    [TestCase(false)]
-    [TestCase(true)]
-    public async Task RepairsMissingOrStaleNet6DependencyMetadata(bool createStaleTarget)
+    [TestCase("missing-source")]
+    [TestCase("missing-target")]
+    [TestCase("mismatch")]
+    public async Task RefusesMissingOrMismatchedDependencyMetadataWithoutWriting(string scenario)
     {
         LinuxRuntimeDispatcherTests.RequireLinux();
 
         string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
         try
         {
-            string expected = "current dependency metadata\n";
-            string targetPath = Path.Combine(root, "StardewModdingAPI-net6.deps.json");
-            await LinuxRuntimeDispatcherTests.WriteGameDeps(root, expected);
-            if (createStaleTarget)
-                await File.WriteAllTextAsync(targetPath, "stale dependency metadata\n");
-            await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "exit 0");
+            if (scenario != "missing-source")
+                await LinuxRuntimeDispatcherTests.WriteGameDeps(root, "current dependency metadata\n");
+            if (scenario != "missing-target")
+                await LinuxRuntimeDispatcherTests.WriteTargetDeps(root, scenario == "mismatch" ? "stale dependency metadata\n" : "current dependency metadata\n");
+            await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "printf '%s\\n' 'HOST_STARTED'");
+            string before = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root);
 
             DispatcherResult result = await LinuxRuntimeDispatcherTests.RunDispatcher(root, runtime: "net6");
 
-            result.ExitCode.Should().Be(0, result.StandardError);
-            (await File.ReadAllTextAsync(targetPath)).Should().Be(expected);
-        }
-        finally
-        {
-            Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [Test]
-    public async Task RejectsMissingGameDependencyMetadataBeforeStartingNet6Host()
-    {
-        LinuxRuntimeDispatcherTests.RequireLinux();
-
-        string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
-        try
-        {
-            await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "printf 'host started\\n'");
-
-            DispatcherResult result = await LinuxRuntimeDispatcherTests.RunDispatcher(root, runtime: "net6");
-
-            string sourcePath = Path.Combine(root, "Stardew Valley.deps.json");
             result.ExitCode.Should().Be(1);
             result.StandardOutput.Should().BeEmpty();
-            result.StandardError.Should().Be($"SMAPI can't find the game's dependency metadata: {sourcePath}\n");
+            result.StandardError.Should().Be(LinuxRuntimeDispatcherTests.DependencyRepairGuidance);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root)).Should().Be(before);
         }
         finally
         {
@@ -166,33 +153,140 @@ internal class LinuxRuntimeDispatcherTests
         }
     }
 
-    [Test]
-    public async Task CleansTemporaryDependencyMetadataWhenRepairFails()
+    [TestCase("source", "symlink")]
+    [TestCase("target", "symlink")]
+    [TestCase("source", "hardlink")]
+    [TestCase("target", "hardlink")]
+    [TestCase("source", "fifo")]
+    [TestCase("target", "fifo")]
+    [TestCase("source", "directory")]
+    [TestCase("target", "directory")]
+    [TestCase("source", "empty")]
+    [TestCase("target", "empty")]
+    [TestCase("source", "oversize")]
+    [TestCase("target", "oversize")]
+    public async Task RefusesUnsafeDependencyMetadataWithoutFollowingOrWriting(string selectedEntry, string unsafeKind)
     {
         LinuxRuntimeDispatcherTests.RequireLinux();
 
         string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
-        UnixFileMode writableMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        string external = LinuxRuntimeDispatcherTests.CreatePlainTestRoot();
         try
         {
-            string targetPath = Path.Combine(root, "StardewModdingAPI-net6.deps.json");
-            await LinuxRuntimeDispatcherTests.WriteGameDeps(root, "current dependency metadata\n");
-            await File.WriteAllTextAsync(targetPath, "stale dependency metadata\n");
-            await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "exit 0");
-            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            await LinuxRuntimeDispatcherTests.WriteMatchingDeps(root, "current dependency metadata\n");
+            await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "printf '%s\\n' 'HOST_STARTED'");
+            string selectedPath = Path.Combine(root, selectedEntry == "source" ? "Stardew Valley.deps.json" : "StardewModdingAPI-net6.deps.json");
+            File.Delete(selectedPath);
+            string externalEntry = Path.Combine(external, "external-dependency-metadata.json");
+            await File.WriteAllTextAsync(externalEntry, "external sentinel dependency metadata\n");
+            string externalSentinel = Path.Combine(external, "unrelated-sentinel.txt");
+            await File.WriteAllTextAsync(externalSentinel, "preserve this external sentinel exactly\n");
+
+            switch (unsafeKind)
+            {
+                case "symlink":
+                    File.CreateSymbolicLink(selectedPath, externalEntry);
+                    break;
+                case "hardlink":
+                    LinuxRuntimeDispatcherTests.CreateHardLink(externalEntry, selectedPath);
+                    break;
+                case "fifo":
+                    LinuxRuntimeDispatcherTests.CreateFifo(selectedPath);
+                    break;
+                case "directory":
+                    Directory.CreateDirectory(selectedPath);
+                    break;
+                case "empty":
+                    await File.WriteAllBytesAsync(selectedPath, Array.Empty<byte>());
+                    break;
+                case "oversize":
+                    await using (FileStream stream = File.Create(selectedPath))
+                        stream.SetLength(LinuxRuntimeDispatcherTests.MaximumDependencyMetadataBytes + 1);
+                    break;
+                default:
+                    throw new AssertionException($"Unknown unsafe fixture '{unsafeKind}'.");
+            }
+            string beforeRoot = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root);
+            string beforeExternal = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(external);
 
             DispatcherResult result = await LinuxRuntimeDispatcherTests.RunDispatcher(root, runtime: "net6");
 
             result.ExitCode.Should().Be(1);
-            result.StandardError.Should().Contain("SMAPI couldn't update its game-runtime dependency metadata:");
-            File.SetUnixFileMode(root, writableMode);
-            (await File.ReadAllTextAsync(targetPath)).Should().Be("stale dependency metadata\n");
-            Directory.EnumerateFileSystemEntries(root, "StardewModdingAPI-net6.deps.json.tmp.*").Should().BeEmpty();
+            result.StandardOutput.Should().BeEmpty();
+            result.StandardError.Should().Be(LinuxRuntimeDispatcherTests.DependencyRepairGuidance);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root)).Should().Be(beforeRoot);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(external)).Should().Be(beforeExternal);
+            (await File.ReadAllTextAsync(externalSentinel)).Should().Be("preserve this external sentinel exactly\n");
         }
         finally
         {
-            File.SetUnixFileMode(root, writableMode);
             Directory.Delete(root, recursive: true);
+            Directory.Delete(external, recursive: true);
+        }
+    }
+
+    [TestCase("net6", "symlink")]
+    [TestCase("net6", "hardlink")]
+    [TestCase("net6", "fifo")]
+    [TestCase("net6", "directory")]
+    [TestCase("net6", "empty")]
+    [TestCase("net10", "symlink")]
+    [TestCase("net10", "hardlink")]
+    [TestCase("net10", "fifo")]
+    [TestCase("net10", "directory")]
+    [TestCase("net10", "empty")]
+    public async Task RejectsUnsafeRuntimeHostWithoutFollowingOrWriting(string runtime, string unsafeKind)
+    {
+        LinuxRuntimeDispatcherTests.RequireLinux();
+
+        string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
+        string external = LinuxRuntimeDispatcherTests.CreatePlainTestRoot();
+        try
+        {
+            if (runtime == "net6")
+                await LinuxRuntimeDispatcherTests.WriteMatchingDeps(root, "current dependency metadata\n");
+            string hostPath = Path.Combine(root, $"StardewModdingAPI-{runtime}");
+            string externalHost = Path.Combine(external, "external-host");
+            await LinuxRuntimeDispatcherTests.WriteExecutableFile(externalHost, "#!/bin/sh\nprintf '%s\\n' 'EXTERNAL_HOST_STARTED'\n");
+            await File.WriteAllTextAsync(Path.Combine(external, "unrelated-sentinel.txt"), "external host sentinel\n");
+
+            switch (unsafeKind)
+            {
+                case "symlink":
+                    File.CreateSymbolicLink(hostPath, externalHost);
+                    break;
+                case "hardlink":
+                    LinuxRuntimeDispatcherTests.CreateHardLink(externalHost, hostPath);
+                    break;
+                case "fifo":
+                    LinuxRuntimeDispatcherTests.CreateFifo(hostPath);
+                    File.SetUnixFileMode(hostPath, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+                    break;
+                case "directory":
+                    Directory.CreateDirectory(hostPath);
+                    File.SetUnixFileMode(hostPath, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+                    break;
+                case "empty":
+                    await LinuxRuntimeDispatcherTests.WriteExecutableFile(hostPath, "");
+                    break;
+                default:
+                    throw new AssertionException($"Unknown unsafe fixture '{unsafeKind}'.");
+            }
+            string beforeRoot = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root);
+            string beforeExternal = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(external);
+
+            DispatcherResult result = await LinuxRuntimeDispatcherTests.RunDispatcher(root, runtime: runtime, gcMode: "workstation");
+
+            result.ExitCode.Should().Be(1);
+            result.StandardOutput.Should().BeEmpty();
+            result.StandardError.Should().Be($"SMAPI's {runtime} runtime host is missing or isn't executable: {hostPath}\n");
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root)).Should().Be(beforeRoot);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(external)).Should().Be(beforeExternal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(external, recursive: true);
         }
     }
 
@@ -204,7 +298,7 @@ internal class LinuxRuntimeDispatcherTests
         string root = LinuxRuntimeDispatcherTests.CreateTestRoot(includeSpaces: true);
         try
         {
-            await LinuxRuntimeDispatcherTests.WriteGameDeps(root, "dependency metadata\n");
+            await LinuxRuntimeDispatcherTests.WriteMatchingDeps(root, "dependency metadata\n");
             await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "for argument in \"$@\"; do printf '<%s>\\n' \"$argument\"; done");
             string[] arguments = { "", "two words", "literal*?[x]", "quote'\"$" };
 
@@ -281,6 +375,35 @@ internal class LinuxRuntimeDispatcherTests
         return root;
     }
 
+    /// <summary>Create an empty isolated directory which doesn't contain the dispatcher.</summary>
+    private static string CreatePlainTestRoot()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "smapi-runtime-dispatcher-tests", $"external-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    /// <summary>Capture entry identities and regular-file bytes without following links or opening special files.</summary>
+    private static async Task<string> CaptureTreeSnapshot(string root)
+    {
+        ProcessStartInfo start = new("bash")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        start.ArgumentList.Add("-c");
+        start.ArgumentList.Add("find -P \"$1\" -printf '%P|%y|%D|%i|%n|%s|%m|%l\\n' | LC_ALL=C sort; find -P \"$1\" -type f -exec sha256sum -- {} + | LC_ALL=C sort");
+        start.ArgumentList.Add("--");
+        start.ArgumentList.Add(root);
+        using Process process = Process.Start(start)!;
+        Task<string> output = process.StandardOutput.ReadToEndAsync();
+        Task<string> error = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        process.ExitCode.Should().Be(0, await error);
+        return await output;
+    }
+
     /// <summary>Format the native GC settings printed by the test host.</summary>
     private static string FormatGcSettings(IReadOnlyDictionary<string, string> values)
     {
@@ -329,9 +452,20 @@ internal class LinuxRuntimeDispatcherTests
         }
 
         using Process process = Process.Start(start)!;
-        string standardOutput = await process.StandardOutput.ReadToEndAsync();
-        string standardError = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        Task<string> output = process.StandardOutput.ReadToEndAsync();
+        Task<string> error = process.StandardError.ReadToEndAsync();
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(10));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            Assert.Fail("The runtime dispatcher did not terminate within ten seconds.");
+        }
+        string standardOutput = await output;
+        string standardError = await error;
         return new DispatcherResult(process.ExitCode, standardOutput, standardError);
     }
 
@@ -339,7 +473,13 @@ internal class LinuxRuntimeDispatcherTests
     private static async Task WriteHost(string root, string runtime, string shellBody, bool executable = true)
     {
         string path = Path.Combine(root, $"StardewModdingAPI-{runtime}");
-        await File.WriteAllTextAsync(path, $"#!/bin/sh\n{shellBody}\n");
+        await LinuxRuntimeDispatcherTests.WriteExecutableFile(path, $"#!/bin/sh\n{shellBody}\n", executable);
+    }
+
+    /// <summary>Write a regular file with a selected executable mode.</summary>
+    private static async Task WriteExecutableFile(string path, string contents, bool executable = true)
+    {
+        await File.WriteAllTextAsync(path, contents);
         UnixFileMode mode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         if (executable)
             mode |= UnixFileMode.UserExecute;
@@ -358,6 +498,39 @@ internal class LinuxRuntimeDispatcherTests
     {
         return File.WriteAllTextAsync(Path.Combine(root, "Stardew Valley.deps.json"), contents);
     }
+
+    /// <summary>Write the installer-owned dependency metadata consumed by the net6 host.</summary>
+    private static Task WriteTargetDeps(string root, string contents)
+    {
+        return File.WriteAllTextAsync(Path.Combine(root, "StardewModdingAPI-net6.deps.json"), contents);
+    }
+
+    /// <summary>Write matching game and installer-owned dependency metadata.</summary>
+    private static async Task WriteMatchingDeps(string root, string contents)
+    {
+        await LinuxRuntimeDispatcherTests.WriteGameDeps(root, contents);
+        await LinuxRuntimeDispatcherTests.WriteTargetDeps(root, contents);
+    }
+
+    /// <summary>Create a hard link and fail with the native error when unsupported.</summary>
+    private static void CreateHardLink(string existingPath, string newPath)
+    {
+        if (link(existingPath, newPath) != 0)
+            throw new AssertionException($"link(2) failed with errno {Marshal.GetLastWin32Error()}.");
+    }
+
+    /// <summary>Create a FIFO fixture without ever opening it.</summary>
+    private static void CreateFifo(string path)
+    {
+        if (mkfifo(path, 0x180) != 0)
+            throw new AssertionException($"mkfifo(2) failed with errno {Marshal.GetLastWin32Error()}.");
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int link(string existingPath, string newPath);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int mkfifo(string path, int mode);
 
     /// <summary>The result from a dispatcher process.</summary>
     private sealed record DispatcherResult(int ExitCode, string StandardOutput, string StandardError);
