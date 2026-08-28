@@ -16,6 +16,28 @@ public sealed class TransactionOutcomeTests
 {
     private readonly List<string> TemporaryDirectories = new();
 
+    [TestCase(28, TransactionErrorCode.DiskFull)]
+    [TestCase(30, TransactionErrorCode.ReadOnlyFileSystem)]
+    [TestCase(13, TransactionErrorCode.PermissionDenied)]
+    [TestCase(1, TransactionErrorCode.PermissionDenied)]
+    [TestCase(18, TransactionErrorCode.CrossDeviceBoundary)]
+    [TestCase(5, TransactionErrorCode.IoFailure)]
+    public void ErrorClassification_PreservesActionableLinuxIoFailures(int errorNumber, TransactionErrorCode expected)
+    {
+        IOException failure = new("synthetic", unchecked((int)0x80070000) | errorNumber);
+
+        InstallerTransactionExecutor.GetErrorCode(failure).Should().Be(expected);
+        InstallerTransactionExecutor.SafeMessage(expected).Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Test]
+    public void ErrorClassification_MapsManagedPermissionFailureWithoutLeakingExceptionText()
+    {
+        InstallerTransactionExecutor.GetErrorCode(new UnauthorizedAccessException("private path"))
+            .Should().Be(TransactionErrorCode.PermissionDenied);
+        InstallerTransactionExecutor.SafeMessage(TransactionErrorCode.PermissionDenied).Should().NotContain("private path");
+    }
+
     [TearDown]
     public void TearDown()
     {

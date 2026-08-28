@@ -227,6 +227,10 @@ public enum TransactionErrorCode
     ConcurrentOperation,
     WorkspaceConflict,
     RecoveryFailed,
+    DiskFull,
+    ReadOnlyFileSystem,
+    PermissionDenied,
+    CrossDeviceBoundary,
     IoFailure
 }
 

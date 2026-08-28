@@ -370,6 +370,19 @@ internal sealed class InstallerTransactionExecutor
             InstallerTransactionException transaction => transaction.Code,
             TransactionRecoveryAttemptException recovery when recovery.InnerException is not null => GetErrorCode(recovery.InnerException),
             AggregateException aggregate when aggregate.InnerExceptions.Count > 0 => GetErrorCode(aggregate.InnerExceptions[^1]),
+            UnauthorizedAccessException => TransactionErrorCode.PermissionDenied,
+            IOException io => GetIoErrorCode(io),
+            _ => TransactionErrorCode.IoFailure
+        };
+
+    private static TransactionErrorCode GetIoErrorCode(IOException exception)
+        => (exception.HResult & 0xffff) switch
+        {
+            28 => TransactionErrorCode.DiskFull, // ENOSPC
+            30 => TransactionErrorCode.ReadOnlyFileSystem, // EROFS
+            13 or 1 => TransactionErrorCode.PermissionDenied, // EACCES or EPERM
+            18 => TransactionErrorCode.CrossDeviceBoundary, // EXDEV
+            _ when exception.InnerException is not null => GetErrorCode(exception.InnerException),
             _ => TransactionErrorCode.IoFailure
         };
 
@@ -384,6 +397,10 @@ internal sealed class InstallerTransactionExecutor
             TransactionErrorCode.ConcurrentOperation => "Another installer operation is active.",
             TransactionErrorCode.WorkspaceConflict => "The installer workspace needs attention before continuing.",
             TransactionErrorCode.RecoveryFailed => "Automatic recovery could not safely finish.",
+            TransactionErrorCode.DiskFull => "The selected filesystem does not have enough free space to finish safely.",
+            TransactionErrorCode.ReadOnlyFileSystem => "The selected filesystem is read-only.",
+            TransactionErrorCode.PermissionDenied => "The current user does not have permission to change an installer-owned path.",
+            TransactionErrorCode.CrossDeviceBoundary => "The operation crossed a filesystem boundary which cannot preserve the required atomic transaction.",
             _ => "The installer operation failed because of an input/output error."
         };
 
