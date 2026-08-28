@@ -8,7 +8,10 @@ using StardewModdingAPI.Installer.Core.Transactions;
 
 namespace StardewModdingAPI.Installer.Core.Engine;
 
-/// <summary>An opaque, user-reviewable installer plan bound to one exact root generation and live content authorities.</summary>
+/// <summary>
+/// An opaque, user-reviewable installer plan bound to one exact root generation and borrowed live content authorities.
+/// Disposing this inspection invalidates its plan and repair candidates, but never disposes a package or recovery handle supplied by the caller.
+/// </summary>
 public sealed class InspectedInstallationState : IDisposable
 {
     private bool Disposed;
@@ -18,24 +21,34 @@ public sealed class InspectedInstallationState : IDisposable
     public ulong OperationGeneration => this.Binding.OperationGeneration;
     public InstallationPlan Plan { get; }
     public Sha256Digest ConfirmationDigest { get; }
+    /// <summary>Get the deterministic exact modified-file candidates which this blocked repair inspection can authorize.</summary>
+    public IReadOnlyList<ModifiedFileReplacementCandidate> ModifiedFileReplacementCandidates { get; }
     internal BoundInstallationPlan Binding { get; }
     internal IVerifiedPackageContentAuthority? TargetPackageContent { get; }
     internal ICommittedRecoveryContentAuthority? RollbackContent { get; }
     internal IReadOnlyList<ModifiedFileReplacementApproval> ModifiedFileReplacementApprovals { get; }
+    internal object RepairCandidateAuthority { get; }
 
     internal InspectedInstallationState(
         InstallationPlan plan,
         BoundInstallationPlan binding,
         IVerifiedPackageContentAuthority? targetPackageContent,
         ICommittedRecoveryContentAuthority? rollbackContent,
+        object repairCandidateAuthority,
+        IEnumerable<ModifiedFileReplacementCandidate>? modifiedFileReplacementCandidates = null,
         IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
     )
     {
+        ArgumentNullException.ThrowIfNull(repairCandidateAuthority);
         this.Plan = plan;
         this.Binding = binding;
         this.ConfirmationDigest = binding.GetCanonicalDigest();
         this.TargetPackageContent = targetPackageContent;
         this.RollbackContent = rollbackContent;
+        this.RepairCandidateAuthority = repairCandidateAuthority;
+        this.ModifiedFileReplacementCandidates = new ReadOnlyCollection<ModifiedFileReplacementCandidate>(
+            (modifiedFileReplacementCandidates ?? Array.Empty<ModifiedFileReplacementCandidate>()).ToArray()
+        );
         this.ModifiedFileReplacementApprovals = (modifiedFileReplacementApprovals ?? Array.Empty<ModifiedFileReplacementApproval>()).ToArray();
     }
 
@@ -47,6 +60,9 @@ public sealed class InspectedInstallationState : IDisposable
         this.RollbackContent?.AssertUsable();
     }
 
+    /// <summary>
+    /// Invalidate this inspection and its repair candidates. Borrowed package and recovery handles remain caller-owned and usable.
+    /// </summary>
     public void Dispose() => this.Disposed = true;
 }
 
@@ -76,6 +92,10 @@ public sealed class LinuxInstallerEngine
     }
 
     /// <summary>Inspect and plan one action without changing game or ownership files.</summary>
+    /// <remarks>
+    /// <paramref name="targetPackage"/> and <paramref name="recovery"/> are borrowed. The caller must keep them alive through execution
+    /// and remains responsible for disposing them after the inspection is disposed or execution completes.
+    /// </remarks>
     public Task<InspectedInstallationState> InspectAsync(
         string gameRoot,
         InstallationAction action,
@@ -88,30 +108,28 @@ public sealed class LinuxInstallerEngine
             cancellationToken
         );
 
-    /// <summary>Inspect repair with narrow full-identity approvals for specific modified owned files.</summary>
-    public Task<InspectedInstallationState> InspectRepairAsync(
-        string gameRoot,
-        VerifiedPackageContent targetPackage,
-        IEnumerable<ModifiedFileReplacementApproval> modifiedFileReplacementApprovals,
+    /// <summary>
+    /// Select exact core-minted modified-file candidates from a blocked repair inspection, revalidate them through the anchored game root,
+    /// and return a replacement inspection. Selecting only some candidates leaves the remaining conflicts blocked.
+    /// </summary>
+    /// <remarks>
+    /// The source inspection and its borrowed package must remain usable until this method completes. This method does not dispose either.
+    /// </remarks>
+    public Task<InspectedInstallationState> ApproveRepairAsync(
+        InspectedInstallationState sourceInspection,
+        IEnumerable<ModifiedFileReplacementCandidate> selectedCandidates,
         CancellationToken cancellationToken = default
     )
         => Task.Run(
-            () => this.Inspect(
-                gameRoot,
-                InstallationAction.Repair,
-                targetPackage,
-                null,
-                modifiedFileReplacementApprovals,
-                cancellationToken
-            ),
+            () => this.ApproveRepair(sourceInspection, selectedCandidates, cancellationToken),
             cancellationToken
         );
 
     private InspectedInstallationState Inspect(
         string gameRoot,
         InstallationAction action,
-        VerifiedPackageContent? targetPackage,
-        CommittedRecoveryHandle? recovery,
+        IVerifiedPackageContentAuthority? targetPackage,
+        ICommittedRecoveryContentAuthority? recovery,
         IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals,
         CancellationToken cancellationToken
     )
@@ -129,7 +147,102 @@ public sealed class LinuxInstallerEngine
             packageAuthority,
             recoveryAuthority,
             modifiedFileReplacementApprovals,
-            state
+            state,
+            cancellationToken
+        );
+        try
+        {
+            state.AssertUsable(inspection.Game, inspection.RootIdentity);
+            inspection.AssertStable();
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+    }
+
+    private InspectedInstallationState ApproveRepair(
+        InspectedInstallationState sourceInspection,
+        IEnumerable<ModifiedFileReplacementCandidate> selectedCandidates,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(sourceInspection);
+        ArgumentNullException.ThrowIfNull(selectedCandidates);
+        sourceInspection.AssertUsable();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (sourceInspection.Action != InstallationAction.Repair || sourceInspection.Plan.CanExecute)
+        {
+            throw new ExecutionCompilationException(
+                ExecutionCompilationError.NonExecutablePlan,
+                "Repair candidates can only be selected from a blocked repair inspection."
+            );
+        }
+        IVerifiedPackageContentAuthority targetPackage = sourceInspection.TargetPackageContent
+            ?? throw new ExecutionCompilationException(ExecutionCompilationError.StaleManifest, "The repair inspection has no live package authority.");
+
+        ModifiedFileReplacementCandidate[] selected = selectedCandidates.ToArray();
+        HashSet<ModifiedFileReplacementCandidate> unique = new(ReferenceEqualityComparer.Instance);
+        foreach (ModifiedFileReplacementCandidate? candidate in selected)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (candidate is null)
+                throw new ArgumentException("A selected repair candidate can't be null.", nameof(selectedCandidates));
+            if (!unique.Add(candidate))
+                throw new ArgumentException("A repair candidate can't be selected more than once.", nameof(selectedCandidates));
+            if (
+                !ReferenceEquals(candidate.SourceAuthority, sourceInspection.RepairCandidateAuthority)
+                || !sourceInspection.ModifiedFileReplacementCandidates.Any(issued => ReferenceEquals(issued, candidate))
+            )
+            {
+                throw new ExecutionCompilationException(
+                    ExecutionCompilationError.StalePlan,
+                    "A selected repair candidate wasn't issued by this exact inspection."
+                );
+            }
+        }
+
+        using InstallerInspectionLease inspection = InstallerInspectionLease.Open(sourceInspection.GameRoot.CanonicalPath);
+        if (inspection.RootIdentity != sourceInspection.GameRoot || inspection.Generation != sourceInspection.OperationGeneration)
+        {
+            throw new ExecutionCompilationException(
+                ExecutionCompilationError.StalePlan,
+                "The game root or installer generation changed after the repair candidates were inspected."
+            );
+        }
+        foreach (ModifiedFileReplacementCandidate candidate in selected)
+        {
+            RecoveryFileObservation observed = InstallationStateInspector.ReadObservation(
+                inspection.Game,
+                candidate.Path,
+                cancellationToken
+            );
+            if (observed.Identity != candidate.ObservedIdentity)
+            {
+                throw new ExecutionCompilationException(
+                    ExecutionCompilationError.StalePlan,
+                    $"Repair candidate '{candidate.Path}' changed after inspection."
+                );
+            }
+        }
+
+        ModifiedFileReplacementApproval[] approvals = sourceInspection.ModifiedFileReplacementApprovals
+            .Concat(selected.Select(candidate => new ModifiedFileReplacementApproval(candidate.Path, candidate.ObservedIdentity)))
+            .OrderBy(approval => approval.Path.Value, StringComparer.Ordinal)
+            .ToArray();
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
+        InspectedInstallationState result = this.InspectCore(
+            inspection.Game,
+            inspection.RootIdentity,
+            inspection.Generation,
+            InstallationAction.Repair,
+            targetPackage,
+            null,
+            approvals,
+            state,
+            cancellationToken
         );
         try
         {
@@ -145,6 +258,10 @@ public sealed class LinuxInstallerEngine
     }
 
     /// <summary>Execute only the exact opaque inspection and digest the user reviewed.</summary>
+    /// <remarks>
+    /// Package and recovery authorities referenced by the inspection are borrowed, must remain alive until this task completes, and are never
+    /// disposed by successful, failed, or cancelled execution.
+    /// </remarks>
     public Task<TransactionResult> ExecuteAsync(
         InspectedInstallationState inspection,
         Sha256Digest confirmedDigest,
@@ -177,7 +294,8 @@ public sealed class LinuxInstallerEngine
             inspection.Action,
             inspection.TargetPackageContent,
             inspection.RollbackContent,
-            inspection.ModifiedFileReplacementApprovals
+            inspection.ModifiedFileReplacementApprovals,
+            cancellationToken
         );
         using (current)
         {
@@ -190,7 +308,8 @@ public sealed class LinuxInstallerEngine
                 inspection.TargetPackageContent,
                 inspection.RollbackContent,
                 coreState,
-                inspection.ModifiedFileReplacementApprovals
+                inspection.ModifiedFileReplacementApprovals,
+                cancellationToken
             );
             InstallationExecutionPreparation preparation = this.Compiler.Prepare(
                 current.Binding,
@@ -202,7 +321,7 @@ public sealed class LinuxInstallerEngine
         }
     }
 
-    /// <summary>Open the current committed recovery generation through an opaque anchored handle.</summary>
+    /// <summary>Open the current committed recovery generation through an opaque anchored handle owned by the caller.</summary>
     public Task<CommittedRecoveryHandle> OpenCurrentRecoveryAsync(
         string gameRoot,
         CancellationToken cancellationToken = default
@@ -236,7 +355,7 @@ public sealed class LinuxInstallerEngine
         }
     }
 
-    /// <summary>Open one selected generation from the bounded authenticated recovery chain.</summary>
+    /// <summary>Open one selected generation from the bounded authenticated recovery chain through a handle owned by the caller.</summary>
     public Task<CommittedRecoveryHandle> OpenRecoveryAsync(
         string gameRoot,
         Guid generationId,
@@ -369,7 +488,8 @@ public sealed class LinuxInstallerEngine
         InstallationAction action,
         IVerifiedPackageContentAuthority? targetPackage,
         ICommittedRecoveryContentAuthority? recovery,
-        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null,
+        CancellationToken cancellationToken = default
     )
     {
         ArgumentNullException.ThrowIfNull(lease);
@@ -392,7 +512,8 @@ public sealed class LinuxInstallerEngine
             targetPackage,
             recovery,
             modifiedFileReplacementApprovals,
-            state
+            state,
+            cancellationToken
         );
     }
 
@@ -404,7 +525,8 @@ public sealed class LinuxInstallerEngine
         IVerifiedPackageContentAuthority? targetPackage,
         ICommittedRecoveryContentAuthority? recovery,
         IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals,
-        AnchoredCoreStateAuthority state
+        AnchoredCoreStateAuthority state,
+        CancellationToken cancellationToken
     )
     {
         if (action is InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair)
@@ -417,22 +539,48 @@ public sealed class LinuxInstallerEngine
         if ((action == InstallationAction.Rollback) != (recovery is not null))
             throw new ArgumentException("Only rollback accepts and requires a committed recovery handle.", nameof(recovery));
 
+        cancellationToken.ThrowIfCancellationRequested();
+        ModifiedFileReplacementApproval[] approvals = (modifiedFileReplacementApprovals ?? Array.Empty<ModifiedFileReplacementApproval>())
+            .ToArray();
+        foreach (ModifiedFileReplacementApproval approval in approvals)
+        {
+            RecoveryFileObservation observed = InstallationStateInspector.ReadObservation(game, approval.Path, cancellationToken);
+            if (observed.Identity != approval.ObservedIdentity)
+            {
+                throw new ExecutionCompilationException(
+                    ExecutionCompilationError.StalePlan,
+                    $"Approved repair file '{approval.Path}' changed after approval."
+                );
+            }
+        }
+
         InstallationPlanningRequest request = InstallationStateInspector.CreateRequest(
             game,
             action,
             targetPackage,
             recovery,
             state,
-            modifiedFileReplacementApprovals
+            approvals,
+            cancellationToken
         );
         InstallationPlan plan = new InstallationPlanner().Plan(request);
+        object repairCandidateAuthority = new();
+        ModifiedFileReplacementCandidate[] repairCandidates = InstallationStateInspector.CreateRepairCandidates(
+            game,
+            request,
+            plan,
+            repairCandidateAuthority,
+            cancellationToken
+        );
         if (!plan.CanExecute)
             return new InspectedInstallationState(
                 plan,
                 CreateNonExecutableBinding(plan, gameRoot, operationGeneration, state),
                 targetPackage,
                 recovery,
-                modifiedFileReplacementApprovals
+                repairCandidateAuthority,
+                repairCandidates,
+                approvals
             );
         BoundInstallationPlan binding = this.Compiler.BindPlan(
             plan,
@@ -448,7 +596,9 @@ public sealed class LinuxInstallerEngine
             binding,
             targetPackage,
             recovery,
-            modifiedFileReplacementApprovals
+            repairCandidateAuthority,
+            repairCandidates,
+            approvals
         );
     }
 
@@ -488,9 +638,11 @@ internal static class InstallationStateInspector
         IVerifiedPackageContentAuthority? targetPackage,
         ICommittedRecoveryContentAuthority? recovery,
         AnchoredCoreStateAuthority state,
-        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null,
+        CancellationToken cancellationToken = default
     )
     {
+        cancellationToken.ThrowIfCancellationRequested();
         PackageManifest? targetManifest = targetPackage?.Manifest;
         InstallationReceipt? receipt = state.Receipt;
         HashSet<NormalizedRelativePath> inventoryPaths = new();
@@ -499,13 +651,16 @@ internal static class InstallationStateInspector
         if (receipt is not null)
             inventoryPaths.UnionWith(receipt.Entries.Select(entry => entry.Path));
         inventoryPaths.Add(LauncherPath);
-        CurrentFile[] currentFiles = inventoryPaths
-            .Select(path => ReadCurrentFile(game, path))
-            .Where(file => file is not null)
-            .Cast<CurrentFile>()
-            .ToArray();
+        List<CurrentFile> currentFiles = new(inventoryPaths.Count);
+        foreach (NormalizedRelativePath path in inventoryPaths.OrderBy(path => path.Value, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CurrentFile? current = ReadCurrentFile(game, path, cancellationToken);
+            if (current is not null)
+                currentFiles.Add(current);
+        }
         CurrentFile? currentLauncher = currentFiles.SingleOrDefault(file => file.Path.Equals(LauncherPath));
-        CurrentFile? launcherBackup = ReadCurrentFile(game, LauncherBackupPath);
+        CurrentFile? launcherBackup = ReadCurrentFile(game, LauncherBackupPath, cancellationToken);
         LauncherState launcher = LauncherState.Assess(
             currentLauncher?.Sha256,
             launcherBackup?.Sha256,
@@ -531,7 +686,8 @@ internal static class InstallationStateInspector
                             recovery?.OriginAction == InstallationAction.Backup
                                 ? receipt?.Entries.Select(entry => entry.Path) ?? Array.Empty<NormalizedRelativePath>()
                                 : Array.Empty<NormalizedRelativePath>()
-                        )
+                        ),
+                    cancellationToken
                 )
                 : Array.Empty<RecoveryFileObservation>(),
             recovery?.OriginAction,
@@ -551,7 +707,7 @@ internal static class InstallationStateInspector
             InstallationAction.Rollback => rollbackSnapshot?.Entries.Select(entry => entry.Path) ?? Array.Empty<NormalizedRelativePath>(),
             _ => throw new ArgumentOutOfRangeException(nameof(action))
         };
-        RecoveryFileObservation[] observations = ReadObservations(game, required.Distinct());
+        RecoveryFileObservation[] observations = ReadObservations(game, required.Distinct(), cancellationToken);
         return new InstallationPlanningRequest(
             action,
             inventory,
@@ -565,39 +721,113 @@ internal static class InstallationStateInspector
         );
     }
 
-    private static CurrentFile? ReadCurrentFile(LinuxAnchoredFileSystem game, NormalizedRelativePath path)
+    internal static ModifiedFileReplacementCandidate[] CreateRepairCandidates(
+        LinuxAnchoredFileSystem game,
+        InstallationPlanningRequest request,
+        InstallationPlan plan,
+        object sourceAuthority,
+        CancellationToken cancellationToken
+    )
     {
+        ArgumentNullException.ThrowIfNull(sourceAuthority);
+        if (request.Action != InstallationAction.Repair || plan.CanExecute)
+            return Array.Empty<ModifiedFileReplacementCandidate>();
+
+        NormalizedRelativePath[] paths = plan.Conflicts
+            .Where(conflict => conflict.Path is not null && conflict.Code is PlanConflictCode.ModifiedOwnedFile or PlanConflictCode.ModifiedInstalledLauncher)
+            .Select(conflict => conflict.Path!)
+            .Distinct()
+            .OrderBy(path => path.Value, StringComparer.Ordinal)
+            .Where(path => IsExactRepairCandidate(request, path))
+            .ToArray();
+        List<ModifiedFileReplacementCandidate> result = new(paths.Length);
+        foreach (NormalizedRelativePath path in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RecoveryFileObservation observation = ReadObservation(game, path, cancellationToken);
+            RecoveryFileIdentity identity = observation.Identity
+                ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"Repair candidate '{path}' disappeared during inspection.");
+            CurrentFile expected = request.Inventory.Entries.Single(entry => entry.Path.Equals(path)).Current
+                ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"Repair candidate '{path}' has no current inventory observation.");
+            if (identity.Sha256 != expected.Sha256 || identity.UnixMode != expected.UnixMode)
+                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"Repair candidate '{path}' changed during inspection.");
+            result.Add(new ModifiedFileReplacementCandidate(sourceAuthority, path, identity));
+        }
+        return result.ToArray();
+    }
+
+    internal static RecoveryFileObservation ReadObservation(
+        LinuxAnchoredFileSystem game,
+        NormalizedRelativePath path,
+        CancellationToken cancellationToken = default
+    )
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        LinuxFileIdentity? identity = game.Stat(path.Value);
+        if (identity is null)
+            return new RecoveryFileObservation(path, null);
+        using LinuxAnchoredFile file = game.OpenRegularFileForRead(path.Value);
+        if (file.Identity != identity)
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"'{path}' changed during recovery inspection.");
+        return new RecoveryFileObservation(
+            path,
+            new RecoveryFileIdentity(
+                Sha256Digest.Parse(game.ComputeSha256(file, cancellationToken)),
+                identity.Size,
+                identity.UnixMode,
+                RecoveryFileType.RegularFile
+            )
+        );
+    }
+
+    private static bool IsExactRepairCandidate(InstallationPlanningRequest request, NormalizedRelativePath path)
+    {
+        if (path.Equals(LauncherPath))
+        {
+            return request.Launcher.Classification == LauncherClassification.InstalledModified
+                && request.Launcher.CurrentLauncherSha256 is not null
+                && request.Launcher.CurrentLauncherUnixMode is not null
+                && request.InstalledReceipt is not null
+                && request.TargetManifest is not null;
+        }
+        InventoryEntry? entry = request.Inventory.Entries.SingleOrDefault(candidate => candidate.Path.Equals(path));
+        return entry is
+        {
+            Classification: InventoryClassification.ModifiedOwned,
+            Current: not null,
+            Installed: not null,
+            Target: not null
+        };
+    }
+
+    private static CurrentFile? ReadCurrentFile(
+        LinuxAnchoredFileSystem game,
+        NormalizedRelativePath path,
+        CancellationToken cancellationToken
+    )
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         LinuxFileIdentity? identity = game.Stat(path.Value);
         if (identity is null)
             return null;
         using LinuxAnchoredFile file = game.OpenRegularFileForRead(path.Value);
         if (file.Identity != identity)
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"'{path}' changed during inspection.");
-        return new CurrentFile(path, Sha256Digest.Parse(game.ComputeSha256(file)), identity.UnixMode);
+        return new CurrentFile(path, Sha256Digest.Parse(game.ComputeSha256(file, cancellationToken)), identity.UnixMode);
     }
 
     private static RecoveryFileObservation[] ReadObservations(
         LinuxAnchoredFileSystem game,
-        IEnumerable<NormalizedRelativePath> paths
+        IEnumerable<NormalizedRelativePath> paths,
+        CancellationToken cancellationToken
     )
     {
-        return paths.Distinct().OrderBy(path => path.Value, StringComparer.Ordinal).Select(path =>
+        List<RecoveryFileObservation> result = new();
+        foreach (NormalizedRelativePath path in paths.Distinct().OrderBy(path => path.Value, StringComparer.Ordinal))
         {
-            LinuxFileIdentity? identity = game.Stat(path.Value);
-            if (identity is null)
-                return new RecoveryFileObservation(path, null);
-            using LinuxAnchoredFile file = game.OpenRegularFileForRead(path.Value);
-            if (file.Identity != identity)
-                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"'{path}' changed during recovery inspection.");
-            return new RecoveryFileObservation(
-                path,
-                new RecoveryFileIdentity(
-                    Sha256Digest.Parse(game.ComputeSha256(file)),
-                    identity.Size,
-                    identity.UnixMode,
-                    RecoveryFileType.RegularFile
-                )
-            );
-        }).ToArray();
+            cancellationToken.ThrowIfCancellationRequested();
+            result.Add(ReadObservation(game, path, cancellationToken));
+        }
+        return result.ToArray();
     }
 }

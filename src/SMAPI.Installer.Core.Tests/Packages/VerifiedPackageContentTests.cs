@@ -127,6 +127,45 @@ public sealed class VerifiedPackageContentTests
     }
 
     [Test]
+    public async Task PublicInspectAsync_PreCancelledDoesNotMutateAndLeavesPackageUsable()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "cancelled-inspection-game");
+        Directory.CreateDirectory(game);
+        string launcher = Path.Combine(game, "StardewValley");
+        await File.WriteAllTextAsync(launcher, "vanilla launcher");
+        File.SetUnixFileMode(launcher, (UnixFileMode)493);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        Func<Task> cancelled = () => new LinuxInstallerEngine().InspectAsync(
+            game,
+            InstallationAction.Install,
+            content,
+            cancellationToken: cancellation.Token
+        );
+
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse();
+        using InspectedInstallationState retry = await new LinuxInstallerEngine().InspectAsync(game, InstallationAction.Install, content);
+        retry.Plan.CanExecute.Should().BeTrue();
+    }
+
+    [Test]
+    public void RepairCandidateApprovalHasNoCallerMintedAuthoritySurface()
+    {
+        typeof(ModifiedFileReplacementCandidate).GetConstructors().Should().BeEmpty();
+        typeof(LinuxInstallerEngine).GetMethod("InspectRepairAsync").Should().BeNull();
+        typeof(ModifiedFileReplacementApproval).IsNotPublic.Should().BeTrue();
+    }
+
+    [Test]
     public async Task PublicInspection_DisposeDoesNotTakePackageOwnership()
     {
         Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
@@ -176,6 +215,33 @@ public sealed class VerifiedPackageContentTests
     }
 
     [Test]
+    public async Task PublicExecution_PreCancelledLeavesInspectionAndBorrowedPackageReusable()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "cancelled-execution-game");
+        Directory.CreateDirectory(game);
+        string launcher = Path.Combine(game, "StardewValley");
+        await File.WriteAllTextAsync(launcher, "vanilla launcher");
+        File.SetUnixFileMode(launcher, (UnixFileMode)493);
+        LinuxInstallerEngine engine = new();
+        using InspectedInstallationState inspection = await engine.InspectAsync(game, InstallationAction.Install, content);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        Func<Task> cancelled = () => engine.ExecuteAsync(inspection, inspection.ConfirmationDigest, cancellation.Token);
+
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse();
+        (await engine.ExecuteAsync(inspection, inspection.ConfirmationDigest)).Status.Should().Be(TransactionStatus.Committed);
+    }
+
+    [Test]
     public async Task PublicFacade_VerifiedInstallAndApprovedRepair_UsesExactPackageBytes()
     {
         Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
@@ -196,17 +262,52 @@ public sealed class VerifiedPackageContentTests
         string assembly = Path.Combine(game, "smapi-internal", "a.dll");
         await File.WriteAllTextAsync(assembly, "locally modified");
         File.SetUnixFileMode(assembly, (UnixFileMode)420);
-        ModifiedFileReplacementApproval approval = new(
-            NormalizedRelativePath.Parse("smapi-internal/a.dll"),
-            Sha256Digest.Hash("locally modified"u8),
-            420
-        );
+        using InspectedInstallationState blocked = await engine.InspectAsync(game, InstallationAction.Repair, content);
+        ModifiedFileReplacementCandidate candidate = blocked.ModifiedFileReplacementCandidates.Should().ContainSingle().Subject;
+        candidate.Path.Value.Should().Be("smapi-internal/a.dll");
+        candidate.ObservedSha256.Should().Be(Sha256Digest.Hash("locally modified"u8));
+        candidate.ObservedSizeBytes.Should().Be("locally modified"u8.Length);
+        candidate.ObservedUnixMode.Should().Be(420);
+        candidate.ObservedFileType.Should().Be(RecoveryFileType.RegularFile);
 
-        using InspectedInstallationState repair = await engine.InspectRepairAsync(game, content, [approval]);
+        using InspectedInstallationState repair = await engine.ApproveRepairAsync(blocked, [candidate]);
         (await engine.ExecuteAsync(repair, repair.ConfirmationDigest)).Status.Should().Be(TransactionStatus.Committed);
 
         (await File.ReadAllTextAsync(assembly)).Should().Be("verified assembly");
         File.GetUnixFileMode(assembly).Should().Be((UnixFileMode)420);
+        using InspectedInstallationState reusable = await engine.InspectAsync(game, InstallationAction.Repair, content);
+        reusable.Plan.CanExecute.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task PublicExecution_StaleFailureDoesNotDisposeBorrowedPackage()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "failed-borrow-game");
+        Directory.CreateDirectory(game);
+        string launcher = Path.Combine(game, "StardewValley");
+        await File.WriteAllTextAsync(launcher, "vanilla launcher");
+        File.SetUnixFileMode(launcher, (UnixFileMode)493);
+        LinuxInstallerEngine engine = new();
+        using InspectedInstallationState stale = await engine.InspectAsync(game, InstallationAction.Install, content);
+        await File.WriteAllTextAsync(launcher, "changed after inspection");
+
+        Func<Task> execute = () => engine.ExecuteAsync(stale, stale.ConfirmationDigest);
+
+        await execute.Should().ThrowAsync<Exception>();
+        string retryGame = Path.Combine(this.TempRoot, "failed-borrow-retry-game");
+        Directory.CreateDirectory(retryGame);
+        string retryLauncher = Path.Combine(retryGame, "StardewValley");
+        await File.WriteAllTextAsync(retryLauncher, "vanilla launcher");
+        File.SetUnixFileMode(retryLauncher, (UnixFileMode)493);
+        using InspectedInstallationState retry = await engine.InspectAsync(retryGame, InstallationAction.Install, content);
+        retry.Plan.CanExecute.Should().BeTrue();
     }
 
     private async Task<VerifiedInstallerPackage> CreateAuthorityAsync(

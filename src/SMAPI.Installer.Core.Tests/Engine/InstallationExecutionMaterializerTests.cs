@@ -440,15 +440,16 @@ public sealed class InstallationExecutionMaterializerTests
         string runtimePath = Path.Combine(game, "StardewModdingAPI.dll");
         File.WriteAllText(runtimePath, "user modified runtime");
         File.SetUnixFileMode(runtimePath, (UnixFileMode)0x1a4);
-        using (InspectedInstallationState blocked = this.Inspect(engine, game, InstallationAction.Repair, package))
-            blocked.Plan.Conflicts.Should().Contain(conflict => conflict.Code == PlanConflictCode.ModifiedOwnedFile);
-        ModifiedFileReplacementApproval approval = new(
-            NormalizedRelativePath.Parse("StardewModdingAPI.dll"),
-            Hash("user modified runtime"),
-            0x1a4
-        );
+        using InspectedInstallationState blocked = this.Inspect(engine, game, InstallationAction.Repair, package);
+        blocked.Plan.Conflicts.Should().Contain(conflict => conflict.Code == PlanConflictCode.ModifiedOwnedFile);
+        ModifiedFileReplacementCandidate candidate = blocked.ModifiedFileReplacementCandidates.Should().ContainSingle().Subject;
+        candidate.Path.Value.Should().Be("StardewModdingAPI.dll");
+        candidate.ObservedSha256.Should().Be(Hash("user modified runtime"));
+        candidate.ObservedSizeBytes.Should().Be(21);
+        candidate.ObservedUnixMode.Should().Be(0x1a4);
+        candidate.ObservedFileType.Should().Be(RecoveryFileType.RegularFile);
 
-        Execute(this.Inspect(engine, game, InstallationAction.Repair, package, [approval]), engine);
+        Execute(engine.ApproveRepairAsync(blocked, [candidate]).GetAwaiter().GetResult(), engine);
         File.ReadAllText(runtimePath).Should().Be("runtime one");
         using CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
         recovery.Action.Should().Be(InstallationAction.Repair);
@@ -458,6 +459,159 @@ public sealed class InstallationExecutionMaterializerTests
         Execute(engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult(), engine);
         File.ReadAllText(runtimePath).Should().Be("user modified runtime");
         File.GetUnixFileMode(runtimePath).Should().Be((UnixFileMode)0x1a4);
+    }
+
+    [Test]
+    public void RepairCandidates_AreInspectionBoundDeterministicAndSupportPartialSelection()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        Write(game, "StardewModdingAPI.dll", "modified runtime", 0x180);
+        Write(game, "StardewValley", "modified launcher", 0x1c0);
+        Write(game, "unrelated-user-file.txt", "preserve me", 0x180);
+        using InspectedInstallationState blocked = this.Inspect(engine, game, InstallationAction.Repair, package);
+
+        blocked.ModifiedFileReplacementCandidates.Select(candidate => candidate.Path.Value).Should().Equal(
+            "StardewModdingAPI.dll",
+            "StardewValley"
+        );
+        ModifiedFileReplacementCandidate runtime = blocked.ModifiedFileReplacementCandidates[0];
+        ModifiedFileReplacementCandidate launcher = blocked.ModifiedFileReplacementCandidates[1];
+        Action duplicate = () => engine.ApproveRepairAsync(blocked, [runtime, runtime]).GetAwaiter().GetResult();
+        duplicate.Should().Throw<ArgumentException>();
+
+        using InspectedInstallationState partial = engine.ApproveRepairAsync(blocked, [runtime]).GetAwaiter().GetResult();
+        partial.Plan.CanExecute.Should().BeFalse();
+        partial.ModifiedFileReplacementCandidates.Should().ContainSingle()
+            .Which.Path.Should().Be(launcher.Path);
+        partial.Plan.Conflicts.Should().ContainSingle(conflict => conflict.Code == PlanConflictCode.ModifiedInstalledLauncher);
+        Action foreign = () => engine.ApproveRepairAsync(partial, [launcher]).GetAwaiter().GetResult();
+        foreign.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StalePlan);
+
+        using InspectedInstallationState approved = engine.ApproveRepairAsync(
+            partial,
+            [partial.ModifiedFileReplacementCandidates.Single()]
+        ).GetAwaiter().GetResult();
+        approved.Plan.CanExecute.Should().BeTrue();
+        Execute(approved, engine);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime one");
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("launcher one");
+        File.ReadAllText(Path.Combine(game, "unrelated-user-file.txt")).Should().Be("preserve me");
+    }
+
+    [Test]
+    public void RepairCandidates_RejectDisposedSourceAndFullIdentityDrift()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        string runtimePath = Path.Combine(game, "StardewModdingAPI.dll");
+        Write(game, "StardewModdingAPI.dll", "modified runtime", 0x180);
+        InspectedInstallationState disposed = this.Inspect(engine, game, InstallationAction.Repair, package);
+        ModifiedFileReplacementCandidate disposedCandidate = disposed.ModifiedFileReplacementCandidates.Single();
+        disposed.Dispose();
+
+        Action useDisposed = () => engine.ApproveRepairAsync(disposed, [disposedCandidate]).GetAwaiter().GetResult();
+        useDisposed.Should().Throw<ObjectDisposedException>();
+
+        using InspectedInstallationState drifted = this.Inspect(engine, game, InstallationAction.Repair, package);
+        ModifiedFileReplacementCandidate driftedCandidate = drifted.ModifiedFileReplacementCandidates.Single();
+        File.SetUnixFileMode(runtimePath, (UnixFileMode)0x1a4);
+        Action approveDrifted = () => engine.ApproveRepairAsync(drifted, [driftedCandidate]).GetAwaiter().GetResult();
+        approveDrifted.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StalePlan);
+        File.ReadAllText(runtimePath).Should().Be("modified runtime");
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.Pointer!.Action.Should().Be(InstallationAction.Install);
+    }
+
+    [Test]
+    public void RepairCandidates_RejectForeignRootPackageAndOperationGeneration()
+    {
+        string firstGame = this.CreateDirectory();
+        string secondGame = this.CreateDirectory();
+        Write(firstGame, "StardewValley", "first vanilla", 0x1ed);
+        Write(secondGame, "StardewValley", "second vanilla", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority firstPackage = this.CreatePackage("launcher one", "runtime one");
+        using FilePackageAuthority secondPackage = this.CreatePackage("launcher two", "runtime two");
+        Execute(this.Inspect(engine, firstGame, InstallationAction.Install, firstPackage), engine);
+        Execute(this.Inspect(engine, secondGame, InstallationAction.Install, secondPackage), engine);
+        Write(firstGame, "StardewModdingAPI.dll", "first modified", 0x180);
+        Write(secondGame, "StardewModdingAPI.dll", "second modified", 0x180);
+        using InspectedInstallationState first = this.Inspect(engine, firstGame, InstallationAction.Repair, firstPackage);
+        using InspectedInstallationState second = this.Inspect(engine, secondGame, InstallationAction.Repair, secondPackage);
+        ModifiedFileReplacementCandidate firstCandidate = first.ModifiedFileReplacementCandidates.Single();
+
+        Action foreign = () => engine.ApproveRepairAsync(second, [firstCandidate]).GetAwaiter().GetResult();
+        foreign.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StalePlan);
+
+        using (InstallerOperationLease lease = InstallerOperationLease.Acquire(firstGame))
+            lease.ReserveNextGeneration(lease.Generation);
+        Action staleGeneration = () => engine.ApproveRepairAsync(first, [firstCandidate]).GetAwaiter().GetResult();
+        staleGeneration.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StalePlan);
+        File.ReadAllText(Path.Combine(firstGame, "StardewModdingAPI.dll")).Should().Be("first modified");
+        File.ReadAllText(Path.Combine(secondGame, "StardewModdingAPI.dll")).Should().Be("second modified");
+    }
+
+    [Test]
+    public void RepairCandidates_AmbiguousLauncherBackupIsNeverApprovable()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        Write(game, "StardewValley-original", "unknown backup", 0x1ed);
+
+        using InspectedInstallationState blocked = this.Inspect(engine, game, InstallationAction.Repair, package);
+
+        blocked.Plan.Conflicts.Should().Contain(conflict => conflict.Code == PlanConflictCode.AmbiguousLauncherBackup);
+        blocked.ModifiedFileReplacementCandidates.Should().BeEmpty();
+    }
+
+    [Test]
+    public void RecoveryHandle_IsBorrowedAcrossInspectionAndExecution()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
+        InspectedInstallationState first = engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult();
+        first.Dispose();
+        using InspectedInstallationState retry = engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult();
+        retry.Plan.CanExecute.Should().BeTrue();
+
+        engine.ExecuteAsync(retry, retry.ConfirmationDigest).GetAwaiter().GetResult().Status.Should().Be(TransactionStatus.Committed);
+        Action retained = () => ((ICommittedRecoveryContentAuthority)recovery).AssertUsable();
+        retained.Should().NotThrow();
+        recovery.Dispose();
+    }
+
+    [Test]
+    public void RecoveryHandle_DisposedBeforeExecutionRejectsWithoutMutation()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
+        using InspectedInstallationState rollback = engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult();
+        recovery.Dispose();
+
+        Action execute = () => engine.ExecuteAsync(rollback, rollback.ConfirmationDigest).GetAwaiter().GetResult();
+
+        execute.Should().Throw<ObjectDisposedException>();
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("launcher one");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime one");
     }
 
     private string CreateDirectory()
@@ -501,12 +655,11 @@ public sealed class InstallationExecutionMaterializerTests
         LinuxInstallerEngine engine,
         string game,
         InstallationAction action,
-        IVerifiedPackageContentAuthority? package = null,
-        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
+        IVerifiedPackageContentAuthority? package = null
     )
     {
         using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
-        return engine.InspectLocked(lease, action, package, null, modifiedFileReplacementApprovals);
+        return engine.InspectLocked(lease, action, package, null);
     }
 
     private static void Execute(InspectedInstallationState inspection, LinuxInstallerEngine engine)

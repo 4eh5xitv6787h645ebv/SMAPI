@@ -73,26 +73,61 @@ public sealed record PlannedOperation
     }
 }
 
-/// <summary>An explicit, full-identity approval to replace one observed modified owned file during repair.</summary>
-public sealed record ModifiedFileReplacementApproval
+/// <summary>
+/// A core-minted, reviewable candidate for replacing one exact modified receipt-owned file during repair.
+/// This candidate can only be selected through the still-usable inspection which issued it.
+/// </summary>
+public sealed class ModifiedFileReplacementCandidate
+{
+    /// <summary>The canonical receipt-owned path observed by the core.</summary>
+    public NormalizedRelativePath Path { get; }
+    /// <summary>The observed content digest.</summary>
+    public Sha256Digest ObservedSha256 { get; }
+    /// <summary>The observed byte length.</summary>
+    public long ObservedSizeBytes { get; }
+    /// <summary>The observed Unix permission bits.</summary>
+    public int ObservedUnixMode { get; }
+    /// <summary>The observed bounded file type.</summary>
+    public RecoveryFileType ObservedFileType { get; }
+    internal object SourceAuthority { get; }
+    internal RecoveryFileIdentity ObservedIdentity { get; }
+
+    internal ModifiedFileReplacementCandidate(
+        object sourceAuthority,
+        NormalizedRelativePath path,
+        RecoveryFileIdentity observedIdentity
+    )
+    {
+        ArgumentNullException.ThrowIfNull(sourceAuthority);
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(observedIdentity);
+        this.SourceAuthority = sourceAuthority;
+        this.Path = path;
+        this.ObservedIdentity = observedIdentity;
+        this.ObservedSha256 = observedIdentity.Sha256;
+        this.ObservedSizeBytes = observedIdentity.SizeBytes;
+        this.ObservedUnixMode = observedIdentity.UnixMode;
+        this.ObservedFileType = observedIdentity.FileType;
+    }
+}
+
+/// <summary>An internal full-identity repair authorization derived only from a core-minted candidate.</summary>
+internal sealed record ModifiedFileReplacementApproval
 {
     public NormalizedRelativePath Path { get; }
-    public Sha256Digest ObservedSha256 { get; }
-    public int ObservedUnixMode { get; }
+    public RecoveryFileIdentity ObservedIdentity { get; }
+    public Sha256Digest ObservedSha256 => this.ObservedIdentity.Sha256;
+    public int ObservedUnixMode => this.ObservedIdentity.UnixMode;
 
-    public ModifiedFileReplacementApproval(
+    internal ModifiedFileReplacementApproval(
         NormalizedRelativePath path,
-        Sha256Digest observedSha256,
-        int observedUnixMode
+        RecoveryFileIdentity observedIdentity
     )
     {
         ArgumentNullException.ThrowIfNull(path);
-        ArgumentNullException.ThrowIfNull(observedSha256);
-        if (observedUnixMode is < 0 or > 0x1ff)
-            throw new ArgumentOutOfRangeException(nameof(observedUnixMode));
+        ArgumentNullException.ThrowIfNull(observedIdentity);
         this.Path = path;
-        this.ObservedSha256 = observedSha256;
-        this.ObservedUnixMode = observedUnixMode;
+        this.ObservedIdentity = observedIdentity;
     }
 }
 

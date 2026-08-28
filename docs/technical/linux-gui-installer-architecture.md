@@ -51,13 +51,15 @@ Inventory classifies each candidate as:
 5. unknown collision; or
 6. unrelated/user-owned and preserved.
 
-Only absent and unchanged receipt-owned entries are safe to replace automatically. Modified, legacy, or unknown entries block the operation unless an exact review screen records an explicit backup-and-replace decision. Ambiguous `StardewValley-original` state always blocks. Repair changes only missing or corrupt receipt-owned files for the same verified release.
+Only absent and unchanged receipt-owned entries are safe to replace automatically. Modified, legacy, or unknown entries block the operation unless an exact review screen records an explicit backup-and-replace decision. For repair, the core exposes only deterministic, nonconstructible candidates minted from descriptor-anchored observations of exact modified receipt-owned files; the frontend selects those candidate objects from their still-live source inspection and never opens, stats, or hashes a game path itself. Selection revalidates root identity, operation generation, package authority, file type, size, mode, and digest before the core replans, and partial selection leaves every unselected conflict blocked. Ambiguous `StardewValley-original` state always blocks. Repair changes only missing or explicitly approved corrupt receipt-owned files for the same verified release.
 
 ### Deterministic planning
 
 `CreatePlan` is read-only and produces a stable ordered list of creates, replacements, removals, preserved paths, conflicts, warnings, required backup bytes, and the expected final receipt. Plans distinguish install, update, repair, uninstall, create-backup, and rollback. Legacy app-data migration is a separate planned action and never an uninstall side effect.
 
 Both frontends display the same immutable plan identifier. The executor refuses a stale plan when the game root, package identity, inventory fingerprints, or lock generation changed after planning.
+
+Verified package content and committed recovery handles are caller-owned live authorities. Inspections and execution borrow them without taking ownership: the caller keeps each required handle alive until approval or execution completes, may retain it for a safe retry, and disposes it explicitly afterward. Disposing an inspection invalidates its plan and repair candidates only; success, failure, and cancellation never implicitly dispose either borrowed authority.
 
 ### Transaction and recovery
 
