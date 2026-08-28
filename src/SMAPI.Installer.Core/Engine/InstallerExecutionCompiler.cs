@@ -82,6 +82,7 @@ internal sealed class InstallerExecutionCompiler
             plan.GetCanonicalDigest(),
             request.TargetManifest?.GetCanonicalDigest(),
             request.InstalledReceipt?.GetCanonicalDigest(),
+            request.InstalledReceipt?.ManifestSha256,
             GetRollbackSnapshotDigest(request.RollbackSnapshot),
             GetRecoveryObservationsDigest(request.RecoveryObservations),
             rollbackContent?.GenerationId,
@@ -150,10 +151,11 @@ internal sealed class InstallerExecutionCompiler
             .ToArray();
         AssertUniqueSafeDestinations(instructions);
         ReceiptPreparationInstruction receipt = CreateReceiptInstruction(binding, currentRequest, plan, transactionId);
+        ManifestPreparationInstruction manifest = CreateManifestInstruction(binding, currentRequest);
         RecoverySnapshotPreparation? recovery = RequiresNewRecoverySnapshot(plan.Action)
             ? CreateRecoverySnapshotPreparation(currentRequest, instructions, receipt, observations)
             : null;
-        return new InstallationExecutionPreparation(transactionId, binding, instructions, receipt, recovery);
+        return new InstallationExecutionPreparation(transactionId, binding, instructions, manifest, receipt, recovery);
     }
 
     private FilePreparationInstruction CompileOperation(
@@ -425,6 +427,73 @@ internal sealed class InstallerExecutionCompiler
 
             default:
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, "The action has no receipt-state rule.");
+        }
+    }
+
+    private static ManifestPreparationInstruction CreateManifestInstruction(
+        BoundInstallationPlan binding,
+        InstallationPlanningRequest request
+    )
+    {
+        switch (request.Action)
+        {
+            case InstallationAction.Install:
+            case InstallationAction.Update:
+            case InstallationAction.Repair:
+                {
+                    IVerifiedPackageContentAuthority authority = binding.TargetPackageContent
+                        ?? throw Error(ExecutionCompilationError.StaleManifest, "A manifest write has no live verified package authority.");
+                    return new ManifestPreparationInstruction(
+                        ReceiptPreparationKind.WriteAtomically,
+                        binding.InstalledManifestSha256,
+                        new VerifiedCanonicalManifestSource(
+                            authority,
+                            CanonicalOwnershipDocuments.SerializeManifest(authority.Manifest)
+                        )
+                    );
+                }
+
+            case InstallationAction.Uninstall:
+                if (binding.InstalledManifestSha256 is null)
+                    throw Error(ExecutionCompilationError.InvalidOperationMapping, "An uninstall has no installed manifest to remove.");
+                return new ManifestPreparationInstruction(
+                    ReceiptPreparationKind.RemoveAtomically,
+                    binding.InstalledManifestSha256,
+                    null
+                );
+
+            case InstallationAction.Backup:
+                return new ManifestPreparationInstruction(ReceiptPreparationKind.None, null, null);
+
+            case InstallationAction.Rollback:
+                {
+                    ICommittedRecoveryContentAuthority authority = binding.RollbackContent
+                        ?? throw Error(ExecutionCompilationError.StaleRollbackSnapshot, "A rollback has no live committed recovery authority.");
+                    if (authority.PreviousManifestSha256 is null)
+                    {
+                        if (binding.InstalledManifestSha256 is null)
+                            throw Error(ExecutionCompilationError.InvalidOperationMapping, "A manifest-removing rollback has no current manifest identity.");
+                        return new ManifestPreparationInstruction(
+                            ReceiptPreparationKind.RemoveAtomically,
+                            binding.InstalledManifestSha256,
+                            null
+                        );
+                    }
+                    return new ManifestPreparationInstruction(
+                        ReceiptPreparationKind.WriteAtomically,
+                        binding.InstalledManifestSha256,
+                        new RecoverySnapshotSource(
+                            authority,
+                            RecoverySnapshotContent.InstalledManifest,
+                            null,
+                            null,
+                            authority.PreviousManifestSha256
+                        )
+                    );
+                }
+
+            default:
+                throw Error(ExecutionCompilationError.InvalidOperationMapping, "The action has no manifest-state rule.");
         }
     }
 

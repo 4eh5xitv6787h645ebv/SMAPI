@@ -112,7 +112,20 @@ internal static class CanonicalOwnershipDocuments
     )
     {
         limits ??= OwnershipPersistenceLimits.Default;
-        RollbackSnapshot snapshot = ParseCanonical(bytes, limits, root =>
+        RollbackSnapshot snapshot = ParseRollbackSnapshotUnbound(bytes, limits);
+
+        if (snapshot.ExpectedCurrentReceiptSha256 != currentReceipt?.GetCanonicalDigest())
+            throw new OwnershipDocumentException("The rollback snapshot doesn't target the supplied current receipt state.");
+        return snapshot;
+    }
+
+    internal static RollbackSnapshot ParseRollbackSnapshotUnbound(
+        ReadOnlyMemory<byte> bytes,
+        OwnershipPersistenceLimits? limits = null
+    )
+    {
+        limits ??= OwnershipPersistenceLimits.Default;
+        return ParseCanonical(bytes, limits, root =>
         {
             AssertExactObject(
                 root,
@@ -134,10 +147,6 @@ internal static class CanonicalOwnershipDocuments
             RollbackSnapshotEntry[] entries = ParseArray(root.GetProperty("entries"), limits, "rollback entries", ParseRollbackEntry);
             return new RollbackSnapshot(currentReceiptSha256, previousReceiptSha256, entries);
         }, SerializeRollbackSnapshot, "rollback snapshot");
-
-        if (snapshot.ExpectedCurrentReceiptSha256 != currentReceipt?.GetCanonicalDigest())
-            throw new OwnershipDocumentException("The rollback snapshot doesn't target the supplied current receipt state.");
-        return snapshot;
     }
 
     /// <summary>Validate a receipt before persistence, not only when it is subsequently loaded.</summary>

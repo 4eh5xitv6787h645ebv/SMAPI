@@ -369,7 +369,15 @@ internal static class TransactionJournalStore
     private static void ValidateCoreRecoveryLayout(TransactionJournal journal)
     {
         string prefix = $".smapi-installer/recovery/generations/{journal.TransactionId:N}/";
-        string[] paths = journal.Entries.Take(journal.CoreRecoveryOperationCount)
+        TransactionJournalEntry[] recoveryEntries = journal.Entries.Take(journal.CoreRecoveryOperationCount).ToArray();
+        if (
+            recoveryEntries.Length != journal.CoreRecoveryOperationCount
+            || recoveryEntries.Any(entry => !entry.RelativePath.StartsWith(prefix, StringComparison.Ordinal))
+        )
+        {
+            throw RecoveryError("The immutable recovery plan's recovery generation prefix is invalid.");
+        }
+        string[] paths = recoveryEntries
             .Select(entry => entry.RelativePath[prefix.Length..])
             .ToArray();
         if (
@@ -586,7 +594,13 @@ internal static class TransactionJournalStore
         try
         {
             using JsonDocument document = JsonDocument.Parse(bytes, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 16 });
-            JsonElement schema = document.RootElement.GetProperty("schemaVersion");
+            if (
+                document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("schemaVersion", out JsonElement schema)
+            )
+            {
+                throw new JsonException();
+            }
             if (schema.ValueKind != JsonValueKind.Number || !schema.TryGetInt32(out int schemaVersion))
                 throw new JsonException();
             if (schemaVersion == 2)

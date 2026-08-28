@@ -285,6 +285,31 @@ public sealed class InstallerTransactionExecutorTests
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
     }
 
+    [TestCase("{}")]
+    [TestCase("[]")]
+    public void Recover_WhenJournalRootShapeIsMalformed_FailsWithControlledRecoveryError(string journalJson)
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed", Hash("new"))
+        });
+        Action interrupted = () => new InstallerTransactionExecutor(
+            faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true)
+        ).Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        string journalPath = Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "journal.json");
+        File.WriteAllText(journalPath, journalJson);
+
+        Action recover = () => new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+    }
+
     [Test]
     public void Apply_WhenRollbackRuns_RemovesDirectoriesCreatedByTransaction()
     {

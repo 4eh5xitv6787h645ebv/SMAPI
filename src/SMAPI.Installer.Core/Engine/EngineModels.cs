@@ -44,6 +44,7 @@ public sealed class BoundInstallationPlan
     public Sha256Digest PlanSha256 { get; }
     public Sha256Digest? ManifestSha256 { get; }
     public Sha256Digest? InstalledReceiptSha256 { get; }
+    public Sha256Digest? InstalledManifestSha256 { get; }
     public Sha256Digest? RollbackSnapshotSha256 { get; }
     public Sha256Digest? RecoveryObservationsSha256 { get; }
     public Guid? RecoveryGenerationId { get; }
@@ -58,6 +59,7 @@ public sealed class BoundInstallationPlan
         Sha256Digest planSha256,
         Sha256Digest? manifestSha256,
         Sha256Digest? installedReceiptSha256,
+        Sha256Digest? installedManifestSha256,
         Sha256Digest? rollbackSnapshotSha256,
         Sha256Digest? recoveryObservationsSha256,
         Guid? recoveryGenerationId,
@@ -73,6 +75,7 @@ public sealed class BoundInstallationPlan
         this.PlanSha256 = planSha256;
         this.ManifestSha256 = manifestSha256;
         this.InstalledReceiptSha256 = installedReceiptSha256;
+        this.InstalledManifestSha256 = installedManifestSha256;
         this.RollbackSnapshotSha256 = rollbackSnapshotSha256;
         this.RecoveryObservationsSha256 = recoveryObservationsSha256;
         this.RecoveryGenerationId = recoveryGenerationId;
@@ -102,6 +105,7 @@ public sealed class BoundInstallationPlan
             writer.WriteString("plan_sha256", this.PlanSha256.Value);
             WriteNullableDigest(writer, "manifest_sha256", this.ManifestSha256);
             WriteNullableDigest(writer, "installed_receipt_sha256", this.InstalledReceiptSha256);
+            WriteNullableDigest(writer, "installed_manifest_sha256", this.InstalledManifestSha256);
             WriteNullableDigest(writer, "rollback_snapshot_sha256", this.RollbackSnapshotSha256);
             WriteNullableDigest(writer, "recovery_observations_sha256", this.RecoveryObservationsSha256);
             if (this.RecoveryGenerationId is null)
@@ -135,6 +139,8 @@ internal interface ICommittedRecoveryContentAuthority
     GameRootIdentity GameRoot { get; }
     RollbackSnapshot Snapshot { get; }
     Sha256Digest SnapshotSha256 { get; }
+    Sha256Digest? PreviousManifestSha256 { get; }
+    Sha256Digest? PreviousReceiptSha256 { get; }
     LinuxAnchoredFile OpenGameFile(NormalizedRelativePath path, RecoveryFileIdentity expectedIdentity);
     LinuxAnchoredFile OpenPreviousReceipt(Sha256Digest expectedSha256);
     LinuxAnchoredFile OpenPreviousManifest(Sha256Digest expectedSha256);
@@ -229,7 +235,8 @@ public sealed class CurrentGameFileSource : PreparationSource
 public enum RecoverySnapshotContent
 {
     GameFile,
-    InstalledReceipt
+    InstalledReceipt,
+    InstalledManifest
 }
 
 /// <summary>A source which may only be resolved from the exact canonical recovery snapshot.</summary>
@@ -285,6 +292,29 @@ public sealed class GeneratedCanonicalReceiptSource : PreparationSource
     }
 }
 
+/// <summary>The canonical manifest retained by the exact verified target package authority.</summary>
+public sealed class VerifiedCanonicalManifestSource : PreparationSource
+{
+    public PackageManifest Manifest { get; }
+    public Sha256Digest Sha256 { get; }
+    private readonly byte[] Bytes;
+    internal IVerifiedPackageContentAuthority Authority { get; }
+
+    internal VerifiedCanonicalManifestSource(IVerifiedPackageContentAuthority authority, byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        authority.AssertUsable();
+        this.Authority = authority;
+        this.Manifest = authority.Manifest;
+        this.Bytes = bytes.ToArray();
+        this.Sha256 = Sha256Digest.Hash(this.Bytes);
+        if (this.Sha256 != authority.ManifestSha256)
+            throw new ArgumentException("The canonical manifest bytes don't match their verified package authority.", nameof(bytes));
+    }
+
+    public byte[] GetCanonicalBytes() => this.Bytes.ToArray();
+}
+
 /// <summary>One typed preparation instruction corresponding one-to-one with a planner operation.</summary>
 public sealed class FilePreparationInstruction
 {
@@ -329,6 +359,25 @@ public enum ReceiptPreparationKind
     None,
     WriteAtomically,
     RemoveAtomically
+}
+
+/// <summary>The installed-manifest state change committed with the transaction.</summary>
+public sealed class ManifestPreparationInstruction
+{
+    public ReceiptPreparationKind Kind { get; }
+    public Sha256Digest? ExpectedExistingManifestSha256 { get; }
+    public PreparationSource? Source { get; }
+
+    internal ManifestPreparationInstruction(
+        ReceiptPreparationKind kind,
+        Sha256Digest? expectedExistingManifestSha256,
+        PreparationSource? source
+    )
+    {
+        this.Kind = kind;
+        this.ExpectedExistingManifestSha256 = expectedExistingManifestSha256;
+        this.Source = source;
+    }
 }
 
 /// <summary>A core-owned receipt commit instruction. Receipt state is never represented as an arbitrary game destination.</summary>
@@ -418,12 +467,14 @@ public sealed class InstallationExecutionPreparation
     public IReadOnlyList<FilePreparationInstruction> Instructions { get; }
     public IReadOnlyList<FilePreparationInstruction> TransactionDestinations { get; }
     public ReceiptPreparationInstruction Receipt { get; }
+    public ManifestPreparationInstruction Manifest { get; }
     public RecoverySnapshotPreparation? RecoverySnapshot { get; }
 
     internal InstallationExecutionPreparation(
         Guid transactionId,
         BoundInstallationPlan binding,
         IEnumerable<FilePreparationInstruction> instructions,
+        ManifestPreparationInstruction manifest,
         ReceiptPreparationInstruction receipt,
         RecoverySnapshotPreparation? recoverySnapshot
     )
@@ -437,6 +488,7 @@ public sealed class InstallationExecutionPreparation
             all.Where(instruction => instruction.IsTransactionDestination).ToArray()
         );
         this.Receipt = receipt;
+        this.Manifest = manifest;
         this.RecoverySnapshot = recoverySnapshot;
     }
 }

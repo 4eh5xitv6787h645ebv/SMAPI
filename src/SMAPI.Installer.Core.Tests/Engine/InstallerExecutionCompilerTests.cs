@@ -596,6 +596,8 @@ public class InstallerExecutionCompilerTests
         public GameRootIdentity GameRoot => InstallerExecutionCompilerTests.GameRoot;
         public RollbackSnapshot Snapshot { get; }
         public Sha256Digest SnapshotSha256 => Sha256Digest.Hash(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(this.Snapshot));
+        public Sha256Digest? PreviousManifestSha256 => this.Snapshot.PreviousReceiptSha256 is null ? null : OwnershipTestData.Digest('a');
+        public Sha256Digest? PreviousReceiptSha256 => this.Snapshot.PreviousReceiptSha256;
 
         public FakeRecoveryContentAuthority(RollbackSnapshot snapshot)
         {
