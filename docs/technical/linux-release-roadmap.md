@@ -71,16 +71,16 @@ Scope constraints apply throughout:
 ### Phase 1 publication and integration
 
 - [x] Update `README.md` with current 4.5.2-versus-fork evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
-- [x] Update the GitHub Pages home and comparison with current evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
+- [x] Update the GitHub Pages home and comparison with current evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2); [successful deployment](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33162274803); verified HTTP 200).
 - [x] Update the performance audit with current evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
 - [x] Update release notes with current evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
 - [x] Open a focused [Phase 1 fork pull request #170](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170).
 - [x] Obtain independent Phase 1 final-diff, evidence, and security/privacy reviews ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451242326)).
 - [x] Obtain independent Phase 1 documentation, performance-claims, and privacy reviews ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451183384)).
-- [x] Pass applicable repository checks; no GitHub PR status checks are configured ([25 tests, probe build, link validation, and diff-check evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451242326)).
+- [x] Pass applicable repository checks; no GitHub PR status checks were configured before merge ([25 tests, probe build, link validation, and diff-check evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451242326); [post-merge Pages build](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33162274803)).
 - [x] Address every actionable Phase 1 review finding and obtain re-review PASS ([final review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451242326)).
-- [ ] Merge the Phase 1 pull request into `develop` and close it.
-- [ ] Verify `develop` equals `origin/develop` after the merge.
+- [x] Merge Phase 1 pull request [#170](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170) into `develop` and close it ([`1cd1b435`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/1cd1b4353d63eeb635bdf9c9a20171b14b83133b)).
+- [x] Verify local `develop` equals `origin/develop` after the merge (`1cd1b435`).
 
 ## Phase 2 — Automated performance regression testing
 
