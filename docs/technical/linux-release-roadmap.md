@@ -205,6 +205,18 @@ Scope constraints apply throughout:
 - [ ] Verify practical X11 behavior.
 - [ ] Verify practical Wayland behavior.
 
+### GUI screenshots and visual documentation
+
+- [ ] Capture current screenshots from the exact reviewed GUI build, without private fixture names, paths, or other personal data.
+- [ ] Document game-folder detection and manual selection with screenshots.
+- [ ] Document install, update, repair, and uninstall states with screenshots.
+- [ ] Document backup, recovery selection, and rollback states with screenshots.
+- [ ] Document download progress, checksum verification, and successful completion with screenshots.
+- [ ] Document understandable error, modified/unknown-file protection, and detailed-log views with screenshots.
+- [ ] Document keyboard focus, practical screen scaling, X11, and Wayland behavior with screenshots.
+- [ ] Add the current screenshot set to both repository user documentation and GitHub Pages.
+- [ ] Verify every published screenshot and its containing documentation page returns HTTP 200.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
@@ -388,6 +400,7 @@ or pull request was performed.
 - [ ] Documentation covers diagnostics.
 - [ ] Documentation covers privacy.
 - [ ] Documentation covers screenshots.
+- [ ] Documentation screenshots cover every major GUI workflow and state listed in Phase 4.
 - [ ] Documentation covers troubleshooting.
 - [ ] GitHub Pages builds successfully.
 - [ ] Every important GitHub Pages page and asset returns HTTP 200.
