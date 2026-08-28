@@ -19,6 +19,7 @@
     <File Path="../build/common.targets" />
     <File Path="../build/deploy-local-smapi.targets" />
     <File Path="../build/find-game-folder.targets" />
+    <Project Path="../build/SMAPI.Installer.PackageTool/SMAPI.Installer.PackageTool.csproj" />
   </Folder>
   <Folder Name="/.root/build/scripts/">
     <File Path="../build/scripts/finalize-install-package.sh" />
@@ -45,6 +46,7 @@
   </Folder>
   <Folder Name="/Internal/">
     <Project Path="../benchmarks/SMAPI.PerformanceBenchmarks/SMAPI.PerformanceBenchmarks.csproj" />
+    <Project Path="SMAPI.Installer.PackageTool.Tests/SMAPI.Installer.PackageTool.Tests.csproj" />
     <Project Path="SMAPI.Internal/SMAPI.Internal.shproj" />
     <Project Path="SMAPI.Installer.Core.Tests/SMAPI.Installer.Core.Tests.csproj" />
     <Project Path="SMAPI.ModBuildConfig.Analyzer.Tests/SMAPI.ModBuildConfig.Analyzer.Tests.csproj" />

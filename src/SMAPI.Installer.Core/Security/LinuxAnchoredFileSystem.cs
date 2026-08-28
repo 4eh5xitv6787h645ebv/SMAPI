@@ -419,6 +419,57 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         return result;
     }
 
+    /// <summary>Copy and SHA-256 hash a bounded stable regular file through its already-open handle.</summary>
+    public async Task<string> CopyAndHashAsync(
+        LinuxAnchoredFile file,
+        Stream destination,
+        long maximumBytes,
+        CancellationToken cancellationToken = default
+    )
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(destination);
+        if (maximumBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        if (!destination.CanWrite || !destination.CanSeek || destination.Position != 0 || destination.Length != 0)
+            throw new ArgumentException("The copy destination must be writable, seekable, empty, and positioned at zero.", nameof(destination));
+        cancellationToken.ThrowIfCancellationRequested();
+        file.AssertOpen();
+
+        LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        if (!before.IsSameObject(file.Identity) || before.Size <= 0 || before.Size > maximumBytes)
+            throw new IOException("The open file is empty, too large, or no longer refers to its captured object.");
+        using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
+        try
+        {
+            long offset = 0;
+            while (offset < before.Size)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int count = RandomAccess.Read(
+                    file.Handle,
+                    buffer.AsSpan(0, (int)Math.Min(buffer.Length, before.Size - offset)),
+                    offset
+                );
+                if (count == 0)
+                    throw new EndOfStreamException("The anchored file became shorter while it was copied.");
+                hasher.AppendData(buffer, 0, count);
+                await destination.WriteAsync(buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+                offset = checked(offset + count);
+            }
+            LinuxFileIdentity after = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+            if (after != before)
+                throw new IOException("The anchored file identity changed while it was copied.");
+            return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
     /// <summary>Append one bounded record through a captured file handle and durably verify its anchored name and length.</summary>
     public long AppendAndFsync(
         LinuxAnchoredFile file,

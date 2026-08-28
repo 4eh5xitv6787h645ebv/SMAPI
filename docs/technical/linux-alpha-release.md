@@ -24,8 +24,11 @@ official stable release:
 Later alphas increment the final number. A published tag is never reused or moved. The public
 release assets are built from the exact tag commit by GitHub Actions; the build records its source
 commit, tree, pinned game-reference commit, runner, SDKs, package size, and SHA-256. Recorded inputs
-and provenance establish identity and integrity, but byte-for-byte reproducible ZIP output is not
-claimed.
+describe how the artifact was built, but only the package/manifest hashes and independently verified
+GitHub attestations establish published identity, integrity, and provenance. The workflow-run URL,
+runner, pinned reference-build commit, timestamp, and .NET details are bounded informational fields;
+clean-machine quartet verification does not authenticate them. Byte-for-byte reproducible ZIP
+output is not claimed.
 
 ## Requirements and safety boundary
 
@@ -62,6 +65,39 @@ gh attestation verify \
 The checksum command must report `OK`. The attestation must identify this repository and the
 `linux-alpha-release.yml` workflow. Inspect `build-metadata.json` and confirm that its package name,
 SHA-256, release tag, and full source commit match the release page.
+
+### Unreleased next-alpha quartet
+
+The published alpha.1 above has three assets and no install-manifest companion. A future tagged
+next-alpha build from source containing the Phase 4 package-authority work will instead publish an
+exact four-file set:
+
+- the finalized installer ZIP;
+- `SMAPI-<embedded-version>-linux-x64-install-manifest.json`, a canonical external companion which
+  records the exact installer-owned files, hashes, sizes, Unix modes, and release identity;
+- `SHA256SUMS`, with exactly two sorted subjects: the manifest followed by the installer ZIP; and
+- `build-metadata.json`, whose plural `artifacts` array records those same two subjects.
+
+The ZIP and manifest are both GitHub-attested. After a future release actually publishes that set,
+copy the two exact asset names from its release page and verify them together:
+
+```bash
+package_name='COPY THE EXACT INSTALLER ZIP NAME HERE'
+manifest_name='COPY THE EXACT INSTALL MANIFEST NAME HERE'
+sha256sum --check --strict SHA256SUMS
+gh attestation verify "$package_name" -R 4eh5xitv6787h645ebv/SMAPI
+gh attestation verify "$manifest_name" -R 4eh5xitv6787h645ebv/SMAPI
+```
+
+Both checksum subjects must report `OK`, and both attestations must identify this repository, the
+tagged `linux-alpha-release.yml` workflow, and the selected release commit. A pull-request build,
+`develop` build, manual source build, or pre-tag workflow-dispatch candidate is non-authoritative:
+the production workflow records its actual identity and does not invoke the release-manifest
+creation path. The tool's tag-context check prevents accidental candidate minting, but it is not a
+cryptographic provenance boundary and its environment can be reproduced by a local caller. Only
+successful verification of both GitHub attestations against this repository, tagged workflow, and
+selected commit establishes published release authority. Do not substitute an unattested local or
+candidate quartet for the published tagged assets.
 
 ## Install
 
@@ -173,9 +209,17 @@ against executable game assemblies in the authorized disposable environment, wit
 counts and pass/fail evidence published.
 
 After independent release, security/privacy, testing, and final-diff reviews, the pull request is
-merged to `develop`. A candidate is built by dispatching `linux-alpha-release.yml` with the exact
-40-character merge commit, embedded version, and reserved tag. Only after the full test suite,
-isolated lifecycle, and trusted-workload qualifications pass for that exact commit is the annotated
-tag created at the same commit. The tag-triggered workflow rebuilds and qualifies the package,
-creates checksums and metadata, attests the checksum subjects, and publishes a prerelease. The
-downloaded public asset—not a local package—is then used for the final clean-room verification.
+merged to `develop`. A non-authoritative candidate is built by dispatching
+`linux-alpha-release.yml` with the exact 40-character merge commit, embedded version, and reserved
+tag. Its metadata records the actual pre-tag workflow ref; it does not mint a companion manifest
+which the installer can accept as release authority. Only after the full test suite, isolated
+lifecycle, and trusted-workload qualifications pass for that exact commit is the annotated tag
+created at the same commit.
+
+For a source revision containing the Phase 4 quartet work, the tag-triggered workflow then rebuilds
+and qualifies the finalized ZIP, creates its canonical external install manifest, emits
+`SHA256SUMS` with exactly those two sorted subjects and plural-artifact build metadata, runs the
+complete package/manifest authority verification before and after workflow-artifact transfer,
+attests both subjects, and publishes exactly the four named release files. The downloaded public
+quartet—not a local package or pre-tag candidate—is then used for final clean-room verification.
+These next-alpha steps do not retroactively describe the published alpha.1 assets.
