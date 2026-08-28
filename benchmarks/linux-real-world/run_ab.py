@@ -83,6 +83,14 @@ def command_version(*args: str) -> str:
     return result.stdout.strip().splitlines()[0] if result.stdout.strip() else f"exit-{result.returncode}"
 
 
+def load_workload_baseline(path: Path) -> str:
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    identity = baseline.get("workloadIdentitySha256") if isinstance(baseline, dict) else None
+    if not isinstance(baseline, dict) or baseline.get("schema") != 1 or not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
+        raise ValueError("invalid private preflight workload identity baseline")
+    return identity
+
+
 def environment_metadata(cpu_list: str, display: str) -> dict[str, Any]:
     governors: set[str] = set()
     for path in Path("/sys/devices/system/cpu").glob("cpu[0-9]*/cpufreq/scaling_governor"):
@@ -133,6 +141,7 @@ def environment_metadata(cpu_list: str, display: str) -> dict[str, Any]:
         "xvfb": {"binarySha256": sha256(Path(xvfb_binary)), "helpSignature": command_version("Xvfb", "-help")},
         "locale": "C.UTF-8",
         "renderer": renderer,
+        "runtimeSettings": {"DOTNET_TieredCompilation": "0", "ALSOFT_DRIVERS": "null"},
     }
 
 
@@ -357,14 +366,57 @@ def selected_log_metadata(log_path: Path) -> dict[str, Any]:
     if "logStarted" in phase_clock:
         origin = phase_clock["logStarted"]
         phase_clock = {name: (seconds - origin) % 86400 for name, seconds in phase_clock.items()}
-    load_failure_patterns = (
-        r"Failed loading mod",
-        r"because its DLL couldn't be loaded",
-        r"because its entry DLL .* doesn't exist",
-        r"because it contains files, but none of them are manifest\.json",
-        r"\bSkipped mods\b",
-        r"These mods could not be added",
+    skipped_mods = 0
+    skipped_identities: list[str] = []
+    loaded_code_identities: list[str] = []
+    loaded_pack_identities: list[str] = []
+    identity_target: list[str] | None = None
+    identity_remaining = 0
+    in_skipped_section = False
+    for line in text.splitlines():
+        identity_message_match = re.match(r"^\[[^]]+\] (.*)$", line)
+        if identity_message_match:
+            identity_message = identity_message_match.group(1)
+            code_header = re.fullmatch(r"Loaded (\d+) mods:", identity_message)
+            pack_header = re.fullmatch(r"Loaded (\d+) content packs:", identity_message)
+            if code_header:
+                identity_target = loaded_code_identities
+                identity_remaining = int(code_header.group(1))
+            elif pack_header:
+                identity_target = loaded_pack_identities
+                identity_remaining = int(pack_header.group(1))
+            elif identity_remaining > 0 and identity_message.startswith("   "):
+                assert identity_target is not None
+                identity_target.append(identity_message.strip())
+                identity_remaining -= 1
+        message_match = re.match(r"^\[[^]]+\]\s{4}(.*)$", line)
+        if not message_match:
+            continue
+        message = message_match.group(1)
+        if message == "Skipped mods":
+            in_skipped_section = True
+        elif in_skipped_section and re.fullmatch(r"-+", message):
+            continue
+        elif in_skipped_section and message and not message.startswith(" "):
+            in_skipped_section = False
+        elif in_skipped_section and re.match(r"^\s{3}- ", message):
+            skipped_mods += 1
+            skipped_identities.append(message.strip())
+    identity_complete = (
+        mod_match is not None
+        and pack_match is not None
+        and len(loaded_code_identities) == int(mod_match.group(1))
+        and len(loaded_pack_identities) == int(pack_match.group(1))
+        and len(skipped_identities) == skipped_mods
     )
+    workload_identity = None
+    if identity_complete:
+        workload_identity = hashlib.sha256(json.dumps(
+            {"code": loaded_code_identities, "contentPacks": loaded_pack_identities, "skipped": skipped_identities},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
     return {
         "resolution": resolution,
         "loadedCodeMods": int(mod_match.group(1)) if mod_match else None,
@@ -372,12 +424,19 @@ def selected_log_metadata(log_path: Path) -> dict[str, Any]:
         "smapiVersion": version_match.group(1) if version_match else None,
         "gameVersion": version_match.group(2) if version_match else None,
         "modsReady": "Mods loaded and ready!" in text,
-        "loadFailureCount": sum(len(re.findall(pattern, text, flags=re.IGNORECASE)) for pattern in load_failure_patterns),
+        "skippedModCount": skipped_mods,
+        "workloadIdentitySha256": workload_identity,
         "startupPhaseSecondsFromLogStart": phase_clock,
     }
 
 
-def validate_log_metadata(log_metadata: dict[str, Any], expected_code_mods: int, expected_content_packs: int) -> None:
+def validate_log_metadata(
+    log_metadata: dict[str, Any],
+    expected_code_mods: int,
+    expected_content_packs: int,
+    expected_skipped_mods: int,
+    expected_workload_identity: str | None,
+) -> None:
     if log_metadata["resolution"] != EXPECTED_RESOLUTION:
         raise ValueError(f"unexpected resolution: {log_metadata['resolution']}")
     if not log_metadata["modsReady"]:
@@ -387,8 +446,15 @@ def validate_log_metadata(log_metadata: dict[str, Any], expected_code_mods: int,
             f"incomplete workload: expected {expected_code_mods} code mods/{expected_content_packs} content packs, "
             f"got {log_metadata['loadedCodeMods']}/{log_metadata['loadedContentPacks']}"
         )
-    if log_metadata["loadFailureCount"] != 0:
-        raise ValueError(f"SMAPI reported {log_metadata['loadFailureCount']} framework mod-load failures")
+    if log_metadata["skippedModCount"] != expected_skipped_mods:
+        raise ValueError(
+            f"workload skip count changed: expected {expected_skipped_mods}, got {log_metadata['skippedModCount']}"
+        )
+    identity = log_metadata["workloadIdentitySha256"]
+    if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
+        raise ValueError("complete private workload identity could not be derived from the SMAPI log")
+    if expected_workload_identity is not None and identity != expected_workload_identity:
+        raise ValueError("loaded code/content/skip identity differs from the official preflight baseline")
     if log_metadata["smapiVersion"] is None or log_metadata["gameVersion"] != "1.6.15 build 24356":
         raise ValueError("missing or unexpected SMAPI/game version metadata")
     startup_phases = log_metadata["startupPhaseSecondsFromLogStart"]
@@ -449,7 +515,14 @@ def validate_saved_sample(
         raise ValueError("saved sample probe acceptance summary mismatch")
     log_path = run_root / "home" / ".config" / "StardewValley" / "ErrorLogs" / "SMAPI-latest.txt"
     log_metadata = selected_log_metadata(log_path)
-    validate_log_metadata(log_metadata, metadata["expectedLoadedCodeMods"], metadata["expectedLoadedContentPacks"])
+    expected_identity = load_workload_baseline(run_root.parents[1] / "preflight-workload-identity.json")
+    validate_log_metadata(
+        log_metadata,
+        metadata["expectedLoadedCodeMods"],
+        metadata["expectedLoadedContentPacks"],
+        metadata["expectedSkippedMods"],
+        expected_identity,
+    )
     if saved.get("log") != log_metadata:
         raise ValueError("saved sample log projection mismatch")
 
@@ -470,6 +543,11 @@ def run_sample(
     series: str,
 ) -> None:
     metadata = json.loads((private_root / "metadata.json").read_text(encoding="utf-8"))
+    workload_baseline_path = private_root / "preflight-workload-identity.json"
+    if series == "preflight" and product == "a" and workload_baseline_path.exists():
+        raise ValueError("official preflight workload baseline already exists; archive the interrupted preflight before restarting")
+    if not (series == "preflight" and product == "a") and not workload_baseline_path.is_file():
+        raise ValueError("accepted official preflight workload baseline is required")
     label = f"{sequence:02d}-{product}{sample}" + ("-diagnostics" if diagnostics else "")
     run_root = private_root / run_group / label
     if run_root.exists():
@@ -546,6 +624,8 @@ def run_sample(
         "--setenv", "LC_ALL", "C.UTF-8",
         "--setenv", "DOTNET_CLI_TELEMETRY_OPTOUT", "1",
         "--setenv", "DOTNET_NOLOGO", "1",
+        "--setenv", "DOTNET_TieredCompilation", "0",
+        "--setenv", "ALSOFT_DRIVERS", "null",
         "--setenv", "HOME", os.fspath(home),
         "--setenv", "XDG_CONFIG_HOME", os.fspath(home / ".config"),
         "--setenv", "XDG_DATA_HOME", os.fspath(home / ".local" / "share"),
@@ -591,7 +671,12 @@ def run_sample(
     summary = probe_summary(result_path)
     log_path = home / ".config" / "StardewValley" / "ErrorLogs" / "SMAPI-latest.txt"
     log_metadata = selected_log_metadata(log_path)
-    validate_log_metadata(log_metadata, expected_code_mods, expected_content_packs)
+    expected_identity = None
+    if workload_baseline_path.is_file():
+        expected_identity = load_workload_baseline(workload_baseline_path)
+    validate_log_metadata(
+        log_metadata, expected_code_mods, expected_content_packs, metadata["expectedSkippedMods"], expected_identity
+    )
     sample_metadata = {
         "schema": 1,
         "label": label,
@@ -619,6 +704,12 @@ def run_sample(
     }
     (run_root / "sample.json").write_text(json.dumps(sample_metadata, indent=2) + "\n", encoding="utf-8")
     os.chmod(run_root / "sample.json", 0o600)
+    if series == "preflight" and product == "a":
+        workload_baseline_path.write_text(json.dumps({
+            "schema": 1,
+            "workloadIdentitySha256": log_metadata["workloadIdentitySha256"],
+        }, indent=2) + "\n", encoding="utf-8")
+        os.chmod(workload_baseline_path, 0o600)
     print(json.dumps({"accepted": label, "steadySeconds": summary["steadySeconds"], "steadyUpdates": summary["steadyUpdates"]}))
 
 
@@ -665,6 +756,21 @@ def main() -> int:
         raise ValueError("runner script differs from prepared committed harness")
     if sha256(Path(__file__).with_name("harness_common.py")) != metadata.get("commonScriptSha256"):
         raise ValueError("common harness helpers differ from the prepared committed harness")
+    if not args.preflight:
+        for sequence, (product, sample, diagnostics, series) in enumerate(
+            (("a", 1, False, "preflight"), ("b", 1, False, "preflight")), start=1
+        ):
+            label = f"{sequence:02d}-{product}{sample}"
+            validate_saved_sample(
+                private_root / "preflight-runs" / label,
+                metadata,
+                label,
+                sequence,
+                product,
+                sample,
+                diagnostics,
+                series,
+            )
 
     gold_expected = {
         "game-a": metadata["products"]["a"]["gameTree"],

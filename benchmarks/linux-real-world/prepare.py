@@ -278,6 +278,7 @@ def main() -> int:
             "commonDepsSha256": common_deps_hash,
             "expectedLoadedCodeMods": 132,
             "expectedLoadedContentPacks": 176,
+            "expectedSkippedMods": 1,
             "modsTree": tree_manifest(mods),
             "savesTree": tree_manifest(saves),
             "products": products,

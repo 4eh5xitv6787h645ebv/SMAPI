@@ -161,6 +161,12 @@ def summarize_sample(run_root: Path, raw_root: Path) -> dict[str, Any]:
             "temperatureCelsiusBefore": private["temperatureCelsiusBefore"],
             "temperatureCelsiusAfter": private["temperatureCelsiusAfter"],
             "startupPhaseSecondsFromLogStart": private["log"]["startupPhaseSecondsFromLogStart"],
+            "loadedCodeMods": private["log"]["loadedCodeMods"],
+            "loadedContentPacks": private["log"]["loadedContentPacks"],
+            "skippedModCount": private["log"]["skippedModCount"],
+            "smapiVersion": private["log"]["smapiVersion"],
+            "gameVersion": private["log"]["gameVersion"],
+            "resolution": private["log"]["resolution"],
         }
         stream.write(json.dumps(raw_header, separators=(",", ":")) + "\n")
         for record in records:
@@ -195,6 +201,12 @@ def summarize_sample(run_root: Path, raw_root: Path) -> dict[str, Any]:
             "warpFarmSettled": (markers["warp_farm_settled"] - markers["warp_farm_start"]) * to_ms,
         },
         "startupPhaseSecondsFromLogStart": private["log"]["startupPhaseSecondsFromLogStart"],
+        "workload": {
+            "loadedCodeMods": private["log"]["loadedCodeMods"],
+            "loadedContentPacks": private["log"]["loadedContentPacks"],
+            "skippedModCount": private["log"]["skippedModCount"],
+            "identityMatched": True,
+        },
         "preRunChosenCpuBusyPercent": private["preRunChosenCpuBusyPercent"],
         "duringRunChosenCpuBusyPercent": private["duringRunChosenCpuBusyPercent"],
     }
@@ -267,6 +279,20 @@ def main() -> int:
         raise ValueError("common harness helpers differ from the prepared committed harness")
     plan = json.loads((private_root / "suite-plan.json").read_text(encoding="utf-8"))
     validate_final_plan(plan)
+    for sequence, (product, sample, diagnostics, series) in enumerate(
+        (("a", 1, False, "preflight"), ("b", 1, False, "preflight")), start=1
+    ):
+        label = f"{sequence:02d}-{product}{sample}"
+        runner.validate_saved_sample(
+            private_root / "preflight-runs" / label,
+            prepared,
+            label,
+            sequence,
+            product,
+            sample,
+            diagnostics,
+            series,
+        )
     expected_runs: list[Path] = []
     for group, entries in (("runs", plan["main"]), ("diagnostic-runs", plan["diagnostics"])):
         for sequence, entry in enumerate(entries, start=1):
@@ -297,6 +323,7 @@ def main() -> int:
     environment = {key: environment_private[key] for key in (
         "schema", "system", "kernel", "machine", "cpuList", "cpuModel", "logicalCpuCount", "governors",
         "memory", "dotnet", "bwrap", "xvfb", "locale", "renderer",
+        "runtimeSettings",
     )}
     metadata = {
         "schema": 1,
@@ -308,6 +335,9 @@ def main() -> int:
         "probeAssemblySha256": prepared["probeAssemblySha256"],
         "commonLauncherSha256": prepared["commonLauncherSha256"],
         "commonDepsSha256": prepared["commonDepsSha256"],
+        "expectedLoadedCodeMods": prepared["expectedLoadedCodeMods"],
+        "expectedLoadedContentPacks": prepared["expectedLoadedContentPacks"],
+        "expectedSkippedMods": prepared["expectedSkippedMods"],
         "harnessCommit": prepared["harnessCommit"],
         "calculationMethod": "nearest-rank tick percentiles; per-run metrics aggregated descriptively across independent processes",
         "environment": environment,
@@ -331,6 +361,8 @@ def main() -> int:
             "SMAPI startup log boundaries have one-second timestamp resolution.",
             "Shared-host load and filesystem caches cannot be eliminated completely; per-run variation is retained.",
             "Probe startup timing begins at mod entry and cannot observe native launcher/runtime work before that boundary.",
+            "Tiered compilation is disabled to avoid a reproducible .NET 6 JIT crash in this workload, so results do not represent the default tiered-runtime configuration.",
+            "A null audio backend is used consistently because the isolated Xvfb session has no audio device.",
         ],
     }
     (output_root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

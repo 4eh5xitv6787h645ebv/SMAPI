@@ -132,6 +132,23 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canonical preregistered"):
             analyzer.validate_final_plan(edited)
 
+    def test_workload_baseline_rejects_malformed_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "baseline.json"
+            malformed = (
+                {},
+                {"schema": 1},
+                {"schema": 1, "workloadIdentitySha256": None},
+                {"schema": 2, "workloadIdentitySha256": "a" * 64},
+                {"schema": 1, "workloadIdentitySha256": "a" * 63},
+                {"schema": 1, "workloadIdentitySha256": "A" * 64},
+            )
+            for baseline in malformed:
+                with self.subTest(baseline=baseline):
+                    path.write_text(json.dumps(baseline) + "\n", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid private preflight"):
+                        runner.load_workload_baseline(path)
+
     def test_tree_manifest_is_deterministic_and_rejects_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -229,17 +246,47 @@ class HarnessTests(unittest.TestCase):
     def test_log_parser_detects_standard_skipped_mod_banner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "log.txt"
-            path.write_text("[12:00:00 ERROR SMAPI] Skipped mods\nThese mods could not be added to your game.\n", encoding="utf-8")
-            self.assertGreaterEqual(runner.selected_log_metadata(path)["loadFailureCount"], 1)
+            path.write_text(
+                "[12:00:00 ERROR SMAPI]    Skipped mods\n"
+                "[12:00:00 ERROR SMAPI]    --------------------------------------------------\n"
+                "[12:00:00 ERROR SMAPI]       These mods could not be added to your game.\n"
+                "[12:00:00 ERROR SMAPI]       - fixture content pack because its dependency is missing.\n"
+                "[12:00:00 WARN  SMAPI]    Changed save serializer\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner.selected_log_metadata(path)["skippedModCount"], 1)
+
+    def test_workload_identity_covers_loaded_and_skipped_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "log.txt"
+            template = (
+                "[12:00:00 INFO  SMAPI] Loaded 2 mods:\n"
+                "[12:00:00 INFO  SMAPI]    Code One 1.0.0 | first\n"
+                "[12:00:00 INFO  SMAPI]    Code {second} 1.0.0 | second\n"
+                "[12:00:00 INFO  SMAPI] Loaded 1 content packs:\n"
+                "[12:00:00 INFO  SMAPI]    Pack One 1.0.0 | pack\n"
+                "[12:00:00 ERROR SMAPI]    Skipped mods\n"
+                "[12:00:00 ERROR SMAPI]    --------------------------------------------------\n"
+                "[12:00:00 ERROR SMAPI]       These mods could not be added to your game.\n"
+                "[12:00:00 ERROR SMAPI]       - Missing Pack 1.0.0 because dependency category.\n"
+                "[12:00:00 WARN  SMAPI]    Changed save serializer\n"
+            )
+            path.write_text(template.format(second="Two"), encoding="utf-8")
+            first = runner.selected_log_metadata(path)["workloadIdentitySha256"]
+            path.write_text(template.format(second="Changed"), encoding="utf-8")
+            second = runner.selected_log_metadata(path)["workloadIdentitySha256"]
+            self.assertRegex(first, r"^[0-9a-f]{64}$")
+            self.assertNotEqual(first, second)
 
     def test_complete_startup_metadata_is_accepted(self) -> None:
         metadata = {
             "resolution": "1280x720", "loadedCodeMods": 132, "loadedContentPacks": 176,
             "smapiVersion": "4.5.2", "gameVersion": "1.6.15 build 24356", "modsReady": True,
-            "loadFailureCount": 0,
+            "skippedModCount": 1,
+            "workloadIdentitySha256": "a" * 64,
             "startupPhaseSecondsFromLogStart": {name: index for index, name in enumerate(runner.REQUIRED_STARTUP_PHASES)},
         }
-        runner.validate_log_metadata(metadata, 132, 176)
+        runner.validate_log_metadata(metadata, 132, 176, 1, "a" * 64)
 
     def test_nearest_rank_percentile_and_run_variation(self) -> None:
         self.assertEqual(analyzer.percentile([1.0, 2.0, 3.0, 4.0], 0.95), 4.0)
