@@ -140,8 +140,8 @@ Scope constraints apply throughout:
 - [x] Run isolated installation tests ([hosted and independent downloaded-artifact lifecycle](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
 - [x] Run isolated update tests ([hosted and independent downloaded-artifact lifecycle](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
 - [x] Run isolated uninstall tests ([hosted and independent downloaded-artifact lifecycle](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
-- [x] Run isolated rollback tests ([verified fork-to-official-4.5.2 rollback](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
-- [x] Run a final trusted-modpack smoke test without publishing the fixtures ([sanitized workload/report/viewer evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
+- [ ] Run isolated rollback tests against the exact merged release candidate (the [pre-review candidate rollback](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444) must be repeated after installer hardening).
+- [ ] Run a final trusted-modpack smoke test without publishing the fixtures against the exact merged release candidate (the [pre-review workload evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444) must be repeated after installer hardening).
 - [ ] Obtain an independent Phase 3 release review.
 - [ ] Obtain an independent Phase 3 security/privacy review.
 - [ ] Obtain an independent Phase 3 testing review.
@@ -151,7 +151,7 @@ Scope constraints apply throughout:
 ### Publication and clean-room verification
 
 - [x] Open a focused Phase 3 fork pull request ([#172](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172)).
-- [x] Pass required CI and repository checks ([Linux alpha qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33170191391) and [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33170191358)).
+- [x] Pass required CI and repository checks ([exact reviewed-head Linux alpha qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33173516873) and [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33173516872)).
 - [ ] Merge the Phase 3 pull request into `develop` and close it.
 - [ ] Verify the release tag points to the exact reviewed commit.
 - [ ] Publish a GitHub prerelease clearly labeled experimental.

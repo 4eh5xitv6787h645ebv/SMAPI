@@ -5,17 +5,17 @@ set -euo pipefail
 ## Read config
 ##########
 # get SMAPI version
-version="$1"
+version="${1-}"
 if [ $# -eq 0 ]; then
     echo "SMAPI release version (like '4.0.0'):"
-    read version
+    IFS= read -r version
 fi
 
 # get Windows bin path
-windowsBinPath="$2"
+windowsBinPath="${2-}"
 if [ $# -le 1 ]; then
     echo "Windows compiled bin path:"
-    read windowsBinPath
+    IFS= read -r windowsBinPath
 fi
 
 # installer internal folders

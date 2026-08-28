@@ -121,6 +121,7 @@ jobs:
                 run: |
                     set -euo pipefail
                     build/scripts/test-linux-release-inputs.sh
+                    build/scripts/test-finalize-install-package-inputs.sh
                     bash -n build/scripts/finalize-install-package.sh
                     bash -n src/SMAPI.Installer/assets/smapi-runtime-dispatcher.sh
                     bash -n src/SMAPI.Installer/assets/unix-launcher.sh
