@@ -249,7 +249,7 @@ Scope constraints apply throughout:
 - [x] Document the non-cryptographic environment guard, two-attestation provenance boundary, unauthenticated informational build fields, external companion model, and immutable alpha.1 history ([clean documentation re-review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
 - [x] Pass required Linux qualification and deterministic performance checks on the exact reviewed head ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33218511989); [performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33218511910)).
 - [x] Address every actionable release-authority architecture, installer, security/privacy, testing, workflow, documentation, and final-diff finding and obtain clean exact-head reviews ([review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
-- [x] Merge and close focused [PR #179](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179), delete its feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`c289d9989250d4e51a2c9890de13466b35af733d`; origin contained only `develop`).
+- [x] Merge and close focused [PR #179](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179), delete its feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`c289d9989250d4e51a2c9890de13466b35af733d`).
 
 ### Phase 4 tests, reviews, packaging, and integration
 
