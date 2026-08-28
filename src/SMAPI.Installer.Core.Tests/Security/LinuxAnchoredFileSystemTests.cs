@@ -10,6 +10,8 @@ namespace StardewModdingAPI.Installer.Core.Tests.Security;
 [TestFixture]
 public sealed class LinuxAnchoredFileSystemTests
 {
+    private const int OpenReadWrite = 2;
+    private const int OpenNonBlocking = 0x800;
     private string TempRoot = null!;
     private string RootPath = null!;
 
@@ -96,6 +98,18 @@ public sealed class LinuxAnchoredFileSystemTests
         Action action = () => fileSystem.OpenRegularFileForRead("original.txt").Dispose();
 
         action.Should().Throw<IOException>().WithMessage("*multiple hard links*");
+    }
+
+    [Test]
+    public void OpenRegularFileForRead_Fifo_RejectsPromptlyWithoutWaitingForWriter()
+    {
+        string fifo = Path.Combine(this.RootPath, "pipe");
+        mkfifo(fifo, 0x180).Should().Be(0, $"mkfifo(2) failed with errno {Marshal.GetLastWin32Error()}");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        Exception failure = CapturePromptFailure(() => fileSystem.OpenRegularFileForRead("pipe").Dispose(), fifo);
+
+        failure.Should().BeOfType<IOException>().Which.Message.Should().Contain("unsupported special file");
     }
 
     [Test]
@@ -297,6 +311,36 @@ public sealed class LinuxAnchoredFileSystemTests
         File.ReadAllText(Path.Combine(this.RootPath, "destination")).Should().Be("source bytes");
     }
 
+    [TestCase("rename")]
+    [TestCase("replace")]
+    [TestCase("unlink")]
+    public void RegularFileMutation_SourceSwappedToFifo_RejectsPromptlyWithoutMutation(string operation)
+    {
+        string source = Path.Combine(this.RootPath, "source");
+        string parked = Path.Combine(this.RootPath, "parked-source");
+        string destination = Path.Combine(this.RootPath, "destination");
+        File.WriteAllText(source, "trusted source");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        LinuxFileIdentity expectedSource = fileSystem.Stat("source")!;
+        File.Move(source, parked);
+        mkfifo(source, 0x180).Should().Be(0, $"mkfifo(2) failed with errno {Marshal.GetLastWin32Error()}");
+
+        Action mutation = operation switch
+        {
+            "rename" => () => fileSystem.RenameFileNoReplace("source", "destination", expectedSource),
+            "replace" => () => fileSystem.ReplaceFileAtomically("source", "destination", expectedSource, null),
+            "unlink" => () => fileSystem.UnlinkFile("source", expectedSource),
+            _ => throw new AssertionException($"Unknown mutation surface '{operation}'.")
+        };
+        Exception failure = CapturePromptFailure(mutation, source);
+
+        failure.Should().BeOfType<IOException>();
+        File.ReadAllText(parked).Should().Be("trusted source");
+        File.Exists(destination).Should().BeFalse();
+        Action inspectSource = () => fileSystem.Stat("source");
+        inspectSource.Should().Throw<IOException>().WithMessage("*unsupported special file*");
+    }
+
     [Test]
     public void UnlinkFile_PathReplacedAfterStat_RejectsAndPreservesReplacement()
     {
@@ -428,9 +472,50 @@ public sealed class LinuxAnchoredFileSystemTests
         File.ReadAllText(Path.Combine(directory, "content")).Should().Be("preserve");
     }
 
+    private static Exception CapturePromptFailure(Action action, string fifoPath)
+    {
+        Task<Exception?> attempt = Task.Run(() =>
+        {
+            try
+            {
+                action();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex;
+            }
+        });
+
+        if (!attempt.Wait(TimeSpan.FromSeconds(2)))
+        {
+            // Open both ends without blocking so a vulnerable read-only open can finish and the test never strands a worker.
+            int unblockDescriptor = open(fifoPath, OpenReadWrite | OpenNonBlocking, 0);
+            try
+            {
+                unblockDescriptor.Should().BeGreaterThanOrEqualTo(0, $"open(2) failed with errno {Marshal.GetLastWin32Error()}");
+                attempt.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue("the blocked filesystem operation should be released for safe test cleanup");
+            }
+            finally
+            {
+                if (unblockDescriptor >= 0)
+                    close(unblockDescriptor).Should().Be(0, $"close(2) failed with errno {Marshal.GetLastWin32Error()}");
+            }
+            Assert.Fail("The anchored filesystem operation blocked while opening a FIFO leaf.");
+        }
+
+        return attempt.Result ?? throw new AssertionException("The anchored filesystem unexpectedly accepted a FIFO leaf.");
+    }
+
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int link(string oldPath, string newPath);
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int mkfifo(string path, int mode);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int open(string path, int flags, int mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int close(int descriptor);
 }

@@ -75,6 +75,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
 {
     private const int OpenReadOnly = 0;
     private const int OpenReadWrite = 2;
+    private const int OpenNonBlocking = 0x800;
     private const int OpenCreate = 0x40;
     private const int OpenExclusive = 0x80;
     private const int OpenDirectory = 0x10000;
@@ -173,7 +174,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         SafeFileHandle handle = OpenAt(
             parent.Parent,
             parent.Leaf,
-            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            OpenReadOnly | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
             0,
             "Couldn't open an anchored regular file"
         );
@@ -199,7 +200,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         SafeFileHandle handle = OpenAt(
             parent.Parent,
             parent.Leaf,
-            OpenReadWrite | OpenNoFollow | OpenCloseOnExec,
+            OpenReadWrite | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
             0,
             "Couldn't open an anchored regular file for writing"
         );
@@ -226,7 +227,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         SafeFileHandle handle = OpenAt(
             parent.Parent,
             parent.Leaf,
-            OpenReadWrite | OpenCreate | OpenNoFollow | OpenCloseOnExec,
+            OpenReadWrite | OpenCreate | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
             (uint)unixMode,
             "Couldn't create or open the anchored lock file"
         );
@@ -261,7 +262,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         SafeFileHandle handle = OpenAt(
             parent.Parent,
             parent.Leaf,
-            OpenReadWrite | OpenCreate | OpenExclusive | OpenNoFollow | OpenCloseOnExec,
+            OpenReadWrite | OpenCreate | OpenExclusive | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
             (uint)unixMode,
             "Couldn't create an anchored file without replacement"
         );
@@ -636,7 +637,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         using SafeFileHandle sourceHandle = OpenAt(
             source.Parent,
             source.Leaf,
-            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            OpenReadOnly | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
             0,
             "Couldn't open the anchored rename source"
         );
@@ -684,7 +685,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         using SafeFileHandle sourceHandle = OpenAt(
             source.Parent,
             source.Leaf,
-            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            OpenReadOnly | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
             0,
             "Couldn't open the anchored replacement source"
         );
@@ -773,7 +774,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         using SafeFileHandle handle = OpenAt(
             parent.Parent,
             parent.Leaf,
-            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            OpenReadOnly | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
             0,
             "Couldn't open the anchored unlink target"
         );
