@@ -9,18 +9,27 @@ Scope constraints apply throughout:
 - [ ] Preserve unrelated user changes.
 - [ ] Never commit, mirror, republish, or include the private modpack or Blossom save in artifacts.
 - [ ] Never modify the live game installation, live `Mods` directory, or live saves.
+- [x] Treat the complete PR #158 modpack release and Blossom save as explicitly trusted and authorized for extraction and execution without per-mod trust, provenance, licensing, or code review, and without asking again.
 - [ ] Use focused feature branches and separate pull requests where that improves safety or reviewability.
 - [ ] Commit and push every meaningful completed change.
 - [ ] Use independent agents for architecture, performance, security/privacy, UX/accessibility, installer, testing, documentation, and final-diff reviews.
 - [ ] Address every actionable review finding before merging.
 - [ ] Merge every completed phase into `develop` before starting dependent work.
+- [ ] Continue until every item is complete or an unavoidable external blocker satisfies the goal-blocked policy.
 
 ## Tracking and governance
 
-- [x] Create this repository roadmap with a checkbox for every phase, requirement, test, review, pull request, release, and definition-of-done item.
+- [ ] Create this repository roadmap with a checkbox for every phase, requirement, test, review, pull request, release, and definition-of-done item.
 - [x] Create [umbrella GitHub issue #168](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168) with the mirrored checklist.
 - [x] Link the umbrella issue from this roadmap.
-- [x] Commit and push the initial roadmap immediately (`cb0830b1`).
+- [x] Commit and push the initial roadmap immediately ([`cb0830b1`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/cb0830b1)).
+- [x] Open and link roadmap pull request [#169](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169).
+- [ ] Obtain an independent roadmap documentation/completeness review.
+- [ ] Obtain an independent roadmap final-diff review.
+- [ ] Address every actionable roadmap review finding.
+- [ ] Pass applicable roadmap PR checks.
+- [ ] Merge roadmap PR #169 into `develop` and close it.
+- [ ] Verify `develop` equals `origin/develop` after the roadmap merge.
 - [ ] Keep both checklists synchronized as evidence is verified.
 
 ## Phase 1 — Current upstream comparison and reproducible benchmarks
@@ -35,7 +44,7 @@ Scope constraints apply throughout:
 - [ ] Verify the A and B builds use the same game build, mods, configurations, save state, resolution, session, launch wrapper, warm-up, and scenarios.
 - [ ] Define repeatable startup, steady-state gameplay, and important load/warp transition scenarios.
 - [ ] Automate alternating A/B sample order.
-- [ ] Run at least five samples per build.
+- [ ] Run at least five A/B samples per build in the defined alternating order.
 - [ ] Measure at least 180 seconds of steady-state gameplay in every sample.
 - [ ] Record sanitized raw results, environment metadata, exact commits, scripts, and calculation methods in the repository.
 
@@ -55,7 +64,8 @@ Scope constraints apply throughout:
 - [ ] State clearly that one-machine results are not universal FPS claims.
 - [ ] Identify and fix every confirmed fork regression.
 - [ ] Rerun comparisons affected by fixes.
-- [ ] Obtain an independent performance/methodology review.
+- [ ] Obtain an independent performance-results review.
+- [ ] Obtain an independent methodology-and-conclusions review.
 - [ ] Address every actionable methodology or conclusion finding.
 
 ### Phase 1 publication and integration
@@ -65,7 +75,8 @@ Scope constraints apply throughout:
 - [ ] Update the performance audit with current evidence and limitations.
 - [ ] Update release notes with current evidence and limitations.
 - [ ] Open a focused Phase 1 fork pull request.
-- [ ] Obtain independent final-diff and documentation reviews.
+- [ ] Obtain an independent Phase 1 final-diff review.
+- [ ] Obtain an independent Phase 1 documentation review.
 - [ ] Pass required CI and repository checks.
 - [ ] Address every actionable Phase 1 review finding.
 - [ ] Merge the Phase 1 pull request into `develop` and close it.
@@ -98,7 +109,10 @@ Scope constraints apply throughout:
 - [ ] Revert all intentional regression probes after verification.
 - [ ] Repeatedly run required checks to verify they are stable and non-flaky.
 - [ ] Open a focused Phase 2 fork pull request.
-- [ ] Obtain independent architecture, performance, testing, and final-diff reviews.
+- [ ] Obtain an independent Phase 2 architecture review.
+- [ ] Obtain an independent Phase 2 performance review.
+- [ ] Obtain an independent Phase 2 testing review.
+- [ ] Obtain an independent Phase 2 final-diff review.
 - [ ] Address every actionable Phase 2 review finding.
 - [ ] Pass required CI and repository checks.
 - [ ] Merge the Phase 2 pull request into `develop` and close it.
@@ -128,7 +142,10 @@ Scope constraints apply throughout:
 - [ ] Run isolated uninstall tests.
 - [ ] Run isolated rollback tests.
 - [ ] Run a final trusted-modpack smoke test without publishing the fixtures.
-- [ ] Obtain independent release, security/privacy, testing, and final-diff reviews.
+- [ ] Obtain an independent Phase 3 release review.
+- [ ] Obtain an independent Phase 3 security/privacy review.
+- [ ] Obtain an independent Phase 3 testing review.
+- [ ] Obtain an independent Phase 3 final-diff review.
 - [ ] Address every actionable release review finding.
 
 ### Publication and clean-room verification
@@ -199,9 +216,10 @@ Scope constraints apply throughout:
 - [ ] Obtain independent installer architecture review.
 - [ ] Obtain independent security/privacy review.
 - [ ] Obtain independent UX/accessibility review.
-- [ ] Obtain independent testing and final-diff reviews.
+- [ ] Obtain independent Phase 4 testing review.
+- [ ] Obtain independent Phase 4 final-diff review.
 - [ ] Address every actionable Phase 4 review finding.
-- [ ] Package the GUI through the release workflow.
+- [ ] Package and document the GUI through the release workflow only after independent security/privacy and UX/accessibility findings are addressed.
 - [ ] Document GUI installation, update, repair, uninstall, backup, rollback, logs, errors, and troubleshooting.
 - [ ] Open a focused Phase 4 fork pull request.
 - [ ] Pass required CI and repository checks.
@@ -251,8 +269,15 @@ Scope constraints apply throughout:
 - [ ] Add comprehensive recommendation unit and integration tests.
 - [ ] Validate diagnostics-disabled overhead with the complete trusted workload.
 - [ ] Validate privacy exclusions with the complete trusted workload.
+- [ ] Validate diagnostics-disabled overhead with synthetic maximum-capacity fixtures.
+- [ ] Validate privacy exclusions with synthetic maximum-capacity fixtures.
 - [ ] Validate bounded behavior with synthetic maximum-capacity fixtures.
-- [ ] Obtain independent architecture, security/privacy, UX/accessibility, testing, documentation, and final-diff reviews.
+- [ ] Obtain an independent Phase 5 architecture review.
+- [ ] Obtain an independent Phase 5 security/privacy review.
+- [ ] Obtain an independent Phase 5 UX/accessibility review.
+- [ ] Obtain an independent Phase 5 testing review.
+- [ ] Obtain an independent Phase 5 documentation review.
+- [ ] Obtain an independent Phase 5 final-diff review.
 - [ ] Address every actionable Phase 5 review finding.
 - [ ] Open a focused Phase 5 fork pull request.
 - [ ] Pass required CI and repository checks.
@@ -289,7 +314,13 @@ Scope constraints apply throughout:
 - [ ] Add truncation and boundedness tests.
 - [ ] Add privacy tests.
 - [ ] Add real-workload tests with the private fixtures kept outside artifacts.
-- [ ] Obtain independent architecture, performance, security/privacy, UX/accessibility, testing, documentation, and final-diff reviews.
+- [ ] Obtain an independent Phase 6 architecture review.
+- [ ] Obtain an independent Phase 6 performance review.
+- [ ] Obtain an independent Phase 6 security/privacy review.
+- [ ] Obtain an independent Phase 6 UX/accessibility review.
+- [ ] Obtain an independent Phase 6 testing review.
+- [ ] Obtain an independent Phase 6 documentation review.
+- [ ] Obtain an independent Phase 6 final-diff review.
 - [ ] Address every actionable Phase 6 review finding.
 - [ ] Open a focused Phase 6 fork pull request.
 - [ ] Pass required CI and repository checks.
@@ -302,6 +333,7 @@ Scope constraints apply throughout:
 
 - [ ] Fetch and review the complete fork delta against current `Pathoschild/SMAPI` `develop`.
 - [ ] Identify low-risk, platform-neutral correctness or performance improvements that separate cleanly from Linux-only features.
+- [ ] Keep Linux-only or high-risk experimental changes in this fork.
 - [ ] Document Linux-only or high-risk experimental changes not submitted upstream and explain why.
 - [ ] Rebase every selected change onto current upstream `develop`.
 - [ ] Minimize every selected upstream diff.
@@ -313,7 +345,12 @@ Scope constraints apply throughout:
 
 ### Submission and follow-through
 
-- [ ] Obtain independent upstream-readiness, architecture, performance, testing, documentation, and final-diff reviews.
+- [ ] Obtain an independent Phase 7 upstream-readiness review.
+- [ ] Obtain an independent Phase 7 architecture review.
+- [ ] Obtain an independent Phase 7 performance review.
+- [ ] Obtain an independent Phase 7 testing review.
+- [ ] Obtain an independent Phase 7 documentation review.
+- [ ] Obtain an independent Phase 7 final-diff review.
 - [ ] Address every actionable Phase 7 review finding.
 - [ ] Submit a focused upstream GitHub pull request for each justified change.
 - [ ] Verify every submitted upstream PR is valid and CI-clean.
