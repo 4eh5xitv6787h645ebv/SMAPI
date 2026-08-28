@@ -301,15 +301,40 @@ case "$runtime" in
         ;;
 esac
 
+tool_version_contains() {
+    local tool_name=$1 expected=$2 version
+    command -v "$tool_name" >/dev/null 2>&1 || return 1
+    version=$(LC_ALL=C "$tool_name" --version 2>/dev/null) || return 1
+    [[ "$version" == *"$expected"* ]]
+}
+
+# The validation below intentionally uses exact GNU stat, cmp, and timeout behavior. Probe it
+# explicitly so a minimal or non-GNU userland gets one understandable error instead of a misleading
+# file error. GNU cmp is shipped by diffutils; GNU stat and timeout are shipped by coreutils.
+if ! tool_version_contains stat "GNU coreutils" \
+    || ! stat --printf='' -- "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+    printf '%s\n' "SMAPI can't launch because GNU coreutils stat is required. Install GNU coreutils and try again." >&2
+    exit 1
+fi
+if [ "$runtime" = "net6" ] && {
+    ! tool_version_contains cmp "GNU diffutils" \
+        || ! tool_version_contains timeout "GNU coreutils" \
+        || ! timeout --kill-after=1s 1s cmp -s -- /dev/null /dev/null
+}; then
+    printf '%s\n' "SMAPI can't launch with the game's .NET runtime because GNU cmp and coreutils timeout are required. Install GNU diffutils and coreutils, then try again." >&2
+    exit 1
+fi
+
 if [ "$runtime" = "net10" ]; then
     configure_net10_gc || exit $?
 fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit $?
 
-# Read one bounded, unique regular-file identity without following a symbolic-link leaf. The caller
-# compares the identity again after reading so a concurrent replacement fails closed. This dispatcher
-# never repairs files: the installer core owns all mutation, journaling, and rollback behavior.
+# Read one bounded, unique regular-file identity without following a symbolic-link leaf. Rechecking
+# detects ordinary changes observed during validation, but these pathname checks aren't a race-free
+# guarantee against adversarial same-user replacement between validation and exec. This dispatcher
+# never repairs files: the installer owns all mutation, journaling, and rollback behavior.
 inspect_unique_regular_file() {
     local path=$1 minimum_size=$2 maximum_size=$3 require_executable=$4
     local metadata file_type link_count size_bytes identity remainder
@@ -353,7 +378,7 @@ if [ "$runtime" = "net6" ]; then
         exit 1
     }
     if [ "${source_identity%%:*}" != "${target_identity%%:*}" ] \
-        || ! timeout --signal=KILL 5s cmp -s -- "$source_deps" "$target_deps"; then
+        || ! { timeout --kill-after=1s 5s cmp -s -- "$source_deps" "$target_deps"; } 2>/dev/null; then
         print_dependency_repair_guidance
         exit 1
     fi

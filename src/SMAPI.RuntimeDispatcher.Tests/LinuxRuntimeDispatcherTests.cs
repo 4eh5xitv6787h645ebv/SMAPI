@@ -19,6 +19,10 @@ internal class LinuxRuntimeDispatcherTests
     private const string DependencyRepairGuidance =
         "SMAPI can't safely launch with the game's .NET runtime because dependency metadata is missing, unsafe, or out of date.\n"
         + "Re-run \"install on Linux.sh\" from the same verified installer package and choose Install, then try again.\n";
+    private const string StatPrerequisiteError =
+        "SMAPI can't launch because GNU coreutils stat is required. Install GNU coreutils and try again.\n";
+    private const string Net6PrerequisiteError =
+        "SMAPI can't launch with the game's .NET runtime because GNU cmp and coreutils timeout are required. Install GNU diffutils and coreutils, then try again.\n";
 
     private static readonly string[] NativeGcSettings =
     {
@@ -91,6 +95,75 @@ internal class LinuxRuntimeDispatcherTests
         finally
         {
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestCase("net6")]
+    [TestCase("net10")]
+    public async Task RejectsNonGnuStatWithPathFreePrerequisiteError(string runtime)
+    {
+        LinuxRuntimeDispatcherTests.RequireLinux();
+
+        string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
+        string tools = LinuxRuntimeDispatcherTests.CreatePlainTestRoot();
+        try
+        {
+            await LinuxRuntimeDispatcherTests.WriteToolWrapper(tools, "stat", "printf '%s\\n' 'stat from another userland'\nexit 0");
+            string beforeRoot = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root);
+            string beforeTools = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(tools);
+
+            DispatcherResult result = await LinuxRuntimeDispatcherTests.RunDispatcher(
+                root,
+                runtime,
+                gcMode: "workstation",
+                environment: new Dictionary<string, string> { ["PATH"] = LinuxRuntimeDispatcherTests.PrependPath(tools) }
+            );
+
+            result.ExitCode.Should().Be(1);
+            result.StandardOutput.Should().BeEmpty();
+            result.StandardError.Should().Be(LinuxRuntimeDispatcherTests.StatPrerequisiteError);
+            result.StandardError.Should().NotContain(root);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root)).Should().Be(beforeRoot);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(tools)).Should().Be(beforeTools);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(tools, recursive: true);
+        }
+    }
+
+    [TestCase("cmp")]
+    [TestCase("timeout")]
+    public async Task RejectsNonGnuNet6ComparisonToolWithPathFreePrerequisiteError(string tool)
+    {
+        LinuxRuntimeDispatcherTests.RequireLinux();
+
+        string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
+        string tools = LinuxRuntimeDispatcherTests.CreatePlainTestRoot();
+        try
+        {
+            await LinuxRuntimeDispatcherTests.WriteToolWrapper(tools, tool, $"printf '%s\\n' '{tool} from another userland'\nexit 0");
+            string beforeRoot = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root);
+            string beforeTools = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(tools);
+
+            DispatcherResult result = await LinuxRuntimeDispatcherTests.RunDispatcher(
+                root,
+                runtime: "net6",
+                environment: new Dictionary<string, string> { ["PATH"] = LinuxRuntimeDispatcherTests.PrependPath(tools) }
+            );
+
+            result.ExitCode.Should().Be(1);
+            result.StandardOutput.Should().BeEmpty();
+            result.StandardError.Should().Be(LinuxRuntimeDispatcherTests.Net6PrerequisiteError);
+            result.StandardError.Should().NotContain(root);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root)).Should().Be(beforeRoot);
+            (await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(tools)).Should().Be(beforeTools);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(tools, recursive: true);
         }
     }
 
@@ -225,6 +298,101 @@ internal class LinuxRuntimeDispatcherTests
         {
             Directory.Delete(root, recursive: true);
             Directory.Delete(external, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task RefusesOrdinaryDependencyReplacementObservedWhileComparisonIsPaused()
+    {
+        LinuxRuntimeDispatcherTests.RequireLinux();
+
+        string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
+        string tools = LinuxRuntimeDispatcherTests.CreatePlainTestRoot();
+        string handshake = LinuxRuntimeDispatcherTests.CreatePlainTestRoot();
+        try
+        {
+            const string contents = "current dependency metadata\n";
+            await LinuxRuntimeDispatcherTests.WriteMatchingDeps(root, contents);
+            await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "printf '%s\\n' 'HOST_STARTED'");
+            await LinuxRuntimeDispatcherTests.WriteToolWrapper(
+                tools,
+                "cmp",
+                "if [ \"${1-}\" = \"--version\" ] || [ \"${3-}\" = \"/dev/null\" ]; then exec \"$SMAPI_TEST_REAL_CMP\" \"$@\"; fi\n"
+                + ": > \"$SMAPI_TEST_CMP_STARTED\"\n"
+                + "while [ ! -e \"$SMAPI_TEST_CMP_CONTINUE\" ]; do /usr/bin/sleep 0.01; done\n"
+                + "exec \"$SMAPI_TEST_REAL_CMP\" \"$@\""
+            );
+            string started = Path.Combine(handshake, "started");
+            string proceed = Path.Combine(handshake, "continue");
+            Dictionary<string, string> environment = new()
+            {
+                ["PATH"] = LinuxRuntimeDispatcherTests.PrependPath(tools),
+                ["SMAPI_TEST_REAL_CMP"] = LinuxRuntimeDispatcherTests.FindExecutable("cmp"),
+                ["SMAPI_TEST_CMP_STARTED"] = started,
+                ["SMAPI_TEST_CMP_CONTINUE"] = proceed
+            };
+
+            Task<DispatcherResult> running = LinuxRuntimeDispatcherTests.RunDispatcher(root, runtime: "net6", environment: environment);
+            await LinuxRuntimeDispatcherTests.WaitForFile(started, TimeSpan.FromSeconds(3));
+            string target = Path.Combine(root, "StardewModdingAPI-net6.deps.json");
+            UnixFileMode mode = File.GetUnixFileMode(target);
+            File.Delete(target);
+            await LinuxRuntimeDispatcherTests.WriteTargetDeps(root, contents);
+            File.SetUnixFileMode(target, mode);
+            await File.WriteAllTextAsync(proceed, "continue\n");
+
+            DispatcherResult result = await running;
+
+            result.ExitCode.Should().Be(1);
+            result.StandardOutput.Should().BeEmpty();
+            result.StandardError.Should().Be(LinuxRuntimeDispatcherTests.DependencyRepairGuidance);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(tools, recursive: true);
+            Directory.Delete(handshake, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task BoundsAComparisonWhichStopsResponding()
+    {
+        LinuxRuntimeDispatcherTests.RequireLinux();
+
+        string root = LinuxRuntimeDispatcherTests.CreateTestRoot();
+        string tools = LinuxRuntimeDispatcherTests.CreatePlainTestRoot();
+        try
+        {
+            await LinuxRuntimeDispatcherTests.WriteMatchingDeps(root, "current dependency metadata\n");
+            await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "printf '%s\\n' 'HOST_STARTED'");
+            await LinuxRuntimeDispatcherTests.WriteToolWrapper(
+                tools,
+                "cmp",
+                "if [ \"${1-}\" = \"--version\" ] || [ \"${3-}\" = \"/dev/null\" ]; then exec \"$SMAPI_TEST_REAL_CMP\" \"$@\"; fi\nexec /usr/bin/sleep 30"
+            );
+            Stopwatch elapsed = Stopwatch.StartNew();
+
+            DispatcherResult result = await LinuxRuntimeDispatcherTests.RunDispatcher(
+                root,
+                runtime: "net6",
+                environment: new Dictionary<string, string>
+                {
+                    ["PATH"] = LinuxRuntimeDispatcherTests.PrependPath(tools),
+                    ["SMAPI_TEST_REAL_CMP"] = LinuxRuntimeDispatcherTests.FindExecutable("cmp")
+                }
+            );
+
+            elapsed.Stop();
+            result.ExitCode.Should().Be(1);
+            result.StandardOutput.Should().BeEmpty();
+            result.StandardError.Should().Be(LinuxRuntimeDispatcherTests.DependencyRepairGuidance);
+            elapsed.Elapsed.Should().BeGreaterThan(TimeSpan.FromSeconds(4)).And.BeLessThan(TimeSpan.FromSeconds(9));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(tools, recursive: true);
         }
     }
 
@@ -384,6 +552,40 @@ internal class LinuxRuntimeDispatcherTests
         string root = Path.Combine(Path.GetTempPath(), "smapi-runtime-dispatcher-tests", $"external-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         return root;
+    }
+
+    /// <summary>Write one executable test-only PATH wrapper.</summary>
+    private static Task WriteToolWrapper(string root, string name, string shellBody)
+    {
+        return LinuxRuntimeDispatcherTests.WriteExecutableFile(Path.Combine(root, name), $"#!/bin/sh\n{shellBody}\n");
+    }
+
+    /// <summary>Prepend a test-only command directory to the inherited PATH.</summary>
+    private static string PrependPath(string root)
+    {
+        return $"{root}{Path.PathSeparator}{Environment.GetEnvironmentVariable("PATH")}";
+    }
+
+    /// <summary>Resolve one executable from the test process's unmodified PATH.</summary>
+    private static string FindExecutable(string name)
+    {
+        foreach (string directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            string candidate = Path.Combine(directory, name);
+            if (File.Exists(candidate))
+                return Path.GetFullPath(candidate);
+        }
+        throw new AssertionException($"Required test executable '{name}' wasn't found in PATH.");
+    }
+
+    /// <summary>Wait for a test handshake without allowing an accidental hang.</summary>
+    private static async Task WaitForFile(string path, TimeSpan timeout)
+    {
+        Stopwatch elapsed = Stopwatch.StartNew();
+        while (!File.Exists(path) && elapsed.Elapsed < timeout)
+            await Task.Delay(10);
+        if (!File.Exists(path))
+            Assert.Fail($"The test handshake '{path}' wasn't created within {timeout}.");
     }
 
     /// <summary>Capture entry identities and regular-file bytes without following links or opening special files.</summary>

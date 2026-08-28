@@ -31,6 +31,9 @@ claimed.
 
 - Native Linux x86_64 Stardew Valley 1.6.14 or later. Android/mobile is not supported.
 - A normal desktop user account. **Never run the installer with `sudo` or as root.**
+- GNU Bash.
+- GNU coreutils (`stat` and `timeout`) and GNU diffutils (`cmp`). The runtime dispatcher requires
+  `stat` for both runtime paths; its default game-runtime path also requires `cmp` and `timeout`.
 - The game must be closed.
 - Back up saves, `Mods`, and any existing `smapi-internal/config.user.json` before changing loaders.
 - Download only from this repository's
@@ -119,7 +122,8 @@ backup rules. If terminal automation cannot run it, `internal/linux/install.dat`
 1. Extract `install.dat` into a staging directory.
 2. Back up `StardewValley` as `StardewValley-original` without overwriting an existing backup.
 3. Copy the staged payload into the game directory without deleting unrelated files.
-4. Copy `Stardew Valley.deps.json` to `StardewModdingAPI-net6.deps.json`.
+4. Copy `Stardew Valley.deps.json` to `StardewModdingAPI-net6.deps.json`, preserving both its exact
+   bytes and Unix mode: `cp --preserve=mode -- "Stardew Valley.deps.json" "StardewModdingAPI-net6.deps.json"`.
 5. Rename staged `unix-launcher.sh` to `StardewValley`.
 6. Mark `StardewValley`, `StardewModdingAPI`, both `StardewModdingAPI-net*` hosts, and every
    private-runtime `createdump` executable as mode 755. The private app-relative runtime contains
@@ -137,7 +141,10 @@ the private benchmark modpack or save.
 
 The published performance comparison describes one controlled workstation and workload. It is not
 a universal FPS, power, CPU-use, or latency claim. There is no GUI/updater yet, and the current
-rollback flow is not atomic. See the [comparison](../upstream-comparison.md),
+rollback flow is not atomic. The read-only runtime dispatcher rechecks path identities to catch
+ordinary concurrent changes during validation, but same-user adversarial path replacement between
+validation and process execution is outside this nonprivileged launcher's threat boundary. See the
+[comparison](../upstream-comparison.md),
 [validation record](linux-alpha-release-validation.md), and
 [issue tracker](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues).
 
