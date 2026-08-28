@@ -168,6 +168,52 @@ public sealed class InstallerTransactionExecutorTests
     }
 
     [Test]
+    public void Recover_LegacySchema2InterruptedJournal_RestoresOriginalAndAllowsUpgrade()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "legacy old");
+        Write(payload, "managed", "legacy new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("legacy old"), "managed", Hash("legacy new"))
+        });
+        Action interrupted = () => new InstallerTransactionExecutor(
+            faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true)
+        ).Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        DowngradeJournalToSchema2(game, plan.TransactionId);
+
+        new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().ContainSingle();
+
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("legacy old");
+    }
+
+    [Test]
+    public void Apply_LegacySchema2FinalJournal_DoesNotBlockNextTransaction()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "first", "first");
+        Write(payload, "second", "second");
+        TransactionPlan first = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", null, "first", Hash("first"))
+        });
+        new InstallerTransactionExecutor().Apply(game, payload, first);
+        DowngradeJournalToSchema2(game, first.TransactionId);
+        TransactionPlan second = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.xml", null, "second", Hash("second"))
+        });
+
+        new InstallerTransactionExecutor().Apply(game, payload, second).Status.Should().Be(TransactionStatus.Committed);
+
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("first");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second");
+    }
+
+    [Test]
     public void Recover_WhenResultChangedAfterInterruption_PreservesChangeAndRefusesRollback()
     {
         string game = this.CreateDirectory();
@@ -504,26 +550,6 @@ public sealed class InstallerTransactionExecutorTests
     }
 
     [Test]
-    public void Apply_ReceiptWriteParticipatesInSameRollbackBoundary()
-    {
-        string game = this.CreateDirectory();
-        string payload = this.CreateDirectory();
-        Write(payload, "receipt", "canonical receipt");
-        TransactionPlan plan = TransactionPlan.CreateWithCoreReceipt(
-            Guid.NewGuid(),
-            Array.Empty<TransactionFileOperation>(),
-            WriteOperation(TransactionPlan.CoreReceiptRelativePath, null, "receipt", Hash("canonical receipt"))
-        );
-        InstallerTransactionExecutor executor = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: false));
-
-        Action apply = () => executor.Apply(game, payload, plan);
-
-        apply.Should().Throw<InvalidOperationException>();
-        File.Exists(Path.Combine(game, ".smapi-installer/ownership/receipt.json")).Should().BeFalse();
-        Directory.Exists(Path.Combine(game, ".smapi-installer/ownership")).Should().BeFalse();
-    }
-
-    [Test]
     public void Apply_PublicPlanCannotForgeReservedReceiptMutation()
     {
         string game = this.CreateDirectory();
@@ -538,25 +564,6 @@ public sealed class InstallerTransactionExecutorTests
 
         apply.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.InvalidPlan);
         Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse("plan validation must precede every side effect");
-    }
-
-    [Test]
-    public void Apply_CoreAuthorizedReceiptCommitsWithOrdinaryFiles()
-    {
-        string game = this.CreateDirectory();
-        string payload = this.CreateDirectory();
-        Write(payload, "runtime", "runtime");
-        Write(payload, "receipt", "canonical receipt");
-        TransactionPlan plan = TransactionPlan.CreateWithCoreReceipt(
-            Guid.NewGuid(),
-            new[] { WriteOperation("StardewModdingAPI.dll", null, "runtime", Hash("runtime")) },
-            WriteOperation(TransactionPlan.CoreReceiptRelativePath, null, "receipt", Hash("canonical receipt"), 0x180)
-        );
-
-        new InstallerTransactionExecutor().Apply(game, payload, plan).Status.Should().Be(TransactionStatus.Committed);
-
-        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime");
-        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreReceiptRelativePath)).Should().Be("canonical receipt");
     }
 
     [Test]
@@ -757,6 +764,46 @@ public sealed class InstallerTransactionExecutorTests
     private static string Hash(string text)
     {
         return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
+    }
+
+    private static void DowngradeJournalToSchema2(string gameRoot, Guid transactionId)
+    {
+        string transaction = Path.Combine(gameRoot, ".smapi-installer/transactions", transactionId.ToString("N"));
+        string journalPath = Path.Combine(transaction, "journal.json");
+        JsonObject journal = JsonNode.Parse(File.ReadAllText(journalPath))!.AsObject();
+        journal["schemaVersion"] = 2;
+        journal.Remove("coreGenerationId");
+        journal.Remove("coreRecoveryOperationCount");
+        journal.Remove("coreRecoveryContentCount");
+        journal.Remove("hasCoreAuthorizedManifestMutation");
+        journal.Remove("hasCoreAuthorizedRecoveryPointerMutation");
+        string journalText = journal.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(journalPath, journalText);
+        string planSha256 = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(journalText))).ToLowerInvariant();
+
+        string eventsPath = Path.Combine(transaction, "events.jsonl");
+        string? previous = null;
+        List<string> rewritten = new();
+        foreach (string line in File.ReadAllLines(eventsPath).Where(line => line.Length > 0))
+        {
+            JsonObject prior = JsonNode.Parse(line)!.AsObject();
+            JsonObject unsigned = new()
+            {
+                ["schemaVersion"] = 1,
+                ["sequence"] = prior["sequence"]!.GetValue<int>(),
+                ["kind"] = prior["kind"]!.GetValue<string>(),
+                ["operationIndex"] = prior["operationIndex"]?.DeepClone(),
+                ["planSha256"] = planSha256,
+                ["previousEventSha256"] = previous
+            };
+            string eventSha256 = Convert.ToHexString(
+                SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(unsigned.ToJsonString()))
+            ).ToLowerInvariant();
+            unsigned["eventSha256"] = eventSha256;
+            rewritten.Add(unsigned.ToJsonString());
+            previous = eventSha256;
+        }
+        File.WriteAllText(eventsPath, string.Join('\n', rewritten) + "\n");
     }
 
     private static TransactionFileOperation WriteOperation(string destination, string? existingHash, string source, string resultHash, int? mode = null)

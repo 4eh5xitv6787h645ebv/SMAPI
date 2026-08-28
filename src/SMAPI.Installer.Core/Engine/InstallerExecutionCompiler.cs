@@ -24,7 +24,9 @@ internal sealed class InstallerExecutionCompiler
         InstallationPlanningRequest request,
         GameRootIdentity gameRoot,
         ulong operationGeneration,
-        IVerifiedPackageContentAuthority? targetPackageContent
+        IVerifiedPackageContentAuthority? targetPackageContent,
+        ICommittedRecoveryContentAuthority? rollbackContent = null,
+        Sha256Digest? currentRecoveryPointerSha256 = null
     )
     {
         ArgumentNullException.ThrowIfNull(plan);
@@ -50,6 +52,22 @@ internal sealed class InstallerExecutionCompiler
         }
         else if (targetPackageContent is not null)
             throw Error(ExecutionCompilationError.InvalidOperationMapping, "This action must not invent a target package-content authority.");
+        if (request.Action == InstallationAction.Rollback)
+        {
+            if (
+                rollbackContent is null
+                || request.RollbackSnapshot is null
+                || !ReferenceEquals(rollbackContent.Snapshot, request.RollbackSnapshot)
+                || rollbackContent.SnapshotSha256 != GetRollbackSnapshotDigest(request.RollbackSnapshot)
+                || rollbackContent.GameRoot != gameRoot
+            )
+            {
+                throw Error(ExecutionCompilationError.StaleRollbackSnapshot, "The rollback snapshot isn't backed by a live committed recovery authority for this game root.");
+            }
+            rollbackContent.AssertUsable();
+        }
+        else if (rollbackContent is not null)
+            throw Error(ExecutionCompilationError.InvalidOperationMapping, "This action must not invent a committed recovery authority.");
 
         InstallationPlan expected = this.Planner.Plan(request);
         if (!expected.CanExecute || expected.GetCanonicalDigest() != plan.GetCanonicalDigest())
@@ -66,7 +84,10 @@ internal sealed class InstallerExecutionCompiler
             request.InstalledReceipt?.GetCanonicalDigest(),
             GetRollbackSnapshotDigest(request.RollbackSnapshot),
             GetRecoveryObservationsDigest(request.RecoveryObservations),
-            targetPackageContent
+            rollbackContent?.GenerationId,
+            currentRecoveryPointerSha256,
+            targetPackageContent,
+            rollbackContent
         );
     }
 
@@ -90,6 +111,7 @@ internal sealed class InstallerExecutionCompiler
         if (binding.PlanSha256 != plan.GetCanonicalDigest())
             throw Error(ExecutionCompilationError.StalePlan, "The canonical plan changed after it was bound.");
         binding.TargetPackageContent?.AssertUsable();
+        binding.RollbackContent?.AssertUsable();
 
         AssertSameDigest(
             binding.ManifestSha256,
@@ -250,7 +272,8 @@ internal sealed class InstallerExecutionCompiler
                 operation,
                 PreparationInstructionKind.WriteTransactionDestination,
                 new RecoverySnapshotSource(
-                    binding.RollbackSnapshotSha256,
+                    binding.RollbackContent
+                        ?? throw Error(ExecutionCompilationError.StaleRollbackSnapshot, "A restore has no live committed recovery authority."),
                     RecoverySnapshotContent.GameFile,
                     operation.Path,
                     snapshotEntry.Backup
@@ -390,7 +413,8 @@ internal sealed class InstallerExecutionCompiler
                         ReceiptPreparationKind.WriteAtomically,
                         binding.InstalledReceiptSha256,
                         new RecoverySnapshotSource(
-                            snapshotSha256,
+                            binding.RollbackContent
+                                ?? throw Error(ExecutionCompilationError.StaleRollbackSnapshot, "A receipt restore has no live committed recovery authority."),
                             RecoverySnapshotContent.InstalledReceipt,
                             null,
                             null,

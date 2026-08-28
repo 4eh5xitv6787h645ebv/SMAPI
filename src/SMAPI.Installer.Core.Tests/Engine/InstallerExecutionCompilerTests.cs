@@ -2,6 +2,7 @@ using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Ownership.Persistence;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Security;
@@ -378,7 +379,14 @@ public class InstallerExecutionCompilerTests
     public void BoundPlan_RejectsRecoveryMetadataTamperingEvenWhenPlanHashesAreUnchanged()
     {
         (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration, Authority(request));
+        BoundInstallationPlan binding = this.Compiler.BindPlan(
+            plan,
+            request,
+            GameRoot,
+            OperationGeneration,
+            Authority(request),
+            RecoveryAuthority(request)
+        );
         RecoveryFileObservation[] tampered = request.RecoveryObservations
             .Select(observation => observation.Path.Value == "StardewValley"
                 ? new RecoveryFileObservation(
@@ -530,7 +538,14 @@ public class InstallerExecutionCompilerTests
     {
         request = AddRequiredRecoveryObservations(request);
         InstallationPlan plan = this.Planner.Plan(request);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration, Authority(request));
+        BoundInstallationPlan binding = this.Compiler.BindPlan(
+            plan,
+            request,
+            GameRoot,
+            OperationGeneration,
+            Authority(request),
+            RecoveryAuthority(request)
+        );
         return (plan, this.Compiler.Prepare(binding, plan, request, TransactionId));
     }
 
@@ -550,6 +565,13 @@ public class InstallerExecutionCompilerTests
             : null;
     }
 
+    private static ICommittedRecoveryContentAuthority? RecoveryAuthority(InstallationPlanningRequest request)
+    {
+        return request.Action == InstallationAction.Rollback && request.RollbackSnapshot is not null
+            ? new FakeRecoveryContentAuthority(request.RollbackSnapshot)
+            : null;
+    }
+
     private sealed class FakePackageContentAuthority : IVerifiedPackageContentAuthority
     {
         public PackageManifest Manifest { get; }
@@ -564,6 +586,30 @@ public class InstallerExecutionCompilerTests
         {
             throw new NotSupportedException("The pure compiler tests never materialize package bytes.");
         }
+
+        public void AssertUsable() { }
+    }
+
+    private sealed class FakeRecoveryContentAuthority : ICommittedRecoveryContentAuthority
+    {
+        public Guid GenerationId { get; } = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        public GameRootIdentity GameRoot => InstallerExecutionCompilerTests.GameRoot;
+        public RollbackSnapshot Snapshot { get; }
+        public Sha256Digest SnapshotSha256 => Sha256Digest.Hash(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(this.Snapshot));
+
+        public FakeRecoveryContentAuthority(RollbackSnapshot snapshot)
+        {
+            this.Snapshot = snapshot;
+        }
+
+        public LinuxAnchoredFile OpenGameFile(NormalizedRelativePath path, RecoveryFileIdentity expectedIdentity)
+            => throw new NotSupportedException("The pure compiler tests never materialize recovery bytes.");
+
+        public LinuxAnchoredFile OpenPreviousReceipt(Sha256Digest expectedSha256)
+            => throw new NotSupportedException("The pure compiler tests never materialize recovery bytes.");
+
+        public LinuxAnchoredFile OpenPreviousManifest(Sha256Digest expectedSha256)
+            => throw new NotSupportedException("The pure compiler tests never materialize recovery bytes.");
 
         public void AssertUsable() { }
     }

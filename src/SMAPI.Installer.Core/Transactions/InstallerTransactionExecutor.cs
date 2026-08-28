@@ -243,11 +243,7 @@ internal sealed class InstallerTransactionExecutor
     {
         CoreReservedMutationAuthorization? authorization = plan.CoreAuthorization;
         if (authorization is null)
-        {
-            return relativePath == TransactionPlan.CoreReceiptRelativePath
-                && plan.HasCoreAuthorizedReceiptMutation
-                && operationIndex == plan.Operations.Count - 1;
-        }
+            return false;
 
         if (authorization.GenerationId != plan.TransactionId)
             return false;

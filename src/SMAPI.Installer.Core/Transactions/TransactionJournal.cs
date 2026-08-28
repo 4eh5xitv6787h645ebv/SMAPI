@@ -22,6 +22,21 @@ internal sealed class TransactionJournal
     public bool HasCoreAuthorizedManifestMutation { get; init; }
     public bool HasCoreAuthorizedRecoveryPointerMutation { get; init; }
     public List<TransactionJournalEntry> Entries { get; init; } = new();
+    [JsonIgnore]
+    public string? PersistedPlanSha256 { get; init; }
+}
+
+internal sealed class LegacyTransactionJournalV2
+{
+    public int SchemaVersion { get; init; } = 2;
+    public Guid TransactionId { get; init; }
+    public long CreatedUtcTicks { get; init; }
+    public string CanonicalGameRoot { get; init; } = null!;
+    public ulong GameRootInode { get; init; }
+    public uint GameRootDeviceMajor { get; init; }
+    public uint GameRootDeviceMinor { get; init; }
+    public bool HasCoreAuthorizedReceiptMutation { get; init; }
+    public List<TransactionJournalEntry> Entries { get; init; } = new();
 }
 
 internal sealed class TransactionJournalEntry
@@ -142,25 +157,49 @@ internal static class TransactionJournalStore
         }
         if (bytes.Length == 0)
             throw RecoveryError("The immutable recovery plan is empty.");
-        AssertPlanShape(bytes);
+        int schemaVersion = AssertPlanShape(bytes);
         TransactionJournal? journal;
         try
         {
-            journal = JsonSerializer.Deserialize<TransactionJournal>(bytes, PlanSerializerOptions);
+            if (schemaVersion == 2)
+            {
+                LegacyTransactionJournalV2? legacy = JsonSerializer.Deserialize<LegacyTransactionJournalV2>(bytes, PlanSerializerOptions);
+                if (legacy is null || !bytes.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(legacy, PlanSerializerOptions)))
+                    throw RecoveryError("The immutable recovery plan isn't canonical.");
+                journal = new TransactionJournal
+                {
+                    SchemaVersion = legacy.SchemaVersion,
+                    TransactionId = legacy.TransactionId,
+                    CreatedUtcTicks = legacy.CreatedUtcTicks,
+                    CanonicalGameRoot = legacy.CanonicalGameRoot,
+                    GameRootInode = legacy.GameRootInode,
+                    GameRootDeviceMajor = legacy.GameRootDeviceMajor,
+                    GameRootDeviceMinor = legacy.GameRootDeviceMinor,
+                    HasCoreAuthorizedReceiptMutation = legacy.HasCoreAuthorizedReceiptMutation,
+                    Entries = legacy.Entries,
+                    PersistedPlanSha256 = Hash(bytes)
+                };
+            }
+            else
+            {
+                journal = JsonSerializer.Deserialize<TransactionJournal>(bytes, PlanSerializerOptions);
+                if (journal is null || !bytes.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(journal, PlanSerializerOptions)))
+                    throw RecoveryError("The immutable recovery plan isn't canonical.");
+            }
         }
         catch (JsonException exception)
         {
             throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "The immutable recovery plan isn't valid JSON.", exception);
         }
-        if (journal is null || !bytes.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(journal, PlanSerializerOptions)))
-            throw RecoveryError("The immutable recovery plan isn't canonical.");
+        if (journal is null)
+            throw RecoveryError("The immutable recovery plan is missing its canonical model.");
         ValidateJournal(journal, expectedTransactionId, expectedGameRoot, expectedGameRootIdentity);
         return journal;
     }
 
     public static string GetPlanSha256(TransactionJournal journal)
     {
-        return Hash(JsonSerializer.SerializeToUtf8Bytes(journal, PlanSerializerOptions));
+        return journal.PersistedPlanSha256 ?? Hash(JsonSerializer.SerializeToUtf8Bytes(journal, PlanSerializerOptions));
     }
 
     public static TransactionJournalReplay ReadEvents(LinuxAnchoredFileSystem transaction, TransactionJournal journal)
@@ -249,7 +288,7 @@ internal static class TransactionJournalStore
     private static void ValidateJournal(TransactionJournal journal, Guid expectedId, string expectedRoot, LinuxFileIdentity? expectedIdentity)
     {
         if (
-            journal.SchemaVersion != 3
+            journal.SchemaVersion is not (2 or 3)
             || journal.TransactionId == Guid.Empty
             || journal.TransactionId != expectedId
             || journal.CreatedUtcTicks < DateTime.UnixEpoch.Ticks
@@ -298,6 +337,20 @@ internal static class TransactionJournalStore
         }
         if (journal.HasCoreAuthorizedReceiptMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreReceiptRelativePath))
             throw RecoveryError("The immutable recovery plan's receipt authorization is inconsistent.");
+        if (journal.SchemaVersion == 2)
+        {
+            if (
+                journal.CoreGenerationId is not null
+                || journal.CoreRecoveryOperationCount != 0
+                || journal.CoreRecoveryContentCount != 0
+                || journal.HasCoreAuthorizedManifestMutation
+                || journal.HasCoreAuthorizedRecoveryPointerMutation
+            )
+            {
+                throw RecoveryError("The legacy immutable recovery plan contains unsupported core-state authorization.");
+            }
+            return;
+        }
         if (
             journal.HasCoreAuthorizedManifestMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreManifestRelativePath)
             || journal.HasCoreAuthorizedRecoveryPointerMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreRecoveryPointerRelativePath)
@@ -309,12 +362,59 @@ internal static class TransactionJournalStore
         {
             throw RecoveryError("The immutable recovery plan's core-state authorization is inconsistent.");
         }
+        if (journal.CoreGenerationId is not null)
+            ValidateCoreRecoveryLayout(journal);
+    }
+
+    private static void ValidateCoreRecoveryLayout(TransactionJournal journal)
+    {
+        string prefix = $".smapi-installer/recovery/generations/{journal.TransactionId:N}/";
+        string[] paths = journal.Entries.Take(journal.CoreRecoveryOperationCount)
+            .Select(entry => entry.RelativePath[prefix.Length..])
+            .ToArray();
+        if (
+            paths.Length == 0
+            || paths[0] != "snapshot.json"
+            || journal.CoreRecoveryOperationCount > journal.Entries.Count - 1
+            || paths.Count(path => path.StartsWith("files/", StringComparison.Ordinal)) != journal.CoreRecoveryContentCount
+            || paths.Contains("previous-receipt.json") != paths.Contains("previous-manifest.json")
+        )
+        {
+            throw RecoveryError("The immutable recovery plan's recovery generation layout is invalid.");
+        }
+        string[] content = Enumerable.Range(0, journal.CoreRecoveryContentCount)
+            .Select(index => $"files/{index:D8}")
+            .ToArray();
+        string[] expected = new[] { "snapshot.json", "previous-receipt.json", "previous-manifest.json", "previous-pointer.json" }
+            .Where(paths.Contains)
+            .Concat(content)
+            .ToArray();
+        if (!paths.SequenceEqual(expected, StringComparer.Ordinal))
+            throw RecoveryError("The immutable recovery plan's recovery generation isn't canonical and contiguous.");
+        foreach (TransactionJournalEntry entry in journal.Entries.Take(journal.CoreRecoveryOperationCount))
+        {
+            if (entry.Kind != TransactionOperationKind.WriteFile || entry.HadOriginal || entry.ResultUnixMode != 0x180)
+                throw RecoveryError("The immutable recovery plan contains an unsafe recovery-generation mutation.");
+        }
+        foreach (TransactionJournalEntry entry in journal.Entries.Where(entry =>
+            entry.RelativePath is TransactionPlan.CoreManifestRelativePath or TransactionPlan.CoreReceiptRelativePath or TransactionPlan.CoreRecoveryPointerRelativePath
+        ))
+        {
+            if (entry.Kind == TransactionOperationKind.WriteFile && entry.ResultUnixMode != 0x180)
+                throw RecoveryError("The immutable recovery plan contains an unsafe core-document mode.");
+        }
     }
 
     private static bool IsAllowedDestination(TransactionJournal journal, int index, string path)
     {
         if (OwnedNamespacePolicy.IsAllowedTransactionDestination(NormalizedRelativePath.Parse(path)))
             return true;
+        if (journal.SchemaVersion == 2)
+        {
+            return path == TransactionPlan.CoreReceiptRelativePath
+                && journal.HasCoreAuthorizedReceiptMutation
+                && index == journal.Entries.Count - 1;
+        }
         if (journal.CoreGenerationId is null)
         {
             return path == TransactionPlan.CoreReceiptRelativePath
@@ -481,33 +581,46 @@ internal static class TransactionJournalStore
             throw RecoveryError("The recovery plan contains an invalid digest.");
     }
 
-    private static void AssertPlanShape(byte[] bytes)
+    private static int AssertPlanShape(byte[] bytes)
     {
         try
         {
             using JsonDocument document = JsonDocument.Parse(bytes, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 16 });
-            AssertExactProperties(
-                document.RootElement,
-                "schemaVersion",
-                "transactionId",
-                "createdUtcTicks",
-                "canonicalGameRoot",
-                "gameRootInode",
-                "gameRootDeviceMajor",
-                "gameRootDeviceMinor",
-                "hasCoreAuthorizedReceiptMutation",
-                "coreGenerationId",
-                "coreRecoveryOperationCount",
-                "coreRecoveryContentCount",
-                "hasCoreAuthorizedManifestMutation",
-                "hasCoreAuthorizedRecoveryPointerMutation",
-                "entries"
-            );
+            JsonElement schema = document.RootElement.GetProperty("schemaVersion");
+            if (schema.ValueKind != JsonValueKind.Number || !schema.TryGetInt32(out int schemaVersion))
+                throw new JsonException();
+            if (schemaVersion == 2)
+            {
+                AssertExactProperties(document.RootElement, "schemaVersion", "transactionId", "createdUtcTicks", "canonicalGameRoot", "gameRootInode", "gameRootDeviceMajor", "gameRootDeviceMinor", "hasCoreAuthorizedReceiptMutation", "entries");
+            }
+            else if (schemaVersion == 3)
+            {
+                AssertExactProperties(
+                    document.RootElement,
+                    "schemaVersion",
+                    "transactionId",
+                    "createdUtcTicks",
+                    "canonicalGameRoot",
+                    "gameRootInode",
+                    "gameRootDeviceMajor",
+                    "gameRootDeviceMinor",
+                    "hasCoreAuthorizedReceiptMutation",
+                    "coreGenerationId",
+                    "coreRecoveryOperationCount",
+                    "coreRecoveryContentCount",
+                    "hasCoreAuthorizedManifestMutation",
+                    "hasCoreAuthorizedRecoveryPointerMutation",
+                    "entries"
+                );
+            }
+            else
+                throw new JsonException();
             JsonElement entries = document.RootElement.GetProperty("entries");
             if (entries.ValueKind != JsonValueKind.Array)
                 throw new JsonException();
             foreach (JsonElement entry in entries.EnumerateArray())
                 AssertExactProperties(entry, "index", "kind", "relativePath", "hadOriginal", "expectedExistingSha256", "expectedResultSha256", "resultUnixMode", "backupRelativePath", "stagedRelativePath", "createdDirectories");
+            return schemaVersion;
         }
         catch (JsonException exception)
         {

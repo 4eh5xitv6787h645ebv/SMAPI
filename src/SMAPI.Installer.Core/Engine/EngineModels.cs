@@ -5,6 +5,7 @@ using System.Text.Json;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Engine;
 
@@ -45,7 +46,10 @@ public sealed class BoundInstallationPlan
     public Sha256Digest? InstalledReceiptSha256 { get; }
     public Sha256Digest? RollbackSnapshotSha256 { get; }
     public Sha256Digest? RecoveryObservationsSha256 { get; }
+    public Guid? RecoveryGenerationId { get; }
+    public Sha256Digest? CurrentRecoveryPointerSha256 { get; }
     internal IVerifiedPackageContentAuthority? TargetPackageContent { get; }
+    internal ICommittedRecoveryContentAuthority? RollbackContent { get; }
 
     internal BoundInstallationPlan(
         InstallationAction action,
@@ -56,7 +60,10 @@ public sealed class BoundInstallationPlan
         Sha256Digest? installedReceiptSha256,
         Sha256Digest? rollbackSnapshotSha256,
         Sha256Digest? recoveryObservationsSha256,
-        IVerifiedPackageContentAuthority? targetPackageContent
+        Guid? recoveryGenerationId,
+        Sha256Digest? currentRecoveryPointerSha256,
+        IVerifiedPackageContentAuthority? targetPackageContent,
+        ICommittedRecoveryContentAuthority? rollbackContent
     )
     {
         ArgumentNullException.ThrowIfNull(gameRoot);
@@ -68,7 +75,10 @@ public sealed class BoundInstallationPlan
         this.InstalledReceiptSha256 = installedReceiptSha256;
         this.RollbackSnapshotSha256 = rollbackSnapshotSha256;
         this.RecoveryObservationsSha256 = recoveryObservationsSha256;
+        this.RecoveryGenerationId = recoveryGenerationId;
+        this.CurrentRecoveryPointerSha256 = currentRecoveryPointerSha256;
         this.TargetPackageContent = targetPackageContent;
+        this.RollbackContent = rollbackContent;
     }
 
     /// <summary>Serialize every execution-relevant plan and observed-state identity deterministically.</summary>
@@ -94,6 +104,11 @@ public sealed class BoundInstallationPlan
             WriteNullableDigest(writer, "installed_receipt_sha256", this.InstalledReceiptSha256);
             WriteNullableDigest(writer, "rollback_snapshot_sha256", this.RollbackSnapshotSha256);
             WriteNullableDigest(writer, "recovery_observations_sha256", this.RecoveryObservationsSha256);
+            if (this.RecoveryGenerationId is null)
+                writer.WriteNull("recovery_generation_id");
+            else
+                writer.WriteString("recovery_generation_id", this.RecoveryGenerationId.Value.ToString("N"));
+            WriteNullableDigest(writer, "current_recovery_pointer_sha256", this.CurrentRecoveryPointerSha256);
             writer.WriteEndObject();
         }
         return Encoding.UTF8.GetString(stream.ToArray());
@@ -112,6 +127,18 @@ public sealed class BoundInstallationPlan
         else
             writer.WriteString(name, digest.Value);
     }
+}
+
+internal interface ICommittedRecoveryContentAuthority
+{
+    Guid GenerationId { get; }
+    GameRootIdentity GameRoot { get; }
+    RollbackSnapshot Snapshot { get; }
+    Sha256Digest SnapshotSha256 { get; }
+    LinuxAnchoredFile OpenGameFile(NormalizedRelativePath path, RecoveryFileIdentity expectedIdentity);
+    LinuxAnchoredFile OpenPreviousReceipt(Sha256Digest expectedSha256);
+    LinuxAnchoredFile OpenPreviousManifest(Sha256Digest expectedSha256);
+    void AssertUsable();
 }
 
 /// <summary>The later preparation step to perform for one losslessly retained planner operation.</summary>
@@ -215,16 +242,20 @@ public sealed class RecoverySnapshotSource : PreparationSource
     public long? ExpectedSizeBytes { get; }
     public int? ExpectedUnixMode { get; }
     public RecoveryFileType? ExpectedFileType { get; }
+    internal ICommittedRecoveryContentAuthority Authority { get; }
 
     internal RecoverySnapshotSource(
-        Sha256Digest snapshotSha256,
+        ICommittedRecoveryContentAuthority authority,
         RecoverySnapshotContent content,
         NormalizedRelativePath? entryPath,
         RecoveryFileIdentity? expectedIdentity,
         Sha256Digest? expectedReceiptSha256 = null
     )
     {
-        this.SnapshotSha256 = snapshotSha256;
+        ArgumentNullException.ThrowIfNull(authority);
+        authority.AssertUsable();
+        this.Authority = authority;
+        this.SnapshotSha256 = authority.SnapshotSha256;
         this.Content = content;
         this.EntryPath = entryPath;
         this.ExpectedContentSha256 = expectedIdentity?.Sha256 ?? expectedReceiptSha256;

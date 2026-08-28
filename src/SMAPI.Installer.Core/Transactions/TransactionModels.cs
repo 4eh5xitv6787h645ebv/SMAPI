@@ -45,22 +45,21 @@ internal sealed class TransactionPlan
     /// <summary>The stable ordered operations.</summary>
     public IReadOnlyList<TransactionFileOperation> Operations { get; }
 
-    /// <summary>Whether the core engine, rather than an external caller, appended the reserved receipt mutation.</summary>
-    internal bool HasCoreAuthorizedReceiptMutation { get; }
+    /// <summary>Whether the core engine authorized an exact receipt mutation inside a complete core-state transition.</summary>
+    internal bool HasCoreAuthorizedReceiptMutation => this.CoreAuthorization?.HasReceiptMutation ?? false;
     internal CoreReservedMutationAuthorization? CoreAuthorization { get; }
 
     /// <summary>Construct an instance.</summary>
     /// <param name="transactionId">The unique transaction ID.</param>
     /// <param name="operations">The ordered operations.</param>
     public TransactionPlan(Guid transactionId, IEnumerable<TransactionFileOperation> operations)
-        : this(transactionId, operations, hasCoreAuthorizedReceiptMutation: false, coreAuthorization: null)
+        : this(transactionId, operations, coreAuthorization: null)
     {
     }
 
     private TransactionPlan(
         Guid transactionId,
         IEnumerable<TransactionFileOperation> operations,
-        bool hasCoreAuthorizedReceiptMutation,
         CoreReservedMutationAuthorization? coreAuthorization
     )
     {
@@ -75,30 +74,7 @@ internal sealed class TransactionPlan
 
         this.TransactionId = transactionId;
         this.Operations = new ReadOnlyCollection<TransactionFileOperation>(array);
-        this.HasCoreAuthorizedReceiptMutation = hasCoreAuthorizedReceiptMutation;
         this.CoreAuthorization = coreAuthorization;
-    }
-
-    /// <summary>Create a plan whose one reserved receipt mutation was produced by the typed core engine.</summary>
-    internal static TransactionPlan CreateWithCoreReceipt(
-        Guid transactionId,
-        IEnumerable<TransactionFileOperation> ordinaryOperations,
-        TransactionFileOperation receiptOperation
-    )
-    {
-        ArgumentNullException.ThrowIfNull(ordinaryOperations);
-        ArgumentNullException.ThrowIfNull(receiptOperation);
-        TransactionFileOperation[] ordinary = ordinaryOperations.ToArray();
-        if (ordinary.Any(operation => operation.RelativePath == CoreReceiptRelativePath))
-            throw new ArgumentException("The ordinary operation set can't contain the reserved receipt path.", nameof(ordinaryOperations));
-        if (receiptOperation.RelativePath != CoreReceiptRelativePath)
-            throw new ArgumentException("The authorized receipt operation must target the exact reserved receipt path.", nameof(receiptOperation));
-        return new TransactionPlan(
-            transactionId,
-            ordinary.Append(receiptOperation),
-            hasCoreAuthorizedReceiptMutation: true,
-            coreAuthorization: null
-        );
     }
 
     /// <summary>Create the sole fully authorized engine plan, with recovery published first and its pointer last.</summary>
@@ -155,11 +131,23 @@ internal sealed class TransactionPlan
             throw new ArgumentException("Core recovery generation paths aren't in canonical publication order.", nameof(recoveryOperations));
         if (
             relativeRecoveryPaths.Distinct(StringComparer.Ordinal).Count() != relativeRecoveryPaths.Length
-            || recovery.Any(operation => operation.Kind != TransactionOperationKind.WriteFile || operation.ExpectedExistingSha256 is not null)
+            || recovery.Any(operation =>
+                operation.Kind != TransactionOperationKind.WriteFile
+                || operation.ExpectedExistingSha256 is not null
+                || operation.ResultUnixMode != 0x180
+            )
         )
         {
-            throw new ArgumentException("Core recovery generation paths must be unique absent-file writes.", nameof(recoveryOperations));
+            throw new ArgumentException("Core recovery generation paths must be unique absent-file writes with private 0600 modes.", nameof(recoveryOperations));
         }
+        if (relativeRecoveryPaths.Contains("previous-receipt.json") != relativeRecoveryPaths.Contains("previous-manifest.json"))
+            throw new ArgumentException("Core recovery generations must retain the prior receipt and manifest as one tuple.", nameof(recoveryOperations));
+        if (manifestOperation?.Kind == TransactionOperationKind.WriteFile && manifestOperation.ResultUnixMode != 0x180)
+            throw new ArgumentException("The core manifest write must use private 0600 permissions.", nameof(manifestOperation));
+        if (receiptOperation?.Kind == TransactionOperationKind.WriteFile && receiptOperation.ResultUnixMode != 0x180)
+            throw new ArgumentException("The core receipt write must use private 0600 permissions.", nameof(receiptOperation));
+        if (pointerOperation.ResultUnixMode != 0x180)
+            throw new ArgumentException("The core recovery pointer write must use private 0600 permissions.", nameof(pointerOperation));
 
         CoreReservedMutationAuthorization authorization = new(
             transactionId,
@@ -176,7 +164,6 @@ internal sealed class TransactionPlan
         return new TransactionPlan(
             transactionId,
             ordered,
-            hasCoreAuthorizedReceiptMutation: receiptOperation is not null,
             coreAuthorization: authorization
         );
     }
