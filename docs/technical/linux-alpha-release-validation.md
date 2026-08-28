@@ -16,10 +16,14 @@ SHA-256, metadata asset, and GitHub attestation verification result.
 
 ## Automated qualification
 
-The final record will link the focused runtime-dispatcher tests, full test suite, Release build,
+The final record will link the fixture-free runtime-dispatcher and analyzer tests, Release build,
 formatting check, package structure test, and isolated install/update/uninstall/failure lifecycle
-test for the exact release commit. It will also record the required performance-gate result and the
-independent release, security/privacy, testing, and final-diff reviews.
+test for the exact release commit. Hosted CI uses pinned public game reference assemblies for
+compilation only; because those assemblies are intentionally non-executable, the complete
+game-bound test suite is run separately against executable assemblies in the authorized disposable
+environment. The record will publish sanitized discovered/passed/skipped/failed counts for that
+exact-commit run. It will also record the required performance-gate result and the independent
+release, security/privacy, testing, and final-diff reviews.
 
 ## Clean isolated verification
 

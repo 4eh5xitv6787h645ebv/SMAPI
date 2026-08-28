@@ -137,32 +137,19 @@ jobs:
                     -p:CopyToGameFolder=false
                     -p:AllowMissingPrunePackageData=true
 
-            -   name: Run focused Linux runtime-dispatcher tests
+            -   name: Run fixture-free Linux runtime-dispatcher tests
                 run: >-
-                    dotnet test src/SMAPI.Tests/SMAPI.Tests.csproj
+                    dotnet test src/SMAPI.RuntimeDispatcher.Tests/SMAPI.RuntimeDispatcher.Tests.csproj
                     --configuration Release
                     --no-build
-                    -p:GamePath="$RUNNER_TEMP/StardewValley"
-                    -p:CopyToGameFolder=false
-                    -p:AllowMissingPrunePackageData=true
-                    --filter FullyQualifiedName~SMAPI.Tests.Core.LinuxRuntimeDispatcherTests
+                    -- RunConfiguration.TreatNoTestsAsError=true
 
-            -   name: Run full test suite
-                shell: bash
-                run: |
-                    set -euo pipefail
-                    dotnet test src/SMAPI.Tests/SMAPI.Tests.csproj \
-                        --configuration Release \
-                        --no-build \
-                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
-                        -p:CopyToGameFolder=false \
-                        -p:AllowMissingPrunePackageData=true
-                    dotnet test src/SMAPI.ModBuildConfig.Analyzer.Tests/SMAPI.ModBuildConfig.Analyzer.Tests.csproj \
-                        --configuration Release \
-                        --no-build \
-                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
-                        -p:CopyToGameFolder=false \
-                        -p:AllowMissingPrunePackageData=true
+            -   name: Run fixture-free analyzer tests
+                run: >-
+                    dotnet test src/SMAPI.ModBuildConfig.Analyzer.Tests/SMAPI.ModBuildConfig.Analyzer.Tests.csproj
+                    --configuration Release
+                    --no-build
+                    -- RunConfiguration.TreatNoTestsAsError=true
 
             -   name: Build Linux-only installer package
                 shell: pwsh

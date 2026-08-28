@@ -142,10 +142,17 @@ rollback flow is not atomic. See the [comparison](../upstream-comparison.md),
 ## Maintainer release process
 
 The Phase 3 pull request must pass `Linux alpha release qualification` and the repository's required
-performance gate. After independent release, security/privacy, testing, and final-diff reviews, it
-is merged to `develop`. A candidate is built by dispatching `linux-alpha-release.yml` with the exact
-40-character merge commit, embedded version, and reserved tag. Only after isolated lifecycle and
-trusted-workload qualification is the annotated tag created at that same commit. The tag-triggered
-workflow rebuilds and qualifies the package, creates checksums and metadata, attests the checksum
-subjects, and publishes a prerelease. The downloaded public asset—not a local package—is then used
-for the final clean-room verification.
+performance gate. Hosted CI compiles the game-bound test assembly against pinned public reference
+assemblies, then executes the fixture-free runtime-dispatcher and analyzer suites with zero-test
+discovery treated as an error. Reference assemblies are deliberately non-executable, so they must
+not be presented as a full game-bound test run. The complete `SMAPI.Tests` suite is run separately
+against executable game assemblies in the authorized disposable environment, with only sanitized
+counts and pass/fail evidence published.
+
+After independent release, security/privacy, testing, and final-diff reviews, the pull request is
+merged to `develop`. A candidate is built by dispatching `linux-alpha-release.yml` with the exact
+40-character merge commit, embedded version, and reserved tag. Only after the full test suite,
+isolated lifecycle, and trusted-workload qualifications pass for that exact commit is the annotated
+tag created at the same commit. The tag-triggered workflow rebuilds and qualifies the package,
+creates checksums and metadata, attests the checksum subjects, and publishes a prerelease. The
+downloaded public asset—not a local package—is then used for the final clean-room verification.
