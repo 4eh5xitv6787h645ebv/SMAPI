@@ -13,14 +13,14 @@ Linux users and contributors evaluating its changes.
 
 <div class="metric-grid">
   <div class="metric-card">
-    <span class="metric-value">97.5%</span>
-    <span class="metric-label">lower mean framework overhead</span>
-    <span class="metric-note">one historical 308-mod A/B</span>
+    <span class="metric-value">49.8%</span>
+    <span class="metric-label">lower paired mean update time</span>
+    <span class="metric-note">mean difference across five 4.5.2 pairs</span>
   </div>
   <div class="metric-card">
-    <span class="metric-value">80.0%</span>
-    <span class="metric-label">lower allocation per tick</span>
-    <span class="metric-note">same machine, save, and sample length</span>
+    <span class="metric-value">35.9%</span>
+    <span class="metric-label">lower allocation per update</span>
+    <span class="metric-note">median of five runs on one machine</span>
   </div>
   <div class="metric-card">
     <span class="metric-value">95</span>
@@ -50,14 +50,17 @@ Linux performance easier to measure and explain.
 
 ## Measured performance
 
-The headline comparison is a 180-second steady-state measurement on an Arch Linux Framework Laptop
-13 with 308 mods and the Blossom save. Stock SMAPI 4.5.1 measured 5.892 ms mean framework overhead
-per tick; the tested fork build measured approximately 0.149 ms. Allocation fell from 4,787 KB to
-959 KB per tick.
+The current comparison ran official SMAPI 4.5.2 and the fork in five fixed-order A/B pairs on one
+Linux workstation with the same 132 loaded code mods, 176 loaded content packs, and authorized
+private save. Each separate process captured at least 180 seconds of steady gameplay. Median-of-run
+mean update elapsed duration was 14.596 ms official and 7.228 ms fork; main-thread allocation per
+update was 1,384.6 KiB and 887.6 KiB respectively.
 
-Those values are a historical workload result, not a universal FPS claim or a fresh 4.5.2 release
-comparison. The detailed page shows the complete numbers and clearly separates whole-game evidence
-from isolated path benchmarks.
+Mean update time was lower in all five pairs, but this is descriptive evidence for that machine and
+workload—not a universal FPS, CPU-use, power, or latency claim. A always ran before B, tiered
+compilation was disabled, audio used a null backend, and rendering used Xvfb/llvmpipe. The fork's
+selected-core busy time was higher in every pair. The detailed page retains full distributions,
+run variation, diagnostic overhead, adverse signals, and the older historical comparison.
 
 [Read the performance evidence and limitations →](upstream-comparison.html#performance-evidence)
 

@@ -9,9 +9,35 @@ kicker: Technical reference
 
 This document tracks SMAPI-side performance and correctness findings for Linux players with very large mod sets (for example, 200+ code mods and 400+ content packs). It focuses on work SMAPI can avoid or make incremental. SMAPI also has opt-in runtime diagnostics for the mod-owned execution boundaries it can observe.
 
-The rankings prioritize gameplay frame pacing, then transition stalls, memory pressure, and startup time. Expected benefits are qualitative until measured in-game on representative Linux systems; no percentage claims are implied.
+The rankings prioritize gameplay frame pacing, then transition stalls, memory pressure, and startup
+time. Expected benefits for individual findings are qualitative unless their evidence says
+otherwise; projected rankings do not imply percentage gains. The whole-workload section below
+reports separate measured results with explicit limitations.
 
 Statuses used below are **confirmed**, **fixed**, **deferred**, **rejected**, and **needs runtime evidence**.
+
+## Current whole-workload evidence
+
+The Phase 1 Linux comparison tested official SMAPI 4.5.2 at `79f9bbbe` against the fork at
+`3c98eadd` using five fixed-order A/B pairs and five paired diagnostics-control/enabled samples.
+Every separate process captured at least 180 seconds of steady gameplay with the same 132 loaded
+code mods, 176 loaded content packs, authorized private save, game/runtime files, configuration,
+resolution, isolated session, wrapper, warm-up, and scripted save/warp scenario.
+
+Across the five main runs, median-of-run mean update elapsed duration was 14.596 ms official and
+7.228 ms fork; p95 was 26.265 ms and 18.546 ms; p99 was 35.659 ms and 26.681 ms; and main-thread
+allocation per update was 1,384.6 KiB and 887.6 KiB. Mean update time was lower in every pair, with
+paired differences from −53.9% to −46.1%. Enabling fork diagnostics increased paired mean update
+time by 1.3%–8.3% (mean 4.0%) in the separate control series.
+
+This is descriptive one-workstation evidence, not a universal FPS, CPU, power, or latency claim.
+Official A always preceded fork B, tiered compilation was disabled, audio used a null backend, and
+Xvfb used llvmpipe software rendering. Selected-core busy time was higher for the fork in every
+pair. Process Gen1 collections were 2–5 higher and Farm-observed warp timing was slower in four of
+five pairs, but the captures lack GC pause duration and stable transition evidence, so neither is a
+confirmed fork regression. The [current comparison](../upstream-comparison.md#current-452-whole-workload-comparison)
+and [sanitized result bundle](https://github.com/4eh5xitv6787h645ebv/SMAPI/tree/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results)
+retain full distributions, run variation, metric semantics, runtime provenance, and limitations.
 
 ## Runtime mod diagnostics
 

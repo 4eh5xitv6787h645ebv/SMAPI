@@ -31,21 +31,35 @@ less repeated map work, bounded performance diagnostics, and a private in-game M
 
 ## Measured comparison
 
-One historical same-machine comparison used a 308-mod Linux workload and a mid/late-game save. Each
-steady-state sample ran for 180 seconds with external instrumentation around SMAPI, the game update,
-and mod handlers.
+A current same-session Linux comparison used official SMAPI 4.5.2 at
+[`79f9bbbe`](https://github.com/Pathoschild/SMAPI/commit/79f9bbbe3edbb7ca3369e7ad0d3dd45131b34fc0)
+and this fork at [`3c98eadd`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/3c98eadd2bddc24d43c889afb11b155e92469882).
+It ran five fixed-order A/B pairs with the same 132 loaded code mods, 176 loaded content packs,
+private save, game build, resolution, configuration, wrapper, warm-up, and scenario. Every process
+contributed at least 180 seconds of steady-state gameplay.
 
-| Metric | Stock SMAPI 4.5.1 | Fork build | Observed change |
+| Median-of-run metric | Official 4.5.2 | Fork, diagnostics disabled | Observed difference |
 | --- | ---: | ---: | ---: |
-| Mean SMAPI framework overhead per tick | 5.892 ms | ~0.149 ms | **97.5% lower** |
-| p95 SMAPI framework overhead per tick | 7.201 ms | 0.196 ms | **97.3% lower** |
-| Allocation per tick | 4,787 KB | 959 KB | **80.0% lower** |
-| `SGame.Update` + `Draw` per frame | 14.696 ms | 6.785 ms | **53.8% lower** |
+| Mean update elapsed duration | 14.596 ms | 7.228 ms | **50.5% lower** |
+| p95 update elapsed duration | 26.265 ms | 18.546 ms | **29.4% lower** |
+| p99 update elapsed duration | 35.659 ms | 26.681 ms | **25.2% lower** |
+| Mean framework envelope | 10.422 ms | 3.348 ms | **67.9% lower** |
+| Main-thread allocation/update | 1,384.6 KiB | 887.6 KiB | **35.9% lower** |
 
-These are results from one machine, modpack, save, and historical stock 4.5.1 baseline—not a promise
-of the same FPS or latency improvement on every system. See the
+The framework envelope is outer-update elapsed duration minus the measured base-game update window.
+It includes descheduling, identical probe overhead, and observed mod callbacks dispatched outside
+that window; it is not pure SMAPI CPU time or causal attribution to the fork changes.
+
+Mean update time was lower in all five pairs; paired differences ranged from −53.9% to −46.1%.
+These are descriptive results from one workstation and one authorized private workload—not a
+universal FPS, CPU-use, power, or latency promise. A always preceded B, tiered compilation was
+disabled, audio used a null backend, and Xvfb used llvmpipe software rendering. Fork selected-core
+busy time was higher in every pair, so the captures do not establish general efficiency. See the
 [full comparison and methodology](https://4eh5xitv6787h645ebv.github.io/SMAPI/upstream-comparison.html)
-for hardware details, current-version caveats, and isolated benchmark results.
+or [benchmark summary](benchmarks/linux-real-world/results/summary.md) for distributions, run-to-run
+variation, adverse signals, diagnostic overhead, and calculation details. The commit-pinned
+[sanitized result bundle](https://github.com/4eh5xitv6787h645ebv/SMAPI/tree/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results)
+contains the numeric raw JSONL and machine-readable summary.
 
 ## What this fork adds
 
