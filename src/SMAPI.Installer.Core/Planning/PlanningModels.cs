@@ -134,12 +134,12 @@ public sealed class InstallationPlan
                 writer.WriteStartObject();
                 writer.WriteString("kind", GetOperationName(operation.Kind));
                 writer.WriteString("path", operation.Path.Value);
-                if (operation.ExpectedCurrentSha256.HasValue)
-                    writer.WriteString("expected_current_sha256", operation.ExpectedCurrentSha256.Value.Value);
+                if (operation.ExpectedCurrentSha256 is not null)
+                    writer.WriteString("expected_current_sha256", operation.ExpectedCurrentSha256.Value);
                 else
                     writer.WriteNull("expected_current_sha256");
-                if (operation.ResultSha256.HasValue)
-                    writer.WriteString("result_sha256", operation.ResultSha256.Value.Value);
+                if (operation.ResultSha256 is not null)
+                    writer.WriteString("result_sha256", operation.ResultSha256.Value);
                 else
                     writer.WriteNull("result_sha256");
                 writer.WriteEndObject();
@@ -234,23 +234,23 @@ public sealed class LauncherState
     {
         if (receipt == null)
         {
-            if (backup.HasValue)
+            if (backup is not null)
                 return new LauncherState(current, backup, null, LauncherClassification.AmbiguousBackup);
             return new LauncherState(
                 current,
                 null,
                 null,
-                current.HasValue ? LauncherClassification.FreshVanilla : LauncherClassification.MissingGameLauncher
+                current is not null ? LauncherClassification.FreshVanilla : LauncherClassification.MissingGameLauncher
             );
         }
 
-        if (!backup.HasValue)
+        if (backup is null)
             return new LauncherState(current, null, receipt, LauncherClassification.MissingOriginalBackup);
-        if (backup.Value != receipt.OriginalLauncherSha256)
+        if (backup != receipt.OriginalLauncherSha256)
             return new LauncherState(current, backup, receipt, LauncherClassification.AmbiguousBackup);
-        if (!current.HasValue)
+        if (current is null)
             return new LauncherState(null, backup, receipt, LauncherClassification.InstalledLauncherMissing);
-        if (current.Value == receipt.InstalledLauncherSha256)
+        if (current == receipt.InstalledLauncherSha256)
             return new LauncherState(current, backup, receipt, LauncherClassification.InstalledUnchanged);
         return new LauncherState(current, backup, receipt, LauncherClassification.InstalledModified);
     }
@@ -282,9 +282,9 @@ public sealed class RollbackSnapshotEntry
     {
         ArgumentNullException.ThrowIfNull(path);
         OwnedNamespacePolicy.AssertAllowed(path, ownedKind);
-        if (kind == RollbackEntryKind.Restore && !backupSha256.HasValue)
+        if (kind == RollbackEntryKind.Restore && backupSha256 is null)
             throw new ArgumentException("A restore rollback entry requires a backup digest.", nameof(backupSha256));
-        if (kind == RollbackEntryKind.Remove && (!expectedCurrentSha256.HasValue || backupSha256.HasValue))
+        if (kind == RollbackEntryKind.Remove && (expectedCurrentSha256 is null || backupSha256 is not null))
             throw new ArgumentException("A remove rollback entry requires only an expected current digest.");
 
         this.Path = path;
@@ -303,6 +303,7 @@ public sealed class RollbackSnapshot
 
     public RollbackSnapshot(Sha256Digest expectedInstalledReceiptSha256, IEnumerable<RollbackSnapshotEntry> entries)
     {
+        ArgumentNullException.ThrowIfNull(expectedInstalledReceiptSha256);
         ArgumentNullException.ThrowIfNull(entries);
         RollbackSnapshotEntry[] ordered = entries.OrderBy(entry => entry.Path.Value, StringComparer.Ordinal).ToArray();
         if (ordered.Length == 0)

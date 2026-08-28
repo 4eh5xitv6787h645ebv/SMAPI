@@ -47,6 +47,7 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
         Sha256Digest packageSha256
     )
     {
+        ArgumentNullException.ThrowIfNull(packageSha256);
         if (!string.Equals(repository, InstallationReleaseIdentity.ReviewedRepository, StringComparison.Ordinal))
             throw new ArgumentException("The release repository isn't the reviewed SMAPI fork.", nameof(repository));
 

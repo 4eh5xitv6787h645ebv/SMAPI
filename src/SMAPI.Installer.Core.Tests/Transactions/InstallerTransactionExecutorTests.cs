@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Transactions;
@@ -165,6 +167,119 @@ public sealed class InstallerTransactionExecutorTests
     }
 
     [Test]
+    public void Recover_WhenResultChangedAfterInterruption_PreservesChangeAndRefusesRollback()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
+        });
+        InstallerTransactionExecutor crashing = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true));
+        Action interrupted = () => crashing.Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        File.WriteAllText(Path.Combine(game, "StardewModdingAPI.dll"), "user edit after interruption");
+
+        Action recover = () => new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("user edit after interruption");
+    }
+
+    [Test]
+    public void Recover_WhenBackupWasTampered_PreservesResultAndRefusesRollback()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
+        });
+        InstallerTransactionExecutor crashing = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true));
+        Action interrupted = () => crashing.Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        string transaction = Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"));
+        File.WriteAllText(Path.Combine(transaction, "backups/00000000"), "tampered backup");
+
+        Action recover = () => new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+    }
+
+    [Test]
+    public void Recover_WhenJournalDestinationWasTampered_PreservesUnrelatedFile()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(game, "unrelated.txt", "preserve");
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
+        });
+        InstallerTransactionExecutor crashing = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true));
+        Action interrupted = () => crashing.Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        string journalPath = Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "journal.json");
+        JsonNode root = JsonNode.Parse(File.ReadAllText(journalPath))!;
+        root["entries"]![0]!["relativePath"] = "unrelated.txt";
+        File.WriteAllText(journalPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+        Action recover = () => new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "unrelated.txt")).Should().Be("preserve");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+    }
+
+    [Test]
+    public void Apply_WhenRollbackRuns_RemovesDirectoriesCreatedByTransaction()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("smapi-internal/new/deep/managed.txt", null, "managed.txt", Hash("new"))
+        });
+        InstallerTransactionExecutor executor = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: false));
+
+        Action action = () => executor.Apply(game, payload, plan);
+
+        action.Should().Throw<InvalidOperationException>();
+        Directory.Exists(Path.Combine(game, "smapi-internal")).Should().BeFalse();
+    }
+
+    [Test]
+    public void Apply_WhenUnexpectedBackupCollisionAppears_PreservesOriginal()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
+        });
+        CallbackFaultInjector collision = new(before: (transactionId, operationIndex) =>
+        {
+            string path = Path.Combine(game, ".smapi-installer/transactions", transactionId.ToString("N"), "backups", operationIndex.ToString("D8"));
+            File.WriteAllText(path, "unexpected");
+        });
+
+        Action action = () => new InstallerTransactionExecutor(faultInjector: collision).Apply(game, payload, plan);
+
+        action.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
+    }
+
+    [Test]
     public void Apply_RejectsSymlinkedDestinationParentWithoutTouchingTarget()
     {
         Assume.That(OperatingSystem.IsLinux(), Is.True);
@@ -309,5 +424,20 @@ public sealed class InstallerTransactionExecutorTests
                 throw new SimulatedProcessTerminationException("Injected process termination.");
             throw new InvalidOperationException("Injected transaction failure.");
         }
+    }
+
+    private sealed class CallbackFaultInjector : ITransactionFaultInjector
+    {
+        private readonly Action<Guid, int>? Before;
+        private readonly Action<Guid, int>? After;
+
+        public CallbackFaultInjector(Action<Guid, int>? before = null, Action<Guid, int>? after = null)
+        {
+            this.Before = before;
+            this.After = after;
+        }
+
+        public void BeforeMutation(Guid transactionId, int operationIndex) => this.Before?.Invoke(transactionId, operationIndex);
+        public void AfterMutation(Guid transactionId, int operationIndex) => this.After?.Invoke(transactionId, operationIndex);
     }
 }

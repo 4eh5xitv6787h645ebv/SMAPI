@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using StardewModdingAPI.Installer.Core.Security;
+using StardewModdingAPI.Installer.Core.Ownership;
 
 namespace StardewModdingAPI.Installer.Core.Privacy;
 
@@ -20,7 +22,7 @@ public sealed record InstallerLogEntry(
     string EventCode,
     string Message,
     string? ReleaseTag = null,
-    string? RelativeOwnedPath = null,
+    NormalizedRelativePath? RelativeOwnedPath = null,
     string? StableErrorCode = null
 );
 
@@ -35,6 +37,8 @@ public enum InstallerLogLevel
 /// <summary>Writes local-only bounded JSONL logs with explicit redaction.</summary>
 public sealed class InstallerLog : IDisposable
 {
+    private const string StateMarkerContents = "smapi-installer-state-v1\n";
+    private static readonly Regex OwnedLogFilename = new(@"\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\.jsonl\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex UriQuery = new(@"(?<uri>https://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     private static readonly Regex Credential = new(@"(?i)\b(authorization|cookie|set-cookie|token|access_token|refresh_token|signature|sig|x-amz-[a-z-]+)\b\s*[:=]\s*[^\s,;]+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex Bearer = new(@"(?i)\bbearer\s+[a-z0-9._~+/=-]+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -43,6 +47,8 @@ public sealed class InstallerLog : IDisposable
     private readonly InstallerLogOptions Options;
     private readonly FileStream Stream;
     private readonly string[] SensitiveValues;
+    private readonly Guid OperationId;
+    private readonly object SyncRoot = new();
     private int WrittenBytes;
     private bool Disposed;
 
@@ -56,19 +62,28 @@ public sealed class InstallerLog : IDisposable
     /// <param name="sensitiveValues">Exact local path, mod/save/report, or secret canaries to redact wherever they appear.</param>
     public InstallerLog(InstallerLogOptions options, Guid operationId, DateTimeOffset now, IEnumerable<string>? sensitiveValues = null)
     {
+        LinuxPrivilegeGuard.AssertNotRoot();
         this.Options = ValidateOptions(options);
         if (operationId == Guid.Empty)
             throw new ArgumentException("An operation ID is required.", nameof(operationId));
 
-        this.SensitiveValues = sensitiveValues?
+        this.SensitiveValues = (sensitiveValues ?? Array.Empty<string>())
+            .Concat(new[]
+            {
+                this.Options.StateRoot,
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            })
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.Ordinal)
             .OrderByDescending(value => value.Length)
             .ToArray()
-            ?? Array.Empty<string>();
+            .ToArray();
+
+        this.OperationId = operationId;
 
         string logsDirectory = System.IO.Path.Combine(this.Options.StateRoot, "logs");
-        Directory.CreateDirectory(logsDirectory);
+        EnsurePrivateStateRoot(this.Options.StateRoot);
+        EnsureRealDirectory(logsDirectory);
         SetMode(logsDirectory, Convert.ToInt32("700", 8));
         Rotate(logsDirectory, this.Options.MaximumFileCount - 1);
 
@@ -82,39 +97,42 @@ public sealed class InstallerLog : IDisposable
     /// <returns>Whether the entry was written.</returns>
     public bool Write(InstallerLogEntry entry)
     {
-        if (this.Disposed)
-            throw new ObjectDisposedException(nameof(InstallerLog));
         ArgumentNullException.ThrowIfNull(entry);
-        if (entry.OperationId == Guid.Empty)
-            throw new ArgumentException("A log entry requires an operation ID.", nameof(entry));
-
-        string message = this.Redact(entry.Message);
-        if (message.Length > this.Options.MaximumMessageCharacters)
-            message = message[..this.Options.MaximumMessageCharacters] + "…[truncated]";
-        string eventCode = ValidateIdentifier(entry.EventCode, nameof(entry.EventCode));
-        string? releaseTag = entry.ReleaseTag is null ? null : ValidateIdentifier(entry.ReleaseTag, nameof(entry.ReleaseTag));
-        string? stableErrorCode = entry.StableErrorCode is null ? null : ValidateIdentifier(entry.StableErrorCode, nameof(entry.StableErrorCode));
-        string? relativeOwnedPath = entry.RelativeOwnedPath is null ? null : ValidateRelativeOwnedPath(entry.RelativeOwnedPath);
-
-        byte[] line = JsonSerializer.SerializeToUtf8Bytes(new
+        lock (this.SyncRoot)
         {
-            timestamp = entry.Timestamp.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture),
-            operationId = entry.OperationId.ToString("N"),
-            level = entry.Level.ToString(),
-            eventCode,
-            message,
-            releaseTag,
-            relativeOwnedPath,
-            stableErrorCode
-        });
-        if (this.WrittenBytes + line.Length + 1 > this.Options.MaximumFileBytes)
-            return false;
+            if (this.Disposed)
+                throw new ObjectDisposedException(nameof(InstallerLog));
+            if (entry.OperationId != this.OperationId)
+                throw new ArgumentException("A log entry's operation ID doesn't match its log.", nameof(entry));
 
-        this.Stream.Write(line);
-        this.Stream.WriteByte((byte)'\n');
-        this.Stream.Flush(flushToDisk: true);
-        this.WrittenBytes += line.Length + 1;
-        return true;
+            string message = this.Redact(entry.Message);
+            if (message.Length > this.Options.MaximumMessageCharacters)
+                message = message[..this.Options.MaximumMessageCharacters] + "…[truncated]";
+            string eventCode = ValidateIdentifier(entry.EventCode, nameof(entry.EventCode));
+            string? releaseTag = entry.ReleaseTag is null ? null : ValidateIdentifier(entry.ReleaseTag, nameof(entry.ReleaseTag));
+            string? stableErrorCode = entry.StableErrorCode is null ? null : ValidateIdentifier(entry.StableErrorCode, nameof(entry.StableErrorCode));
+            string? relativeOwnedPath = entry.RelativeOwnedPath is null ? null : ValidateOwnedPath(entry.RelativeOwnedPath);
+
+            byte[] line = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                timestamp = entry.Timestamp.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+                operationId = entry.OperationId.ToString("N"),
+                level = entry.Level.ToString(),
+                eventCode,
+                message,
+                releaseTag,
+                relativeOwnedPath,
+                stableErrorCode
+            });
+            if (this.WrittenBytes + line.Length + 1 > this.Options.MaximumFileBytes)
+                return false;
+
+            this.Stream.Write(line);
+            this.Stream.WriteByte((byte)'\n');
+            this.Stream.Flush(flushToDisk: true);
+            this.WrittenBytes += line.Length + 1;
+            return true;
+        }
     }
 
     /// <summary>Redact a message for storage in the private local log.</summary>
@@ -133,10 +151,13 @@ public sealed class InstallerLog : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        if (this.Disposed)
-            return;
-        this.Stream.Dispose();
-        this.Disposed = true;
+        lock (this.SyncRoot)
+        {
+            if (this.Disposed)
+                return;
+            this.Stream.Dispose();
+            this.Disposed = true;
+        }
     }
 
     private static InstallerLogOptions ValidateOptions(InstallerLogOptions options)
@@ -156,11 +177,57 @@ public sealed class InstallerLog : IDisposable
     private static void Rotate(string directory, int retainedPriorFiles)
     {
         string[] files = Directory.EnumerateFiles(directory, "*.jsonl", SearchOption.TopDirectoryOnly)
+            .Where(path => InstallerLog.OwnedLogFilename.IsMatch(System.IO.Path.GetFileName(path)))
             .OrderByDescending(path => File.GetLastWriteTimeUtc(path))
             .ThenByDescending(path => path, StringComparer.Ordinal)
             .ToArray();
         foreach (string path in files.Skip(retainedPriorFiles))
             File.Delete(path);
+    }
+
+    private static void EnsurePrivateStateRoot(string stateRoot)
+    {
+        string marker = System.IO.Path.Combine(stateRoot, "state-version");
+        if (PathExistsIncludingLink(stateRoot))
+        {
+            AssertRealDirectory(stateRoot, "The installer state root is a link or non-directory entry.");
+            if (!File.Exists(marker) || new FileInfo(marker).LinkTarget is not null || File.ReadAllText(marker) != StateMarkerContents)
+                throw new IOException("An unknown existing installer state root requires manual inspection.");
+        }
+        else
+        {
+            Directory.CreateDirectory(stateRoot);
+            AssertRealDirectory(stateRoot, "The installer state root couldn't be created safely.");
+            SetMode(stateRoot, Convert.ToInt32("700", 8));
+            File.WriteAllText(marker, StateMarkerContents);
+            SetMode(marker, Convert.ToInt32("600", 8));
+        }
+    }
+
+    private static void EnsureRealDirectory(string path)
+    {
+        if (PathExistsIncludingLink(path))
+            AssertRealDirectory(path, "The installer log directory is a link or non-directory entry.");
+        else
+        {
+            Directory.CreateDirectory(path);
+            AssertRealDirectory(path, "The installer log directory couldn't be created safely.");
+        }
+    }
+
+    private static void AssertRealDirectory(string path, string message)
+    {
+        DirectoryInfo info = new(path);
+        info.Refresh();
+        if (!info.Exists || info.LinkTarget is not null || (info.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException(message);
+    }
+
+    private static bool PathExistsIncludingLink(string path)
+    {
+        FileSystemInfo info = new DirectoryInfo(path);
+        info.Refresh();
+        return info.Exists || info.LinkTarget is not null;
     }
 
     private static string ValidateIdentifier(string value, string parameterName)
@@ -170,14 +237,11 @@ public sealed class InstallerLog : IDisposable
         return value;
     }
 
-    private static string ValidateRelativeOwnedPath(string value)
+    private static string ValidateOwnedPath(NormalizedRelativePath value)
     {
-        if (value.Length > 512 || System.IO.Path.IsPathRooted(value) || value.StartsWith('/') || value.StartsWith('\\') || value.Contains('\\'))
-            throw new ArgumentException("A logged owned path must be normalized and relative.", nameof(value));
-        string[] segments = value.Split('/');
-        if (segments.Any(segment => segment.Length == 0 || segment is "." or ".."))
-            throw new ArgumentException("A logged owned path contains an invalid segment.", nameof(value));
-        return value;
+        if (!OwnedNamespacePolicy.IsAllowedTransactionDestination(value))
+            throw new ArgumentException("A logged path isn't in the compiled installer-owned namespace.", nameof(value));
+        return value.Value;
     }
 
     private static void SetMode(string path, int mode)

@@ -1,4 +1,5 @@
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Transactions;
 
@@ -21,6 +22,7 @@ public sealed class InstallerTransactionExecutor
     /// <remarks>Cancellation is honored through staging and final revalidation. Once mutation begins, the executor finishes commit or rollback.</remarks>
     public TransactionResult Apply(string gameRoot, string payloadRoot, TransactionPlan plan, CancellationToken cancellationToken = default)
     {
+        LinuxPrivilegeGuard.AssertNotRoot();
         ArgumentNullException.ThrowIfNull(plan);
         string canonicalGameRoot = TransactionPath.GetCanonicalRoot(gameRoot, nameof(gameRoot));
         string canonicalPayloadRoot = TransactionPath.GetCanonicalRoot(payloadRoot, nameof(payloadRoot));
@@ -81,6 +83,7 @@ public sealed class InstallerTransactionExecutor
     /// <summary>Recover every incomplete transaction under a game root.</summary>
     public IReadOnlyList<TransactionResult> RecoverIncompleteTransactions(string gameRoot)
     {
+        LinuxPrivilegeGuard.AssertNotRoot();
         string canonicalGameRoot = TransactionPath.GetCanonicalRoot(gameRoot, nameof(gameRoot));
         string workspace = EnsureWorkspace(canonicalGameRoot);
         using FileStream operationLock = AcquireLock(workspace);
@@ -185,6 +188,7 @@ public sealed class InstallerTransactionExecutor
                 ExpectedResultSha256 = operation.ExpectedResultSha256,
                 BackupRelativePath = backupRelativePath
             };
+            entry.CreatedDirectories.AddRange(GetMissingParentDirectories(gameRoot, destination));
             journal.Entries.Add(entry);
             TransactionJournalStore.WriteDurable(journalPath, journal);
             this.FaultInjector.BeforeMutation(plan.TransactionId, index);
@@ -192,7 +196,12 @@ public sealed class InstallerTransactionExecutor
             PathEntry immediatelyBeforeMutation = ValidateExisting(destination, operation.ExpectedExistingSha256);
             if (immediatelyBeforeMutation != existing)
                 throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A destination's filesystem identity changed immediately before mutation.");
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            foreach (string relativeDirectory in entry.CreatedDirectories)
+            {
+                string directory = TransactionPath.ResolveUnderRoot(gameRoot, relativeDirectory);
+                Directory.CreateDirectory(directory);
+                TransactionDurability.FlushDirectory(Path.GetDirectoryName(directory)!);
+            }
             TransactionPath.AssertSafeParents(gameRoot, destination);
             if (entry.HadOriginal)
             {
@@ -205,11 +214,7 @@ public sealed class InstallerTransactionExecutor
             if (operation.Kind == TransactionOperationKind.WriteFile)
             {
                 string stagedPath = Path.Combine(transactionDirectory, "staged", index.ToString("D8"));
-                string temporaryDestination = destination + $".smapi-tmp-{plan.TransactionId:N}";
-                if (TransactionPath.Inspect(temporaryDestination).Kind != PathEntryKind.Missing)
-                    throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A transaction temporary path unexpectedly exists.");
-                File.Move(stagedPath, temporaryDestination);
-                File.Move(temporaryDestination, destination);
+                File.Move(stagedPath, destination);
                 TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
             }
 
@@ -251,7 +256,12 @@ public sealed class InstallerTransactionExecutor
             }
             else
             {
-                if (entry.Kind != PathEntryKind.RegularFile || entry.LinkCount != 1 || !string.Equals(TransactionPath.ComputeSha256(destination), operation.ExpectedResultSha256, StringComparison.Ordinal))
+                if (
+                    entry.Kind != PathEntryKind.RegularFile
+                    || entry.LinkCount != 1
+                    || !string.Equals(TransactionPath.ComputeSha256(destination), operation.ExpectedResultSha256, StringComparison.Ordinal)
+                    || (operation.ResultUnixMode is { } expectedMode && entry.UnixMode != expectedMode)
+                )
                     throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A written destination failed post-verification.");
             }
         }
@@ -269,9 +279,11 @@ public sealed class InstallerTransactionExecutor
             string journalPath = Path.Combine(directory, "journal.json");
             if (!File.Exists(journalPath))
                 throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unrecognized transaction workspace requires manual inspection.");
-            TransactionJournal journal = TransactionJournalStore.Read(journalPath);
-            if (!string.Equals(journal.CanonicalGameRoot, gameRoot, StringComparison.Ordinal))
-                throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A recovery journal belongs to a different game root.");
+            DirectoryInfo directoryInfo = new(directory);
+            directoryInfo.Refresh();
+            if (directoryInfo.LinkTarget is not null || (directoryInfo.Attributes & FileAttributes.ReparsePoint) != 0 || !Guid.TryParseExact(directoryInfo.Name, "N", out Guid transactionId))
+                throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe or unrecognized transaction workspace requires manual inspection.");
+            TransactionJournal journal = TransactionJournalStore.Read(journalPath, transactionId, gameRoot, directory);
             if (journal.Status is TransactionJournalStatus.Committed or TransactionJournalStatus.RolledBack)
                 continue;
 
@@ -304,22 +316,64 @@ public sealed class InstallerTransactionExecutor
                 continue;
             }
 
-            if (current.Kind != PathEntryKind.Missing)
-            {
-                if (current.Kind != PathEntryKind.RegularFile || current.LinkCount != 1)
-                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "Recovery refused an unsafe changed destination.");
-                File.Delete(destination);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
-            }
-
             if (entry.HadOriginal)
             {
-                if (backup.Kind != PathEntryKind.RegularFile || backup.LinkCount != 1)
+                if (
+                    backup.Kind != PathEntryKind.RegularFile
+                    || backup.LinkCount != 1
+                    || entry.ExpectedExistingSha256 is null
+                    || !string.Equals(TransactionPath.ComputeSha256(backupPath), entry.ExpectedExistingSha256, StringComparison.Ordinal)
+                )
                     throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A required transaction backup is missing or unsafe.");
+
+                if (current.Kind != PathEntryKind.Missing)
+                {
+                    if (
+                        entry.Kind != TransactionOperationKind.WriteFile
+                        || current.Kind != PathEntryKind.RegularFile
+                        || current.LinkCount != 1
+                        || entry.ExpectedResultSha256 is null
+                        || !string.Equals(TransactionPath.ComputeSha256(destination), entry.ExpectedResultSha256, StringComparison.Ordinal)
+                    )
+                    {
+                        throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A transaction result changed after interruption; recovery preserved it for manual inspection.");
+                    }
+                }
+
+                if (current.Kind != PathEntryKind.Missing)
+                {
+                    File.Delete(destination);
+                    TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
+                }
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                 File.Move(backupPath, destination);
                 TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
                 TransactionDurability.FlushDirectory(Path.GetDirectoryName(backupPath)!);
+            }
+            else if (current.Kind != PathEntryKind.Missing)
+            {
+                if (
+                    entry.Kind != TransactionOperationKind.WriteFile
+                    || current.Kind != PathEntryKind.RegularFile
+                    || current.LinkCount != 1
+                    || entry.ExpectedResultSha256 is null
+                    || !string.Equals(TransactionPath.ComputeSha256(destination), entry.ExpectedResultSha256, StringComparison.Ordinal)
+                )
+                {
+                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A newly created transaction result changed after interruption; recovery preserved it for manual inspection.");
+                }
+                File.Delete(destination);
+                TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
+            }
+
+            foreach (string relativeDirectory in entry.CreatedDirectories.AsEnumerable().Reverse())
+            {
+                string directory = TransactionPath.ResolveUnderRoot(gameRoot, relativeDirectory);
+                if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any())
+                {
+                    Directory.Delete(directory);
+                    TransactionDurability.FlushDirectory(Path.GetDirectoryName(directory)!);
+                }
             }
         }
         journal.Status = TransactionJournalStatus.RolledBack;
@@ -372,6 +426,23 @@ public sealed class InstallerTransactionExecutor
         TransactionPermissions.SetMode(root, Convert.ToInt32("700", 8));
         foreach (string directory in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories))
             TransactionPermissions.SetMode(directory, Convert.ToInt32("700", 8));
+    }
+
+    private static IReadOnlyList<string> GetMissingParentDirectories(string gameRoot, string destination)
+    {
+        Stack<string> missing = new();
+        string? directory = Path.GetDirectoryName(destination);
+        while (directory is not null && !string.Equals(directory, gameRoot, StringComparison.Ordinal))
+        {
+            PathEntry entry = TransactionPath.Inspect(directory);
+            if (entry.Kind == PathEntryKind.Directory)
+                break;
+            if (entry.Kind != PathEntryKind.Missing)
+                throw new InstallerTransactionException(TransactionErrorCode.UnsafePath, "A destination parent is not a regular directory.");
+            missing.Push(Path.GetRelativePath(gameRoot, directory).Replace(Path.DirectorySeparatorChar, '/'));
+            directory = Path.GetDirectoryName(directory);
+        }
+        return missing.ToArray();
     }
 }
 

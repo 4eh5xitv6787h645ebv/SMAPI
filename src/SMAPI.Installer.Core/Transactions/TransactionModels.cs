@@ -31,6 +31,8 @@ public sealed record TransactionFileOperation(
 /// <summary>An immutable set of ordered operations.</summary>
 public sealed class TransactionPlan
 {
+    /// <summary>The maximum bounded operation count accepted by one transaction.</summary>
+    public const int MaximumOperationCount = 20_000;
     /// <summary>The unique transaction ID.</summary>
     public Guid TransactionId { get; }
 
@@ -48,6 +50,8 @@ public sealed class TransactionPlan
         TransactionFileOperation[] array = operations?.ToArray() ?? throw new ArgumentNullException(nameof(operations));
         if (array.Length == 0)
             throw new ArgumentException("A transaction must contain at least one operation.", nameof(operations));
+        if (array.Length > TransactionPlan.MaximumOperationCount)
+            throw new ArgumentException($"A transaction can't exceed {TransactionPlan.MaximumOperationCount} operations.", nameof(operations));
 
         this.TransactionId = transactionId;
         this.Operations = new ReadOnlyCollection<TransactionFileOperation>(array);

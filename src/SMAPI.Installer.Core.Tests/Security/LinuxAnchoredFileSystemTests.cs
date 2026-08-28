@@ -1,0 +1,262 @@
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using FluentAssertions;
+using NUnit.Framework;
+using StardewModdingAPI.Installer.Core.Security;
+
+namespace StardewModdingAPI.Installer.Core.Tests.Security;
+
+[TestFixture]
+public sealed class LinuxAnchoredFileSystemTests
+{
+    private string TempRoot = null!;
+    private string RootPath = null!;
+
+    [SetUp]
+    public void SetUp()
+    {
+        if (!OperatingSystem.IsLinux())
+            Assert.Ignore("Anchored filesystem tests require Linux.");
+
+        this.TempRoot = Path.Combine(Path.GetTempPath(), $"smapi-anchored-fs-{Guid.NewGuid():N}");
+        this.RootPath = Path.Combine(this.TempRoot, "root");
+        Directory.CreateDirectory(this.RootPath);
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        if (Directory.Exists(this.TempRoot))
+            Directory.Delete(this.TempRoot, recursive: true);
+    }
+
+    [Test]
+    public void Constructor_SymbolicLinkRoot_Rejects()
+    {
+        string linkPath = Path.Combine(this.TempRoot, "linked-root");
+        Directory.CreateSymbolicLink(linkPath, this.RootPath);
+
+        Action action = () => new LinuxAnchoredFileSystem(linkPath);
+
+        action.Should().Throw<IOException>().WithMessage("*real accessible directory*");
+    }
+
+    [TestCase("../escape")]
+    [TestCase("/absolute")]
+    [TestCase("a/../escape")]
+    [TestCase("a\\b")]
+    [TestCase("a//b")]
+    public void Stat_UnsafeRelativePath_Rejects(string path)
+    {
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        Action action = () => fileSystem.Stat(path);
+
+        action.Should().Throw<ArgumentException>();
+    }
+
+    [Test]
+    public void CreateNewFile_SymbolicLinkParent_RejectsWithoutWritingOutsideRoot()
+    {
+        string outside = Path.Combine(this.TempRoot, "outside");
+        Directory.CreateDirectory(outside);
+        Directory.CreateSymbolicLink(Path.Combine(this.RootPath, "linked"), outside);
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        Action action = () => fileSystem.CreateNewFile("linked/new-file", 0x180).Dispose();
+
+        action.Should().Throw<IOException>().WithMessage("*symbolic link or non-directory*");
+        File.Exists(Path.Combine(outside, "new-file")).Should().BeFalse();
+    }
+
+    [Test]
+    public void OpenRegularFileForRead_SymbolicLinkLeaf_RejectsWithoutFollowingIt()
+    {
+        string outside = Path.Combine(this.TempRoot, "outside.txt");
+        File.WriteAllText(outside, "private");
+        File.CreateSymbolicLink(Path.Combine(this.RootPath, "linked.txt"), outside);
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        Action action = () => fileSystem.OpenRegularFileForRead("linked.txt").Dispose();
+
+        action.Should().Throw<IOException>();
+        File.ReadAllText(outside).Should().Be("private");
+    }
+
+    [Test]
+    public void OpenRegularFileForRead_HardlinkedRegularFile_Rejects()
+    {
+        string original = Path.Combine(this.RootPath, "original.txt");
+        string linked = Path.Combine(this.RootPath, "linked.txt");
+        File.WriteAllText(original, "content");
+        link(original, linked).Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        Action action = () => fileSystem.OpenRegularFileForRead("original.txt").Dispose();
+
+        action.Should().Throw<IOException>().WithMessage("*multiple hard links*");
+    }
+
+    [Test]
+    public void Stat_Fifo_RejectsSpecialFile()
+    {
+        string fifo = Path.Combine(this.RootPath, "pipe");
+        mkfifo(fifo, 0x180).Should().Be(0, $"mkfifo(2) failed with errno {Marshal.GetLastWin32Error()}");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        Action action = () => fileSystem.Stat("pipe");
+
+        action.Should().Throw<IOException>().WithMessage("*unsupported special file*");
+    }
+
+    [Test]
+    public void ComputeSha256_PathReplacedAfterOpen_HashesCapturedHandle()
+    {
+        string originalPath = Path.Combine(this.RootPath, "payload.bin");
+        byte[] originalBytes = Encoding.UTF8.GetBytes("trusted original bytes");
+        File.WriteAllBytes(originalPath, originalBytes);
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead("payload.bin");
+
+        File.Move(originalPath, Path.Combine(this.RootPath, "moved.bin"));
+        File.WriteAllText(originalPath, "replacement bytes");
+
+        fileSystem.ComputeSha256(opened).Should().Be(Convert.ToHexString(SHA256.HashData(originalBytes)).ToLowerInvariant());
+    }
+
+    [Test]
+    public void CopyFile_OpenSource_CreatesPrivateVerifiedDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "trusted payload");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        destinationFileSystem.EnsureDirectory("stage", 0x1c0);
+
+        LinuxFileIdentity result = destinationFileSystem.CopyFile(source, "stage/payload", 0x180);
+
+        File.ReadAllText(Path.Combine(this.RootPath, "stage", "payload")).Should().Be("trusted payload");
+        result.Kind.Should().Be(LinuxAnchoredEntryKind.RegularFile);
+        result.LinkCount.Should().Be(1);
+        result.UnixMode.Should().Be(0x180);
+    }
+
+    [Test]
+    public void RenameFileNoReplace_DestinationExists_RejectsAndPreservesBothFiles()
+    {
+        File.WriteAllText(Path.Combine(this.RootPath, "source"), "source bytes");
+        File.WriteAllText(Path.Combine(this.RootPath, "destination"), "destination bytes");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        LinuxFileIdentity sourceIdentity = fileSystem.Stat("source")!;
+
+        Action action = () => fileSystem.RenameFileNoReplace("source", "destination", sourceIdentity);
+
+        action.Should().Throw<IOException>().WithMessage("*destination already exists*");
+        File.ReadAllText(Path.Combine(this.RootPath, "source")).Should().Be("source bytes");
+        File.ReadAllText(Path.Combine(this.RootPath, "destination")).Should().Be("destination bytes");
+    }
+
+    [Test]
+    public void RenameFileNoReplace_SourceIdentityChanged_RejectsReplacement()
+    {
+        string sourcePath = Path.Combine(this.RootPath, "source");
+        File.WriteAllText(sourcePath, "original");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        LinuxFileIdentity originalIdentity = fileSystem.Stat("source")!;
+        File.Move(sourcePath, Path.Combine(this.RootPath, "old-source"));
+        File.WriteAllText(sourcePath, "replacement");
+
+        Action action = () => fileSystem.RenameFileNoReplace("source", "destination", originalIdentity);
+
+        action.Should().Throw<IOException>().WithMessage("*identity changed*");
+        File.ReadAllText(sourcePath).Should().Be("replacement");
+        File.Exists(Path.Combine(this.RootPath, "destination")).Should().BeFalse();
+    }
+
+    [Test]
+    public void RenameFileNoReplace_MatchingIdentity_RenamesWithoutReplacement()
+    {
+        File.WriteAllText(Path.Combine(this.RootPath, "source"), "source bytes");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        LinuxFileIdentity sourceIdentity = fileSystem.Stat("source")!;
+
+        LinuxFileIdentity result = fileSystem.RenameFileNoReplace("source", "destination", sourceIdentity);
+
+        fileSystem.Stat("source").Should().BeNull();
+        result.IsSameObject(sourceIdentity).Should().BeTrue();
+        File.ReadAllText(Path.Combine(this.RootPath, "destination")).Should().Be("source bytes");
+    }
+
+    [Test]
+    public void UnlinkFile_PathReplacedAfterStat_RejectsAndPreservesReplacement()
+    {
+        string target = Path.Combine(this.RootPath, "target");
+        File.WriteAllText(target, "original");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        LinuxFileIdentity originalIdentity = fileSystem.Stat("target")!;
+        File.Move(target, Path.Combine(this.RootPath, "old-target"));
+        File.WriteAllText(target, "replacement");
+
+        Action action = () => fileSystem.UnlinkFile("target", originalIdentity);
+
+        action.Should().Throw<IOException>().WithMessage("*identity changed*");
+        File.ReadAllText(target).Should().Be("replacement");
+    }
+
+    [Test]
+    public void ChmodFile_MatchingIdentity_SetsExactMode()
+    {
+        File.WriteAllText(Path.Combine(this.RootPath, "target"), "content");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        LinuxFileIdentity identity = fileSystem.Stat("target")!;
+
+        LinuxFileIdentity changed = fileSystem.ChmodFile("target", identity, 0x140);
+
+        changed.UnixMode.Should().Be(0x140);
+        changed.IsSameObject(identity).Should().BeTrue();
+    }
+
+    [Test]
+    public void CreateNewFile_SelectedRootPathSwapped_StaysAnchoredToOriginalDirectory()
+    {
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        string movedRoot = Path.Combine(this.TempRoot, "moved-root");
+        string outside = Path.Combine(this.TempRoot, "outside");
+        Directory.Move(this.RootPath, movedRoot);
+        Directory.CreateDirectory(outside);
+        Directory.CreateSymbolicLink(this.RootPath, outside);
+
+        using LinuxAnchoredFile created = fileSystem.CreateNewFile("anchored", 0x180);
+        fileSystem.FsyncDirectory();
+
+        File.Exists(Path.Combine(movedRoot, "anchored")).Should().BeTrue();
+        File.Exists(Path.Combine(outside, "anchored")).Should().BeFalse();
+    }
+
+    [Test]
+    public void EnsureDirectory_ParentSwappedForSymlink_RejectsWithoutWritingOutsideRoot()
+    {
+        string parent = Path.Combine(this.RootPath, "parent");
+        string parked = Path.Combine(this.RootPath, "parked");
+        string outside = Path.Combine(this.TempRoot, "outside");
+        Directory.CreateDirectory(parent);
+        Directory.CreateDirectory(outside);
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        Directory.Move(parent, parked);
+        Directory.CreateSymbolicLink(parent, outside);
+
+        Action action = () => fileSystem.EnsureDirectory("parent/new", 0x1c0);
+
+        action.Should().Throw<IOException>();
+        Directory.Exists(Path.Combine(outside, "new")).Should().BeFalse();
+    }
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int link(string oldPath, string newPath);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int mkfifo(string path, int mode);
+}

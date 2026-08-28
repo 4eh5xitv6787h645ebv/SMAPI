@@ -2,6 +2,7 @@ using System.Runtime.Versioning;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Privacy;
+using StardewModdingAPI.Installer.Core.Ownership;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Privacy;
 
@@ -47,7 +48,7 @@ public sealed class InstallerLogTests
             "download.failed",
             $"home={home}; game={game}; mod={mod}; save={save}; report={report}; https://objects.githubusercontent.com/a?token=secret&sig=bad Authorization: topsecret Bearer abc.def",
             "fork-linux-v1-alpha.1",
-            "smapi-internal/SMAPI.dll",
+            NormalizedRelativePath.Parse("smapi-internal/SMAPI.dll"),
             "package_mismatch"
         )).Should().BeTrue();
         log.Dispose();
@@ -81,21 +82,78 @@ public sealed class InstallerLogTests
     public void Constructor_RotatesOnlyInstallerJsonLogsToConfiguredCount()
     {
         string state = this.CreateDirectory();
+        using (InstallerLog initial = new(new(state), Guid.NewGuid(), DateTimeOffset.UnixEpoch)) { }
         string logs = Path.Combine(state, "logs");
-        Directory.CreateDirectory(logs);
         for (int index = 0; index < 5; index++)
         {
-            string path = Path.Combine(logs, $"old-{index}.jsonl");
+            string path = Path.Combine(logs, $"20000101T00000{index}Z-{Guid.NewGuid():N}.jsonl");
             File.WriteAllText(path, "old");
             File.SetLastWriteTimeUtc(path, DateTime.UnixEpoch.AddMinutes(index));
         }
         string unrelated = Path.Combine(logs, "preserve.txt");
         File.WriteAllText(unrelated, "preserve");
+        string unrelatedJson = Path.Combine(logs, "notes.jsonl");
+        File.WriteAllText(unrelatedJson, "unrelated");
 
         using InstallerLog log = new(new(state, MaximumFileCount: 3), Guid.NewGuid(), DateTimeOffset.UtcNow);
 
-        Directory.GetFiles(logs, "*.jsonl").Should().HaveCount(3);
+        Directory.GetFiles(logs, "*-*.jsonl").Should().HaveCount(3);
         File.ReadAllText(unrelated).Should().Be("preserve");
+        File.ReadAllText(unrelatedJson).Should().Be("unrelated");
+    }
+
+    [Test]
+    public void Constructor_RejectsSymlinkedLogDirectoryWithoutTouchingTarget()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string state = this.CreateDirectory();
+        using (InstallerLog initial = new(new(state), Guid.NewGuid(), DateTimeOffset.UnixEpoch)) { }
+        Directory.Delete(Path.Combine(state, "logs"), recursive: true);
+        string external = Path.Combine(this.TemporaryDirectory!, "external");
+        Directory.CreateDirectory(external);
+        string unrelated = Path.Combine(external, "notes.jsonl");
+        File.WriteAllText(unrelated, "preserve");
+        Directory.CreateSymbolicLink(Path.Combine(state, "logs"), external);
+
+        Action action = () => _ = new InstallerLog(new(state), Guid.NewGuid(), DateTimeOffset.UtcNow);
+
+        action.Should().Throw<IOException>();
+        File.ReadAllText(unrelated).Should().Be("preserve");
+    }
+
+    [Test]
+    public void Write_IsSerializedAndNeverExceedsBoundUnderConcurrency()
+    {
+        string state = this.CreateDirectory();
+        Guid operationId = Guid.NewGuid();
+        string path;
+        using (InstallerLog log = new(new(state, MaximumFileBytes: 4096, MaximumMessageCharacters: 512), operationId, DateTimeOffset.UnixEpoch))
+        {
+            path = log.Path;
+            Action action = () => Parallel.For(0, 100, index => log.Write(new(
+                DateTimeOffset.UnixEpoch,
+                operationId,
+                InstallerLogLevel.Information,
+                "parallel",
+                $"entry-{index}-{new string('x', 200)}"
+            )));
+            action.Should().NotThrow();
+        }
+
+        new FileInfo(path).Length.Should().BeLessThanOrEqualTo(4096);
+        foreach (string line in File.ReadLines(path))
+            System.Text.Json.JsonDocument.Parse(line).Dispose();
+    }
+
+    [Test]
+    public void Write_RejectsMismatchedOperationId()
+    {
+        string state = this.CreateDirectory();
+        using InstallerLog log = new(new(state), Guid.NewGuid(), DateTimeOffset.UnixEpoch);
+
+        Action action = () => log.Write(new(DateTimeOffset.UnixEpoch, Guid.NewGuid(), InstallerLogLevel.Warning, "mismatch", "message"));
+
+        action.Should().Throw<ArgumentException>();
     }
 
     [Test]
@@ -110,16 +168,21 @@ public sealed class InstallerLogTests
         Convert.ToInt32(File.GetUnixFileMode(Path.GetDirectoryName(log.Path)!) & (UnixFileMode)0x1ff).Should().Be(Convert.ToInt32("700", 8));
     }
 
-    [TestCase("/absolute/path")]
-    [TestCase("../escape")]
-    [TestCase("smapi-internal\\file")]
-    public void Write_RejectsUnsafeRelativeOwnedPath(string path)
+    [Test]
+    public void Write_RejectsPathOutsideOwnedNamespace()
     {
         string state = this.CreateDirectory();
         Guid operationId = Guid.NewGuid();
         using InstallerLog log = new(new(state), operationId, DateTimeOffset.UnixEpoch);
 
-        Action action = () => log.Write(new(DateTimeOffset.UnixEpoch, operationId, InstallerLogLevel.Warning, "unsafe", "message", RelativeOwnedPath: path));
+        Action action = () => log.Write(new(
+            DateTimeOffset.UnixEpoch,
+            operationId,
+            InstallerLogLevel.Warning,
+            "unsafe",
+            "message",
+            RelativeOwnedPath: NormalizedRelativePath.Parse("unrelated.txt")
+        ));
 
         action.Should().Throw<ArgumentException>();
     }
@@ -128,6 +191,6 @@ public sealed class InstallerLogTests
     {
         this.TemporaryDirectory = Path.Combine(Path.GetTempPath(), $"smapi-installer-log-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(this.TemporaryDirectory);
-        return this.TemporaryDirectory;
+        return Path.Combine(this.TemporaryDirectory, "state");
     }
 }

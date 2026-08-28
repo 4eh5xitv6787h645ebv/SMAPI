@@ -1,0 +1,708 @@
+using System.Buffers;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+using StardewModdingAPI.Installer.Core.Ownership;
+
+namespace StardewModdingAPI.Installer.Core.Security;
+
+/// <summary>The supported entry types below an anchored Linux directory.</summary>
+public enum LinuxAnchoredEntryKind
+{
+    RegularFile,
+    Directory
+}
+
+/// <summary>An exact observed Linux filesystem identity.</summary>
+public sealed record LinuxFileIdentity(
+    LinuxAnchoredEntryKind Kind,
+    ulong Inode,
+    uint DeviceMajor,
+    uint DeviceMinor,
+    uint LinkCount,
+    long Size,
+    int UnixMode,
+    long ModificationSeconds,
+    uint ModificationNanoseconds,
+    long ChangeSeconds,
+    uint ChangeNanoseconds
+)
+{
+    /// <summary>Whether two observations refer to the same filesystem object.</summary>
+    public bool IsSameObject(LinuxFileIdentity other)
+    {
+        return other != null
+            && this.Kind == other.Kind
+            && this.Inode == other.Inode
+            && this.DeviceMajor == other.DeviceMajor
+            && this.DeviceMinor == other.DeviceMinor;
+    }
+}
+
+/// <summary>An owned safe handle opened through a <see cref="LinuxAnchoredFileSystem"/>.</summary>
+public sealed class LinuxAnchoredFile : IDisposable
+{
+    internal SafeFileHandle Handle { get; }
+
+    /// <summary>The identity captured when the handle was opened.</summary>
+    public LinuxFileIdentity Identity { get; }
+
+    internal LinuxAnchoredFile(SafeFileHandle handle, LinuxFileIdentity identity)
+    {
+        this.Handle = handle;
+        this.Identity = identity;
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        this.Handle.Dispose();
+    }
+
+    internal void AssertOpen()
+    {
+        if (this.Handle.IsClosed || this.Handle.IsInvalid)
+            throw new ObjectDisposedException(nameof(LinuxAnchoredFile));
+    }
+}
+
+/// <summary>
+/// Performs Linux file operations relative to an open real-directory handle. Every traversed segment is opened with
+/// no-follow semantics, so later replacement of the selected root path can't redirect operations.
+/// </summary>
+public sealed class LinuxAnchoredFileSystem : IDisposable
+{
+    private const int OpenReadOnly = 0;
+    private const int OpenReadWrite = 2;
+    private const int OpenCreate = 0x40;
+    private const int OpenExclusive = 0x80;
+    private const int OpenDirectory = 0x10000;
+    private const int OpenNoFollow = 0x20000;
+    private const int OpenCloseOnExec = 0x80000;
+    private const int DuplicateCloseOnExec = 1030;
+    private const int AtSymlinkNoFollow = 0x100;
+    private const int AtEmptyPath = 0x1000;
+    private const uint StatxBasicStats = 0x7ff;
+    private const uint RenameNoReplace = 1;
+    private const ushort FileTypeMask = 0xf000;
+    private const ushort FileTypeDirectory = 0x4000;
+    private const ushort FileTypeRegular = 0x8000;
+    private const int ErrorNoEntry = 2;
+    private const int ErrorExists = 17;
+    private const int ErrorNotDirectory = 20;
+    private const int ErrorNotSupported = 38;
+    private const int ErrorSymbolicLinkLoop = 40;
+
+    private readonly SafeFileHandle RootHandle;
+    private readonly LinuxFileIdentity RootIdentity;
+    private bool Disposed;
+
+    /// <summary>Open and anchor a real Linux directory. A symbolic-link root is rejected.</summary>
+    public LinuxAnchoredFileSystem(string rootPath)
+    {
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Anchored filesystem operations require Linux.");
+        if (string.IsNullOrWhiteSpace(rootPath))
+            throw new ArgumentException("An anchored root path is required.", nameof(rootPath));
+
+        string fullPath = Path.GetFullPath(rootPath);
+        int descriptor = open(fullPath, OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec, 0);
+        if (descriptor < 0)
+            throw CreatePathException("The anchored root isn't a real accessible directory", Marshal.GetLastWin32Error());
+
+        this.RootHandle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        try
+        {
+            this.RootIdentity = GetHandleIdentity(this.RootHandle, requireSingleLinkRegularFile: false);
+            if (this.RootIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw new IOException("The anchored root isn't a directory.");
+        }
+        catch
+        {
+            this.RootHandle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Get a safe regular-file handle without following any path segment.</summary>
+    public LinuxAnchoredFile OpenRegularFileForRead(string relativePath)
+    {
+        this.AssertUsable();
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        SafeFileHandle handle = OpenAt(
+            parent.Parent,
+            parent.Leaf,
+            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            0,
+            "Couldn't open an anchored regular file"
+        );
+        try
+        {
+            LinuxFileIdentity identity = GetHandleIdentity(handle, requireSingleLinkRegularFile: true);
+            if (identity.Kind != LinuxAnchoredEntryKind.RegularFile)
+                throw new IOException("The anchored entry isn't a regular file.");
+            return new LinuxAnchoredFile(handle, identity);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Create a new empty single-link regular file without replacing an existing entry.</summary>
+    public LinuxAnchoredFile CreateNewFile(string relativePath, int unixMode)
+    {
+        this.AssertUsable();
+        ValidateUnixMode(unixMode);
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        SafeFileHandle handle = OpenAt(
+            parent.Parent,
+            parent.Leaf,
+            OpenReadWrite | OpenCreate | OpenExclusive | OpenNoFollow | OpenCloseOnExec,
+            (uint)unixMode,
+            "Couldn't create an anchored file without replacement"
+        );
+        try
+        {
+            SetHandleMode(handle, unixMode);
+            LinuxFileIdentity identity = GetHandleIdentity(handle, requireSingleLinkRegularFile: true);
+            if (identity.Kind != LinuxAnchoredEntryKind.RegularFile)
+                throw new IOException("The newly created anchored entry isn't a regular file.");
+            Fsync(parent.Parent);
+            return new LinuxAnchoredFile(handle, identity);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Copy an already-open regular file to a new anchored path and durably verify the bytes.</summary>
+    public LinuxFileIdentity CopyFile(LinuxAnchoredFile source, string destinationRelativePath, int unixMode)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(source);
+        source.AssertOpen();
+        LinuxFileIdentity sourceBefore = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
+        if (sourceBefore != source.Identity)
+            throw new IOException("The source identity changed after it was opened.");
+
+        using LinuxAnchoredFile destination = this.CreateNewFile(destinationRelativePath, unixMode);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
+        try
+        {
+            long offset = 0;
+            while (true)
+            {
+                int count = RandomAccess.Read(source.Handle, buffer, offset);
+                if (count == 0)
+                    break;
+                RandomAccess.Write(destination.Handle, buffer.AsSpan(0, count), offset);
+                offset = checked(offset + count);
+            }
+            Fsync(destination.Handle);
+        }
+        catch
+        {
+            try
+            {
+                LinuxFileIdentity current = GetHandleIdentity(destination.Handle, requireSingleLinkRegularFile: true);
+                this.UnlinkFile(destinationRelativePath, current);
+            }
+            catch
+            {
+                // The original copy error is more useful; a caller can inspect the private staging root.
+            }
+            throw;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        LinuxFileIdentity sourceAfter = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
+        LinuxFileIdentity destinationAfter = GetHandleIdentity(destination.Handle, requireSingleLinkRegularFile: true);
+        if (sourceAfter != sourceBefore)
+            throw new IOException("The source identity changed while it was copied.");
+        if (destinationAfter.Size != sourceAfter.Size || this.ComputeSha256(source) != this.ComputeSha256(destination))
+            throw new IOException("The anchored copy failed byte-for-byte verification.");
+        return destinationAfter;
+    }
+
+    /// <summary>Compute SHA-256 from an already-open stable single-link regular-file handle.</summary>
+    public string ComputeSha256(LinuxAnchoredFile file)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(file);
+        file.AssertOpen();
+        LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        if (before != file.Identity && !before.IsSameObject(file.Identity))
+            throw new IOException("The open file handle no longer refers to its captured object.");
+
+        using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
+        try
+        {
+            long offset = 0;
+            while (true)
+            {
+                int count = RandomAccess.Read(file.Handle, buffer, offset);
+                if (count == 0)
+                    break;
+                hasher.AppendData(buffer, 0, count);
+                offset = checked(offset + count);
+            }
+            LinuxFileIdentity after = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+            if (after != before)
+                throw new IOException("The file identity changed while it was hashed.");
+            return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>Get an entry identity without following links, or <see langword="null"/> when absent.</summary>
+    /// <remarks>Symbolic links, hardlinked regular files, and special entries are rejected rather than returned.</remarks>
+    public LinuxFileIdentity? Stat(string relativePath)
+    {
+        this.AssertUsable();
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        return GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: true, requireSingleLinkRegularFile: true);
+    }
+
+    /// <summary>Create and durably flush any missing real-directory segments.</summary>
+    public LinuxFileIdentity EnsureDirectory(string relativePath, int unixMode)
+    {
+        this.AssertUsable();
+        ValidateUnixMode(unixMode);
+        string[] segments = GetSegments(relativePath);
+        SafeFileHandle current = Duplicate(this.RootHandle);
+        try
+        {
+            foreach (string segment in segments)
+            {
+                SafeFileHandle next;
+                try
+                {
+                    next = OpenDirectoryAt(current, segment);
+                }
+                catch (FileNotFoundException)
+                {
+                    if (mkdirat(current, segment, (uint)unixMode) != 0)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != ErrorExists)
+                            throw CreatePathException("Couldn't create an anchored directory", error);
+                    }
+                    next = OpenDirectoryAt(current, segment);
+                    SetHandleMode(next, unixMode);
+                    Fsync(current);
+                }
+
+                current.Dispose();
+                current = next;
+            }
+
+            LinuxFileIdentity identity = GetHandleIdentity(current, requireSingleLinkRegularFile: false);
+            if (identity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw new IOException("An anchored directory path resolved to a non-directory entry.");
+            return identity;
+        }
+        finally
+        {
+            current.Dispose();
+        }
+    }
+
+    /// <summary>Rename a known regular file without replacing a destination.</summary>
+    public LinuxFileIdentity RenameFileNoReplace(string sourceRelativePath, string destinationRelativePath, LinuxFileIdentity expectedSource)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(expectedSource);
+        if (string.Equals(sourceRelativePath, destinationRelativePath, StringComparison.Ordinal))
+            throw new ArgumentException("Rename source and destination must differ.", nameof(destinationRelativePath));
+
+        using ParentAndLeaf source = this.OpenParent(sourceRelativePath);
+        using ParentAndLeaf destination = this.OpenParent(destinationRelativePath);
+        using SafeFileHandle sourceHandle = OpenAt(
+            source.Parent,
+            source.Leaf,
+            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            0,
+            "Couldn't open the anchored rename source"
+        );
+        LinuxFileIdentity immediatelyBefore = GetHandleIdentity(sourceHandle, requireSingleLinkRegularFile: true);
+        if (immediatelyBefore != expectedSource || GetIdentityAt(source.Parent, source.Leaf, false, true) != expectedSource)
+            throw new IOException("The rename source identity changed before mutation.");
+        if (GetIdentityAt(destination.Parent, destination.Leaf, true, true) != null)
+            throw new IOException("The no-replace rename destination already exists.");
+
+        RenameAtNoReplace(source.Parent, source.Leaf, destination.Parent, destination.Leaf);
+        Fsync(source.Parent);
+        Fsync(destination.Parent);
+
+        LinuxFileIdentity? result = GetIdentityAt(destination.Parent, destination.Leaf, false, true);
+        if (result == null || !result.IsSameObject(expectedSource))
+        {
+            TryRollbackUnexpectedRename(destination.Parent, destination.Leaf, source.Parent, source.Leaf);
+            throw new IOException("The rename source identity changed during mutation.");
+        }
+        return result;
+    }
+
+    /// <summary>Unlink a regular file only if its exact identity still matches.</summary>
+    public void UnlinkFile(string relativePath, LinuxFileIdentity expectedIdentity)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(expectedIdentity);
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        using SafeFileHandle handle = OpenAt(
+            parent.Parent,
+            parent.Leaf,
+            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            0,
+            "Couldn't open the anchored unlink target"
+        );
+        LinuxFileIdentity observed = GetHandleIdentity(handle, requireSingleLinkRegularFile: true);
+        if (observed != expectedIdentity || GetIdentityAt(parent.Parent, parent.Leaf, false, true) != expectedIdentity)
+            throw new IOException("The unlink target identity changed before mutation.");
+        if (unlinkat(parent.Parent, parent.Leaf, 0) != 0)
+            throw CreatePathException("Couldn't unlink the anchored regular file", Marshal.GetLastWin32Error());
+        Fsync(parent.Parent);
+
+        LinuxFileIdentity after = GetHandleIdentity(handle, requireSingleLinkRegularFile: false);
+        if (after.LinkCount != 0)
+            throw new IOException("The unlink target identity changed during mutation.");
+    }
+
+    /// <summary>Set exact permission bits on a known regular file and return its updated identity.</summary>
+    public LinuxFileIdentity ChmodFile(string relativePath, LinuxFileIdentity expectedIdentity, int unixMode)
+    {
+        this.AssertUsable();
+        ValidateUnixMode(unixMode);
+        using LinuxAnchoredFile file = this.OpenRegularFileForRead(relativePath);
+        if (file.Identity != expectedIdentity)
+            throw new IOException("The chmod target identity changed before mutation.");
+        SetHandleMode(file.Handle, unixMode);
+        Fsync(file.Handle);
+        LinuxFileIdentity result = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        if ((result.UnixMode & 0x1ff) != unixMode || !result.IsSameObject(expectedIdentity))
+            throw new IOException("The chmod result failed identity or mode verification.");
+        return result;
+    }
+
+    /// <summary>Durably flush the anchored root or one of its real subdirectories.</summary>
+    public void FsyncDirectory(string? relativePath = null)
+    {
+        this.AssertUsable();
+        using SafeFileHandle directory = relativePath == null ? Duplicate(this.RootHandle) : this.OpenDirectoryPath(relativePath);
+        Fsync(directory);
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (this.Disposed)
+            return;
+        this.RootHandle.Dispose();
+        this.Disposed = true;
+    }
+
+    private ParentAndLeaf OpenParent(string relativePath)
+    {
+        string[] segments = GetSegments(relativePath);
+        SafeFileHandle current = Duplicate(this.RootHandle);
+        try
+        {
+            for (int index = 0; index < segments.Length - 1; index++)
+            {
+                SafeFileHandle next = OpenDirectoryAt(current, segments[index]);
+                current.Dispose();
+                current = next;
+            }
+            return new ParentAndLeaf(current, segments[^1]);
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
+    }
+
+    private SafeFileHandle OpenDirectoryPath(string relativePath)
+    {
+        string[] segments = GetSegments(relativePath);
+        SafeFileHandle current = Duplicate(this.RootHandle);
+        try
+        {
+            foreach (string segment in segments)
+            {
+                SafeFileHandle next = OpenDirectoryAt(current, segment);
+                current.Dispose();
+                current = next;
+            }
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
+    }
+
+    private static SafeFileHandle OpenDirectoryAt(SafeFileHandle parent, string segment)
+    {
+        SafeFileHandle handle = OpenAt(
+            parent,
+            segment,
+            OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec,
+            0,
+            "Couldn't traverse an anchored directory segment"
+        );
+        try
+        {
+            LinuxFileIdentity identity = GetHandleIdentity(handle, requireSingleLinkRegularFile: false);
+            if (identity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw new IOException("An anchored parent segment isn't a directory.");
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    private static SafeFileHandle OpenAt(SafeFileHandle parent, string name, int flags, uint mode, string message)
+    {
+        int descriptor = openat(parent, name, flags, mode);
+        if (descriptor < 0)
+            throw CreatePathException(message, Marshal.GetLastWin32Error());
+        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+    }
+
+    private static SafeFileHandle Duplicate(SafeFileHandle handle)
+    {
+        int descriptor = fcntl(handle, DuplicateCloseOnExec, 0);
+        if (descriptor < 0)
+            throw new IOException($"Couldn't duplicate an anchored directory descriptor (errno {Marshal.GetLastWin32Error()}).");
+        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+    }
+
+    private static LinuxFileIdentity? GetIdentityAt(
+        SafeFileHandle parent,
+        string name,
+        bool allowMissing,
+        bool requireSingleLinkRegularFile
+    )
+    {
+        int result = statx(parent, name, AtSymlinkNoFollow, StatxBasicStats, out Statx data);
+        if (result != 0)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (allowMissing && error == ErrorNoEntry)
+                return null;
+            if (error == ErrorNotSupported)
+                throw new PlatformNotSupportedException("Linux statx is required for fail-closed anchored filesystem identity checks.");
+            throw CreatePathException("Couldn't inspect an anchored entry", error);
+        }
+        return ConvertIdentity(data, requireSingleLinkRegularFile);
+    }
+
+    private static LinuxFileIdentity GetHandleIdentity(SafeFileHandle handle, bool requireSingleLinkRegularFile)
+    {
+        int result = statx(handle, "", AtEmptyPath | AtSymlinkNoFollow, StatxBasicStats, out Statx data);
+        if (result != 0)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (error == ErrorNotSupported)
+                throw new PlatformNotSupportedException("Linux statx is required for fail-closed anchored filesystem identity checks.");
+            throw new IOException($"Couldn't inspect an anchored handle (errno {error}).");
+        }
+        return ConvertIdentity(data, requireSingleLinkRegularFile);
+    }
+
+    private static LinuxFileIdentity ConvertIdentity(Statx data, bool requireSingleLinkRegularFile)
+    {
+        LinuxAnchoredEntryKind kind = (data.Mode & FileTypeMask) switch
+        {
+            FileTypeRegular => LinuxAnchoredEntryKind.RegularFile,
+            FileTypeDirectory => LinuxAnchoredEntryKind.Directory,
+            _ => throw new IOException("An anchored path is a symbolic link or unsupported special file.")
+        };
+        if (requireSingleLinkRegularFile && kind == LinuxAnchoredEntryKind.RegularFile && data.LinkCount != 1)
+            throw new IOException("An anchored regular file has multiple hard links.");
+        if (data.Size > long.MaxValue)
+            throw new IOException("An anchored file is too large to address safely.");
+        return new LinuxFileIdentity(
+            kind,
+            data.Inode,
+            data.DeviceMajor,
+            data.DeviceMinor,
+            data.LinkCount,
+            (long)data.Size,
+            data.Mode & 0x1ff,
+            data.ModificationTime.Seconds,
+            data.ModificationTime.Nanoseconds,
+            data.ChangeTime.Seconds,
+            data.ChangeTime.Nanoseconds
+        );
+    }
+
+    private static string[] GetSegments(string relativePath)
+    {
+        return NormalizedRelativePath.Parse(relativePath).Value.Split('/');
+    }
+
+    private static void RenameAtNoReplace(SafeFileHandle sourceParent, string source, SafeFileHandle destinationParent, string destination)
+    {
+        try
+        {
+            if (renameat2(sourceParent, source, destinationParent, destination, RenameNoReplace) == 0)
+                return;
+            int error = Marshal.GetLastWin32Error();
+            if (error == ErrorNotSupported)
+                throw new PlatformNotSupportedException("Linux renameat2(RENAME_NOREPLACE) is required for fail-closed anchored renames.");
+            throw CreatePathException("Couldn't rename an anchored file without replacement", error);
+        }
+        catch (EntryPointNotFoundException ex)
+        {
+            throw new PlatformNotSupportedException("Linux renameat2(RENAME_NOREPLACE) is required for fail-closed anchored renames.", ex);
+        }
+    }
+
+    private static void TryRollbackUnexpectedRename(SafeFileHandle sourceParent, string source, SafeFileHandle destinationParent, string destination)
+    {
+        try
+        {
+            RenameAtNoReplace(sourceParent, source, destinationParent, destination);
+            Fsync(sourceParent);
+            Fsync(destinationParent);
+        }
+        catch
+        {
+            // The caller receives a fail-closed identity error and must inspect both anchored paths.
+        }
+    }
+
+    private static void SetHandleMode(SafeFileHandle handle, int mode)
+    {
+        ValidateUnixMode(mode);
+        if (fchmod(handle, (uint)mode) != 0)
+            throw new IOException($"Couldn't set anchored file permissions (errno {Marshal.GetLastWin32Error()}).");
+    }
+
+    private static void ValidateUnixMode(int mode)
+    {
+        if (mode is < 0 or > 0x1ff)
+            throw new ArgumentOutOfRangeException(nameof(mode), "Only ordinary 0000-0777 permission bits are accepted.");
+    }
+
+    private static void Fsync(SafeFileHandle handle)
+    {
+        if (fsync(handle) != 0)
+            throw new IOException($"Couldn't durably flush an anchored handle (errno {Marshal.GetLastWin32Error()}).");
+    }
+
+    private void AssertUsable()
+    {
+        if (this.Disposed || this.RootHandle.IsClosed || this.RootHandle.IsInvalid)
+            throw new ObjectDisposedException(nameof(LinuxAnchoredFileSystem));
+        LinuxFileIdentity current = GetHandleIdentity(this.RootHandle, requireSingleLinkRegularFile: false);
+        if (current.Kind != LinuxAnchoredEntryKind.Directory || !current.IsSameObject(this.RootIdentity))
+            throw new IOException("The anchored root identity changed unexpectedly.");
+    }
+
+    private static Exception CreatePathException(string message, int error)
+    {
+        return error switch
+        {
+            ErrorNoEntry => new FileNotFoundException($"{message} (errno {error})."),
+            ErrorExists => new IOException($"{message}: the destination already exists (errno {error})."),
+            ErrorNotDirectory or ErrorSymbolicLinkLoop => new IOException($"{message}: a path segment is a symbolic link or non-directory (errno {error})."),
+            ErrorNotSupported => new PlatformNotSupportedException($"{message}: the required Linux syscall isn't supported."),
+            _ => new IOException($"{message} (errno {error}).")
+        };
+    }
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int open(string path, int flags, uint mode);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int openat(SafeFileHandle directory, string path, int flags, uint mode);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int mkdirat(SafeFileHandle directory, string path, uint mode);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int unlinkat(SafeFileHandle directory, string path, int flags);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int renameat2(SafeFileHandle sourceDirectory, string source, SafeFileHandle destinationDirectory, string destination, uint flags);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(SafeFileHandle descriptor, int command, int argument);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fchmod(SafeFileHandle descriptor, uint mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fsync(SafeFileHandle descriptor);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int statx(SafeFileHandle directory, string path, int flags, uint mask, out Statx data);
+
+    [StructLayout(LayoutKind.Sequential, Size = 256)]
+    private struct Statx
+    {
+        public uint Mask;
+        public uint BlockSize;
+        public ulong Attributes;
+        public uint LinkCount;
+        public uint UserId;
+        public uint GroupId;
+        public ushort Mode;
+        public ushort Spare0;
+        public ulong Inode;
+        public ulong Size;
+        public ulong Blocks;
+        public ulong AttributesMask;
+        public StatxTimestamp AccessTime;
+        public StatxTimestamp BirthTime;
+        public StatxTimestamp ChangeTime;
+        public StatxTimestamp ModificationTime;
+        public uint DeviceIdMajor;
+        public uint DeviceIdMinor;
+        public uint DeviceMajor;
+        public uint DeviceMinor;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StatxTimestamp
+    {
+        public long Seconds;
+        public uint Nanoseconds;
+        public int Reserved;
+    }
+
+    private sealed class ParentAndLeaf : IDisposable
+    {
+        public SafeFileHandle Parent { get; }
+        public string Leaf { get; }
+
+        public ParentAndLeaf(SafeFileHandle parent, string leaf)
+        {
+            this.Parent = parent;
+            this.Leaf = leaf;
+        }
+
+        public void Dispose()
+        {
+            this.Parent.Dispose();
+        }
+    }
+}

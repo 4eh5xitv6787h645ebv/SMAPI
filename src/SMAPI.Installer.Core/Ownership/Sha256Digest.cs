@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 namespace StardewModdingAPI.Installer.Core.Ownership;
 
 /// <summary>A SHA-256 digest in canonical lowercase hexadecimal form.</summary>
-public readonly record struct Sha256Digest
+public sealed record Sha256Digest
 {
     private static readonly Regex Pattern = new(@"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant);
 

@@ -8,6 +8,31 @@ namespace StardewModdingAPI.Installer.Core.Tests.Ownership;
 public class ManifestReceiptTests
 {
     [Test]
+    public void DigestValueObjectAndPublicModelsRejectNullDigests()
+    {
+        PackageManifestEntry launcher = OwnershipTestData.Entry("StardewValley", '1', OwnedEntryKind.Launcher);
+        InstallationReleaseIdentity release = OwnershipTestData.Release();
+
+        Action manifestEntry = () => new PackageManifestEntry(launcher.Path, null!, 1, 420, launcher.Kind);
+        Action receiptEntry = () => new InstallationReceiptEntry(launcher.Path, null!, 420, launcher.Kind);
+        Action currentFile = () => new CurrentFile(launcher.Path, null!, 420);
+        Action releaseIdentity = () => new InstallationReleaseIdentity(
+            release.Repository,
+            release.Tag,
+            release.EmbeddedVersion,
+            release.PackageAssetName,
+            release.SourceCommit,
+            release.SourceTree,
+            null!
+        );
+
+        manifestEntry.Should().Throw<ArgumentNullException>();
+        receiptEntry.Should().Throw<ArgumentNullException>();
+        currentFile.Should().Throw<ArgumentNullException>();
+        releaseIdentity.Should().Throw<ArgumentNullException>();
+    }
+
+    [Test]
     public void ReleaseIdentity_RejectsCrossArtifactMismatch()
     {
         InstallationReleaseIdentity valid = OwnershipTestData.Release();

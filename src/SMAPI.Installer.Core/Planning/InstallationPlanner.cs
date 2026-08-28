@@ -185,7 +185,7 @@ public sealed class InstallationPlanner
                 operations.Add(new PlannedOperation(PlanOperationKind.Backup, entry.Path, entry.Current.Sha256, entry.Current.Sha256));
         }
 
-        if (request.Launcher.CurrentLauncherSha256.HasValue && planned.Add(InstallationPlanner.LauncherPath.Value))
+        if (request.Launcher.CurrentLauncherSha256 is not null && planned.Add(InstallationPlanner.LauncherPath.Value))
         {
             operations.Add(new PlannedOperation(
                 PlanOperationKind.Backup,
@@ -194,7 +194,7 @@ public sealed class InstallationPlanner
                 request.Launcher.CurrentLauncherSha256
             ));
         }
-        if (request.Launcher.BackupLauncherSha256.HasValue && planned.Add(InstallationPlanner.LauncherBackupPath.Value))
+        if (request.Launcher.BackupLauncherSha256 is not null && planned.Add(InstallationPlanner.LauncherBackupPath.Value))
         {
             operations.Add(new PlannedOperation(
                 PlanOperationKind.Backup,

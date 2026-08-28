@@ -23,6 +23,7 @@ public sealed class InstallationReceiptEntry
     public InstallationReceiptEntry(NormalizedRelativePath path, Sha256Digest installedSha256, int unixMode, OwnedEntryKind kind)
     {
         ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(installedSha256);
         if (unixMode is < 0 or > 511)
             throw new ArgumentOutOfRangeException(nameof(unixMode));
         OwnedNamespacePolicy.AssertAllowed(path, kind);
@@ -46,6 +47,8 @@ public sealed record LauncherReceipt
     /// <summary>Construct an immutable launcher receipt.</summary>
     public LauncherReceipt(Sha256Digest installedLauncherSha256, Sha256Digest originalLauncherSha256)
     {
+        ArgumentNullException.ThrowIfNull(installedLauncherSha256);
+        ArgumentNullException.ThrowIfNull(originalLauncherSha256);
         this.InstalledLauncherSha256 = installedLauncherSha256;
         this.OriginalLauncherSha256 = originalLauncherSha256;
     }
@@ -85,6 +88,7 @@ public sealed class InstallationReceipt
     )
     {
         ArgumentNullException.ThrowIfNull(release);
+        ArgumentNullException.ThrowIfNull(manifestSha256);
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentNullException.ThrowIfNull(launcher);
         if (!IsCanonicalTransactionId(transactionId))

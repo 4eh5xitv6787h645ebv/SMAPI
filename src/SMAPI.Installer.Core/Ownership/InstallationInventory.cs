@@ -40,6 +40,7 @@ public sealed record CurrentFile
     public CurrentFile(NormalizedRelativePath path, Sha256Digest sha256, int unixMode)
     {
         ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(sha256);
         if (unixMode is < 0 or > 511)
             throw new ArgumentOutOfRangeException(nameof(unixMode));
         this.Path = path;

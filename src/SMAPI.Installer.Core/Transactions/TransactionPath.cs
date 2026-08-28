@@ -119,18 +119,19 @@ internal static class TransactionPath
                 FileTypeDirectory => PathEntryKind.Directory,
                 _ => PathEntryKind.UnsafeSpecial
             };
-            return new PathEntry(kind, data.Inode, data.DeviceMajor, data.DeviceMinor, data.LinkCount);
+            return new PathEntry(kind, data.Inode, data.DeviceMajor, data.DeviceMinor, data.LinkCount, data.Mode & 0x1ff);
         }
 
         FileAttributes attributes = File.GetAttributes(path);
         if ((attributes & FileAttributes.ReparsePoint) != 0)
-            return new PathEntry(PathEntryKind.UnsafeSpecial, 0, 0, 0, 0);
+            return new PathEntry(PathEntryKind.UnsafeSpecial, 0, 0, 0, 0, 0);
         return new PathEntry(
             (attributes & FileAttributes.Directory) != 0 ? PathEntryKind.Directory : PathEntryKind.RegularFile,
             0,
             0,
             0,
-            1
+            1,
+            0
         );
     }
 
@@ -196,7 +197,7 @@ internal enum PathEntryKind
     UnsafeSpecial
 }
 
-internal sealed record PathEntry(PathEntryKind Kind, ulong Inode, uint DeviceMajor, uint DeviceMinor, uint LinkCount)
+internal sealed record PathEntry(PathEntryKind Kind, ulong Inode, uint DeviceMajor, uint DeviceMinor, uint LinkCount, int UnixMode)
 {
-    public static PathEntry Missing { get; } = new(PathEntryKind.Missing, 0, 0, 0, 0);
+    public static PathEntry Missing { get; } = new(PathEntryKind.Missing, 0, 0, 0, 0, 0);
 }

@@ -27,6 +27,7 @@ public sealed class PackageManifestEntry
     public PackageManifestEntry(NormalizedRelativePath path, Sha256Digest sha256, long sizeBytes, int unixMode, OwnedEntryKind kind)
     {
         ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(sha256);
         if (sizeBytes < 0)
             throw new ArgumentOutOfRangeException(nameof(sizeBytes));
         if (unixMode is < 0 or > 511)
