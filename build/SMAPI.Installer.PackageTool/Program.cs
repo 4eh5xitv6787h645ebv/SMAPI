@@ -25,19 +25,18 @@ internal static class Program
             }
             string command = args[0];
             Dictionary<string, string> options = Program.ParseOptions(args[1..]);
-            string directory = Program.Take(options, "asset-directory");
-            ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(Program.Take(options, "tag"));
-            string sourceCommit = Program.Take(options, "source-commit");
-            string sourceTree = Program.Take(options, "source-tree");
-            ReleaseAssetSet tool = new();
             switch (command)
             {
                 case "create":
+                    string createDirectory = Program.Take(options, "asset-directory");
+                    ForkReleaseIdentity createIdentity = ForkReleaseIdentity.Parse(Program.Take(options, "tag"));
+                    string createSourceCommit = Program.Take(options, "source-commit");
+                    string createSourceTree = Program.Take(options, "source-tree");
                     string package = Program.Take(options, "package");
                     ReleaseAssetSetInputs createInputs = new(
-                        identity,
-                        sourceCommit,
-                        sourceTree,
+                        createIdentity,
+                        createSourceCommit,
+                        createSourceTree,
                         Program.Take(options, "workflow-ref"),
                         Program.Take(options, "workflow-run"),
                         Program.Take(options, "runner-image"),
@@ -48,24 +47,41 @@ internal static class Program
                     );
                     Program.AssertNoUnknownOptions(options);
                     Program.AssertAuthoritativeTagPushContext(
-                        identity,
-                        sourceCommit,
+                        createIdentity,
+                        createSourceCommit,
                         createInputs.Workflow,
                         getEnvironmentVariable
                     );
-                    await tool.CreateAsync(package, directory, createInputs).ConfigureAwait(false);
+                    await new ReleaseAssetSet().CreateAsync(package, createDirectory, createInputs).ConfigureAwait(false);
                     Console.WriteLine(
-                        $"create: created and self-verified {identity.Tag}; the GitHub tag-push context guard isn't cryptographic provenance"
+                        $"create: created and self-verified {createIdentity.Tag}; the GitHub tag-push context guard isn't cryptographic provenance"
                     );
                     break;
                 case "verify-release":
+                    string verifyDirectory = Program.Take(options, "asset-directory");
+                    ForkReleaseIdentity verifyIdentity = ForkReleaseIdentity.Parse(Program.Take(options, "tag"));
+                    string verifySourceCommit = Program.Take(options, "source-commit");
+                    string verifySourceTree = Program.Take(options, "source-tree");
                     Program.AssertNoUnknownOptions(options);
-                    await tool.VerifyReleaseAsync(
-                        directory,
-                        new ReleaseVerificationInputs(identity, sourceCommit, sourceTree)
+                    await new ReleaseAssetSet().VerifyReleaseAsync(
+                        verifyDirectory,
+                        new ReleaseVerificationInputs(verifyIdentity, verifySourceCommit, verifySourceTree)
                     ).ConfigureAwait(false);
                     Console.WriteLine(
-                        $"verify-release: verified package authority for {identity.Tag}; runner metadata is informational and unauthenticated"
+                        $"verify-release: verified package authority for {verifyIdentity.Tag}; runner metadata is informational and unauthenticated"
+                    );
+                    break;
+                case "inspect-candidate":
+                    string candidatePackage = Program.Take(options, "package");
+                    ForkReleaseIdentity candidateIdentity = ForkReleaseIdentity.Parse(Program.Take(options, "tag"));
+                    Program.AssertNoUnknownOptions(options);
+                    LinuxPackageStructuralInspection inspection = await new LinuxPackageStructuralInspector().InspectAsync(
+                        candidatePackage,
+                        candidateIdentity
+                    ).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"inspect-candidate: non-authoritative structure passed ({inspection.PayloadFileCount} files, "
+                        + $"{inspection.PayloadExpandedBytes} expanded bytes); no release authority or artifacts were created"
                     );
                     break;
                 default:
@@ -149,7 +165,8 @@ internal static class Program
     private static void WriteUsage()
     {
         Console.WriteLine(
-            "Usage: SMAPI.Installer.PackageTool <create|verify-release> --asset-directory PATH --tag TAG "
+            "Usage: SMAPI.Installer.PackageTool inspect-candidate --package ZIP --tag TAG\n"
+            + "   or: SMAPI.Installer.PackageTool <create|verify-release> --asset-directory PATH --tag TAG "
             + "--source-commit SHA --source-tree SHA [create only: --package ZIP --workflow-ref REF "
             + "--workflow-run URL --runner-image IMAGE --runner-arch ARCH --reference-assemblies-commit SHA "
             + "--timestamp-utc UTC --dotnet-info-file PATH]"

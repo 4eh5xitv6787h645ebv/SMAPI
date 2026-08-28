@@ -124,6 +124,42 @@ public sealed class ReleaseAssetSetTests
         await new ReleaseAssetSet().VerifyReleaseAsync(output, this.GetVerificationInputs());
     }
 
+    [Test]
+    public async Task CliInspectCandidate_NoTagContext_InspectsWithoutCreatingAuthorityOrOutputDirectory()
+    {
+        string package = this.CreatePackage(extraLinuxSupportFiles: true);
+        string nonexistentOutput = Path.Combine(this.TempRoot, "candidate-authority");
+        string[] before = Directory.GetFileSystemEntries(this.TempRoot).Order(StringComparer.Ordinal).ToArray();
+
+        int result = await Program.RunAsync(
+            ["inspect-candidate", "--package", package, "--tag", this.Identity.Tag],
+            _ => null
+        );
+
+        result.Should().Be(0);
+        Directory.Exists(nonexistentOutput).Should().BeFalse();
+        Directory.GetFileSystemEntries(this.TempRoot).Order(StringComparer.Ordinal).Should().Equal(before);
+        Directory.GetFiles(this.TempRoot, "*", SearchOption.AllDirectories).Select(Path.GetFileName).Should().NotContain(
+            name => name == "SHA256SUMS" || name == "build-metadata.json" || name!.EndsWith("-install-manifest.json", StringComparison.Ordinal)
+        );
+    }
+
+    [Test]
+    public async Task CliInspectCandidate_CorruptProductionLayoutFailsWithoutAuthorityArtifacts()
+    {
+        string package = this.CreatePackage(corruptInstallDat: true);
+
+        int result = await Program.RunAsync(
+            ["inspect-candidate", "--package", package, "--tag", this.Identity.Tag],
+            _ => null
+        );
+
+        result.Should().Be(1);
+        Directory.GetFiles(this.TempRoot, "*", SearchOption.AllDirectories).Select(Path.GetFileName).Should().NotContain(
+            name => name == "SHA256SUMS" || name == "build-metadata.json" || name!.EndsWith("-install-manifest.json", StringComparison.Ordinal)
+        );
+    }
+
     [TestCase("GITHUB_EVENT_NAME", "pull_request")]
     [TestCase("GITHUB_EVENT_NAME", "workflow_dispatch")]
     [TestCase("GITHUB_REF_TYPE", "branch")]
@@ -269,10 +305,10 @@ public sealed class ReleaseAssetSetTests
         await fifoVerify.Should().ThrowAsync<PackageSecurityException>();
     }
 
-    private string CreatePackage()
+    private string CreatePackage(bool extraLinuxSupportFiles = false, bool corruptInstallDat = false)
     {
         string package = Path.Combine(this.TempRoot, this.Identity.PackageAssetName);
-        byte[] nested = CreateNestedArchive();
+        byte[] nested = corruptInstallDat ? "not a zip"u8.ToArray() : CreateNestedArchive();
         string root = $"SMAPI {this.Identity.EmbeddedVersion} Linux installer";
         using FileStream stream = File.Create(package);
         using ZipArchive archive = new(stream, ZipArchiveMode.Create);
@@ -280,6 +316,11 @@ public sealed class ReleaseAssetSetTests
         AddFile(archive, $"{root}/install on Linux.sh", "#!/bin/sh", 493);
         AddFile(archive, $"{root}/internal/linux/SMAPI.Installer", "installer", 493);
         AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
+        if (extraLinuxSupportFiles)
+        {
+            AddFile(archive, $"{root}/internal/linux/SMAPI.Installer.dll", "managed support", 420);
+            AddFile(archive, $"{root}/internal/linux/libhostfxr.so", "native support", 493);
+        }
         return package;
     }
 

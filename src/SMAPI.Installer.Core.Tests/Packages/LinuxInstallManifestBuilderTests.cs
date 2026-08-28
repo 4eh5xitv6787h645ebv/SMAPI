@@ -73,6 +73,36 @@ public sealed class LinuxInstallManifestBuilderTests
         generated.SourcePath.Value.Should().Be("Stardew Valley.deps.json");
     }
 
+    [Test]
+    public async Task InspectAsync_AppliesProductionStructureChecksWithoutReturningReleaseAuthority()
+    {
+        string package = this.CreatePackage(extraLinuxSupportFiles: true);
+
+        LinuxPackageStructuralInspection inspection = await new LinuxPackageStructuralInspector().InspectAsync(
+            package,
+            this.Identity
+        );
+
+        inspection.PayloadFileCount.Should().Be(6);
+        inspection.PayloadExpandedBytes.Should().BeGreaterThan(0);
+        inspection.GetType().GetProperties().Select(property => property.Name).Should().Equal(
+            nameof(LinuxPackageStructuralInspection.PayloadFileCount),
+            nameof(LinuxPackageStructuralInspection.PayloadExpandedBytes)
+        );
+        inspection.GetType().GetProperties().Select(property => property.PropertyType)
+            .Should().NotContain(typeof(PackageManifest)).And.NotContain(typeof(InstallationReleaseIdentity));
+    }
+
+    [Test]
+    public async Task InspectAsync_RejectsTheSameCorruptNestedProductionLayoutWithoutAuthorityInputs()
+    {
+        string package = this.CreatePackage(corruptInstallDat: true);
+
+        Func<Task> action = () => new LinuxPackageStructuralInspector().InspectAsync(package, this.Identity);
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
+    }
+
     [TestCase("StardewModdingAPI-net6.deps.json", 420, "unexpected")]
     [TestCase("unexpected.dll", 420, "unexpected")]
     [TestCase("smapi-internal/privileged.dll", 2541, "setuid")]

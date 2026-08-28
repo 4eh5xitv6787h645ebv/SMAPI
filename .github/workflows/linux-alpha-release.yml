@@ -224,6 +224,13 @@ jobs:
                     else
                         # Pull requests and pre-tag dispatches remain non-authoritative candidates. Record their
                         # actual workflow ref and don't mint a companion accepted as release authority.
+                        dotnet run \
+                            --project build/SMAPI.Installer.PackageTool/SMAPI.Installer.PackageTool.csproj \
+                            --configuration Release \
+                            -- \
+                            inspect-candidate \
+                            --package "$package_path" \
+                            --tag "$RELEASE_TAG"
                         mkdir -p artifacts/release
                         cp -- "$package_path" artifacts/release/
                         (

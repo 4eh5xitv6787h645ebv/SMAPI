@@ -31,6 +31,47 @@ public sealed class LinuxInstallManifestBuildResult
     public byte[] GetCanonicalBytes() => this.Bytes.ToArray();
 }
 
+/// <summary>The non-authoritative result of structurally inspecting a finalized Linux installer package.</summary>
+/// <remarks>
+/// This intentionally contains no package digest, release authority, or manifest entries. Passing structural inspection
+/// does not qualify a candidate as a release asset.
+/// </remarks>
+public sealed class LinuxPackageStructuralInspection
+{
+    /// <summary>The number of ordinary files in the nested installation payload.</summary>
+    public int PayloadFileCount { get; }
+
+    /// <summary>The total expanded byte count of the nested installation payload.</summary>
+    public long PayloadExpandedBytes { get; }
+
+    internal LinuxPackageStructuralInspection(int payloadFileCount, long payloadExpandedBytes)
+    {
+        this.PayloadFileCount = payloadFileCount;
+        this.PayloadExpandedBytes = payloadExpandedBytes;
+    }
+}
+
+/// <summary>Applies production package structure checks without creating release authority or artifacts.</summary>
+public sealed class LinuxPackageStructuralInspector
+{
+    /// <summary>Inspect an exact prepared Linux ZIP as a non-authoritative candidate.</summary>
+    public async Task<LinuxPackageStructuralInspection> InspectAsync(
+        string packagePath,
+        ForkReleaseIdentity identity,
+        ZipPackageLimits? limits = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxInstallManifestBuilder.InspectedLinuxPackage package = await LinuxInstallManifestBuilder.InspectPackageAsync(
+            packagePath,
+            identity,
+            limits,
+            cancellationToken
+        ).ConfigureAwait(false);
+        return new LinuxPackageStructuralInspection(package.Entries.Count, package.PayloadExpandedBytes);
+    }
+}
+
 /// <summary>Builds the release ownership manifest from the exact finalized outer and nested ZIP bytes.</summary>
 public sealed class LinuxInstallManifestBuilder
 {
@@ -50,6 +91,45 @@ public sealed class LinuxInstallManifestBuilder
         string buildWorkflow,
         ZipPackageLimits? limits = null,
         CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        InspectedLinuxPackage inspected = await LinuxInstallManifestBuilder.InspectPackageAsync(
+            packagePath,
+            identity,
+            limits,
+            cancellationToken
+        ).ConfigureAwait(false);
+        InstallationReleaseIdentity release = new(
+            ForkReleaseIdentity.RepositoryUrl,
+            identity.Tag,
+            identity.EmbeddedVersion,
+            identity.PackageAssetName,
+            sourceCommit,
+            sourceTree,
+            inspected.PackageSha256,
+            inspected.PackageSizeBytes,
+            buildWorkflow,
+            "Release",
+            "linux-x64"
+        );
+        PackageManifest manifest = new(
+            release,
+            inspected.Entries,
+            [GeneratedFileRecipe.CreateCopyGameDepsTemplate()]
+        );
+        byte[] bytes = Encoding.UTF8.GetBytes(manifest.ToCanonicalJson());
+        PackageManifest roundTrip = CanonicalOwnershipDocuments.ParseManifest(bytes);
+        if (!roundTrip.Release.Equals(release) || roundTrip.SchemaVersion != PackageManifest.CurrentSchemaVersion)
+            throw new PackageSecurityException("The generated install manifest failed its canonical round trip.");
+        return new LinuxInstallManifestBuildResult(manifest, bytes);
+    }
+
+    internal static async Task<InspectedLinuxPackage> InspectPackageAsync(
+        string packagePath,
+        ForkReleaseIdentity identity,
+        ZipPackageLimits? limits,
+        CancellationToken cancellationToken
     )
     {
         LinuxPrivilegeGuard.AssertNotRoot();
@@ -82,32 +162,9 @@ public sealed class LinuxInstallManifestBuilder
                 cancellationToken
             ).ConfigureAwait(false);
 
-            string outerRoot = Path.Combine(outerDestination, outerRootName);
-            string nestedArchive = AssertExpectedOuterLayout(outerRoot);
-            InstallationReleaseIdentity release = new(
-                ForkReleaseIdentity.RepositoryUrl,
-                identity.Tag,
-                identity.EmbeddedVersion,
-                identity.PackageAssetName,
-                sourceCommit,
-                sourceTree,
-                packageSha256,
-                packageSize,
-                buildWorkflow,
-                "Release",
-                "linux-x64"
-            );
-            PackageManifest manifest = await BuildNestedManifestAsync(
-                nestedArchive,
-                release,
-                limits,
-                cancellationToken
-            ).ConfigureAwait(false);
-            byte[] bytes = Encoding.UTF8.GetBytes(manifest.ToCanonicalJson());
-            PackageManifest roundTrip = CanonicalOwnershipDocuments.ParseManifest(bytes);
-            if (!roundTrip.Release.Equals(release) || roundTrip.SchemaVersion != PackageManifest.CurrentSchemaVersion)
-                throw new PackageSecurityException("The generated install manifest failed its canonical round trip.");
-            return new LinuxInstallManifestBuildResult(manifest, bytes);
+            string nestedArchive = AssertExpectedOuterLayout(Path.Combine(outerDestination, outerRootName));
+            InspectedNestedPayload payload = await InspectNestedPayloadAsync(nestedArchive, limits, cancellationToken).ConfigureAwait(false);
+            return new InspectedLinuxPackage(packageSha256, packageSize, payload.Entries, payload.ExpandedBytes);
         }
         catch (FileNotFoundException ex)
         {
@@ -202,9 +259,8 @@ public sealed class LinuxInstallManifestBuilder
         return nestedArchive;
     }
 
-    private static async Task<PackageManifest> BuildNestedManifestAsync(
+    private static async Task<InspectedNestedPayload> InspectNestedPayloadAsync(
         string archivePath,
-        InstallationReleaseIdentity release,
         ZipPackageLimits limits,
         CancellationToken cancellationToken
     )
@@ -272,11 +328,17 @@ public sealed class LinuxInstallManifestBuilder
         if (explicitDirectories.Any(directory => !exactPaths.Any(path => path.StartsWith(directory + "/", StringComparison.Ordinal))))
             throw new PackageSecurityException("The nested Linux install payload contains an unexpected empty directory.");
 
-        return new PackageManifest(
-            release,
-            manifestEntries,
-            [GeneratedFileRecipe.CreateCopyGameDepsTemplate()]
-        );
+        if (manifestEntries.Count(entry => entry.Kind == OwnedEntryKind.Launcher && entry.Path.Value == "StardewValley") != 1)
+            throw new PackageSecurityException("The nested Linux install payload must contain exactly one mapped launcher.");
+        try
+        {
+            OwnershipCollectionValidation.AssertDistinctFilePaths(manifestEntries.Select(entry => entry.Path), nameof(manifestEntries));
+        }
+        catch (ArgumentException ex)
+        {
+            throw new PackageSecurityException("The nested Linux install payload doesn't map to a canonical owned-file layout.", ex);
+        }
+        return new InspectedNestedPayload(manifestEntries, actualTotal);
     }
 
     private static string GetCanonicalNestedPath(string rawPath, int maxDepth)
@@ -417,4 +479,13 @@ public sealed class LinuxInstallManifestBuilder
             length
         );
     }
+
+    internal sealed record InspectedLinuxPackage(
+        Sha256Digest PackageSha256,
+        long PackageSizeBytes,
+        IReadOnlyList<PackageManifestEntry> Entries,
+        long PayloadExpandedBytes
+    );
+
+    private sealed record InspectedNestedPayload(IReadOnlyList<PackageManifestEntry> Entries, long ExpandedBytes);
 }
