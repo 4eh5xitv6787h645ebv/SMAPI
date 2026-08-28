@@ -5,6 +5,17 @@ using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Transactions;
 
+internal interface IInstallerOperationLeaseFaultInjector
+{
+    void BeforeGenerationPublicationIdentityCheck(string temporaryName);
+}
+
+internal sealed class NullInstallerOperationLeaseFaultInjector : IInstallerOperationLeaseFaultInjector
+{
+    public static NullInstallerOperationLeaseFaultInjector Instance { get; } = new();
+    public void BeforeGenerationPublicationIdentityCheck(string temporaryName) { }
+}
+
 /// <summary>An exclusive descriptor-anchored operation lease for one exact game-root generation.</summary>
 internal sealed class InstallerOperationLease : IDisposable
 {
@@ -12,6 +23,7 @@ internal sealed class InstallerOperationLease : IDisposable
     private const int GenerationByteLength = 21;
 
     private LinuxFileIdentity GenerationIdentity;
+    private readonly IInstallerOperationLeaseFaultInjector FaultInjector;
     private bool Disposed;
 
     public string CanonicalGameRoot { get; }
@@ -27,7 +39,8 @@ internal sealed class InstallerOperationLease : IDisposable
         LinuxAnchoredFileSystem workspace,
         LinuxAnchoredFile operationLock,
         LinuxFileIdentity generationIdentity,
-        ulong generation
+        ulong generation,
+        IInstallerOperationLeaseFaultInjector faultInjector
     )
     {
         this.CanonicalGameRoot = canonicalGameRoot;
@@ -37,10 +50,18 @@ internal sealed class InstallerOperationLease : IDisposable
         this.RootIdentity = GameRootIdentity.From(canonicalGameRoot, game.Identity);
         this.GenerationIdentity = generationIdentity;
         this.Generation = generation;
+        this.FaultInjector = faultInjector;
     }
 
     public static InstallerOperationLease Acquire(string gameRoot)
+        => Acquire(gameRoot, null);
+
+    internal static InstallerOperationLease Acquire(
+        string gameRoot,
+        IInstallerOperationLeaseFaultInjector? faultInjector
+    )
     {
+        faultInjector ??= NullInstallerOperationLeaseFaultInjector.Instance;
         LinuxPrivilegeGuard.AssertNotRoot();
         string canonicalRoot = TransactionPath.GetCanonicalRoot(gameRoot, nameof(gameRoot));
         LinuxAnchoredFileSystem? game = null;
@@ -56,7 +77,7 @@ internal sealed class InstallerOperationLease : IDisposable
                 throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The selected game root changed while its operation lock was acquired.");
 
             (LinuxFileIdentity identity, ulong generation) = OpenOrCreateGeneration(workspace);
-            InstallerOperationLease result = new(canonicalRoot, game, workspace, operationLock, identity, generation);
+            InstallerOperationLease result = new(canonicalRoot, game, workspace, operationLock, identity, generation, faultInjector);
             game = null;
             workspace = null;
             operationLock = null;
@@ -88,8 +109,19 @@ internal sealed class InstallerOperationLease : IDisposable
             {
                 byte[] bytes = EncodeGeneration(next);
                 this.Workspace.AppendAndFsync(temporary, temporaryName, bytes, 0, GenerationByteLength);
-                temporaryIdentity = this.Workspace.Stat(temporaryName)
+                this.FaultInjector.BeforeGenerationPublicationIdentityCheck(temporaryName);
+                LinuxFileIdentity namedIdentity = this.Workspace.Stat(temporaryName)
                     ?? throw new IOException("The new operation-generation file disappeared before publication.");
+                if (
+                    !namedIdentity.IsSameObject(temporary.Identity)
+                    || namedIdentity.Kind != LinuxAnchoredEntryKind.RegularFile
+                    || namedIdentity.LinkCount != 1
+                    || namedIdentity.UnixMode != 0x180
+                    || namedIdentity.Size != GenerationByteLength
+                    || !this.Workspace.ReadAllBytes(temporary, GenerationByteLength).AsSpan().SequenceEqual(bytes)
+                )
+                    throw new IOException("The new operation-generation path or contents changed before publication.");
+                temporaryIdentity = namedIdentity;
             }
 
             this.GenerationIdentity = this.Workspace.ReplaceFileAtomically(
@@ -108,9 +140,7 @@ internal sealed class InstallerOperationLease : IDisposable
             {
                 try
                 {
-                    LinuxFileIdentity? temporaryCurrent = this.Workspace.Stat(temporaryName);
-                    if (temporaryCurrent is not null)
-                        this.Workspace.UnlinkFile(temporaryName, temporaryCurrent);
+                    this.Workspace.UnlinkFile(temporaryName, temporaryIdentity);
                 }
                 catch
                 {

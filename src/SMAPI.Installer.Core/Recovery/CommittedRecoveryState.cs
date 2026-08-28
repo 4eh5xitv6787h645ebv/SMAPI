@@ -779,6 +779,8 @@ internal interface IRecoveryPruneFaultInjector
     void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null);
     void AfterCleanupEntryUnlink(Guid generationId, string relativeEntryPath) { }
     void BeforeCleanupDirectoryOpen(Guid generationId, string relativeDirectoryPath) { }
+    void BeforePendingPointerCleanupUnlink() { }
+    void BeforeRetentionDocumentCleanupUnlink(Sha256Digest digest) { }
 }
 
 internal sealed class NullRecoveryPruneFaultInjector : IRecoveryPruneFaultInjector
@@ -1101,9 +1103,9 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "The recovery-prune plan has no retained history or physical cleanup change to apply.");
         cancellationToken.ThrowIfCancellationRequested();
         lease.ReserveNextGeneration(lease.Generation);
-        RemovePendingPointer(lease.Game, plan.PendingPointerSha256);
+        RemovePendingPointer(lease.Game, plan.PendingPointerSha256, faultInjector);
         currentState.AssertUsable(lease);
-        DeleteRetentionDocuments(lease.Game, orphanDocuments, currentRetentionSha256);
+        DeleteRetentionDocuments(lease.Game, orphanDocuments, currentRetentionSha256, faultInjector);
         if (publication is not null)
         {
             PublishRetentionDocument(lease.Game, publicationSha256!, publicationBytes!, faultInjector);
@@ -1134,7 +1136,8 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         DeleteRetentionDocuments(
             lease.Game,
             ReadRetentionDocumentCatalog(lease.Game).Where(digest => digest != retainedDocument),
-            retainedDocument
+            retainedDocument,
+            faultInjector
         );
         return removed;
     }
@@ -1294,6 +1297,13 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         Sha256Digest digest,
         CancellationToken cancellationToken = default
     )
+        => ReadRetentionDocumentWithIdentity(game, digest, cancellationToken).Record;
+
+    private static (RecoveryRetentionRecord Record, LinuxFileIdentity Identity) ReadRetentionDocumentWithIdentity(
+        LinuxAnchoredFileSystem game,
+        Sha256Digest digest,
+        CancellationToken cancellationToken = default
+    )
     {
         string path = GetRetentionDocumentPath(digest);
         LinuxFileIdentity identity = game.Stat(path)
@@ -1312,17 +1322,17 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         byte[] bytes = game.ReadAllBytes(file, CanonicalRecoveryRetentionDocument.MaximumBytes);
         if (Sha256Digest.Hash(bytes) != digest)
             throw new OwnershipDocumentException("A recovery-retention document doesn't match its content-addressed name.");
-        return CanonicalRecoveryRetentionDocument.Parse(bytes);
+        return (CanonicalRecoveryRetentionDocument.Parse(bytes), file.Identity);
     }
 
-    private static Sha256Digest? ReadPendingPointerSha256(
+    private static (Sha256Digest? Sha256, LinuxFileIdentity? Identity) ReadPendingPointer(
         LinuxAnchoredFileSystem game,
         CancellationToken cancellationToken = default
     )
     {
         LinuxFileIdentity? identity = game.Stat(PendingPointerPath);
         if (identity is null)
-            return null;
+            return (null, null);
         if (
             identity.Kind != LinuxAnchoredEntryKind.RegularFile
             || identity.LinkCount != 1
@@ -1334,19 +1344,36 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         if (file.Identity != identity)
             throw new OwnershipDocumentException("The pending recovery-pointer publication changed while it was opened.");
         cancellationToken.ThrowIfCancellationRequested();
-        return Sha256Digest.Hash(game.ReadAllBytes(file, CanonicalRecoveryPointerDocument.MaximumBytes));
+        Sha256Digest digest = Sha256Digest.Hash(game.ReadAllBytes(file, CanonicalRecoveryPointerDocument.MaximumBytes));
+        return (digest, file.Identity);
     }
 
-    private static void RemovePendingPointer(LinuxAnchoredFileSystem game, Sha256Digest? expectedSha256)
+    private static Sha256Digest? ReadPendingPointerSha256(
+        LinuxAnchoredFileSystem game,
+        CancellationToken cancellationToken = default
+    )
+        => ReadPendingPointer(game, cancellationToken).Sha256;
+
+    private static void RemovePendingPointer(
+        LinuxAnchoredFileSystem game,
+        Sha256Digest? expectedSha256,
+        IRecoveryPruneFaultInjector faultInjector
+    )
     {
-        Sha256Digest? currentSha256 = ReadPendingPointerSha256(game);
+        (Sha256Digest? currentSha256, LinuxFileIdentity? identity) = ReadPendingPointer(game);
         if (currentSha256 != expectedSha256)
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The pending recovery-pointer publication changed after inspection.");
         if (currentSha256 is null)
             return;
-        LinuxFileIdentity identity = game.Stat(PendingPointerPath)
-            ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The pending recovery-pointer publication disappeared.");
-        game.UnlinkFile(PendingPointerPath, identity);
+        faultInjector.BeforePendingPointerCleanupUnlink();
+        try
+        {
+            game.UnlinkFile(PendingPointerPath, identity!);
+        }
+        catch (IOException exception)
+        {
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The pending recovery-pointer publication changed before cleanup.", exception);
+        }
     }
 
     private static void PublishRetentionDocument(
@@ -1391,18 +1418,25 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
     private static void DeleteRetentionDocuments(
         LinuxAnchoredFileSystem game,
         IEnumerable<Sha256Digest> digests,
-        Sha256Digest? preservedDigest
+        Sha256Digest? preservedDigest,
+        IRecoveryPruneFaultInjector faultInjector
     )
     {
         foreach (Sha256Digest digest in digests.Distinct())
         {
             if (digest == preservedDigest)
                 throw new OwnershipDocumentException("The active authenticated recovery-retention document can't be garbage-collected.");
-            _ = ReadRetentionDocument(game, digest);
+            (_, LinuxFileIdentity identity) = ReadRetentionDocumentWithIdentity(game, digest);
             string path = GetRetentionDocumentPath(digest);
-            LinuxFileIdentity identity = game.Stat(path)
-                ?? throw new OwnershipDocumentException("A recovery-retention document disappeared during garbage collection.");
-            game.UnlinkFile(path, identity);
+            faultInjector.BeforeRetentionDocumentCleanupUnlink(digest);
+            try
+            {
+                game.UnlinkFile(path, identity);
+            }
+            catch (IOException exception)
+            {
+                throw new OwnershipDocumentException("A recovery-retention document changed before garbage collection.", exception);
+            }
         }
     }
 

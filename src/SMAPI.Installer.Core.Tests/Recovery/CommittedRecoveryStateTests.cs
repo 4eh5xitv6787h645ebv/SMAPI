@@ -290,6 +290,73 @@ public sealed class CommittedRecoveryStateTests
         }
     }
 
+    [Test]
+    public void Prune_PendingPointerSwapBetweenVerificationAndCleanupUnlinkIsRejected()
+    {
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
+        using (package)
+        {
+            RecoveryPrunePlan initial = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            LinuxInstallerEngine terminating = new(
+                new InstallerTransactionExecutor(),
+                new BoundaryTerminationFaultInjector(RecoveryPruneBoundary.BeforePointerPublish)
+            );
+            Action interrupt = () => terminating.ExecuteRecoveryPruneAsync(
+                initial,
+                initial.ConfirmationDigest
+            ).GetAwaiter().GetResult();
+            interrupt.Should().Throw<SimulatedProcessTerminationException>();
+            RecoveryPrunePlan resume = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            PendingPointerCleanupSwapFaultInjector fault = new(game);
+            LinuxInstallerEngine swapping = new(new InstallerTransactionExecutor(), fault);
+
+            Action execute = () => swapping.ExecuteRecoveryPruneAsync(
+                resume,
+                resume.ConfirmationDigest
+            ).GetAwaiter().GetResult();
+
+            execute.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PathChanged);
+            fault.DisplacedPath.Should().NotBeNull();
+            File.Exists(fault.DisplacedPath!).Should().BeTrue();
+            normal.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(3);
+        }
+    }
+
+    [Test]
+    public void Prune_OrphanRetentionSwapBetweenVerificationAndCleanupUnlinkIsRejected()
+    {
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryPrunePlan initial = normal.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            normal.ExecuteRecoveryPruneAsync(initial, initial.ConfirmationDigest).GetAwaiter().GetResult();
+            CommittedRecoveryPointer pointer = CanonicalRecoveryPointerDocument.Parse(File.ReadAllBytes(CurrentPointerPath(game)));
+            RecoveryRetentionRecord active = CanonicalRecoveryRetentionDocument.Parse(
+                File.ReadAllBytes(RetentionDocumentPath(game, pointer.RetentionSha256!))
+            );
+            byte[] orphanBytes = CanonicalRecoveryRetentionDocument.Serialize(active with
+            {
+                PublicationHeadPointerSha256 = OwnershipTestData.Digest('6')
+            });
+            Sha256Digest orphanDigest = Sha256Digest.Hash(orphanBytes);
+            WritePrivate(RetentionDocumentPath(game, orphanDigest), orphanBytes);
+            RecoveryPrunePlan cleanup = normal.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            RetentionCleanupSwapFaultInjector fault = new(game, orphanDigest);
+            LinuxInstallerEngine swapping = new(new InstallerTransactionExecutor(), fault);
+
+            Action execute = () => swapping.ExecuteRecoveryPruneAsync(
+                cleanup,
+                cleanup.ConfirmationDigest
+            ).GetAwaiter().GetResult();
+
+            execute.Should().Throw<OwnershipDocumentException>().WithMessage("*changed before garbage collection*");
+            fault.DisplacedPath.Should().NotBeNull();
+            File.Exists(fault.DisplacedPath!).Should().BeTrue();
+            normal.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(2);
+            File.Exists(RetentionDocumentPath(game, pointer.RetentionSha256!)).Should().BeTrue();
+        }
+    }
+
     [TestCase(".")]
     [TestCase("files")]
     public void Prune_CleanupDirectoryPathSwapBeforeOpenIsRejected(string relativeDirectoryPath)
@@ -684,6 +751,70 @@ public sealed class CommittedRecoveryStateTests
             File.Move(current, this.DisplacedPath);
             File.Copy(this.DisplacedPath, current);
             File.SetUnixFileMode(current, (UnixFileMode)0x180);
+        }
+    }
+
+    private sealed class BoundaryTerminationFaultInjector : IRecoveryPruneFaultInjector
+    {
+        private readonly RecoveryPruneBoundary Target;
+
+        public BoundaryTerminationFaultInjector(RecoveryPruneBoundary target)
+        {
+            this.Target = target;
+        }
+
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null)
+        {
+            if (boundary == this.Target)
+                throw new SimulatedProcessTerminationException($"Simulated termination at {boundary}.");
+        }
+    }
+
+    private sealed class PendingPointerCleanupSwapFaultInjector : IRecoveryPruneFaultInjector
+    {
+        private readonly string Game;
+        public string? DisplacedPath { get; private set; }
+
+        public PendingPointerCleanupSwapFaultInjector(string game)
+        {
+            this.Game = game;
+        }
+
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null) { }
+
+        public void BeforePendingPointerCleanupUnlink()
+        {
+            string pending = Path.Combine(this.Game, ".smapi-installer", "recovery", "current.pending");
+            this.DisplacedPath = Path.Combine(this.Game, "displaced-cleanup-current.pending");
+            File.Move(pending, this.DisplacedPath);
+            File.Copy(this.DisplacedPath, pending);
+            File.SetUnixFileMode(pending, (UnixFileMode)0x180);
+        }
+    }
+
+    private sealed class RetentionCleanupSwapFaultInjector : IRecoveryPruneFaultInjector
+    {
+        private readonly string Game;
+        private readonly Sha256Digest Target;
+        public string? DisplacedPath { get; private set; }
+
+        public RetentionCleanupSwapFaultInjector(string game, Sha256Digest target)
+        {
+            this.Game = game;
+            this.Target = target;
+        }
+
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null) { }
+
+        public void BeforeRetentionDocumentCleanupUnlink(Sha256Digest digest)
+        {
+            if (digest != this.Target || this.DisplacedPath is not null)
+                return;
+            string document = RetentionDocumentPath(this.Game, digest);
+            this.DisplacedPath = Path.Combine(this.Game, "displaced-retention-orphan.json");
+            File.Move(document, this.DisplacedPath);
+            File.Copy(this.DisplacedPath, document);
+            File.SetUnixFileMode(document, (UnixFileMode)0x180);
         }
     }
 }

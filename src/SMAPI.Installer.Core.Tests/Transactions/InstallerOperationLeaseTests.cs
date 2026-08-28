@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.Versioning;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Transactions;
@@ -8,6 +9,7 @@ namespace StardewModdingAPI.Installer.Core.Tests.Transactions;
 [TestFixture]
 [Platform("Linux")]
 [NonParallelizable]
+[SupportedOSPlatform("linux")]
 public sealed class InstallerOperationLeaseTests
 {
     private string TempRoot = null!;
@@ -44,6 +46,22 @@ public sealed class InstallerOperationLeaseTests
         using InstallerOperationLease reopened = InstallerOperationLease.Acquire(this.GameRoot);
         reopened.Generation.Should().Be(1);
         reopened.AssertRootAndGeneration(reopened.RootIdentity, 1);
+    }
+
+    [Test]
+    public void ReserveNextGeneration_TemporaryPathSwapBeforePublicationRejectsWithoutAdvancing()
+    {
+        GenerationPublicationSwapFaultInjector fault = new(this.GameRoot, this.TempRoot);
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(this.GameRoot, fault);
+
+        Action reserve = () => lease.ReserveNextGeneration(0);
+
+        reserve.Should().Throw<InstallerTransactionException>()
+            .Which.Code.Should().Be(TransactionErrorCode.WorkspaceConflict);
+        fault.DisplacedPath.Should().NotBeNull();
+        File.Exists(fault.DisplacedPath!).Should().BeTrue();
+        lease.Generation.Should().Be(0);
+        lease.AssertRootAndGeneration(lease.RootIdentity, 0);
     }
 
     [Test]
@@ -162,5 +180,27 @@ public sealed class InstallerOperationLeaseTests
     private static string Hash(string value)
     {
         return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    }
+
+    private sealed class GenerationPublicationSwapFaultInjector : IInstallerOperationLeaseFaultInjector
+    {
+        private readonly string GameRoot;
+        private readonly string TempRoot;
+        public string? DisplacedPath { get; private set; }
+
+        public GenerationPublicationSwapFaultInjector(string gameRoot, string tempRoot)
+        {
+            this.GameRoot = gameRoot;
+            this.TempRoot = tempRoot;
+        }
+
+        public void BeforeGenerationPublicationIdentityCheck(string temporaryName)
+        {
+            string current = Path.Combine(this.GameRoot, ".smapi-installer", temporaryName);
+            this.DisplacedPath = Path.Combine(this.TempRoot, "displaced-operation-generation.tmp");
+            File.Move(current, this.DisplacedPath);
+            File.Copy(this.DisplacedPath, current);
+            File.SetUnixFileMode(current, (UnixFileMode)0x180);
+        }
     }
 }
