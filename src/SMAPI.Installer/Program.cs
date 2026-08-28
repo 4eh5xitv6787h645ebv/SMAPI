@@ -114,7 +114,7 @@ internal class Program
         }
     }
 
-    /// <summary>Write an error directly to the console and exit.</summary>
+    /// <summary>Write an error directly to the console and optionally wait so an interactive user can read it.</summary>
     /// <param name="message">The error message to display.</param>
     private static void PrintError(string message, bool allowUserInput)
     {

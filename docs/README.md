@@ -10,6 +10,8 @@ This directory contains the source for the
 - [Getting started safely](getting-started.md)
 - [Mod Health Report guide](mod-health-report.md)
 - [Linux performance audit](technical/linux-large-mod-performance-audit.md)
+- [Linux alpha release guide](technical/linux-alpha-release.md)
+- [Linux alpha validation record](technical/linux-alpha-release-validation.md)
 
 ## Reference
 

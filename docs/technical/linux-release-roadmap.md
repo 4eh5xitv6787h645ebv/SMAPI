@@ -122,7 +122,7 @@ Scope constraints apply throughout:
 
 ### Versioning and release automation
 
-- [ ] Define and document a fork-specific prerelease version/tag scheme that cannot be mistaken for official SMAPI or collide with upstream tags.
+- [x] Define and document a fork-specific prerelease version/tag scheme that cannot be mistaken for official SMAPI or collide with upstream tags ([scheme and validation](linux-alpha-release.md#release-identity)).
 - [ ] Make GitHub Actions accept and explicitly build an exact reviewed release commit.
 - [ ] Produce the Linux installer/package from that exact reviewed commit.
 - [ ] Produce SHA-256 checksums.
@@ -150,7 +150,7 @@ Scope constraints apply throughout:
 
 ### Publication and clean-room verification
 
-- [ ] Open a focused Phase 3 fork pull request.
+- [x] Open a focused Phase 3 fork pull request ([#172](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172)).
 - [ ] Pass required CI and repository checks.
 - [ ] Merge the Phase 3 pull request into `develop` and close it.
 - [ ] Verify the release tag points to the exact reviewed commit.

@@ -6,6 +6,26 @@ title: Release notes
 ← [Documentation home](index.md)
 
 # Release notes
+## Linux fork 4.5.3 alpha 1 release candidate
+
+This is an **unofficial experimental Linux x86_64 fork** based on official SMAPI 4.5.2. Its
+embedded version is `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1`; its reserved tag is
+`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1`. Publication remains pending until the exact merged
+commit passes automated qualification, independent reviews, an isolated trusted-workload smoke,
+and post-publication clean-room verification.
+
+* Added exact-commit Linux-only release automation with pinned source inputs, SHA-256 checksums,
+  machine-readable build metadata, GitHub provenance, and tag-only prerelease publication.
+* Added structural package and isolated install/update/uninstall/failure lifecycle gates.
+* Made headless installer failures prompt-free and machine-detectable, fixed malformed
+  `--game-path` handling, and prevented headless deletion failures from retrying forever.
+* Preserved current SMAPI logs and local Mod Health Reports across install and uninstall.
+* Documented verification, installation, upgrade, manual install, uninstall, official-4.5.2
+  rollback, privacy boundaries, known limitations, and the release process in the
+  [Linux alpha guide](technical/linux-alpha-release.md).
+* Retained the controlled 4.5.2 comparison and its one-machine limitations; no private modpack or
+  save data is included in the repository or release artifacts.
+
 ## Upcoming release
 * Rebuilt the repository README and GitHub Pages site around an evidence-based comparison with
   official SMAPI, including clearly scoped whole-workload and microbenchmark results.

@@ -124,7 +124,9 @@ jobs:
                         -p:GamePath="$RUNNER_TEMP/StardewValley" \
                         -p:CopyToGameFolder=false \
                         -p:AllowMissingPrunePackageData=true
-                    dotnet format src/SMAPI.slnx --verify-no-changes --no-restore
+                    dotnet format src/SMAPI.slnx --verify-no-changes --no-restore \
+                        --include src/SMAPI.Installer/InteractiveInstaller.cs src/SMAPI.Installer/Program.cs
+                    git diff --check
 
             -   name: Build all projects in Release mode
                 run: >-

