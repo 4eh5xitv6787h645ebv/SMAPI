@@ -217,6 +217,15 @@ Scope constraints apply throughout:
 - [ ] Add the current screenshot set to both repository user documentation and GitHub Pages.
 - [ ] Verify every published screenshot and its containing documentation page returns HTTP 200.
 
+### Shared installer core foundation
+
+- [x] Implement the shared transactional Linux installer core and strict frontend protocol ([merged PR #175](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175); [`93027308`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/93027308c41f3e06117fa6f43732a5b1a40bf336)).
+- [x] Pass the complete core suite, Release warnings-as-errors build, and both full-project formatting gates (488 tests; [final review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5457874064)).
+- [x] Pass required CI on the exact reviewed core head ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33211923106) and [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33211923112)).
+- [x] Address every actionable installer-core architecture, security/privacy, testing, and final-diff finding ([clean exact-head re-review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5457874064)).
+- [x] Merge and close the core-only PR before dependent console/package integration work ([merged PR #175](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175)).
+- [x] Delete the merged core feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`93027308c41f3e06117fa6f43732a5b1a40bf336`).
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
