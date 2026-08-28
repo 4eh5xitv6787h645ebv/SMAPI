@@ -1,0 +1,112 @@
+name: Performance regression
+
+on:
+    pull_request:
+        branches:
+            - develop
+    push:
+        branches:
+            - develop
+    workflow_dispatch:
+
+concurrency:
+    group: performance-regression-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    deterministic-gates:
+        name: Deterministic performance gates
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        env:
+            COMPlus_ReadyToRun: "0"
+            DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+            DOTNET_NOLOGO: "1"
+            DOTNET_TieredCompilation: "0"
+            DOTNET_TieredPGO: "0"
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@v6
+
+            -   name: Install pinned build SDK and benchmark runtime
+                uses: actions/setup-dotnet@v5
+                with:
+                    dotnet-version: |
+                        10.0.108
+                        6.0.428
+
+            -   name: Checkout pinned game reference assemblies
+                shell: bash
+                run: |
+                    git init "$RUNNER_TEMP/StardewValley"
+                    git -C "$RUNNER_TEMP/StardewValley" fetch --depth 1 https://github.com/StardewModders/mod-reference-assemblies.git 0141355fecb8536715ecff22f99374b5e632cbed
+                    git -C "$RUNNER_TEMP/StardewValley" checkout --detach FETCH_HEAD
+                    test "$(git -C "$RUNNER_TEMP/StardewValley" rev-parse HEAD)" = "0141355fecb8536715ecff22f99374b5e632cbed"
+
+            -   name: Restore benchmark project
+                run: >-
+                    dotnet restore benchmarks/SMAPI.PerformanceBenchmarks/SMAPI.PerformanceBenchmarks.csproj
+                    -p:GamePath="$RUNNER_TEMP/StardewValley"
+                    -p:CopyToGameFolder=false
+
+            -   name: Build benchmark project
+                id: benchmark-build
+                run: >-
+                    dotnet build benchmarks/SMAPI.PerformanceBenchmarks/SMAPI.PerformanceBenchmarks.csproj
+                    --configuration Release
+                    --no-restore
+                    -p:GamePath="$RUNNER_TEMP/StardewValley"
+                    -p:CopyToGameFolder=false
+
+            -   name: Verify runner infrastructure and compile game-bound gates
+                if: ${{ !cancelled() && steps.benchmark-build.outcome == 'success' }}
+                run: |
+                    mkdir -p artifacts/performance
+                    dotnet run --project benchmarks/SMAPI.PerformanceBenchmarks/SMAPI.PerformanceBenchmarks.csproj \
+                        --configuration Release \
+                        --no-build \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -- \
+                        --self-test
+                    dotnet build src/SMAPI.Tests/SMAPI.Tests.csproj \
+                        --configuration Release \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
+
+            -   name: Run deterministic correctness and allocation gates
+                if: ${{ !cancelled() && steps.benchmark-build.outcome == 'success' }}
+                run: |
+                    mkdir -p artifacts/performance
+                    dotnet run --project benchmarks/SMAPI.PerformanceBenchmarks/SMAPI.PerformanceBenchmarks.csproj \
+                        --configuration Release \
+                        --no-build \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -- \
+                        --baseline benchmarks/SMAPI.PerformanceBenchmarks/baselines/linux-x64-net6.json \
+                        --output artifacts/performance \
+                        --commit "$GITHUB_SHA"
+
+            -   name: Publish readable job summary
+                if: always()
+                shell: bash
+                run: |
+                    if test -f artifacts/performance/comparison.md; then
+                        cat artifacts/performance/comparison.md >> "$GITHUB_STEP_SUMMARY"
+                    else
+                        echo "The benchmark runner did not produce comparison.md." >> "$GITHUB_STEP_SUMMARY"
+                    fi
+
+            -   name: Upload machine-readable and readable results
+                if: always()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: performance-comparison-${{ github.sha }}-${{ github.run_attempt }}
+                    path: artifacts/performance
+                    if-no-files-found: error
+                    retention-days: 30

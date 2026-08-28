@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://4eh5xitv6787h645ebv.github.io/SMAPI/schemas/performance-baseline-v1.json",
+  "title": "SMAPI deterministic performance baseline",
+  "description": "Correctness and allocation gates plus an informational wall-clock reference for one exact runtime target.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runtime",
+    "scenarios"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "framework",
+        "runtimeVersion",
+        "rid"
+      ],
+      "properties": {
+        "framework": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtimeVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "rid": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "scenarios": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operations",
+          "warmupOperations",
+          "expectedDigest",
+          "maxAllocatedBytesPerOperation",
+          "informationalMedianNanosecondsPerOperation"
+        ],
+        "properties": {
+          "operations": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "warmupOperations": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expectedDigest": {
+            "type": "string",
+            "description": "Lowercase hexadecimal deterministic 64-bit digest returned by the scenario.",
+            "pattern": "^[0-9a-f]{16}$"
+          },
+          "maxAllocatedBytesPerOperation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "informationalMedianNanosecondsPerOperation": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}
