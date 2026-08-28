@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluentAssertions;
@@ -53,8 +54,8 @@ public sealed class InstallerTransactionExecutorTests
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
         File.Exists(Path.Combine(game, "steam_appid.txt")).Should().BeFalse();
         File.ReadAllText(Path.Combine(game, "unrelated.txt")).Should().Be("preserve me");
-        File.ReadAllText(Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "journal.json"))
-            .Should().Contain("\"status\": \"Committed\"");
+        File.ReadAllText(Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "events.jsonl"))
+            .Should().Contain("\"kind\":\"Committed\"");
     }
 
     [Test]
@@ -116,8 +117,8 @@ public sealed class InstallerTransactionExecutorTests
         action.Should().Throw<InvalidOperationException>();
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("first old");
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second old");
-        File.ReadAllText(Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "journal.json"))
-            .Should().Contain("\"status\": \"RolledBack\"");
+        File.ReadAllText(Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "events.jsonl"))
+            .Should().Contain("\"kind\":\"RolledBack\"");
     }
 
     [Test]
@@ -356,6 +357,260 @@ public sealed class InstallerTransactionExecutorTests
         progress.Items.Last().Should().Be(new TransactionProgress(TransactionStage.Completed, 1, 1));
     }
 
+    [Test]
+    public void Apply_MultipleFilesWithSharedMissingParents_CommitsWithoutDirectoryOwnershipCollision()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "one", "one");
+        Write(payload, "two", "two");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("smapi-internal/shared/deep/one", null, "one", Hash("one")),
+            WriteOperation("smapi-internal/shared/deep/two", null, "two", Hash("two"))
+        });
+
+        new InstallerTransactionExecutor().Apply(game, payload, plan);
+
+        File.ReadAllText(Path.Combine(game, "smapi-internal/shared/deep/one")).Should().Be("one");
+        File.ReadAllText(Path.Combine(game, "smapi-internal/shared/deep/two")).Should().Be("two");
+    }
+
+    [Test]
+    public void Recover_TornTrailingEvent_TruncatesUncommittedRecordAndRestoresOriginal()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed", Hash("new"))
+        });
+        Action interrupted = () => new InstallerTransactionExecutor(
+            faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true)
+        ).Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        string events = Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "events.jsonl");
+        File.AppendAllText(events, "{\"partial\":");
+
+        new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().ContainSingle();
+
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
+        File.ReadAllText(events).Should().EndWith("\n").And.NotContain("partial");
+    }
+
+    [Test]
+    public void Recover_TamperedHashChainedEvent_FailsClosedAndPreservesResult()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed", Hash("new"))
+        });
+        Action interrupted = () => new InstallerTransactionExecutor(
+            faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true)
+        ).Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        string events = Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "events.jsonl");
+        string text = File.ReadAllText(events);
+        File.WriteAllText(events, text.Replace("\"kind\":\"Intent\"", "\"kind\":\"Applied\"", StringComparison.Ordinal));
+
+        Action recover = () => new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+    }
+
+    [Test]
+    public void Apply_PayloadHardlink_RejectsWithoutCreatingDestination()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "managed", "new");
+        link(Path.Combine(payload, "managed"), Path.Combine(payload, "linked"))
+            .Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", null, "managed", Hash("new"))
+        });
+
+        Action apply = () => new InstallerTransactionExecutor().Apply(game, payload, plan);
+
+        apply.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PayloadMismatch);
+        File.Exists(Path.Combine(game, "StardewModdingAPI.dll")).Should().BeFalse();
+    }
+
+    [Test]
+    public void Apply_GameRootPathSwappedDuringIntent_RemainsAnchoredToSelectedDirectory()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        string movedGame = Path.Combine(Path.GetDirectoryName(game)!, $"moved-{Guid.NewGuid():N}");
+        string outside = this.CreateDirectory();
+        Write(payload, "managed", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", null, "managed", Hash("new"))
+        });
+        CallbackFaultInjector swap = new(before: (_, _) =>
+        {
+            Directory.Move(game, movedGame);
+            Directory.CreateSymbolicLink(game, outside);
+            this.TemporaryDirectories.Add(movedGame);
+        });
+
+        new InstallerTransactionExecutor(faultInjector: swap).Apply(game, payload, plan);
+
+        File.ReadAllText(Path.Combine(movedGame, "StardewModdingAPI.dll")).Should().Be("new");
+        File.Exists(Path.Combine(outside, "StardewModdingAPI.dll")).Should().BeFalse();
+    }
+
+    [Test]
+    public void Apply_ConcurrentExecutor_UsesKernelLockAndFailsBeforeSecondMutation()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "first", "first");
+        Write(payload, "second", "second");
+        using ManualResetEventSlim entered = new();
+        using ManualResetEventSlim release = new();
+        TransactionPlan firstPlan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", null, "first", Hash("first"))
+        });
+        TransactionPlan secondPlan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.xml", null, "second", Hash("second"))
+        });
+        CallbackFaultInjector blocking = new(before: (_, _) =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        });
+        Task<TransactionResult> first = Task.Run(() => new InstallerTransactionExecutor(faultInjector: blocking).Apply(game, payload, firstPlan));
+        entered.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+
+        Action concurrent = () => new InstallerTransactionExecutor().Apply(game, payload, secondPlan);
+        concurrent.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.ConcurrentOperation);
+        File.Exists(Path.Combine(game, "StardewModdingAPI.xml")).Should().BeFalse();
+        release.Set();
+        first.GetAwaiter().GetResult().Status.Should().Be(TransactionStatus.Committed);
+    }
+
+    [Test]
+    public void Apply_ReceiptWriteParticipatesInSameRollbackBoundary()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "receipt", "canonical receipt");
+        TransactionPlan plan = TransactionPlan.CreateWithCoreReceipt(
+            Guid.NewGuid(),
+            Array.Empty<TransactionFileOperation>(),
+            WriteOperation(TransactionPlan.CoreReceiptRelativePath, null, "receipt", Hash("canonical receipt"))
+        );
+        InstallerTransactionExecutor executor = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: false));
+
+        Action apply = () => executor.Apply(game, payload, plan);
+
+        apply.Should().Throw<InvalidOperationException>();
+        File.Exists(Path.Combine(game, ".smapi-installer/ownership/receipt.json")).Should().BeFalse();
+        Directory.Exists(Path.Combine(game, ".smapi-installer/ownership")).Should().BeFalse();
+    }
+
+    [Test]
+    public void Apply_PublicPlanCannotForgeReservedReceiptMutation()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "receipt", "attacker selected bytes");
+        TransactionPlan injected = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation(TransactionPlan.CoreReceiptRelativePath, null, "receipt", Hash("attacker selected bytes"))
+        });
+
+        Action apply = () => new InstallerTransactionExecutor().Apply(game, payload, injected);
+
+        apply.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.InvalidPlan);
+        Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse("plan validation must precede every side effect");
+    }
+
+    [Test]
+    public void Apply_CoreAuthorizedReceiptCommitsWithOrdinaryFiles()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "runtime", "runtime");
+        Write(payload, "receipt", "canonical receipt");
+        TransactionPlan plan = TransactionPlan.CreateWithCoreReceipt(
+            Guid.NewGuid(),
+            new[] { WriteOperation("StardewModdingAPI.dll", null, "runtime", Hash("runtime")) },
+            WriteOperation(TransactionPlan.CoreReceiptRelativePath, null, "receipt", Hash("canonical receipt"), 0x180)
+        );
+
+        new InstallerTransactionExecutor().Apply(game, payload, plan).Status.Should().Be(TransactionStatus.Committed);
+
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime");
+        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreReceiptRelativePath)).Should().Be("canonical receipt");
+    }
+
+    [Test]
+    public void Apply_RetainsAtMostBoundedFinalTransactionRecords()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "managed", "same");
+        for (int index = 0; index < 19; index++)
+        {
+            TransactionPlan plan = new(Guid.NewGuid(), new[]
+            {
+                WriteOperation($"smapi-internal/retention/file-{index:D2}", null, "managed", Hash("same"))
+            });
+            new InstallerTransactionExecutor().Apply(game, payload, plan);
+        }
+
+        string transactions = Path.Combine(game, ".smapi-installer/transactions");
+        Directory.EnumerateDirectories(transactions).Should().HaveCount(16);
+        Directory.EnumerateDirectories(transactions).Should().OnlyContain(path =>
+            Directory.EnumerateFileSystemEntries(path).Select(Path.GetFileName).OrderBy(name => name)
+                .SequenceEqual(new[] { "events.jsonl", "journal.json" })
+        );
+    }
+
+    [TestCase(TransactionSetupBoundary.PreparationDirectoryCreated, 0)]
+    [TestCase(TransactionSetupBoundary.PayloadDirectoriesCreated, 0)]
+    [TestCase(TransactionSetupBoundary.ImmutablePlanCreated, 0)]
+    [TestCase(TransactionSetupBoundary.CreationEventCreated, 0)]
+    [TestCase(TransactionSetupBoundary.TransactionPublished, 1)]
+    public void Recover_ProcessStopsAtEverySetupBoundary_CleansOrRollsBackWithoutBlocking(
+        TransactionSetupBoundary boundary,
+        int expectedRecoveryCount
+    )
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "managed", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", null, "managed", Hash("new"))
+        });
+        InstallerTransactionExecutor crashing = new(faultInjector: new SetupTerminationFaultInjector(boundary));
+
+        Action interrupted = () => crashing.Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+
+        new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().HaveCount(expectedRecoveryCount);
+        Directory.EnumerateDirectories(Path.Combine(game, ".smapi-installer/transactions"))
+            .Select(Path.GetFileName)
+            .Should().NotContain(name => name!.StartsWith("preparing-", StringComparison.Ordinal));
+        File.Exists(Path.Combine(game, "StardewModdingAPI.dll")).Should().BeFalse();
+    }
+
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-installer-core-tests-{Guid.NewGuid():N}");
@@ -440,4 +695,27 @@ public sealed class InstallerTransactionExecutorTests
         public void BeforeMutation(Guid transactionId, int operationIndex) => this.Before?.Invoke(transactionId, operationIndex);
         public void AfterMutation(Guid transactionId, int operationIndex) => this.After?.Invoke(transactionId, operationIndex);
     }
+
+    private sealed class SetupTerminationFaultInjector : ITransactionFaultInjector
+    {
+        private readonly TransactionSetupBoundary Boundary;
+
+        public SetupTerminationFaultInjector(TransactionSetupBoundary boundary)
+        {
+            this.Boundary = boundary;
+        }
+
+        public void AtSetupBoundary(Guid transactionId, TransactionSetupBoundary boundary)
+        {
+            if (boundary == this.Boundary)
+                throw new SimulatedProcessTerminationException($"Injected setup termination at {boundary}.");
+        }
+
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+
+        public void AfterMutation(Guid transactionId, int operationIndex) { }
+    }
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int link(string oldPath, string newPath);
 }

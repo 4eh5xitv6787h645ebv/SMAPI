@@ -1,13 +1,17 @@
+using System.Text;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Transactions;
 
-/// <summary>Applies immutable file plans with a durable journal and exact rollback.</summary>
+/// <summary>Applies immutable Linux file plans through anchored descriptors with durable exact rollback.</summary>
 public sealed class InstallerTransactionExecutor
 {
     private const string WorkspaceName = ".smapi-installer";
-    private const string WorkspaceMarkerContents = "smapi-installer-state-v1\n";
+    private const string TransactionsName = "transactions";
+    private const string WorkspaceMarkerName = "state-version";
+    private const string WorkspaceMarkerContents = "smapi-installer-state-v2\n";
+    private const int MaximumRetainedFinalTransactions = 16;
     private readonly ITransactionProgressSink Progress;
     private readonly ITransactionFaultInjector FaultInjector;
 
@@ -28,46 +32,79 @@ public sealed class InstallerTransactionExecutor
         string canonicalPayloadRoot = TransactionPath.GetCanonicalRoot(payloadRoot, nameof(payloadRoot));
         ValidatePlan(plan);
 
+        using LinuxAnchoredFileSystem game = new(canonicalGameRoot);
+        using LinuxAnchoredFileSystem payload = new(canonicalPayloadRoot);
         this.Progress.Report(new(TransactionStage.AcquiringLock, 0, plan.Operations.Count));
-        string workspace = EnsureWorkspace(canonicalGameRoot);
-        using FileStream operationLock = AcquireLock(workspace);
+        using LinuxAnchoredFileSystem workspace = EnsureWorkspace(game);
+        using LinuxAnchoredFile operationLock = AcquireLock(workspace);
 
         this.Progress.Report(new(TransactionStage.Recovering, 0, plan.Operations.Count));
-        this.RecoverIncompleteTransactionsLocked(canonicalGameRoot, workspace);
+        this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
 
-        string transactionDirectory = Path.Combine(workspace, "transactions", plan.TransactionId.ToString("N"));
-        if (Directory.Exists(transactionDirectory))
+        TransactionJournal journal = BuildJournal(game, canonicalGameRoot, plan);
+        string transactionName = plan.TransactionId.ToString("N");
+        string preparationName = $"preparing-{transactionName}";
+        string transactionRelativePath = $"{WorkspaceName}/{TransactionsName}/{transactionName}";
+        string preparationRelativePath = $"{WorkspaceName}/{TransactionsName}/{preparationName}";
+        if (game.Stat(transactionRelativePath) is not null || game.Stat(preparationRelativePath) is not null)
             throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "A transaction with this ID already exists.");
 
-        Directory.CreateDirectory(Path.Combine(transactionDirectory, "staged"));
-        Directory.CreateDirectory(Path.Combine(transactionDirectory, "backups"));
-        SetPrivateDirectoryModes(transactionDirectory);
-        string journalPath = Path.Combine(transactionDirectory, "journal.json");
-        TransactionJournal journal = new()
-        {
-            TransactionId = plan.TransactionId,
-            CanonicalGameRoot = canonicalGameRoot
-        };
-        TransactionJournalStore.WriteDurable(journalPath, journal);
-
+        game.EnsureDirectory(preparationRelativePath, 0x1c0, out bool transactionCreated);
+        if (!transactionCreated)
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The transaction directory appeared concurrently.");
+        LinuxAnchoredFileSystem? preparedTransaction = null;
+        LinuxAnchoredFile? preparedEventsFile = null;
+        TransactionJournalReplay replay;
         try
         {
-            this.StagePayload(canonicalPayloadRoot, transactionDirectory, plan, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            this.RevalidateAll(canonicalGameRoot, plan);
-            cancellationToken.ThrowIfCancellationRequested();
+            this.FaultInjector.AtSetupBoundary(plan.TransactionId, TransactionSetupBoundary.PreparationDirectoryCreated);
+            preparedTransaction = game.OpenSubdirectory(preparationRelativePath);
+            preparedTransaction.EnsureDirectory("staged", 0x1c0);
+            preparedTransaction.EnsureDirectory("backups", 0x1c0);
+            this.FaultInjector.AtSetupBoundary(plan.TransactionId, TransactionSetupBoundary.PayloadDirectoriesCreated);
+            TransactionJournalStore.Create(preparedTransaction, journal);
+            this.FaultInjector.AtSetupBoundary(plan.TransactionId, TransactionSetupBoundary.ImmutablePlanCreated);
+            replay = TransactionJournalStore.ReadEvents(preparedTransaction, journal);
+            preparedEventsFile = TransactionJournalStore.OpenEventsForAppend(preparedTransaction, replay);
+            replay = TransactionJournalStore.Append(preparedTransaction, preparedEventsFile, journal, replay, TransactionJournalEventKind.Created);
+            this.FaultInjector.AtSetupBoundary(plan.TransactionId, TransactionSetupBoundary.CreationEventCreated);
+            LinuxFileIdentity preparationIdentity = game.Stat(preparationRelativePath)
+                ?? throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The prepared transaction disappeared before publication.");
+            game.RenameDirectoryNoReplace(preparationRelativePath, transactionRelativePath, preparationIdentity);
+            this.FaultInjector.AtSetupBoundary(plan.TransactionId, TransactionSetupBoundary.TransactionPublished);
+        }
+        catch (SimulatedProcessTerminationException)
+        {
+            preparedEventsFile?.Dispose();
+            preparedTransaction?.Dispose();
+            throw;
+        }
+        catch
+        {
+            preparedEventsFile?.Dispose();
+            preparedTransaction?.Dispose();
+            this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
+            throw;
+        }
+        using LinuxAnchoredFileSystem transaction = preparedTransaction;
+        using LinuxAnchoredFile eventsFile = preparedEventsFile;
 
-            journal.Status = TransactionJournalStatus.Applying;
-            TransactionJournalStore.WriteDurable(journalPath, journal);
-            this.ApplyMutations(canonicalGameRoot, transactionDirectory, plan, journal, journalPath);
+        bool committed = false;
+        try
+        {
+            this.StagePayload(payload, transaction, plan, cancellationToken);
+            replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Prepared);
+            cancellationToken.ThrowIfCancellationRequested();
+            this.RevalidateAll(game, plan);
+            cancellationToken.ThrowIfCancellationRequested();
+            replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Applying);
+            replay = this.ApplyMutations(game, transaction, plan, journal, replay, eventsFile);
 
             this.Progress.Report(new(TransactionStage.Verifying, plan.Operations.Count, plan.Operations.Count));
-            VerifyResults(canonicalGameRoot, plan);
-            journal.Status = TransactionJournalStatus.Committed;
+            VerifyResults(game, plan);
             this.Progress.Report(new(TransactionStage.Committing, plan.Operations.Count, plan.Operations.Count));
-            TransactionJournalStore.WriteDurable(journalPath, journal);
-            this.Progress.Report(new(TransactionStage.Completed, plan.Operations.Count, plan.Operations.Count));
-            return new(plan.TransactionId, TransactionStatus.Committed, plan.Operations.Count);
+            replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Committed);
+            committed = true;
         }
         catch (SimulatedProcessTerminationException)
         {
@@ -75,9 +112,18 @@ public sealed class InstallerTransactionExecutor
         }
         catch
         {
-            this.RollBackJournal(canonicalGameRoot, transactionDirectory, journal, journalPath);
+            eventsFile.Dispose();
+            this.RollBackJournal(game, transaction, journal);
+            CleanupFinalTransaction(transaction);
             throw;
         }
+
+        if (!committed)
+            throw new InstallerTransactionException(TransactionErrorCode.IoFailure, "The transaction ended without a durable terminal event.");
+        CleanupFinalTransaction(transaction);
+        this.TrimFinalTransactions(game, workspace, canonicalGameRoot);
+        this.Progress.Report(new(TransactionStage.Completed, plan.Operations.Count, plan.Operations.Count));
+        return new(plan.TransactionId, TransactionStatus.Committed, plan.Operations.Count);
     }
 
     /// <summary>Recover every incomplete transaction under a game root.</summary>
@@ -85,9 +131,12 @@ public sealed class InstallerTransactionExecutor
     {
         LinuxPrivilegeGuard.AssertNotRoot();
         string canonicalGameRoot = TransactionPath.GetCanonicalRoot(gameRoot, nameof(gameRoot));
-        string workspace = EnsureWorkspace(canonicalGameRoot);
-        using FileStream operationLock = AcquireLock(workspace);
-        return this.RecoverIncompleteTransactionsLocked(canonicalGameRoot, workspace);
+        using LinuxAnchoredFileSystem game = new(canonicalGameRoot);
+        using LinuxAnchoredFileSystem workspace = EnsureWorkspace(game);
+        using LinuxAnchoredFile operationLock = AcquireLock(workspace);
+        IReadOnlyList<TransactionResult> results = this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
+        this.TrimFinalTransactions(game, workspace, canonicalGameRoot);
+        return results;
     }
 
     private static void ValidatePlan(TransactionPlan plan)
@@ -96,8 +145,24 @@ public sealed class InstallerTransactionExecutor
         HashSet<string> caseInsensitiveDestinations = new(StringComparer.OrdinalIgnoreCase);
         foreach (TransactionFileOperation operation in plan.Operations)
         {
+            if (!Enum.IsDefined(typeof(TransactionOperationKind), operation.Kind))
+                throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction contains an unknown operation kind.");
             string relativePath = TransactionPath.NormalizeRelativePath(operation.RelativePath, nameof(operation.RelativePath));
-            if (!OwnedNamespacePolicy.IsAllowedTransactionDestination(NormalizedRelativePath.Parse(relativePath)))
+            bool allowed;
+            try
+            {
+                allowed = OwnedNamespacePolicy.IsAllowedTransactionDestination(NormalizedRelativePath.Parse(relativePath))
+                    || (
+                        relativePath == TransactionPlan.CoreReceiptRelativePath
+                        && plan.HasCoreAuthorizedReceiptMutation
+                        && ReferenceEquals(operation, plan.Operations[^1])
+                    );
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A destination path isn't canonical or exceeds its bound.", exception);
+            }
+            if (!allowed)
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction destination isn't in the compiled installer-owned allowlist.");
             if (!destinations.Add(relativePath) || !caseInsensitiveDestinations.Add(relativePath))
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction contains duplicate or case-colliding destinations.");
@@ -107,8 +172,18 @@ public sealed class InstallerTransactionExecutor
             {
                 if (operation.PayloadRelativePath is null || operation.ExpectedResultSha256 is null)
                     throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A write operation requires a payload path and result digest.");
-                TransactionPath.NormalizeRelativePath(operation.PayloadRelativePath, nameof(operation.PayloadRelativePath));
+                string payloadPath = TransactionPath.NormalizeRelativePath(operation.PayloadRelativePath, nameof(operation.PayloadRelativePath));
+                try
+                {
+                    NormalizedRelativePath.Parse(payloadPath);
+                }
+                catch (ArgumentException exception)
+                {
+                    throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A payload path isn't canonical or exceeds its bound.", exception);
+                }
                 ValidateSha256(operation.ExpectedResultSha256, allowNull: false, nameof(operation.ExpectedResultSha256));
+                if (operation.ResultUnixMode is < 0 or > 0x1ff)
+                    throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A Unix mode is outside the supported permission bits.");
             }
             else if (operation.PayloadRelativePath is not null || operation.ExpectedResultSha256 is not null || operation.ResultUnixMode is not null)
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A remove operation can't include payload fields.");
@@ -119,11 +194,48 @@ public sealed class InstallerTransactionExecutor
     {
         if (value is null && allowNull)
             return;
-        if (value is null || value.Length != 64 || value.Any(character => !Uri.IsHexDigit(character)) || !string.Equals(value, value.ToLowerInvariant(), StringComparison.Ordinal))
+        if (value is null || value.Length != 64 || value.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
             throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, $"{name} must be a lowercase SHA-256 digest.");
     }
 
-    private void StagePayload(string payloadRoot, string transactionDirectory, TransactionPlan plan, CancellationToken cancellationToken)
+    private static TransactionJournal BuildJournal(LinuxAnchoredFileSystem game, string canonicalGameRoot, TransactionPlan plan)
+    {
+        HashSet<string> assignedCreatedDirectories = new(StringComparer.Ordinal);
+        TransactionJournal journal = new()
+        {
+            TransactionId = plan.TransactionId,
+            CreatedUtcTicks = DateTime.UtcNow.Ticks,
+            CanonicalGameRoot = canonicalGameRoot,
+            GameRootInode = game.Identity.Inode,
+            GameRootDeviceMajor = game.Identity.DeviceMajor,
+            GameRootDeviceMinor = game.Identity.DeviceMinor,
+            HasCoreAuthorizedReceiptMutation = plan.HasCoreAuthorizedReceiptMutation
+        };
+        for (int index = 0; index < plan.Operations.Count; index++)
+        {
+            TransactionFileOperation operation = plan.Operations[index];
+            IReadOnlyList<string> missingParents = GetMissingParentDirectories(game, operation.RelativePath);
+            ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.ExistingFileMismatch);
+            journal.Entries.Add(new TransactionJournalEntry
+            {
+                Index = index,
+                Kind = operation.Kind,
+                RelativePath = operation.RelativePath,
+                HadOriginal = operation.ExpectedExistingSha256 is not null,
+                ExpectedExistingSha256 = operation.ExpectedExistingSha256,
+                ExpectedResultSha256 = operation.ExpectedResultSha256,
+                ResultUnixMode = operation.ResultUnixMode,
+                BackupRelativePath = $"backups/{index:D8}",
+                StagedRelativePath = operation.Kind == TransactionOperationKind.WriteFile ? $"staged/{index:D8}" : null,
+                CreatedDirectories = missingParents
+                    .Where(assignedCreatedDirectories.Add)
+                    .ToList()
+            });
+        }
+        return journal;
+    }
+
+    private void StagePayload(LinuxAnchoredFileSystem payload, LinuxAnchoredFileSystem transaction, TransactionPlan plan, CancellationToken cancellationToken)
     {
         for (int index = 0; index < plan.Operations.Count; index++)
         {
@@ -132,288 +244,314 @@ public sealed class InstallerTransactionExecutor
             TransactionFileOperation operation = plan.Operations[index];
             if (operation.Kind != TransactionOperationKind.WriteFile)
                 continue;
-
-            string source = TransactionPath.ResolveUnderRoot(payloadRoot, operation.PayloadRelativePath!);
-            TransactionPath.AssertSafeParents(payloadRoot, source);
-            TransactionPath.RequireRegularFile(source, TransactionErrorCode.PayloadMismatch, "A payload entry isn't a single-link regular file.");
-            string actualHash = TransactionPath.ComputeSha256(source);
-            if (!string.Equals(actualHash, operation.ExpectedResultSha256, StringComparison.Ordinal))
-                throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A payload entry doesn't match its expected digest.");
-
-            string stagedPath = Path.Combine(transactionDirectory, "staged", index.ToString("D8"));
-            using (FileStream input = new(source, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.SequentialScan))
-            using (FileStream output = new(stagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.SequentialScan))
+            try
             {
-                input.CopyTo(output);
-                output.Flush(flushToDisk: true);
+                using LinuxAnchoredFile source = payload.OpenRegularFileForRead(operation.PayloadRelativePath!);
+                string actualHash = payload.ComputeSha256(source);
+                if (!string.Equals(actualHash, operation.ExpectedResultSha256, StringComparison.Ordinal))
+                    throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A payload entry doesn't match its expected digest.");
+                int mode = operation.ResultUnixMode ?? source.Identity.UnixMode;
+                LinuxFileIdentity staged = transaction.CopyFile(source, $"staged/{index:D8}", mode);
+                using LinuxAnchoredFile stagedFile = transaction.OpenRegularFileForRead($"staged/{index:D8}");
+                if (staged != stagedFile.Identity || transaction.ComputeSha256(stagedFile) != operation.ExpectedResultSha256)
+                    throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A staged payload entry failed verification.");
             }
-            if (operation.ResultUnixMode is { } mode)
-                TransactionPermissions.SetMode(stagedPath, mode);
-            if (!string.Equals(TransactionPath.ComputeSha256(stagedPath), operation.ExpectedResultSha256, StringComparison.Ordinal))
-                throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A staged payload entry failed verification.");
+            catch (InstallerTransactionException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A payload entry isn't a stable single-link regular file.", exception);
+            }
         }
-        TransactionDurability.FlushDirectory(Path.Combine(transactionDirectory, "staged"));
+        transaction.FsyncDirectory("staged");
     }
 
-    private void RevalidateAll(string gameRoot, TransactionPlan plan)
+    private void RevalidateAll(LinuxAnchoredFileSystem game, TransactionPlan plan)
     {
         for (int index = 0; index < plan.Operations.Count; index++)
         {
             this.Progress.Report(new(TransactionStage.Revalidating, index, plan.Operations.Count));
             TransactionFileOperation operation = plan.Operations[index];
-            string destination = TransactionPath.ResolveUnderRoot(gameRoot, operation.RelativePath);
-            TransactionPath.AssertSafeParents(gameRoot, destination);
-            ValidateExisting(destination, operation.ExpectedExistingSha256);
+            ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.ExistingFileMismatch);
         }
     }
 
-    private void ApplyMutations(string gameRoot, string transactionDirectory, TransactionPlan plan, TransactionJournal journal, string journalPath)
+    private TransactionJournalReplay ApplyMutations(
+        LinuxAnchoredFileSystem game,
+        LinuxAnchoredFileSystem transaction,
+        TransactionPlan plan,
+        TransactionJournal journal,
+        TransactionJournalReplay replay,
+        LinuxAnchoredFile eventsFile
+    )
     {
+        string transactionPrefix = $"{WorkspaceName}/{TransactionsName}/{plan.TransactionId:N}/";
         for (int index = 0; index < plan.Operations.Count; index++)
         {
             this.Progress.Report(new(TransactionStage.Applying, index, plan.Operations.Count));
             TransactionFileOperation operation = plan.Operations[index];
-            string destination = TransactionPath.ResolveUnderRoot(gameRoot, operation.RelativePath);
-            TransactionPath.AssertSafeParents(gameRoot, destination);
-            PathEntry existing = ValidateExisting(destination, operation.ExpectedExistingSha256);
+            TransactionJournalEntry entry = journal.Entries[index];
+            LinuxFileIdentity? existing = ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.PathChanged);
+            LinuxFileIdentity? staged = operation.Kind == TransactionOperationKind.WriteFile
+                ? ValidateFile(transaction, entry.StagedRelativePath!, operation.ExpectedResultSha256!, TransactionErrorCode.PayloadMismatch)
+                : null;
 
-            string backupRelativePath = $"backups/{index:D8}";
-            TransactionJournalEntry entry = new()
-            {
-                Index = index,
-                Kind = operation.Kind,
-                RelativePath = operation.RelativePath,
-                HadOriginal = existing.Kind != PathEntryKind.Missing,
-                ExpectedExistingSha256 = operation.ExpectedExistingSha256,
-                ExpectedResultSha256 = operation.ExpectedResultSha256,
-                BackupRelativePath = backupRelativePath
-            };
-            entry.CreatedDirectories.AddRange(GetMissingParentDirectories(gameRoot, destination));
-            journal.Entries.Add(entry);
-            TransactionJournalStore.WriteDurable(journalPath, journal);
+            replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Intent, index);
             this.FaultInjector.BeforeMutation(plan.TransactionId, index);
+            LinuxFileIdentity? immediatelyBefore = ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.PathChanged);
+            if (existing != immediatelyBefore)
+                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A destination identity changed immediately before mutation.");
 
-            PathEntry immediatelyBeforeMutation = ValidateExisting(destination, operation.ExpectedExistingSha256);
-            if (immediatelyBeforeMutation != existing)
-                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A destination's filesystem identity changed immediately before mutation.");
-            foreach (string relativeDirectory in entry.CreatedDirectories)
+            foreach (string directory in entry.CreatedDirectories)
             {
-                string directory = TransactionPath.ResolveUnderRoot(gameRoot, relativeDirectory);
-                Directory.CreateDirectory(directory);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(directory)!);
+                if (game.Stat(directory) is not null)
+                    throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A planned destination directory appeared before mutation.");
+                game.EnsureDirectory(directory, 0x1c0, out bool created);
+                if (!created)
+                    throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A planned destination directory wasn't exclusively created.");
             }
-            TransactionPath.AssertSafeParents(gameRoot, destination);
-            if (entry.HadOriginal)
-            {
-                string backupPath = TransactionPath.ResolveUnderRoot(transactionDirectory, backupRelativePath);
-                File.Move(destination, backupPath);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(backupPath)!);
-            }
-
+            if (existing is not null)
+                game.RenameFileNoReplace(operation.RelativePath, transactionPrefix + entry.BackupRelativePath, existing);
             if (operation.Kind == TransactionOperationKind.WriteFile)
-            {
-                string stagedPath = Path.Combine(transactionDirectory, "staged", index.ToString("D8"));
-                File.Move(stagedPath, destination);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
-            }
+                game.RenameFileNoReplace(transactionPrefix + entry.StagedRelativePath, operation.RelativePath, staged!);
 
-            entry.MutationApplied = true;
-            TransactionJournalStore.WriteDurable(journalPath, journal);
+            replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Applied, index);
             this.FaultInjector.AfterMutation(plan.TransactionId, index);
         }
+        return replay;
     }
 
-    private static PathEntry ValidateExisting(string destination, string? expectedHash)
+    private static LinuxFileIdentity? ValidateExisting(
+        LinuxAnchoredFileSystem fileSystem,
+        string relativePath,
+        string? expectedHash,
+        TransactionErrorCode code
+    )
     {
-        PathEntry entry = TransactionPath.Inspect(destination);
-        if (expectedHash is null)
+        try
         {
-            if (entry.Kind != PathEntryKind.Missing)
-                throw new InstallerTransactionException(TransactionErrorCode.ExistingFileMismatch, "A destination expected to be absent now exists.");
-            return entry;
+            LinuxFileIdentity? identity = fileSystem.Stat(relativePath);
+            if (expectedHash is null)
+            {
+                if (identity is not null)
+                    throw new InstallerTransactionException(code, "A destination expected to be absent now exists.");
+                return null;
+            }
+            if (identity is null || identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1)
+                throw new InstallerTransactionException(code, "An existing destination isn't a single-link regular file.");
+            using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead(relativePath);
+            if (opened.Identity != identity || fileSystem.ComputeSha256(opened) != expectedHash)
+                throw new InstallerTransactionException(code, "An existing destination changed after planning.");
+            return identity;
         }
-
-        if (entry.Kind != PathEntryKind.RegularFile || entry.LinkCount != 1)
-            throw new InstallerTransactionException(TransactionErrorCode.ExistingFileMismatch, "An existing destination isn't a single-link regular file.");
-        string actualHash = TransactionPath.ComputeSha256(destination);
-        if (!string.Equals(actualHash, expectedHash, StringComparison.Ordinal))
-            throw new InstallerTransactionException(TransactionErrorCode.ExistingFileMismatch, "An existing destination changed after planning.");
-        return entry;
+        catch (InstallerTransactionException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InstallerTransactionException(code, "A destination path is unsafe or changed during inspection.", exception);
+        }
     }
 
-    private static void VerifyResults(string gameRoot, TransactionPlan plan)
+    private static LinuxFileIdentity ValidateFile(LinuxAnchoredFileSystem fileSystem, string path, string digest, TransactionErrorCode code)
+    {
+        try
+        {
+            using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead(path);
+            if (fileSystem.ComputeSha256(opened) != digest)
+                throw new InstallerTransactionException(code, "A transaction file failed digest verification.");
+            return opened.Identity;
+        }
+        catch (InstallerTransactionException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InstallerTransactionException(code, "A transaction file is missing or unsafe.", exception);
+        }
+    }
+
+    private static void VerifyResults(LinuxAnchoredFileSystem game, TransactionPlan plan)
     {
         foreach (TransactionFileOperation operation in plan.Operations)
         {
-            string destination = TransactionPath.ResolveUnderRoot(gameRoot, operation.RelativePath);
-            TransactionPath.AssertSafeParents(gameRoot, destination);
-            PathEntry entry = TransactionPath.Inspect(destination);
             if (operation.Kind == TransactionOperationKind.RemoveFile)
             {
-                if (entry.Kind != PathEntryKind.Missing)
+                if (game.Stat(operation.RelativePath) is not null)
                     throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A removed destination reappeared before commit.");
+                continue;
             }
-            else
-            {
-                if (
-                    entry.Kind != PathEntryKind.RegularFile
-                    || entry.LinkCount != 1
-                    || !string.Equals(TransactionPath.ComputeSha256(destination), operation.ExpectedResultSha256, StringComparison.Ordinal)
-                    || (operation.ResultUnixMode is { } expectedMode && entry.UnixMode != expectedMode)
-                )
-                    throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A written destination failed post-verification.");
-            }
+            LinuxFileIdentity identity = ValidateFile(game, operation.RelativePath, operation.ExpectedResultSha256!, TransactionErrorCode.PathChanged);
+            if (operation.ResultUnixMode is { } expectedMode && identity.UnixMode != expectedMode)
+                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A written destination has incorrect permissions.");
         }
     }
 
-    private IReadOnlyList<TransactionResult> RecoverIncompleteTransactionsLocked(string gameRoot, string workspace)
+    private IReadOnlyList<TransactionResult> RecoverIncompleteTransactionsLocked(
+        LinuxAnchoredFileSystem game,
+        LinuxAnchoredFileSystem workspace,
+        string canonicalGameRoot
+    )
     {
-        string transactionsRoot = Path.Combine(workspace, "transactions");
-        if (!Directory.Exists(transactionsRoot))
-            return Array.Empty<TransactionResult>();
-
+        using LinuxAnchoredFileSystem transactions = workspace.OpenSubdirectory(TransactionsName);
         List<TransactionResult> results = new();
-        foreach (string directory in Directory.EnumerateDirectories(transactionsRoot).OrderBy(path => path, StringComparer.Ordinal))
+        foreach (string name in transactions.EnumerateEntryNames())
         {
-            string journalPath = Path.Combine(directory, "journal.json");
-            if (!File.Exists(journalPath))
-                throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unrecognized transaction workspace requires manual inspection.");
-            DirectoryInfo directoryInfo = new(directory);
-            directoryInfo.Refresh();
-            if (directoryInfo.LinkTarget is not null || (directoryInfo.Attributes & FileAttributes.ReparsePoint) != 0 || !Guid.TryParseExact(directoryInfo.Name, "N", out Guid transactionId))
-                throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe or unrecognized transaction workspace requires manual inspection.");
-            TransactionJournal journal = TransactionJournalStore.Read(journalPath, transactionId, gameRoot, directory);
-            if (journal.Status is TransactionJournalStatus.Committed or TransactionJournalStatus.RolledBack)
+            LinuxFileIdentity? identity = transactions.Stat(name);
+            if (name.StartsWith("preparing-", StringComparison.Ordinal))
+            {
+                if (
+                    identity?.Kind != LinuxAnchoredEntryKind.Directory
+                    || !Guid.TryParseExact(name["preparing-".Length..], "N", out _)
+                )
+                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe preparation workspace requires manual inspection.");
+                CleanupUnpublishedTransaction(transactions, name, identity);
                 continue;
-
+            }
+            if (identity?.Kind != LinuxAnchoredEntryKind.Directory || !Guid.TryParseExact(name, "N", out Guid transactionId))
+                throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe or unrecognized transaction workspace requires manual inspection.");
+            using LinuxAnchoredFileSystem transaction = transactions.OpenSubdirectory(name);
+            TransactionJournal journal = TransactionJournalStore.ReadPlan(transaction, transactionId, canonicalGameRoot, game.Identity);
+            TransactionJournalReplay replay = TransactionJournalStore.ReadEvents(transaction, journal);
+            if (replay.Status is TransactionJournalEventKind.Committed or TransactionJournalEventKind.RolledBack)
+            {
+                CleanupFinalTransaction(transaction);
+                continue;
+            }
             this.Progress.Report(new(TransactionStage.Recovering, 0, journal.Entries.Count));
-            int changed = journal.Entries.Count(entry => entry.MutationApplied || File.Exists(Path.Combine(directory, entry.BackupRelativePath.Replace('/', Path.DirectorySeparatorChar))));
-            this.RollBackJournal(gameRoot, directory, journal, journalPath);
-            results.Add(new(journal.TransactionId, TransactionStatus.Recovered, changed));
+            int changed = replay.IntendedOperations.Count;
+            this.RollBackJournal(game, transaction, journal);
+            CleanupFinalTransaction(transaction);
+            results.Add(new(transactionId, TransactionStatus.Recovered, changed));
         }
         return results;
     }
 
-    private void RollBackJournal(string gameRoot, string transactionDirectory, TransactionJournal journal, string journalPath)
+    private void RollBackJournal(LinuxAnchoredFileSystem game, LinuxAnchoredFileSystem transaction, TransactionJournal journal)
     {
-        journal.Status = TransactionJournalStatus.RollingBack;
-        TransactionJournalStore.WriteDurable(journalPath, journal);
-        for (int index = journal.Entries.Count - 1; index >= 0; index--)
-        {
-            this.Progress.Report(new(TransactionStage.RollingBack, journal.Entries.Count - index - 1, journal.Entries.Count));
-            TransactionJournalEntry entry = journal.Entries[index];
-            string destination = TransactionPath.ResolveUnderRoot(gameRoot, entry.RelativePath);
-            TransactionPath.AssertSafeParents(gameRoot, destination);
-            string backupPath = TransactionPath.ResolveUnderRoot(transactionDirectory, entry.BackupRelativePath);
+        TransactionJournalReplay replay = TransactionJournalStore.ReadEvents(transaction, journal);
+        if (replay.Status == TransactionJournalEventKind.RolledBack)
+            return;
+        if (replay.Status == TransactionJournalEventKind.Committed)
+            throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A committed transaction can't be rolled back by crash recovery.");
+        using LinuxAnchoredFile eventsFile = TransactionJournalStore.OpenEventsForAppend(transaction, replay);
+        if (replay.Status != TransactionJournalEventKind.RollingBack && replay.Status != TransactionJournalEventKind.RollbackApplied)
+            replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RollingBack);
 
-            PathEntry current = TransactionPath.Inspect(destination);
-            PathEntry backup = TransactionPath.Inspect(backupPath);
-            if (entry.HadOriginal && backup.Kind == PathEntryKind.Missing)
-            {
-                if (current.Kind != PathEntryKind.RegularFile || current.LinkCount != 1 || entry.ExpectedExistingSha256 is null || !string.Equals(TransactionPath.ComputeSha256(destination), entry.ExpectedExistingSha256, StringComparison.Ordinal))
-                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A transaction stopped before backing up its original file, but that file no longer matches the journal.");
+        string transactionPrefix = $"{WorkspaceName}/{TransactionsName}/{journal.TransactionId:N}/";
+        foreach (int index in replay.IntendedOperations.OrderByDescending(value => value))
+        {
+            if (replay.RolledBackOperations.Contains(index))
                 continue;
-            }
+            this.Progress.Report(new(TransactionStage.RollingBack, replay.RolledBackOperations.Count, replay.IntendedOperations.Count));
+            TransactionJournalEntry entry = journal.Entries[index];
+            string backupPath = transactionPrefix + entry.BackupRelativePath;
+            LinuxFileIdentity? current = game.Stat(entry.RelativePath);
+            LinuxFileIdentity? backup = game.Stat(backupPath);
 
             if (entry.HadOriginal)
             {
-                if (
-                    backup.Kind != PathEntryKind.RegularFile
-                    || backup.LinkCount != 1
-                    || entry.ExpectedExistingSha256 is null
-                    || !string.Equals(TransactionPath.ComputeSha256(backupPath), entry.ExpectedExistingSha256, StringComparison.Ordinal)
-                )
-                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A required transaction backup is missing or unsafe.");
-
-                if (current.Kind != PathEntryKind.Missing)
+                if (backup is null)
                 {
-                    if (
-                        entry.Kind != TransactionOperationKind.WriteFile
-                        || current.Kind != PathEntryKind.RegularFile
-                        || current.LinkCount != 1
-                        || entry.ExpectedResultSha256 is null
-                        || !string.Equals(TransactionPath.ComputeSha256(destination), entry.ExpectedResultSha256, StringComparison.Ordinal)
-                    )
+                    if (current is null || entry.ExpectedExistingSha256 is null)
+                        throw RecoveryError("A required original and its backup are both missing.");
+                    ValidateFile(game, entry.RelativePath, entry.ExpectedExistingSha256, TransactionErrorCode.RecoveryFailed);
+                }
+                else
+                {
+                    LinuxFileIdentity verifiedBackup = ValidateFile(game, backupPath, entry.ExpectedExistingSha256!, TransactionErrorCode.RecoveryFailed);
+                    if (current is not null)
                     {
-                        throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A transaction result changed after interruption; recovery preserved it for manual inspection.");
+                        if (entry.Kind != TransactionOperationKind.WriteFile || entry.ExpectedResultSha256 is null)
+                            throw RecoveryError("An unexpected file blocks exact rollback.");
+                        LinuxFileIdentity verifiedResult = ValidateFile(game, entry.RelativePath, entry.ExpectedResultSha256, TransactionErrorCode.RecoveryFailed);
+                        game.UnlinkFile(entry.RelativePath, verifiedResult);
                     }
+                    game.RenameFileNoReplace(backupPath, entry.RelativePath, verifiedBackup);
                 }
-
-                if (current.Kind != PathEntryKind.Missing)
-                {
-                    File.Delete(destination);
-                    TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
-                }
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                File.Move(backupPath, destination);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(backupPath)!);
             }
-            else if (current.Kind != PathEntryKind.Missing)
+            else
             {
-                if (
-                    entry.Kind != TransactionOperationKind.WriteFile
-                    || current.Kind != PathEntryKind.RegularFile
-                    || current.LinkCount != 1
-                    || entry.ExpectedResultSha256 is null
-                    || !string.Equals(TransactionPath.ComputeSha256(destination), entry.ExpectedResultSha256, StringComparison.Ordinal)
-                )
+                if (backup is not null)
+                    throw RecoveryError("A transaction backup exists for a destination which was originally absent.");
+                if (current is not null)
                 {
-                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A newly created transaction result changed after interruption; recovery preserved it for manual inspection.");
+                    if (entry.Kind != TransactionOperationKind.WriteFile || entry.ExpectedResultSha256 is null)
+                        throw RecoveryError("An unexpected result blocks exact rollback.");
+                    LinuxFileIdentity verifiedResult = ValidateFile(game, entry.RelativePath, entry.ExpectedResultSha256, TransactionErrorCode.RecoveryFailed);
+                    game.UnlinkFile(entry.RelativePath, verifiedResult);
                 }
-                File.Delete(destination);
-                TransactionDurability.FlushDirectory(Path.GetDirectoryName(destination)!);
             }
 
-            foreach (string relativeDirectory in entry.CreatedDirectories.AsEnumerable().Reverse())
+            foreach (string directory in entry.CreatedDirectories.AsEnumerable().Reverse())
             {
-                string directory = TransactionPath.ResolveUnderRoot(gameRoot, relativeDirectory);
-                if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any())
-                {
-                    Directory.Delete(directory);
-                    TransactionDurability.FlushDirectory(Path.GetDirectoryName(directory)!);
-                }
+                LinuxFileIdentity? directoryIdentity = game.Stat(directory);
+                if (directoryIdentity is null)
+                    continue;
+                if (directoryIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+                    throw RecoveryError("A transaction-created parent changed type during rollback.");
+                using LinuxAnchoredFileSystem opened = game.OpenSubdirectory(directory);
+                if (opened.EnumerateEntryNames().Count == 0)
+                    game.RemoveEmptyDirectory(directory, directoryIdentity);
             }
+            replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RollbackApplied, index);
         }
-        journal.Status = TransactionJournalStatus.RolledBack;
-        TransactionJournalStore.WriteDurable(journalPath, journal);
+        TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RolledBack);
     }
 
-    private static string EnsureWorkspace(string gameRoot)
+    private static LinuxAnchoredFileSystem EnsureWorkspace(LinuxAnchoredFileSystem game)
     {
-        string workspace = Path.Combine(gameRoot, WorkspaceName);
-        string marker = Path.Combine(workspace, "state-version");
-        PathEntry existing = TransactionPath.Inspect(workspace);
-        if (existing.Kind == PathEntryKind.Missing)
-        {
-            Directory.CreateDirectory(workspace);
-            SetPrivateDirectoryModes(workspace);
-            using FileStream markerStream = new(marker, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            using StreamWriter writer = new(markerStream, leaveOpen: true);
-            writer.Write(WorkspaceMarkerContents);
-            writer.Flush();
-            markerStream.Flush(flushToDisk: true);
-            TransactionPermissions.SetMode(marker, Convert.ToInt32("600", 8));
-            TransactionDurability.FlushDirectory(workspace);
-        }
-        else
-        {
-            if (existing.Kind != PathEntryKind.Directory || !File.Exists(marker) || File.ReadAllText(marker) != WorkspaceMarkerContents)
-                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "An unknown .smapi-installer entry blocks safe installation.");
-            TransactionPath.RequireRegularFile(marker, TransactionErrorCode.WorkspaceConflict, "The installer workspace marker is unsafe.");
-        }
-        return workspace;
-    }
-
-    private static FileStream AcquireLock(string workspace)
-    {
-        string lockPath = Path.Combine(workspace, "operation.lock");
         try
         {
-            FileStream stream = new(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            TransactionPermissions.SetMode(lockPath, Convert.ToInt32("600", 8));
-            return stream;
+            LinuxFileIdentity? workspaceIdentity = game.Stat(WorkspaceName);
+            if (workspaceIdentity is null)
+            {
+                game.EnsureDirectory(WorkspaceName, 0x1c0, out bool created);
+                if (!created)
+                    throw new IOException("The workspace appeared concurrently.");
+                using LinuxAnchoredFileSystem createdWorkspace = game.OpenSubdirectory(WorkspaceName);
+                byte[] markerBytes = Encoding.UTF8.GetBytes(WorkspaceMarkerContents);
+                using LinuxAnchoredFile marker = createdWorkspace.CreateNewFile(WorkspaceMarkerName, 0x180);
+                createdWorkspace.AppendAndFsync(marker, WorkspaceMarkerName, markerBytes, 0, markerBytes.Length);
+            }
+            else if (workspaceIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw new IOException("The reserved workspace isn't a directory.");
+
+            LinuxAnchoredFileSystem workspace = game.OpenSubdirectory(WorkspaceName);
+            try
+            {
+                using LinuxAnchoredFile marker = workspace.OpenRegularFileForRead(WorkspaceMarkerName);
+                byte[] expected = Encoding.UTF8.GetBytes(WorkspaceMarkerContents);
+                if (!workspace.ReadAllBytes(marker, expected.Length).AsSpan().SequenceEqual(expected))
+                    throw new IOException("The workspace marker is unknown.");
+                workspace.EnsureDirectory(TransactionsName, 0x1c0);
+                return workspace;
+            }
+            catch
+            {
+                workspace.Dispose();
+                throw;
+            }
+        }
+        catch (InstallerTransactionException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "An unknown or unsafe .smapi-installer entry blocks safe installation.", exception);
+        }
+    }
+
+    private static LinuxAnchoredFile AcquireLock(LinuxAnchoredFileSystem workspace)
+    {
+        try
+        {
+            return workspace.AcquireExclusiveFileLock("operation.lock", 0x180);
         }
         catch (IOException exception)
         {
@@ -421,43 +559,166 @@ public sealed class InstallerTransactionExecutor
         }
     }
 
-    private static void SetPrivateDirectoryModes(string root)
+    private static IReadOnlyList<string> GetMissingParentDirectories(LinuxAnchoredFileSystem game, string destination)
     {
-        TransactionPermissions.SetMode(root, Convert.ToInt32("700", 8));
-        foreach (string directory in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories))
-            TransactionPermissions.SetMode(directory, Convert.ToInt32("700", 8));
-    }
-
-    private static IReadOnlyList<string> GetMissingParentDirectories(string gameRoot, string destination)
-    {
-        Stack<string> missing = new();
-        string? directory = Path.GetDirectoryName(destination);
-        while (directory is not null && !string.Equals(directory, gameRoot, StringComparison.Ordinal))
+        string[] segments = destination.Split('/');
+        List<string> missing = new();
+        for (int count = 1; count < segments.Length; count++)
         {
-            PathEntry entry = TransactionPath.Inspect(directory);
-            if (entry.Kind == PathEntryKind.Directory)
-                break;
-            if (entry.Kind != PathEntryKind.Missing)
-                throw new InstallerTransactionException(TransactionErrorCode.UnsafePath, "A destination parent is not a regular directory.");
-            missing.Push(Path.GetRelativePath(gameRoot, directory).Replace(Path.DirectorySeparatorChar, '/'));
-            directory = Path.GetDirectoryName(directory);
+            string parent = string.Join('/', segments.Take(count));
+            LinuxFileIdentity? identity;
+            try
+            {
+                identity = game.Stat(parent);
+            }
+            catch (IOException exception)
+            {
+                throw new InstallerTransactionException(TransactionErrorCode.UnsafePath, "A destination parent is a link or unsupported entry.", exception);
+            }
+            if (identity is null)
+                missing.Add(parent);
+            else if (identity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw new InstallerTransactionException(TransactionErrorCode.UnsafePath, "A destination parent isn't a real directory.");
         }
-        return missing.ToArray();
+        return missing;
     }
-}
 
-internal static class TransactionPermissions
-{
-    public static void SetMode(string path, int mode)
+    private static void CleanupFinalTransaction(LinuxAnchoredFileSystem transaction)
     {
-        if (!OperatingSystem.IsLinux())
-            return;
-        if (mode is < 0 or > 0x1ff)
-            throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A Unix mode is outside the supported permission bits.");
-        if (chmod(path, (uint)mode) != 0)
-            throw new IOException("Couldn't set private transaction permissions.");
+        foreach (string directoryName in new[] { "staged", "backups" })
+        {
+            LinuxFileIdentity? directoryIdentity = transaction.Stat(directoryName);
+            if (directoryIdentity is null)
+                continue;
+            if (directoryIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw RecoveryError("A finalized transaction payload directory changed type.");
+            using LinuxAnchoredFileSystem directory = transaction.OpenSubdirectory(directoryName);
+            foreach (string name in directory.EnumerateEntryNames())
+            {
+                if (name.Length != 8 || name.Any(character => character is < '0' or > '9'))
+                    throw RecoveryError("A finalized transaction contains an unknown payload entry.");
+                LinuxFileIdentity identity = directory.Stat(name)
+                    ?? throw RecoveryError("A finalized transaction payload entry disappeared.");
+                if (identity.Kind != LinuxAnchoredEntryKind.RegularFile)
+                    throw RecoveryError("A finalized transaction contains a non-file payload entry.");
+                directory.UnlinkFile(name, identity);
+            }
+            directory.Dispose();
+            LinuxFileIdentity emptiedIdentity = transaction.Stat(directoryName)
+                ?? throw RecoveryError("A finalized transaction payload directory disappeared before cleanup.");
+            transaction.RemoveEmptyDirectory(directoryName, emptiedIdentity);
+        }
+        HashSet<string> expected = new(StringComparer.Ordinal) { TransactionJournalStore.PlanFileName, TransactionJournalStore.EventsFileName };
+        if (transaction.EnumerateEntryNames().Any(name => !expected.Contains(name)))
+            throw RecoveryError("A finalized transaction contains unknown state and was preserved for inspection.");
     }
 
-    [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
-    private static extern int chmod(string path, uint mode);
+    private static void CleanupUnpublishedTransaction(
+        LinuxAnchoredFileSystem transactions,
+        string name,
+        LinuxFileIdentity originalIdentity
+    )
+    {
+        using (LinuxAnchoredFileSystem preparation = transactions.OpenSubdirectory(name))
+        {
+            HashSet<string> known = new(StringComparer.Ordinal)
+            {
+                "staged",
+                "backups",
+                TransactionJournalStore.PlanFileName,
+                TransactionJournalStore.EventsFileName
+            };
+            IReadOnlyList<string> entries = preparation.EnumerateEntryNames();
+            if (entries.Any(entry => !known.Contains(entry)))
+                throw RecoveryError("An unpublished transaction contains unknown state and was preserved.");
+            foreach (string directoryName in new[] { "staged", "backups" })
+            {
+                LinuxFileIdentity? directoryIdentity = preparation.Stat(directoryName);
+                if (directoryIdentity is null)
+                    continue;
+                if (directoryIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+                    throw RecoveryError("An unpublished transaction payload directory is unsafe.");
+                using (LinuxAnchoredFileSystem directory = preparation.OpenSubdirectory(directoryName))
+                {
+                    foreach (string fileName in directory.EnumerateEntryNames())
+                    {
+                        if (fileName.Length != 8 || fileName.Any(character => character is < '0' or > '9'))
+                            throw RecoveryError("An unpublished transaction contains an unknown payload entry.");
+                        LinuxFileIdentity fileIdentity = directory.Stat(fileName)
+                            ?? throw RecoveryError("An unpublished transaction payload entry disappeared.");
+                        if (fileIdentity.Kind != LinuxAnchoredEntryKind.RegularFile)
+                            throw RecoveryError("An unpublished transaction payload entry isn't a regular file.");
+                        directory.UnlinkFile(fileName, fileIdentity);
+                    }
+                }
+                LinuxFileIdentity emptyDirectory = preparation.Stat(directoryName)
+                    ?? throw RecoveryError("An unpublished transaction directory disappeared during cleanup.");
+                preparation.RemoveEmptyDirectory(directoryName, emptyDirectory);
+            }
+            foreach (string fileName in new[] { TransactionJournalStore.PlanFileName, TransactionJournalStore.EventsFileName })
+            {
+                LinuxFileIdentity? fileIdentity = preparation.Stat(fileName);
+                if (fileIdentity is null)
+                    continue;
+                if (fileIdentity.Kind != LinuxAnchoredEntryKind.RegularFile)
+                    throw RecoveryError("An unpublished transaction state file isn't a regular file.");
+                preparation.UnlinkFile(fileName, fileIdentity);
+            }
+            if (preparation.EnumerateEntryNames().Count != 0)
+                throw RecoveryError("An unpublished transaction contains unknown residual state.");
+        }
+        LinuxFileIdentity currentIdentity = transactions.Stat(name)
+            ?? throw RecoveryError("An unpublished transaction disappeared before directory cleanup.");
+        if (!currentIdentity.IsSameObject(originalIdentity))
+            throw RecoveryError("An unpublished transaction identity changed during cleanup.");
+        transactions.RemoveEmptyDirectory(name, currentIdentity);
+    }
+
+    private void TrimFinalTransactions(
+        LinuxAnchoredFileSystem game,
+        LinuxAnchoredFileSystem workspace,
+        string canonicalGameRoot
+    )
+    {
+        using LinuxAnchoredFileSystem transactions = workspace.OpenSubdirectory(TransactionsName);
+        List<(string Name, long CreatedUtcTicks)> finals = new();
+        foreach (string name in transactions.EnumerateEntryNames())
+        {
+            LinuxFileIdentity? identity = transactions.Stat(name);
+            if (identity?.Kind != LinuxAnchoredEntryKind.Directory || !Guid.TryParseExact(name, "N", out Guid id))
+                throw RecoveryError("An unknown transaction entry prevents bounded retention cleanup.");
+            using LinuxAnchoredFileSystem transaction = transactions.OpenSubdirectory(name);
+            TransactionJournal journal = TransactionJournalStore.ReadPlan(transaction, id, canonicalGameRoot, game.Identity);
+            TransactionJournalReplay replay = TransactionJournalStore.ReadEvents(transaction, journal);
+            if (replay.Status is not (TransactionJournalEventKind.Committed or TransactionJournalEventKind.RolledBack))
+                throw RecoveryError("An incomplete transaction remains after recovery.");
+            CleanupFinalTransaction(transaction);
+            if (transactions.Stat(name) is null)
+                throw RecoveryError("A retained transaction disappeared during cleanup.");
+            finals.Add((name, journal.CreatedUtcTicks));
+        }
+
+        foreach ((string name, _) in finals
+            .OrderBy(item => item.CreatedUtcTicks)
+            .ThenBy(item => item.Name, StringComparer.Ordinal)
+            .Take(Math.Max(0, finals.Count - MaximumRetainedFinalTransactions)))
+        {
+            using (LinuxAnchoredFileSystem transaction = transactions.OpenSubdirectory(name))
+            {
+                foreach (string fileName in new[] { TransactionJournalStore.PlanFileName, TransactionJournalStore.EventsFileName })
+                {
+                    LinuxFileIdentity fileIdentity = transaction.Stat(fileName)
+                        ?? throw RecoveryError("A retained transaction record disappeared during cleanup.");
+                    transaction.UnlinkFile(fileName, fileIdentity);
+                }
+                if (transaction.EnumerateEntryNames().Count != 0)
+                    throw RecoveryError("A retained transaction contains unknown state and wasn't removed.");
+            }
+            LinuxFileIdentity emptyIdentity = transactions.Stat(name)
+                ?? throw RecoveryError("A retained transaction disappeared before directory removal.");
+            transactions.RemoveEmptyDirectory(name, emptyIdentity);
+        }
+    }
+
+    private static InstallerTransactionException RecoveryError(string message) => new(TransactionErrorCode.RecoveryFailed, message);
 }

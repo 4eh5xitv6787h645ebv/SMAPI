@@ -297,6 +297,73 @@ public sealed class LinuxAnchoredFileSystemTests
         Directory.Exists(Path.Combine(outside, "new")).Should().BeFalse();
     }
 
+    [Test]
+    public void AcquireExclusiveFileLock_SecondOpenFailsUntilFirstHandleCloses()
+    {
+        using LinuxAnchoredFileSystem firstFileSystem = new(this.RootPath);
+        using LinuxAnchoredFileSystem secondFileSystem = new(this.RootPath);
+        using LinuxAnchoredFile first = firstFileSystem.AcquireExclusiveFileLock("operation.lock", 0x180);
+
+        Action blocked = () => secondFileSystem.AcquireExclusiveFileLock("operation.lock", 0x180).Dispose();
+
+        blocked.Should().Throw<IOException>().WithMessage("*exclusive lock*");
+        first.Dispose();
+        using LinuxAnchoredFile acquiredAfterRelease = secondFileSystem.AcquireExclusiveFileLock("operation.lock", 0x180);
+        acquiredAfterRelease.Identity.UnixMode.Should().Be(0x180);
+    }
+
+    [Test]
+    public void AcquireExclusiveFileLock_SymlinkAndHardlink_RejectWithoutMutatingTargets()
+    {
+        string outside = Path.Combine(this.TempRoot, "outside-lock");
+        File.WriteAllText(outside, "preserve");
+        File.CreateSymbolicLink(Path.Combine(this.RootPath, "symlink-lock"), outside);
+        File.WriteAllText(Path.Combine(this.RootPath, "real-lock"), "preserve");
+        link(Path.Combine(this.RootPath, "real-lock"), Path.Combine(this.RootPath, "hardlink-lock"))
+            .Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        Action symlink = () => fileSystem.AcquireExclusiveFileLock("symlink-lock", 0x180).Dispose();
+        Action hardlink = () => fileSystem.AcquireExclusiveFileLock("hardlink-lock", 0x180).Dispose();
+
+        symlink.Should().Throw<IOException>();
+        hardlink.Should().Throw<IOException>().WithMessage("*multiple hard links*");
+        File.ReadAllText(outside).Should().Be("preserve");
+        File.ReadAllText(Path.Combine(this.RootPath, "real-lock")).Should().Be("preserve");
+    }
+
+    [Test]
+    public void TruncateAndFsync_PathReplacedAfterOpen_RejectsAndPreservesReplacement()
+    {
+        string path = Path.Combine(this.RootPath, "events");
+        File.WriteAllText(path, "valid\npartial");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForReadWrite("events");
+        File.Move(path, Path.Combine(this.RootPath, "captured"));
+        File.WriteAllText(path, "replacement");
+
+        Action truncate = () => fileSystem.TruncateAndFsync(opened, "events", 6);
+
+        truncate.Should().Throw<IOException>();
+        File.ReadAllText(path).Should().Be("replacement");
+        File.ReadAllText(Path.Combine(this.RootPath, "captured")).Should().Be("valid\npartial");
+    }
+
+    [Test]
+    public void RemoveEmptyDirectory_IdentityChangedOrNonempty_Rejects()
+    {
+        string directory = Path.Combine(this.RootPath, "directory");
+        Directory.CreateDirectory(directory);
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        LinuxFileIdentity original = fileSystem.Stat("directory")!;
+        File.WriteAllText(Path.Combine(directory, "content"), "preserve");
+
+        Action nonempty = () => fileSystem.RemoveEmptyDirectory("directory", original);
+
+        nonempty.Should().Throw<IOException>();
+        File.ReadAllText(Path.Combine(directory, "content")).Should().Be("preserve");
+    }
+
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int link(string oldPath, string newPath);
 

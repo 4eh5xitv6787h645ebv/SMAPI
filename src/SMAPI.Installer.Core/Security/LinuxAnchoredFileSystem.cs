@@ -93,6 +93,9 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     private const int ErrorNotDirectory = 20;
     private const int ErrorNotSupported = 38;
     private const int ErrorSymbolicLinkLoop = 40;
+    private const int LockExclusive = 2;
+    private const int LockNonBlocking = 4;
+    private const int AtRemoveDirectory = 0x200;
 
     private readonly SafeFileHandle RootHandle;
     private readonly LinuxFileIdentity RootIdentity;
@@ -169,6 +172,67 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             if (identity.Kind != LinuxAnchoredEntryKind.RegularFile)
                 throw new IOException("The anchored entry isn't a regular file.");
             return new LinuxAnchoredFile(handle, identity);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Open a stable single-link regular file for descriptor-relative reads and writes.</summary>
+    public LinuxAnchoredFile OpenRegularFileForReadWrite(string relativePath)
+    {
+        this.AssertUsable();
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        SafeFileHandle handle = OpenAt(
+            parent.Parent,
+            parent.Leaf,
+            OpenReadWrite | OpenNoFollow | OpenCloseOnExec,
+            0,
+            "Couldn't open an anchored regular file for writing"
+        );
+        try
+        {
+            LinuxFileIdentity identity = GetHandleIdentity(handle, requireSingleLinkRegularFile: true);
+            if (identity.Kind != LinuxAnchoredEntryKind.RegularFile)
+                throw new IOException("The anchored entry isn't a regular file.");
+            return new LinuxAnchoredFile(handle, identity);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Create or open a private regular lock file and acquire a nonblocking process-wide exclusive lock.</summary>
+    public LinuxAnchoredFile AcquireExclusiveFileLock(string relativePath, int unixMode)
+    {
+        this.AssertUsable();
+        ValidateUnixMode(unixMode);
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        SafeFileHandle handle = OpenAt(
+            parent.Parent,
+            parent.Leaf,
+            OpenReadWrite | OpenCreate | OpenNoFollow | OpenCloseOnExec,
+            (uint)unixMode,
+            "Couldn't create or open the anchored lock file"
+        );
+        try
+        {
+            LinuxFileIdentity identity = GetHandleIdentity(handle, requireSingleLinkRegularFile: true);
+            if (identity.Kind != LinuxAnchoredEntryKind.RegularFile)
+                throw new IOException("The anchored lock entry isn't a regular file.");
+            LinuxFileIdentity? named = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+            if (named != identity)
+                throw new IOException("The anchored lock-file identity changed while it was opened.");
+            SetHandleMode(handle, unixMode);
+            if (flock(handle, LockExclusive | LockNonBlocking) != 0)
+                throw new IOException($"Couldn't acquire the anchored exclusive lock (errno {Marshal.GetLastWin32Error()}).");
+            Fsync(handle);
+            Fsync(parent.Parent);
+            return new LinuxAnchoredFile(handle, GetHandleIdentity(handle, requireSingleLinkRegularFile: true));
         }
         catch
         {
@@ -357,13 +421,44 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         return resultingLength;
     }
 
+    /// <summary>Durably truncate a named regular file through a verified open handle.</summary>
+    public LinuxFileIdentity TruncateAndFsync(LinuxAnchoredFile file, string relativePath, long length)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(file);
+        if (length < 0)
+            throw new ArgumentOutOfRangeException(nameof(length));
+        file.AssertOpen();
+
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        LinuxFileIdentity? namedBefore = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+        if (!before.IsSameObject(file.Identity) || namedBefore != before || length > before.Size)
+            throw new IOException("The anchored truncate target identity or requested length is invalid.");
+        if (ftruncate(file.Handle, length) != 0)
+            throw new IOException($"Couldn't truncate an anchored file (errno {Marshal.GetLastWin32Error()}).");
+        Fsync(file.Handle);
+        LinuxFileIdentity after = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        LinuxFileIdentity? namedAfter = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+        if (!after.IsSameObject(before) || after.Size != length || namedAfter != after)
+            throw new IOException("The anchored truncate target identity changed during mutation.");
+        return after;
+    }
+
     /// <summary>Get an entry identity without following links, or <see langword="null"/> when absent.</summary>
     /// <remarks>Symbolic links, hardlinked regular files, and special entries are rejected rather than returned.</remarks>
     public LinuxFileIdentity? Stat(string relativePath)
     {
         this.AssertUsable();
-        using ParentAndLeaf parent = this.OpenParent(relativePath);
-        return GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: true, requireSingleLinkRegularFile: true);
+        try
+        {
+            using ParentAndLeaf parent = this.OpenParent(relativePath);
+            return GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: true, requireSingleLinkRegularFile: true);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Create and durably flush any missing real-directory segments.</summary>
@@ -526,6 +621,37 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         return result;
     }
 
+    /// <summary>Rename a known real directory without replacing a destination.</summary>
+    public LinuxFileIdentity RenameDirectoryNoReplace(string sourceRelativePath, string destinationRelativePath, LinuxFileIdentity expectedSource)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(expectedSource);
+        if (expectedSource.Kind != LinuxAnchoredEntryKind.Directory)
+            throw new ArgumentException("The expected rename source isn't a directory.", nameof(expectedSource));
+        if (string.Equals(sourceRelativePath, destinationRelativePath, StringComparison.Ordinal))
+            throw new ArgumentException("Rename source and destination must differ.", nameof(destinationRelativePath));
+
+        using ParentAndLeaf source = this.OpenParent(sourceRelativePath);
+        using ParentAndLeaf destination = this.OpenParent(destinationRelativePath);
+        using SafeFileHandle sourceHandle = OpenDirectoryAt(source.Parent, source.Leaf);
+        LinuxFileIdentity immediatelyBefore = GetHandleIdentity(sourceHandle, requireSingleLinkRegularFile: false);
+        if (immediatelyBefore != expectedSource || GetIdentityAt(source.Parent, source.Leaf, false, false) != expectedSource)
+            throw new IOException("The directory rename source identity changed before mutation.");
+        if (GetIdentityAt(destination.Parent, destination.Leaf, true, false) != null)
+            throw new IOException("The no-replace directory rename destination already exists.");
+
+        RenameAtNoReplace(source.Parent, source.Leaf, destination.Parent, destination.Leaf);
+        Fsync(source.Parent);
+        Fsync(destination.Parent);
+        LinuxFileIdentity? result = GetIdentityAt(destination.Parent, destination.Leaf, false, false);
+        if (result is null || !result.IsSameObject(expectedSource))
+        {
+            TryRollbackUnexpectedRename(destination.Parent, destination.Leaf, source.Parent, source.Leaf);
+            throw new IOException("The directory rename source identity changed during mutation.");
+        }
+        return result;
+    }
+
     /// <summary>Unlink a regular file only if its exact identity still matches.</summary>
     public void UnlinkFile(string relativePath, LinuxFileIdentity expectedIdentity)
     {
@@ -549,6 +675,28 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         LinuxFileIdentity after = GetHandleIdentity(handle, requireSingleLinkRegularFile: false);
         if (after.LinkCount != 0)
             throw new IOException("The unlink target identity changed during mutation.");
+    }
+
+    /// <summary>Remove an empty real directory only if its exact anchored identity still matches.</summary>
+    public void RemoveEmptyDirectory(string relativePath, LinuxFileIdentity expectedIdentity)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(expectedIdentity);
+        if (expectedIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+            throw new ArgumentException("The expected identity isn't a directory.", nameof(expectedIdentity));
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        using SafeFileHandle handle = OpenDirectoryAt(parent.Parent, parent.Leaf);
+        LinuxFileIdentity observed = GetHandleIdentity(handle, requireSingleLinkRegularFile: false);
+        if (observed != expectedIdentity || GetIdentityAt(parent.Parent, parent.Leaf, false, false) != expectedIdentity)
+            throw new IOException("The directory identity changed before removal.");
+        using (LinuxAnchoredFileSystem directory = new(Duplicate(handle)))
+        {
+            if (directory.EnumerateEntryNames().Count != 0)
+                throw new IOException("The anchored directory isn't empty.");
+        }
+        if (unlinkat(parent.Parent, parent.Leaf, AtRemoveDirectory) != 0)
+            throw CreatePathException("Couldn't remove the anchored directory", Marshal.GetLastWin32Error());
+        Fsync(parent.Parent);
     }
 
     /// <summary>Set exact permission bits on a known regular file and return its updated identity.</summary>
@@ -821,6 +969,12 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fchmod(SafeFileHandle descriptor, uint mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int flock(SafeFileHandle descriptor, int operation);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int ftruncate(SafeFileHandle descriptor, long length);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fsync(SafeFileHandle descriptor);

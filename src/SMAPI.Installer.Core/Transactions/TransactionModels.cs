@@ -1,4 +1,7 @@
 using System.Collections.ObjectModel;
+using System.Runtime.CompilerServices;
+
+[assembly: InternalsVisibleTo("SMAPI.Installer.Core.Tests")]
 
 namespace StardewModdingAPI.Installer.Core.Transactions;
 
@@ -31,6 +34,7 @@ public sealed record TransactionFileOperation(
 /// <summary>An immutable set of ordered operations.</summary>
 public sealed class TransactionPlan
 {
+    internal const string CoreReceiptRelativePath = ".smapi-installer/ownership/receipt.json";
     /// <summary>The maximum bounded operation count accepted by one transaction.</summary>
     public const int MaximumOperationCount = 20_000;
     /// <summary>The unique transaction ID.</summary>
@@ -39,10 +43,18 @@ public sealed class TransactionPlan
     /// <summary>The stable ordered operations.</summary>
     public IReadOnlyList<TransactionFileOperation> Operations { get; }
 
+    /// <summary>Whether the core engine, rather than an external caller, appended the reserved receipt mutation.</summary>
+    internal bool HasCoreAuthorizedReceiptMutation { get; }
+
     /// <summary>Construct an instance.</summary>
     /// <param name="transactionId">The unique transaction ID.</param>
     /// <param name="operations">The ordered operations.</param>
     public TransactionPlan(Guid transactionId, IEnumerable<TransactionFileOperation> operations)
+        : this(transactionId, operations, hasCoreAuthorizedReceiptMutation: false)
+    {
+    }
+
+    private TransactionPlan(Guid transactionId, IEnumerable<TransactionFileOperation> operations, bool hasCoreAuthorizedReceiptMutation)
     {
         if (transactionId == Guid.Empty)
             throw new ArgumentException("A transaction ID is required.", nameof(transactionId));
@@ -55,6 +67,24 @@ public sealed class TransactionPlan
 
         this.TransactionId = transactionId;
         this.Operations = new ReadOnlyCollection<TransactionFileOperation>(array);
+        this.HasCoreAuthorizedReceiptMutation = hasCoreAuthorizedReceiptMutation;
+    }
+
+    /// <summary>Create a plan whose one reserved receipt mutation was produced by the typed core engine.</summary>
+    internal static TransactionPlan CreateWithCoreReceipt(
+        Guid transactionId,
+        IEnumerable<TransactionFileOperation> ordinaryOperations,
+        TransactionFileOperation receiptOperation
+    )
+    {
+        ArgumentNullException.ThrowIfNull(ordinaryOperations);
+        ArgumentNullException.ThrowIfNull(receiptOperation);
+        TransactionFileOperation[] ordinary = ordinaryOperations.ToArray();
+        if (ordinary.Any(operation => operation.RelativePath == CoreReceiptRelativePath))
+            throw new ArgumentException("The ordinary operation set can't contain the reserved receipt path.", nameof(ordinaryOperations));
+        if (receiptOperation.RelativePath != CoreReceiptRelativePath)
+            throw new ArgumentException("The authorized receipt operation must target the exact reserved receipt path.", nameof(receiptOperation));
+        return new TransactionPlan(transactionId, ordinary.Append(receiptOperation), hasCoreAuthorizedReceiptMutation: true);
     }
 }
 
@@ -139,11 +169,24 @@ public interface ITransactionProgressSink
 /// <summary>Provides deterministic fault-injection boundaries for recovery testing.</summary>
 public interface ITransactionFaultInjector
 {
+    /// <summary>Called at a durable transaction-setup boundary before any game-file mutation is possible.</summary>
+    void AtSetupBoundary(Guid transactionId, TransactionSetupBoundary boundary) { }
+
     /// <summary>Called after an operation intent is durable and before its first mutation.</summary>
     void BeforeMutation(Guid transactionId, int operationIndex);
 
     /// <summary>Called after an operation mutation is durable.</summary>
     void AfterMutation(Guid transactionId, int operationIndex);
+}
+
+/// <summary>Durable transaction setup boundaries exposed for deterministic crash testing.</summary>
+public enum TransactionSetupBoundary
+{
+    PreparationDirectoryCreated,
+    PayloadDirectoriesCreated,
+    ImmutablePlanCreated,
+    CreationEventCreated,
+    TransactionPublished
 }
 
 /// <summary>No-op transaction instrumentation.</summary>
@@ -156,6 +199,9 @@ public sealed class NullTransactionInstrumentation : ITransactionProgressSink, I
 
     /// <inheritdoc />
     public void Report(TransactionProgress progress) { }
+
+    /// <inheritdoc />
+    public void AtSetupBoundary(Guid transactionId, TransactionSetupBoundary boundary) { }
 
     /// <inheritdoc />
     public void BeforeMutation(Guid transactionId, int operationIndex) { }
