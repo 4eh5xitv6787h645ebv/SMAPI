@@ -10,7 +10,7 @@ kicker: Comparison snapshot · 28 August 2026
 Use [official SMAPI](https://github.com/Pathoschild/SMAPI) if you want a supported installer,
 cross-platform releases, and the community's standard troubleshooting path. Evaluate this fork if
 you use Linux desktop, have a very large mod collection, and want its optimization work or local
-diagnostics enough to accept development-build risk.
+diagnostics enough to accept experimental-prerelease risk.
 
 This fork is not “SMAPI but always faster.” Results depend on the mods, save, content, machine, and
 bottleneck. Its measured wins target SMAPI-owned overhead; it cannot make an expensive mod callback,
@@ -178,10 +178,12 @@ The complete scenarios, correctness checks, risks, and rejected ideas are preser
 
 ## Compatibility and risk
 
-The fork retains the same 4.5.2 version identity and is designed around existing SMAPI mods, but it
-changes many internal hot paths and does not yet publish a stable release. Keep backups, evaluate it
-against a disposable game/save copy, and reproduce problems on official SMAPI before reporting an
-upstream regression.
+The historical benchmark build identified as 4.5.2 so it could be compared directly with official
+4.5.2. The public alpha instead uses the distinct prerelease identity
+`4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1`. The fork is designed around existing SMAPI
+mods, but it changes many internal hot paths and does not publish a stable release. Keep backups,
+evaluate it against a disposable game/save copy, and reproduce problems on official SMAPI before
+reporting an upstream regression.
 
 <div class="button-row">
   <a class="button primary" href="getting-started.html">Evaluate the fork safely</a>

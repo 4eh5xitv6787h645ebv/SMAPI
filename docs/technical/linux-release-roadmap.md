@@ -151,7 +151,7 @@ Scope constraints apply throughout:
 ### Publication and clean-room verification
 
 - [x] Open a focused Phase 3 fork pull request ([#172](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172)).
-- [x] Pass required CI and repository checks ([exact reviewed-head Linux alpha qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33173516873) and [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33173516872)).
+- [x] Pass required CI and repository checks ([final reviewed-head Linux alpha qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33174137229), [final reviewed-head deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33174137200), and [exact tagged release qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33177145353)).
 - [x] Merge the Phase 3 pull request into `develop` and close it ([merged PR #172](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172); [`6e5d708a`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/6e5d708a09e7d2b6d9b5434bd1fac52ddbdb5f08)).
 - [x] Verify the release tag points to the exact reviewed commit ([annotated-tag evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
 - [x] Publish a GitHub prerelease clearly labeled experimental ([alpha 1 prerelease](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)).
