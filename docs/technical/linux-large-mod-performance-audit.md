@@ -1,3 +1,10 @@
+---
+layout: default
+title: Linux large-mod performance audit
+description: All 95 performance and correctness findings, with evidence, risk, and status.
+kicker: Technical reference
+---
+
 # Linux large-mod performance and correctness audit
 
 This document tracks SMAPI-side performance and correctness findings for Linux players with very large mod sets (for example, 200+ code mods and 400+ content packs). It focuses on work SMAPI can avoid or make incremental. SMAPI also has opt-in runtime diagnostics for the mod-owned execution boundaries it can observe.

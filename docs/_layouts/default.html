@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="{{ site.lang | default: 'en-US' }}">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101827">
+    <meta name="description" content="{{ page.description | default: site.description | strip_html | normalize_whitespace | escape }}">
+    <title>{{ page.title | default: site.title }}{% if page.title %} · {{ site.title }}{% endif %}</title>
+    <link rel="canonical" href="{{ page.url | replace: 'index.html', '' | absolute_url }}">
+    <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="site-header" role="banner">
+      <nav class="site-nav" aria-label="Main navigation">
+        <a class="brand" href="{{ '/' | relative_url }}">SMAPI <span>Linux Fork</span></a>
+        <div class="nav-links">
+          <a href="{{ '/upstream-comparison.html' | relative_url }}">Compare</a>
+          <a href="{{ '/getting-started.html' | relative_url }}">Get started</a>
+          <a href="{{ '/mod-health-report.html' | relative_url }}">Health report</a>
+          <a href="https://github.com/4eh5xitv6787h645ebv/SMAPI">GitHub</a>
+        </div>
+      </nav>
+      <div class="hero">
+        <p class="kicker">{{ page.kicker | default: 'Linux desktop documentation' }}</p>
+        <h1>{{ page.title | default: site.title }}</h1>
+        {% if page.description %}<p class="hero-description">{{ page.description }}</p>{% endif %}
+      </div>
+    </header>
+    <main id="content" class="main-content" role="main">
+      {{ content }}
+    </main>
+    <footer class="site-footer">
+      <div>
+        <strong>SMAPI Linux Performance Fork</strong>
+        <p>An unofficial development fork. For supported releases and community help, use <a href="https://smapi.io/">official SMAPI</a>.</p>
+      </div>
+      <div class="footer-links">
+        <a href="{{ '/' | relative_url }}">Docs</a>
+        <a href="https://github.com/4eh5xitv6787h645ebv/SMAPI/issues">Issues</a>
+        <a href="https://github.com/Pathoschild/SMAPI">Upstream</a>
+      </div>
+    </footer>
+  </body>
+</html>

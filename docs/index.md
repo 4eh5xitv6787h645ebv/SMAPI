@@ -1,27 +1,73 @@
 ---
 layout: default
-title: SMAPI Linux Desktop Documentation
-description: Player guides and technical documentation for SMAPI on Linux desktop.
+title: Faster, observable SMAPI for Linux
+description: An evidence-led Linux desktop fork for large Stardew Valley mod collections.
+kicker: Unofficial SMAPI development fork
 ---
 
-# SMAPI Linux Desktop Documentation
+<div class="notice warning" markdown="1">
+**Development preview.** This fork has no tagged player release yet. If you want the supported,
+stable mod loader, install [official SMAPI](https://smapi.io/). This site documents the fork for
+Linux users and contributors evaluating its changes.
+</div>
 
-SMAPI is the mod loader and modding API for Stardew Valley. This site collects documentation for
-the Linux desktop version maintained in this repository.
+<div class="metric-grid">
+  <div class="metric-card">
+    <span class="metric-value">97.5%</span>
+    <span class="metric-label">lower mean framework overhead</span>
+    <span class="metric-note">one historical 308-mod A/B</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-value">80.0%</span>
+    <span class="metric-label">lower allocation per tick</span>
+    <span class="metric-note">same machine, save, and sample length</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-value">95</span>
+    <span class="metric-label">audited findings</span>
+    <span class="metric-note">performance and correctness</span>
+  </div>
+</div>
 
-## Mod Health Report
+The fork starts from SMAPI 4.5.2 and concentrates on framework work that becomes visible with
+hundreds of mods: repeated world scans, content routing, map conversion, logging, event allocation,
+and troubleshooting blind spots. It aims to preserve normal SMAPI mod compatibility while making
+Linux performance easier to measure and explain.
 
-The Mod Health Report is a private, local diagnostic that helps identify mod loading problems,
-repeated errors, and slow updates. The illustrated guide explains how to capture a report, read its
-eight sections, retry a failed save, and understand its privacy limits.
+<div class="button-row">
+  <a class="button primary" href="upstream-comparison.html">Compare with official SMAPI</a>
+  <a class="button" href="getting-started.html">Evaluate the fork</a>
+</div>
 
-[Open the Mod Health Report guide](mod-health-report.html)
+## Choose the right SMAPI
 
-[![The Mod Health Report viewer showing a saved report, privacy notice, report sections, and footer actions.](screenshots/mod-health-report-overview.png)](mod-health-report.html)
+| If you need… | Choose… | Why |
+| --- | --- | --- |
+| A supported installer and normal updates | [Official SMAPI](https://smapi.io/) | It is the stable, cross-platform release maintained for the community. |
+| Linux testing with a very large mod list | This fork | It contains the optimization audit and diagnostic additions documented here. |
+| Help using or creating ordinary mods | [Official documentation](https://smapi.io/docs) | The core API and community guidance live upstream. |
+| Evidence about a specific slowdown | This fork's `health` and `performance` tools | They collect bounded local evidence at SMAPI-owned boundaries. |
 
-### Quick start
+## Measured performance
 
-Enter these commands in the SMAPI console while the game is running:
+The headline comparison is a 180-second steady-state measurement on an Arch Linux Framework Laptop
+13 with 308 mods and the Blossom save. Stock SMAPI 4.5.1 measured 5.892 ms mean framework overhead
+per tick; the tested fork build measured approximately 0.149 ms. Allocation fell from 4,787 KB to
+959 KB per tick.
+
+Those values are a historical workload result, not a universal FPS claim or a fresh 4.5.2 release
+comparison. The detailed page shows the complete numbers and clearly separates whole-game evidence
+from isolated path benchmarks.
+
+[Read the performance evidence and limitations →](upstream-comparison.html#performance-evidence)
+
+## See what your mods are doing
+
+The Mod Health Report is generated locally and opens inside Stardew Valley. It summarizes failed or
+skipped mods, repeated errors, slow observed callbacks, capture quality, and the limits of what SMAPI
+could attribute.
+
+[![A Mod Health Report showing its privacy notice, eight report sections, status, and actions.](screenshots/mod-health-report-overview.png)](mod-health-report.html)
 
 ```text
 health start
@@ -30,32 +76,32 @@ health stop
 health view
 ```
 
-Use `health view` by itself to open a quick report based on the current session. The report remains
-on your computer unless you choose to share it.
+[Open the illustrated guide →](mod-health-report.html)
 
-## More documentation
+## Documentation
 
-### Players
+<div class="doc-grid">
+  <a class="doc-card" href="upstream-comparison.html">
+    <strong>Upstream comparison</strong>
+    <span>Features, benchmark tables, methodology, and limitations.</span>
+  </a>
+  <a class="doc-card" href="getting-started.html">
+    <strong>Getting started</strong>
+    <span>Choose a build, test safely, and collect useful evidence.</span>
+  </a>
+  <a class="doc-card" href="mod-health-report.html">
+    <strong>Mod Health Report</strong>
+    <span>Screenshot-led instructions for the private in-game report.</span>
+  </a>
+  <a class="doc-card" href="technical/linux-large-mod-performance-audit.html">
+    <strong>Performance audit</strong>
+    <span>All 95 findings, their risk, evidence, and implementation status.</span>
+  </a>
+</div>
 
-- [SMAPI player guide](https://stardewvalleywiki.com/Modding:Player_Guide)
-- [Mod Health Report guide](mod-health-report.html)
-- [Release notes](release-notes.html)
+## Project boundaries
 
-### Mod authors
-
-- [SMAPI modding documentation](https://smapi.io/docs)
-- [Mod build configuration](mod-build-config.html)
-- [Mod package reference](technical/mod-package.html)
-
-### Contributors
-
-- [SMAPI technical documentation](technical/smapi.html)
-- [Mod Health Report technical plan](technical/mod-health-report-plan.html)
-- [Mod Health Report validation record](technical/mod-health-report-validation.html)
-- [Source repository](https://github.com/4eh5xitv6787h645ebv/SMAPI)
-- [Report an issue](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues)
-
-## Getting help
-
-For installation help, troubleshooting, or questions about mods, visit the
-[SMAPI community](https://smapi.io/community).
+- Linux desktop is the fork's supported development focus; Android/mobile is excluded.
+- Diagnostic collection is bounded, opt-in where it adds overhead, and local-only.
+- A timing identifies where SMAPI observed elapsed time; it does not automatically prove root cause.
+- Official SMAPI remains the recommended choice for general players and cross-platform support.

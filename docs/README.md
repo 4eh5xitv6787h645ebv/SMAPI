@@ -1,80 +1,36 @@
-**SMAPI** is an open-source modding framework and API for [Stardew Valley](https://stardewvalley.net/)
-that lets you play the game with mods. It's safely installed alongside the game's executable, and
-doesn't change any of your game files. It serves seven main purposes:
+# Documentation
 
-1. **Load mods into the game.**  
-   _SMAPI loads mods when the game is starting up so they can interact with it. (Code mods aren't
-   possible without SMAPI to load them.)_
+This directory contains the source for the
+[SMAPI Linux Performance Fork documentation site](https://4eh5xitv6787h645ebv.github.io/SMAPI/).
 
-2. **Provide APIs and events for mods.**  
-   _SMAPI provides APIs and events which let mods interact with the game in ways they otherwise
-   couldn't._
+## Start here
 
-3. **Rewrite mods for compatibility.**  
-   _SMAPI rewrites mods' compiled code before loading them so they work on Linux/macOS/Windows
-   without the mods needing to handle differences between the Linux/macOS and Windows versions of
-   the game. In some cases it also rewrites code broken by a game update so the mod doesn't break._
+- [Documentation home](index.md)
+- [Official SMAPI vs this fork](upstream-comparison.md)
+- [Getting started safely](getting-started.md)
+- [Mod Health Report guide](mod-health-report.md)
+- [Linux performance audit](technical/linux-large-mod-performance-audit.md)
 
-5. **Intercept errors and automatically fix saves.**  
-   _SMAPI intercepts errors, shows the error info in the SMAPI console, and in most cases
-   automatically recovers the game. That prevents mods from crashing the game, and makes it
-   possible to troubleshoot errors in the game itself that would otherwise show a generic 'program
-   has stopped working' type of message._
+## Reference
 
-   _SMAPI also automatically fixes save data in some cases when a load would crash, e.g. due to a
-   custom location or NPC mod that was removed._
+### Players and testers
 
-6. **Provide update checks.**  
-   _SMAPI automatically checks for new versions of your installed mods, and notifies you when any
-   are available._
+- [Release notes](release-notes.md)
+- [Mod Health Report validation](technical/mod-health-report-validation.md)
+- [Linux menu-click compatibility notes](technical/linux-net10-menu-click-fix.md)
 
-7. **Provide compatibility checks.**  
-   _SMAPI automatically detects outdated or broken code in mods, and safely disables them before
-   they cause problems._
+### Mod authors
 
-8. **Back up your save files.**  
-   _SMAPI automatically creates a daily backup of your saves and keeps ten backups (via the bundled
-   Save Backup mod), in case something goes wrong._
+- [Official SMAPI modding documentation](https://smapi.io/docs)
+- [Mod build configuration](technical/mod-package.md)
+- [Mod build package release notes](technical/mod-package-release-notes.md)
 
-## Documentation
-Have questions? Come [ask the community](https://smapi.io/community) to get help from SMAPI
-developers and other modders!
+### Contributors
 
-### For players
-* [Player guide](https://stardewvalleywiki.com/Modding:Player_Guide)
-* [Mod Health Report guide](mod-health-report.md)
+- [SMAPI technical documentation](technical/smapi.md)
+- [SMAPI web services](technical/web.md)
+- [Mod Health Report implementation plan](technical/mod-health-report-plan.md)
+- [Mod Health Report schema](technical/mod-health-report-schema-v1.json)
 
-### For modders
-* [Modding documentation](https://smapi.io/docs)
-* [Mod build configuration](technical/mod-package.md)
-* [Release notes](release-notes.md)
-
-### For SMAPI developers
-* [Technical docs](technical/smapi.md)
-
-## Translating SMAPI
-Contributions are welcome! See [Modding:Translations](https://stardewvalleywiki.com/Modding:Translations)
-on the wiki for help contributing translations.
-
-locale      | status
------------ | :----------------
-default     | ✓ [original text](../src/SMAPI/i18n/default.json)
-Chinese     | ↻ [partly translated](../src/SMAPI/i18n/zh.json)
-French      | ✓ [fully translated](../src/SMAPI/i18n/fr.json)
-German      | ↻ [partly translated](../src/SMAPI/i18n/de.json)
-Hungarian   | ↻ [partly translated](../src/SMAPI/i18n/hu.json)
-Indonesian  | ✓ [fully translated](../src/SMAPI/i18n/id.json)
-Italian     | ↻ [partly translated](../src/SMAPI/i18n/it.json)
-Japanese    | ↻ [partly translated](../src/SMAPI/i18n/ja.json)
-Korean      | ✓ [fully translated](../src/SMAPI/i18n/ko.json)
-[Polish]    | ↻ [partly translated](../src/SMAPI/i18n/pl.json)
-Portuguese  | ✓ [fully translated](../src/SMAPI/i18n/pt.json)
-Russian     | ✓ [fully translated](../src/SMAPI/i18n/ru.json)
-Spanish     | ✓ [partly translated](../src/SMAPI/i18n/es.json)
-[Thai]      | ✓ [partly translated](../src/SMAPI/i18n/th.json)
-Turkish     | ↻ [partly translated](../src/SMAPI/i18n/tr.json)
-[Ukrainian] | ↻ [partly translated](../src/SMAPI/i18n/uk.json)
-
-[Polish]: https://www.nexusmods.com/stardewvalley/mods/3616
-[Thai]: https://www.nexusmods.com/stardewvalley/mods/7052
-[Ukrainian]: https://www.nexusmods.com/stardewvalley/mods/8427
+The site is published by GitHub Pages from `develop:/docs`. Markdown links should remain relative so
+they work both on GitHub and on the generated site.

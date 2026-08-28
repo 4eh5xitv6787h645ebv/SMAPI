@@ -7,6 +7,8 @@ title: Release notes
 
 # Release notes
 ## Upcoming release
+* Rebuilt the repository README and GitHub Pages site around an evidence-based comparison with
+  official SMAPI, including clearly scoped whole-workload and microbenchmark results.
 * For players:
   * Added a Linux desktop `health` console workflow which creates private, local mod-health reports for troubleshooting load errors, log floods, failed callbacks, and slow update ticks.
   * Added a Linux desktop in-game viewer for Mod Health Reports. Enter `health view` to inspect the current session's sanitized report using mouse, keyboard, or controller. The report stays private and local: the viewer never uploads it or opens external apps. Missing viewer translations fall back to English, while schema-v1 finding text remains canonical English.
