@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using StardewModdingAPI.Installer.Core.Planning;
 
 namespace StardewModdingAPI.Installer.Core.Protocol.V1;
 
@@ -15,7 +16,8 @@ public enum ProtocolMessageKind
     ProgressEvent,
     SuccessEvent,
     RolledBackFailureEvent,
-    RecoverableInterruptionEvent
+    RecoverableInterruptionEvent,
+    CancelledEvent
 }
 
 /// <summary>An installer operation exposed by the machine protocol.</summary>
@@ -88,7 +90,7 @@ public sealed record InspectPlanRequest(
     ProtocolSessionId SessionId,
     string GamePath,
     InstallerOperation Operation,
-    string TargetPackageVersion
+    string? TargetPackageVersion
 ) : ProtocolRequest
 {
     /// <inheritdoc />
@@ -97,7 +99,11 @@ public sealed record InspectPlanRequest(
 }
 
 /// <summary>Confirm the exact currently issued plan.</summary>
-public sealed record ConfirmPlanRequest(ProtocolSessionId SessionId, ProtocolPlanId PlanId) : ProtocolRequest
+public sealed record ConfirmPlanRequest(
+    ProtocolSessionId SessionId,
+    ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest
+) : ProtocolRequest
 {
     /// <inheritdoc />
     [JsonIgnore]
@@ -105,7 +111,11 @@ public sealed record ConfirmPlanRequest(ProtocolSessionId SessionId, ProtocolPla
 }
 
 /// <summary>Execute the exact confirmed plan.</summary>
-public sealed record ExecutePlanRequest(ProtocolSessionId SessionId, ProtocolPlanId PlanId) : ProtocolRequest
+public sealed record ExecutePlanRequest(
+    ProtocolSessionId SessionId,
+    ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest
+) : ProtocolRequest
 {
     /// <inheritdoc />
     [JsonIgnore]
@@ -113,7 +123,11 @@ public sealed record ExecutePlanRequest(ProtocolSessionId SessionId, ProtocolPla
 }
 
 /// <summary>Request cancellation of the exact current plan at a safe boundary.</summary>
-public sealed record CancelPlanRequest(ProtocolSessionId SessionId, ProtocolPlanId PlanId) : ProtocolRequest
+public sealed record CancelPlanRequest(
+    ProtocolSessionId SessionId,
+    ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest
+) : ProtocolRequest
 {
     /// <inheritdoc />
     [JsonIgnore]
@@ -132,18 +146,88 @@ public sealed record HandshakeEvent(
     public override ProtocolMessageKind Kind => ProtocolMessageKind.HandshakeEvent;
 }
 
+/// <summary>The exact reviewed release identity shown by the frontend for a plan.</summary>
+public sealed record ProtocolReleaseIdentity(
+    string Repository,
+    string Tag,
+    string EmbeddedVersion,
+    string PackageAssetName,
+    string SourceCommit,
+    string SourceTree,
+    string PackageSha256
+);
+
+/// <summary>The canonical selected Linux game-root identity observed during inspection.</summary>
+public sealed record ProtocolGameRootIdentity(string CanonicalPath, ulong DeviceId, ulong Inode);
+
+/// <summary>One structured, deterministically ordered execution-plan operation.</summary>
+public sealed record ProtocolPlanOperation(
+    PlanOperationKind Kind,
+    string Path,
+    string? ExpectedCurrentSha256,
+    string? ResultSha256
+);
+
+/// <summary>One structured, deterministically ordered reason a plan can't execute.</summary>
+public sealed record ProtocolPlanConflict(PlanConflictCode Code, string? Path);
+
 /// <summary>The immutable inspected operation plan presented for confirmation.</summary>
-public sealed record PlanEvent(
-    ProtocolSessionId SessionId,
-    ProtocolPlanId PlanId,
-    InstallerOperation Operation,
-    string GamePath,
-    ObservedInstallState ObservedState,
-    string Summary,
-    string[] Warnings,
-    bool RequiresConfirmation
-) : ProtocolEvent
+public sealed record PlanEvent : ProtocolEvent
 {
+    private readonly ProtocolPlanOperation[] OperationValues;
+    private readonly ProtocolPlanConflict[] ConflictValues;
+    private readonly string[] WarningValues;
+
+    public ProtocolSessionId SessionId { get; }
+    public ProtocolPlanId PlanId { get; }
+    public ProtocolPlanDigest PlanDigest { get; }
+    public ProtocolPlanDigest ExecutionBindingDigest { get; }
+    public InstallerOperation Operation { get; }
+    public ProtocolGameRootIdentity GameRoot { get; }
+    public ProtocolReleaseIdentity? CurrentRelease { get; }
+    public ProtocolReleaseIdentity? TargetRelease { get; }
+    public ObservedInstallState ObservedState { get; }
+    public ProtocolPlanOperation[] Operations => this.OperationValues.ToArray();
+    public ProtocolPlanConflict[] Conflicts => this.ConflictValues.ToArray();
+    public string Summary { get; }
+    public string[] Warnings => this.WarningValues.ToArray();
+    public bool RequiresConfirmation { get; }
+
+    /// <summary>Construct an immutable plan-event snapshot.</summary>
+    [JsonConstructor]
+    public PlanEvent(
+        ProtocolSessionId sessionId,
+        ProtocolPlanId planId,
+        ProtocolPlanDigest planDigest,
+        ProtocolPlanDigest executionBindingDigest,
+        InstallerOperation operation,
+        ProtocolGameRootIdentity gameRoot,
+        ProtocolReleaseIdentity? currentRelease,
+        ProtocolReleaseIdentity? targetRelease,
+        ObservedInstallState observedState,
+        ProtocolPlanOperation[] operations,
+        ProtocolPlanConflict[] conflicts,
+        string summary,
+        string[] warnings,
+        bool requiresConfirmation
+    )
+    {
+        this.SessionId = sessionId;
+        this.PlanId = planId;
+        this.PlanDigest = planDigest;
+        this.ExecutionBindingDigest = executionBindingDigest;
+        this.Operation = operation;
+        this.GameRoot = gameRoot;
+        this.CurrentRelease = currentRelease;
+        this.TargetRelease = targetRelease;
+        this.ObservedState = observedState;
+        this.OperationValues = operations?.ToArray() ?? throw new ProtocolException("The protocol 'operations' collection can't be null.");
+        this.ConflictValues = conflicts?.ToArray() ?? throw new ProtocolException("The protocol 'conflicts' collection can't be null.");
+        this.Summary = summary;
+        this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
+        this.RequiresConfirmation = requiresConfirmation;
+    }
+
     /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.PlanEvent;
@@ -153,6 +237,7 @@ public sealed record PlanEvent(
 public sealed record ProgressEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest,
     long Sequence,
     InstallerProgressStage Stage,
     long CompletedUnits,
@@ -169,6 +254,7 @@ public sealed record ProgressEvent(
 public sealed record SuccessEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest,
     InstallerOperation Operation,
     string Summary
 ) : ProtocolEvent
@@ -182,6 +268,7 @@ public sealed record SuccessEvent(
 public sealed record RolledBackFailureEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest,
     string ErrorCode,
     string Message,
     string RollbackSummary
@@ -196,6 +283,7 @@ public sealed record RolledBackFailureEvent(
 public sealed record RecoverableInterruptionEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest,
     string ErrorCode,
     string Message,
     InstallerRecoveryAction RecoveryAction,
@@ -205,4 +293,18 @@ public sealed record RecoverableInterruptionEvent(
     /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoverableInterruptionEvent;
+}
+
+/// <summary>Cancellation completed at a safe boundary and left no incomplete transaction.</summary>
+public sealed record CancelledEvent(
+    ProtocolSessionId SessionId,
+    ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest,
+    string Summary,
+    string SafeStateSummary
+) : ProtocolEvent
+{
+    /// <inheritdoc />
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.CancelledEvent;
 }

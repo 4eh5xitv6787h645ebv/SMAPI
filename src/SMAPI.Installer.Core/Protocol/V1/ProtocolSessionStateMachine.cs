@@ -15,6 +15,8 @@ public enum ProtocolSessionState
 /// <summary>Validates request ordering and binds confirmation and execution to exact random IDs.</summary>
 public sealed class ProtocolSessionStateMachine
 {
+    private bool ExecutionStartedForCurrentPlan;
+
     /// <summary>The random identifier assigned to this process session.</summary>
     public ProtocolSessionId SessionId { get; } = ProtocolSessionId.CreateRandom();
 
@@ -26,6 +28,12 @@ public sealed class ProtocolSessionStateMachine
 
     /// <summary>The operation bound to the current immutable plan, or <c>null</c> before inspection.</summary>
     public InstallerOperation? CurrentOperation { get; private set; }
+
+    /// <summary>The canonical execution-plan digest bound to the current plan, or <c>null</c> before inspection.</summary>
+    public ProtocolPlanDigest? CurrentPlanDigest { get; private set; }
+
+    /// <summary>Whether the current structured plan is free of blocking conflicts.</summary>
+    public bool CurrentPlanCanExecute { get; private set; }
 
     /// <summary>The last accepted progress sequence, or <c>-1</c> before progress.</summary>
     public long LastProgressSequence { get; private set; } = -1;
@@ -46,7 +54,13 @@ public sealed class ProtocolSessionStateMachine
     /// <summary>Issue a new random plan, invalidating any earlier unexecuted plan.</summary>
     public PlanEvent IssuePlan(
         InspectPlanRequest request,
+        ProtocolPlanDigest executionBindingDigest,
+        ProtocolGameRootIdentity gameRoot,
+        ProtocolReleaseIdentity? currentRelease,
+        ProtocolReleaseIdentity? targetRelease,
         ObservedInstallState observedState,
+        ProtocolPlanOperation[] operations,
+        ProtocolPlanConflict[] conflicts,
         string summary,
         string[] warnings
     )
@@ -56,22 +70,61 @@ public sealed class ProtocolSessionStateMachine
             throw new ProtocolException($"A plan can't be issued while the session is in state '{this.State}'.");
         this.RequireSession(request.SessionId);
         ProtocolJsonSerializer.SerializeLine(request);
+        if (
+            request.TargetPackageVersion is not null
+            && (
+                targetRelease is null
+                || (
+                    request.TargetPackageVersion != targetRelease.Tag
+                    && request.TargetPackageVersion != targetRelease.EmbeddedVersion
+                )
+            )
+        )
+        {
+            throw new ProtocolException("The inspected target package version doesn't match the exact target release identity.");
+        }
+
+        ProtocolPlanOperation[] operationSnapshot = operations?.ToArray()
+            ?? throw new ProtocolException("The protocol 'operations' collection can't be null.");
+        ProtocolPlanConflict[] conflictSnapshot = conflicts?.ToArray()
+            ?? throw new ProtocolException("The protocol 'conflicts' collection can't be null.");
+        string[] warningSnapshot = warnings?.ToArray()
+            ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
 
         ProtocolPlanId planId = ProtocolPlanId.CreateRandom();
+        ProtocolPlanDigest planDigest = ProtocolPlanDigest.Compute(
+            executionBindingDigest,
+            request.Operation,
+            gameRoot,
+            currentRelease,
+            targetRelease,
+            observedState,
+            operationSnapshot,
+            conflictSnapshot
+        );
         PlanEvent response = new(
             this.SessionId,
             planId,
+            planDigest,
+            executionBindingDigest,
             request.Operation,
-            request.GamePath,
+            gameRoot,
+            currentRelease,
+            targetRelease,
             observedState,
+            operationSnapshot,
+            conflictSnapshot,
             summary,
-            warnings,
-            RequiresConfirmation: true
+            warningSnapshot,
+            requiresConfirmation: true
         );
         ProtocolJsonSerializer.SerializeLine(response);
 
         this.CurrentPlanId = planId;
+        this.CurrentPlanDigest = planDigest;
         this.CurrentOperation = request.Operation;
+        this.CurrentPlanCanExecute = conflictSnapshot.Length == 0;
+        this.ExecutionStartedForCurrentPlan = false;
         this.LastProgressSequence = -1;
         this.State = ProtocolSessionState.PlanIssued;
         return response;
@@ -82,7 +135,9 @@ public sealed class ProtocolSessionStateMachine
     {
         ArgumentNullException.ThrowIfNull(request);
         this.RequireState(ProtocolSessionState.PlanIssued);
-        this.RequireCurrentIds(request.SessionId, request.PlanId);
+        if (!this.CurrentPlanCanExecute)
+            throw new ProtocolException("A plan with unresolved conflicts can't be confirmed.");
+        this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest);
         ProtocolJsonSerializer.SerializeLine(request);
         this.State = ProtocolSessionState.PlanConfirmed;
     }
@@ -94,9 +149,10 @@ public sealed class ProtocolSessionStateMachine
         if (this.State == ProtocolSessionState.PlanIssued)
             throw new ProtocolException("The current plan must be confirmed before execution.");
         this.RequireState(ProtocolSessionState.PlanConfirmed);
-        this.RequireCurrentIds(request.SessionId, request.PlanId);
+        this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest);
         ProtocolJsonSerializer.SerializeLine(request);
         this.State = ProtocolSessionState.Executing;
+        this.ExecutionStartedForCurrentPlan = true;
     }
 
     /// <summary>Request cancellation of the exact current plan at a safe execution boundary.</summary>
@@ -105,7 +161,7 @@ public sealed class ProtocolSessionStateMachine
         ArgumentNullException.ThrowIfNull(request);
         if (this.State is not (ProtocolSessionState.PlanIssued or ProtocolSessionState.PlanConfirmed or ProtocolSessionState.Executing))
             throw new ProtocolException($"Cancellation can't be requested while the session is in state '{this.State}'.");
-        this.RequireCurrentIds(request.SessionId, request.PlanId);
+        this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest);
         ProtocolJsonSerializer.SerializeLine(request);
         this.State = ProtocolSessionState.CancellationRequested;
     }
@@ -116,7 +172,9 @@ public sealed class ProtocolSessionStateMachine
         ArgumentNullException.ThrowIfNull(progress);
         if (this.State is not (ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested))
             throw new ProtocolException($"Progress can't be recorded while the session is in state '{this.State}'.");
-        this.RequireCurrentIds(progress.SessionId, progress.PlanId);
+        if (!this.ExecutionStartedForCurrentPlan)
+            throw new ProtocolException("Progress can't be recorded for a plan cancelled before execution began.");
+        this.RequireCurrentBinding(progress.SessionId, progress.PlanId, progress.PlanDigest);
         ProtocolJsonSerializer.SerializeLine(progress);
         if (progress.Sequence <= this.LastProgressSequence)
             throw new ProtocolException("Progress sequence values must increase monotonically.");
@@ -129,36 +187,60 @@ public sealed class ProtocolSessionStateMachine
         ArgumentNullException.ThrowIfNull(result);
         if (result.Operation != this.CurrentOperation)
             throw new ProtocolException("The success event operation doesn't match the current plan.");
-        this.CompleteTerminal(result, result.SessionId, result.PlanId);
+        this.CompleteTerminal(result, result.SessionId, result.PlanId, result.PlanDigest, allowAfterCancellation: false);
     }
 
     /// <summary>Complete after a failed transaction was rolled back.</summary>
     public void Complete(RolledBackFailureEvent result)
     {
-        this.CompleteTerminal(result, result.SessionId, result.PlanId);
+        ArgumentNullException.ThrowIfNull(result);
+        this.CompleteTerminal(result, result.SessionId, result.PlanId, result.PlanDigest, allowAfterCancellation: true);
     }
 
     /// <summary>Complete with durable recovery information after an interruption.</summary>
     public void Complete(RecoverableInterruptionEvent result)
     {
-        this.CompleteTerminal(result, result.SessionId, result.PlanId);
+        ArgumentNullException.ThrowIfNull(result);
+        this.CompleteTerminal(result, result.SessionId, result.PlanId, result.PlanDigest, allowAfterCancellation: true);
     }
 
-    private void CompleteTerminal(ProtocolEvent result, ProtocolSessionId sessionId, ProtocolPlanId planId)
+    /// <summary>Complete an accepted cancellation after the backend reached a verified safe state.</summary>
+    public void Complete(CancelledEvent result)
     {
         ArgumentNullException.ThrowIfNull(result);
-        if (this.State is not (ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested))
-            throw new ProtocolException($"A terminal event can't be recorded while the session is in state '{this.State}'.");
-        this.RequireCurrentIds(sessionId, planId);
+        this.RequireState(ProtocolSessionState.CancellationRequested);
+        this.RequireCurrentBinding(result.SessionId, result.PlanId, result.PlanDigest);
         ProtocolJsonSerializer.SerializeLine(result);
         this.State = ProtocolSessionState.Completed;
     }
 
-    private void RequireCurrentIds(ProtocolSessionId sessionId, ProtocolPlanId planId)
+    private void CompleteTerminal(
+        ProtocolEvent result,
+        ProtocolSessionId sessionId,
+        ProtocolPlanId planId,
+        ProtocolPlanDigest planDigest,
+        bool allowAfterCancellation
+    )
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (this.State != ProtocolSessionState.Executing && !(allowAfterCancellation && this.State == ProtocolSessionState.CancellationRequested))
+            throw new ProtocolException($"A terminal event can't be recorded while the session is in state '{this.State}'.");
+        this.RequireCurrentBinding(sessionId, planId, planDigest);
+        ProtocolJsonSerializer.SerializeLine(result);
+        this.State = ProtocolSessionState.Completed;
+    }
+
+    private void RequireCurrentBinding(
+        ProtocolSessionId sessionId,
+        ProtocolPlanId planId,
+        ProtocolPlanDigest planDigest
+    )
     {
         this.RequireSession(sessionId);
         if (this.CurrentPlanId is not ProtocolPlanId current || planId != current)
             throw new ProtocolException("The request or event doesn't match the current plan ID; it may be stale.");
+        if (this.CurrentPlanDigest is null || planDigest != this.CurrentPlanDigest)
+            throw new ProtocolException("The request or event doesn't match the current execution-plan digest; it may be stale or altered.");
     }
 
     private void RequireSession(ProtocolSessionId sessionId)
