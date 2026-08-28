@@ -215,9 +215,9 @@ Scope constraints apply throughout:
 - [ ] Add rollback tests.
 - [ ] Add accessibility-focused tests.
 - [ ] Obtain independent installer architecture review.
-- [ ] Obtain independent security/privacy review.
-- [ ] Obtain independent UX/accessibility review.
-- [ ] Obtain independent Phase 4 testing review.
+- [x] Obtain [independent security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890576).
+- [x] Obtain [independent UX/accessibility review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
+- [x] Obtain [independent Phase 4 testing review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
 - [ ] Obtain independent Phase 4 final-diff review.
 - [ ] Address every actionable Phase 4 review finding.
 - [ ] Package and document the GUI through the release workflow only after independent security/privacy and UX/accessibility findings are addressed.
