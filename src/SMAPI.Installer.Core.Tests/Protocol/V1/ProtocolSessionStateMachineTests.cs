@@ -163,6 +163,21 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void PendingRecoveryFailureAllowsOnlyExactRecoveryRetryUntilSafeCompletionOrPreStartCancellation()
+    {
+        ProtocolSessionStateMachine machine = Ready(); RecoverInterruptedRequest request = new(machine.SessionId, "/game");
+        machine.BeginInterruptedRecovery(request);
+        machine.FailInterruptedRecovery(new(machine.SessionId, "RecoveryFailed", "Recovery failed.", ProtocolRecoveryResult.Pending, "Retry.", null));
+        machine.State.Should().Be(ProtocolSessionState.RecoveryRequired);
+        FluentActions.Invoking(() => machine.ValidateReadyRequest(machine.SessionId)).Should().Throw<ProtocolException>();
+        FluentActions.Invoking(() => machine.RecordPrePlanError(new(machine.SessionId, "unsafe", "Unsafe.", "Retry.", false, null))).Should().Throw<ProtocolException>();
+
+        machine.BeginInterruptedRecovery(request);
+        machine.FailInterruptedRecovery(new(machine.SessionId, "RecoveryCancelled", "Cancelled before recovery.", ProtocolRecoveryResult.NotNeeded, "Retry.", null));
+        machine.State.Should().Be(ProtocolSessionState.Ready);
+    }
+
+    [Test]
     public void PlanProgressCancellationAndTerminals_RequireExactOrderingAndBinding()
     {
         ProtocolSessionStateMachine machine = Ready(); PlanEvent plan = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall));

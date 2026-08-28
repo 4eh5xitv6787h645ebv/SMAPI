@@ -34,6 +34,8 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
     private readonly ILinuxInstallerProtocolDiscovery Discovery;
     private readonly ILinuxInstallerProtocolPackageOpener PackageOpener;
     private readonly Action<ProtocolEvent>? EventSink;
+    private readonly Action? TerminalCompletionStarting;
+    private readonly Action? DisposalPublished;
     private readonly string ServerVersion;
     private readonly string? SanitizedLogPath;
     private CancellationTokenSource? ActiveCancellation;
@@ -61,7 +63,9 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         ILinuxInstallerProtocolDiscovery discovery,
         ILinuxInstallerProtocolPackageOpener packageOpener,
         Action<ProtocolEvent>? eventSink = null,
-        string? sanitizedLogPath = null
+        string? sanitizedLogPath = null,
+        Action? terminalCompletionStarting = null,
+        Action? disposalPublished = null
     )
     {
         if (string.IsNullOrWhiteSpace(serverVersion)) throw new ArgumentException("A bounded server version is required.", nameof(serverVersion));
@@ -70,6 +74,8 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         this.Discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
         this.PackageOpener = packageOpener ?? throw new ArgumentNullException(nameof(packageOpener));
         this.EventSink = eventSink;
+        this.TerminalCompletionStarting = terminalCompletionStarting;
+        this.DisposalPublished = disposalPublished;
         this.SanitizedLogPath = sanitizedLogPath;
         this.Engine = engineFactory(new CallbackProgressSink(this.RecordProgress)) ?? throw new ArgumentException("The engine factory returned null.", nameof(engineFactory));
     }
@@ -89,6 +95,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         bool releaseGate = true;
         try
         {
+            this.AssertAcceptingRequests();
             ProtocolJsonSerializer.SerializeLine(request);
             switch (request)
             {
@@ -97,7 +104,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 case DiscoverGamesRequest value:
                     return await this.DiscoverAsync(value, cancellationToken).ConfigureAwait(false);
                 case RecoverInterruptedRequest value:
-                    Task<ProtocolEvent> recovery = this.TrackOperation(this.RecoverInterruptedAsync(value, cancellationToken));
+                    Task<ProtocolEvent> recovery = this.StartRecovery(value, cancellationToken);
                     releaseGate = false; this.CommandGate.Release();
                     return await recovery.ConfigureAwait(false);
                 case OpenPackageRequest value:
@@ -111,7 +118,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 case ConfirmPlanRequest value:
                     this.WithSession(() => this.Session.ConfirmPlan(value)); return null;
                 case ExecutePlanRequest value:
-                    Task<ProtocolEvent> execution = this.TrackOperation(this.ExecuteAsync(value, cancellationToken));
+                    Task<ProtocolEvent> execution = this.StartExecution(value, cancellationToken);
                     releaseGate = false; this.CommandGate.Release();
                     return await execution.ConfigureAwait(false);
                 case CancelPlanRequest value:
@@ -121,7 +128,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 case ConfirmPruneRequest value:
                     this.WithSession(() => this.Session.ConfirmPrune(value)); return null;
                 case ExecutePruneRequest value:
-                    Task<ProtocolEvent> pruning = this.TrackOperation(this.ExecutePruneAsync(value, cancellationToken));
+                    Task<ProtocolEvent> pruning = this.StartPrune(value, cancellationToken);
                     releaseGate = false; this.CommandGate.Release();
                     return await pruning.ConfigureAwait(false);
                 case CancelPruneRequest value:
@@ -160,13 +167,74 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
     }
 
-    private async Task<ProtocolEvent> RecoverInterruptedAsync(RecoverInterruptedRequest request, CancellationToken outerCancellation)
+    private Task<ProtocolEvent> StartRecovery(RecoverInterruptedRequest request, CancellationToken outerCancellation)
     {
         CancellationTokenSource active = CancellationTokenSource.CreateLinkedTokenSource(outerCancellation);
+        TaskCompletionSource<ProtocolEvent> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (this.SessionLock)
         {
-            this.AssertNoActiveExecution(); this.Session.BeginInterruptedRecovery(request); this.ActiveCancellation = active;
+            this.AssertNoActiveExecution();
+            try { this.Session.BeginInterruptedRecovery(request); }
+            catch { active.Dispose(); throw; }
+            this.ActiveCancellation = active;
+            this.ActiveOperation = completion.Task;
         }
+        _ = this.CompleteTrackedOperationAsync(() => this.RecoverInterruptedAsync(request, active), completion);
+        return completion.Task;
+    }
+
+    private Task<ProtocolEvent> StartExecution(ExecutePlanRequest request, CancellationToken outerCancellation)
+    {
+        CancellationTokenSource active = CancellationTokenSource.CreateLinkedTokenSource(outerCancellation);
+        TaskCompletionSource<ProtocolEvent> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        InspectedInstallationState inspection;
+        lock (this.SessionLock)
+        {
+            this.AssertNoActiveExecution();
+            try { inspection = this.Session.BeginExecution(request); }
+            catch { active.Dispose(); throw; }
+            this.ActiveCancellation = active;
+            this.ActiveOperation = completion.Task;
+        }
+        _ = this.CompleteTrackedOperationAsync(() => this.ExecuteAsync(request, inspection, active, outerCancellation), completion);
+        return completion.Task;
+    }
+
+    private Task<ProtocolEvent> StartPrune(ExecutePruneRequest request, CancellationToken outerCancellation)
+    {
+        CancellationTokenSource active = CancellationTokenSource.CreateLinkedTokenSource(outerCancellation);
+        TaskCompletionSource<ProtocolEvent> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        RecoveryPrunePlan plan;
+        lock (this.SessionLock)
+        {
+            this.AssertNoActiveExecution();
+            try { plan = this.Session.BeginPrune(request); }
+            catch { active.Dispose(); throw; }
+            this.ActiveCancellation = active;
+            this.ActiveOperation = completion.Task;
+        }
+        _ = this.CompleteTrackedOperationAsync(() => this.ExecutePruneAsync(request, plan, active, outerCancellation), completion);
+        return completion.Task;
+    }
+
+    private async Task CompleteTrackedOperationAsync(Func<Task<ProtocolEvent>> start, TaskCompletionSource<ProtocolEvent> completion)
+    {
+        try
+        {
+            await Task.Yield();
+            ProtocolEvent result = await start().ConfigureAwait(false);
+            lock (this.SessionLock) { if (ReferenceEquals(this.ActiveOperation, completion.Task)) this.ActiveOperation = null; }
+            completion.TrySetResult(result);
+        }
+        catch (Exception exception)
+        {
+            lock (this.SessionLock) { if (ReferenceEquals(this.ActiveOperation, completion.Task)) this.ActiveOperation = null; }
+            completion.TrySetException(exception);
+        }
+    }
+
+    private async Task<ProtocolEvent> RecoverInterruptedAsync(RecoverInterruptedRequest request, CancellationTokenSource active)
+    {
         try
         {
             InterruptedOperationRecoveryResult result = await this.Engine.RecoverInterruptedOperationAsync(request.GamePath, active.Token).ConfigureAwait(false);
@@ -176,9 +244,27 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
         catch (Exception exception)
         {
-            bool cancelled = exception is OperationCanceledException;
-            string code = cancelled ? "RecoveryCancelled" : "RecoveryFailed";
-            RecoveryFailureEvent terminal = new(this.SessionId, code, cancelled ? "Interrupted-operation recovery was cancelled before recovery began." : "Interrupted-operation recovery stopped without a completed result.", cancelled ? ProtocolRecoveryResult.NotNeeded : ProtocolRecoveryResult.Pending, "Retry interrupted-operation recovery before inspecting or changing the installation.", this.SanitizedLogPath);
+            bool cancelled = exception is OperationCanceledException && active.IsCancellationRequested;
+            InterruptedOperationRecoveryException? partial = exception as InterruptedOperationRecoveryException;
+            string code = cancelled ? "RecoveryCancelled" : partial?.ErrorCode.ToString() ?? "RecoveryFailed";
+            string message = cancelled ? "Interrupted-operation recovery was cancelled before recovery began." : partial?.SafeMessage ?? "Interrupted-operation recovery stopped without a completed result.";
+            ProtocolInterruptedRecoveryFailureDetails? details = partial is null ? null : new(
+                partial.GameRoot.CanonicalPath,
+                partial.GameRoot.DeviceMajor,
+                partial.GameRoot.DeviceMinor,
+                partial.GameRoot.Inode,
+                partial.PreviousOperationGeneration,
+                partial.CurrentOperationGeneration,
+                partial.OperationGenerationAdvanced,
+                partial.NamedRootStillSelected,
+                partial.NamedRootSelectionChanged,
+                partial.RequiresRecovery,
+                partial.RequiresFreshInspection,
+                partial.RecoveredTransactions.Select(transaction => new ProtocolRecoveredTransactionResult(transaction.TransactionId.ToString("N"), transaction.ChangedPathCount)).ToArray(),
+                partial.RecoveredTransactions.Count,
+                partial.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount)
+            );
+            RecoveryFailureEvent terminal = new(this.SessionId, code, message, cancelled ? ProtocolRecoveryResult.NotNeeded : ProtocolRecoveryResult.Pending, "Retry interrupted-operation recovery before inspecting or changing the installation.", this.SanitizedLogPath, details);
             lock (this.OutboundLock) this.WithSession(() => this.Session.FailInterruptedRecovery(terminal));
             return this.Emit(terminal);
         }
@@ -248,16 +334,8 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         return this.Emit(this.WithSession(() => this.Session.IssuePrunePlan(request, plan)));
     }
 
-    private async Task<ProtocolEvent> ExecuteAsync(ExecutePlanRequest request, CancellationToken outerCancellation)
+    private async Task<ProtocolEvent> ExecuteAsync(ExecutePlanRequest request, InspectedInstallationState inspection, CancellationTokenSource active, CancellationToken outerCancellation)
     {
-        CancellationTokenSource active = CancellationTokenSource.CreateLinkedTokenSource(outerCancellation);
-        InspectedInstallationState inspection;
-        lock (this.SessionLock)
-        {
-            this.AssertNoActiveExecution();
-            inspection = this.Session.BeginExecution(request);
-            this.ActiveCancellation = active;
-        }
         try
         {
             using CancellationTokenRegistration outerRegistration = outerCancellation.Register(() => this.RequestOuterCancellation(request));
@@ -278,16 +356,8 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
     }
 
-    private async Task<ProtocolEvent> ExecutePruneAsync(ExecutePruneRequest request, CancellationToken outerCancellation)
+    private async Task<ProtocolEvent> ExecutePruneAsync(ExecutePruneRequest request, RecoveryPrunePlan plan, CancellationTokenSource active, CancellationToken outerCancellation)
     {
-        CancellationTokenSource active = CancellationTokenSource.CreateLinkedTokenSource(outerCancellation);
-        RecoveryPrunePlan plan;
-        lock (this.SessionLock)
-        {
-            this.AssertNoActiveExecution();
-            plan = this.Session.BeginPrune(request);
-            this.ActiveCancellation = active;
-        }
         try
         {
             using CancellationTokenRegistration outerRegistration = outerCancellation.Register(() => this.RequestOuterPruneCancellation(request));
@@ -372,6 +442,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
 
     private void CompleteExecutionTerminal(ProtocolEvent terminal)
     {
+        this.TerminalCompletionStarting?.Invoke();
         lock (this.OutboundLock) this.WithSession(() =>
         {
             switch (terminal)
@@ -387,6 +458,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
 
     private void CompletePruneTerminal(ProtocolEvent terminal)
     {
+        this.TerminalCompletionStarting?.Invoke();
         lock (this.OutboundLock) this.WithSession(() =>
         {
             switch (terminal)
@@ -448,17 +520,6 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
     }
 
-    private async Task<ProtocolEvent> TrackOperation(Task<ProtocolEvent> operation)
-    {
-        lock (this.SessionLock)
-        {
-            if (this.ActiveOperation is not null) throw new ProtocolException("Another execution is already active in this session.");
-            this.ActiveOperation = operation;
-        }
-        try { return await operation.ConfigureAwait(false); }
-        finally { lock (this.SessionLock) { if (ReferenceEquals(this.ActiveOperation, operation)) this.ActiveOperation = null; } }
-    }
-
     private T WithSession<T>(Func<T> action) { lock (this.SessionLock) { this.AssertUsable(); return action(); } }
     private void WithSession(Action action) { lock (this.SessionLock) { this.AssertUsable(); action(); } }
     private T Emit<T>(T value) where T : ProtocolEvent => value;
@@ -469,57 +530,66 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
     private static string GetGameDisplayName(LinuxGameFolderCandidate candidate) => candidate.GameVersion is null ? $"Stardew Valley ({candidate.Status})" : $"Stardew Valley {candidate.GameVersion} ({candidate.Status})";
 
     /// <inheritdoc />
-    public void Dispose()
-    {
-        lock (this.SessionLock) { if (this.Disposed || this.Closing) return; }
-        if (!this.CommandGate.Wait(0)) throw new InvalidOperationException("An installer command is active; use DisposeAsync so it can finish before authorities are disposed.");
-        bool disposeGate = false;
-        lock (this.SessionLock)
-        {
-            if (this.Disposed) { this.CommandGate.Release(); return; }
-            if (this.ActiveOperation is not null) { this.CommandGate.Release(); throw new InvalidOperationException("An installer operation is active; use DisposeAsync so its core terminal outcome can finish before authorities are disposed."); }
-            this.Closing = true; this.Disposed = true; this.ActiveCancellation?.Dispose(); this.ActiveCancellation = null; this.Session.Dispose();
-            disposeGate = true;
-        }
-        if (disposeGate) this.CommandGate.Dispose();
-    }
+    public void Dispose() => this.GetOrStartDisposal().GetAwaiter().GetResult();
 
     /// <inheritdoc />
-    public async ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync() => await this.GetOrStartDisposal().ConfigureAwait(false);
+
+    private Task GetOrStartDisposal()
     {
-        Task disposal;
+        TaskCompletionSource completion;
+        lock (this.SessionLock)
+        {
+            if (this.Disposed) return Task.CompletedTask;
+            if (this.DisposalTask is not null) return this.DisposalTask;
+            this.Closing = true;
+            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            this.DisposalTask = completion.Task;
+        }
+        this.DisposalPublished?.Invoke();
+        _ = this.DisposeCoreAsync(completion);
+        return completion.Task;
+    }
+
+    private async Task DisposeCoreAsync(TaskCompletionSource completion)
+    {
+        bool gateHeld = false;
+        try
+        {
+            this.RequestDisposalCancellation();
+            await this.CommandGate.WaitAsync().ConfigureAwait(false); gateHeld = true;
+            this.RequestDisposalCancellation();
+            Task<ProtocolEvent>? active;
+            lock (this.SessionLock) active = this.ActiveOperation;
+            if (active is not null)
+            {
+                try { await active.ConfigureAwait(false); }
+                catch { }
+            }
+            lock (this.SessionLock)
+            {
+                if (!this.Disposed)
+                {
+                    this.Disposed = true; this.ActiveCancellation?.Dispose(); this.ActiveCancellation = null; this.Session.Dispose();
+                }
+            }
+            completion.TrySetResult();
+        }
+        catch (Exception exception) { completion.TrySetException(exception); }
+        finally { if (gateHeld) this.CommandGate.Release(); }
+    }
+
+    private void RequestDisposalCancellation()
+    {
         lock (this.SessionLock)
         {
             if (this.Disposed) return;
-            this.DisposalTask ??= this.DisposeCoreAsync(); disposal = this.DisposalTask;
-        }
-        await disposal.ConfigureAwait(false);
-    }
-
-    private async Task DisposeCoreAsync()
-    {
-        Task<ProtocolEvent>? active;
-        lock (this.SessionLock)
-        {
-            this.Closing = true;
             if (this.Session.State == ProtocolSessionState.Executing && this.Session.CurrentPlanId is { } plan && this.Session.CurrentPlanDigest is { } digest)
                 this.Session.RequestInternalCancellation(this.SessionId, plan, digest);
             else if (this.Session.State == ProtocolSessionState.Pruning && this.Session.CurrentPrunePlanId is { } prune && this.Session.CurrentPruneDigest is { } pruneDigest)
                 this.Session.RequestInternalPruneCancellation(this.SessionId, prune, pruneDigest);
-            this.ActiveCancellation?.Cancel(); active = this.ActiveOperation;
+            this.ActiveCancellation?.Cancel();
         }
-        await this.CommandGate.WaitAsync().ConfigureAwait(false);
-        if (active is not null)
-        {
-            try { await active.ConfigureAwait(false); }
-            catch { }
-        }
-        lock (this.SessionLock)
-        {
-            if (this.Disposed) return;
-            this.Disposed = true; this.ActiveCancellation?.Dispose(); this.ActiveCancellation = null; this.Session.Dispose();
-        }
-        this.CommandGate.Dispose();
     }
 
     private sealed class CallbackProgressSink(Action<TransactionProgress> callback) : ITransactionProgressSink

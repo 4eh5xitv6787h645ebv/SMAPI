@@ -11,6 +11,7 @@ public enum ProtocolSessionState
     AwaitingHandshake,
     Ready,
     Recovering,
+    RecoveryRequired,
     PlanIssued,
     PlanConfirmed,
     Executing,
@@ -178,7 +179,9 @@ public sealed class ProtocolSessionStateMachine : IDisposable
     /// <summary>Begin explicit bounded journal recovery and invalidate every authority tied to the selected game root.</summary>
     internal void BeginInterruptedRecovery(RecoverInterruptedRequest request)
     {
-        this.AssertUsable(); this.RequireCanIssuePlan(); this.RequireSession(request.SessionId); ProtocolJsonSerializer.SerializeLine(request);
+        this.AssertUsable();
+        if (this.State != ProtocolSessionState.RecoveryRequired) this.RequireCanIssuePlan();
+        this.RequireSession(request.SessionId); ProtocolJsonSerializer.SerializeLine(request);
         this.InvalidateCurrentPlan(); this.CurrentPrunePlan = null; this.CurrentCorePrunePlan = null;
         foreach (ProtocolRecoveryCatalogId catalog in this.Catalogs.Keys.ToArray()) this.RemoveCatalog(catalog);
         this.LastProgressSequence = -1; this.State = ProtocolSessionState.Recovering;
@@ -197,7 +200,7 @@ public sealed class ProtocolSessionStateMachine : IDisposable
 
     internal void FailInterruptedRecovery(RecoveryFailureEvent result)
     {
-        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(result.SessionId); ProtocolJsonSerializer.SerializeLine(result); this.LastProgressSequence = -1; this.State = ProtocolSessionState.Ready;
+        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(result.SessionId); ProtocolJsonSerializer.SerializeLine(result); this.LastProgressSequence = -1; this.State = result.RecoveryResult == ProtocolRecoveryResult.Pending ? ProtocolSessionState.RecoveryRequired : ProtocolSessionState.Ready;
     }
 
     /// <summary>Borrow the current inspection for the exact current plan while an orchestration command is serialized.</summary>
@@ -267,7 +270,7 @@ public sealed class ProtocolSessionStateMachine : IDisposable
     public void Complete(PruneInterruptionEvent result) { this.RequirePruneTerminalState(true); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequirePruneCounts(result.LogicalRemovedGenerationCount, result.PhysicalCleanupGenerationCount); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
     public void Complete(PruneCancelledEvent result) { this.AssertUsable(); this.RequireState(ProtocolSessionState.PruneCancellationRequested); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequirePruneCounts(result.LogicalRemovedGenerationCount, result.PhysicalCleanupGenerationCount); if (!this.PruneStarted && (result.LogicalRemovedGenerationCount != 0 || result.PhysicalCleanupGenerationCount != 0 || result.RecoveryResult != ProtocolRecoveryResult.NotNeeded)) throw new ProtocolException("A pre-execution prune cancellation can't report removals, cleanup, or recovery work."); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
 
-    public void RecordPrePlanError(PrePlanErrorEvent error) { this.AssertUsable(); if (this.State is ProtocolSessionState.AwaitingHandshake or ProtocolSessionState.Recovering or ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested or ProtocolSessionState.Pruning or ProtocolSessionState.PruneCancellationRequested or ProtocolSessionState.Completed) throw new ProtocolException($"A pre-plan error can't be recorded while the session is in state '{this.State}'."); this.RequireSession(error.SessionId); ProtocolJsonSerializer.SerializeLine(error); if (error.IsTerminal) this.State = ProtocolSessionState.Completed; }
+    public void RecordPrePlanError(PrePlanErrorEvent error) { this.AssertUsable(); if (this.State is ProtocolSessionState.AwaitingHandshake or ProtocolSessionState.Recovering or ProtocolSessionState.RecoveryRequired or ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested or ProtocolSessionState.Pruning or ProtocolSessionState.PruneCancellationRequested or ProtocolSessionState.Completed) throw new ProtocolException($"A pre-plan error can't be recorded while the session is in state '{this.State}'."); this.RequireSession(error.SessionId); ProtocolJsonSerializer.SerializeLine(error); if (error.IsTerminal) this.State = ProtocolSessionState.Completed; }
 
     public void Dispose()
     {

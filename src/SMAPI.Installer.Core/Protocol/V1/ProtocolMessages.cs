@@ -263,13 +263,55 @@ public sealed record RecoveryCompletedEvent(
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryCompletedEvent;
 }
 
+public sealed record ProtocolRecoveredTransactionResult(string TransactionId, int ChangedPathCount);
+
+/// <summary>Exact bounded progress preserved when interrupted-operation recovery only partially completes.</summary>
+public sealed record ProtocolInterruptedRecoveryFailureDetails
+{
+    private readonly ProtocolRecoveredTransactionResult[] RecoveredTransactionValues;
+    public string CanonicalGamePath { get; }
+    public uint DeviceMajor { get; }
+    public uint DeviceMinor { get; }
+    public ulong Inode { get; }
+    public ulong PreviousOperationGeneration { get; }
+    public ulong? CurrentOperationGeneration { get; }
+    public bool? OperationGenerationAdvanced { get; }
+    public bool? NamedRootStillSelected { get; }
+    public bool? NamedRootSelectionChanged { get; }
+    public bool RequiresRecovery { get; }
+    public bool RequiresFreshInspection { get; }
+    public ProtocolRecoveredTransactionResult[] RecoveredTransactions => this.RecoveredTransactionValues.ToArray();
+    public int RecoveredTransactionCount { get; }
+    public int RecoveredPathCount { get; }
+
+    [JsonConstructor]
+    public ProtocolInterruptedRecoveryFailureDetails(string canonicalGamePath, uint deviceMajor, uint deviceMinor, ulong inode, ulong previousOperationGeneration, ulong? currentOperationGeneration, bool? operationGenerationAdvanced, bool? namedRootStillSelected, bool? namedRootSelectionChanged, bool requiresRecovery, bool requiresFreshInspection, ProtocolRecoveredTransactionResult[] recoveredTransactions, int recoveredTransactionCount, int recoveredPathCount)
+    {
+        this.CanonicalGamePath = canonicalGamePath;
+        this.DeviceMajor = deviceMajor;
+        this.DeviceMinor = deviceMinor;
+        this.Inode = inode;
+        this.PreviousOperationGeneration = previousOperationGeneration;
+        this.CurrentOperationGeneration = currentOperationGeneration;
+        this.OperationGenerationAdvanced = operationGenerationAdvanced;
+        this.NamedRootStillSelected = namedRootStillSelected;
+        this.NamedRootSelectionChanged = namedRootSelectionChanged;
+        this.RequiresRecovery = requiresRecovery;
+        this.RequiresFreshInspection = requiresFreshInspection;
+        this.RecoveredTransactionValues = recoveredTransactions?.ToArray() ?? throw new ProtocolException("Interrupted-recovery transaction results can't be null.");
+        this.RecoveredTransactionCount = recoveredTransactionCount;
+        this.RecoveredPathCount = recoveredPathCount;
+    }
+}
+
 public sealed record RecoveryFailureEvent(
     ProtocolSessionId SessionId,
     string ErrorCode,
     string Message,
     ProtocolRecoveryResult RecoveryResult,
     string SafeNextStep,
-    string? SanitizedLogPath
+    string? SanitizedLogPath,
+    ProtocolInterruptedRecoveryFailureDetails? Details = null
 ) : ProtocolEvent
 {
     [JsonIgnore]

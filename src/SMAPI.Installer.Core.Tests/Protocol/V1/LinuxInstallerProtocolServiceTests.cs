@@ -65,9 +65,44 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
         failure.ErrorCode.Should().Be("RecoveryFailed"); failure.Message.Should().NotContain("private-secret");
         ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(failure)).Should().BeEquivalentTo(failure);
-        service.State.Should().Be(ProtocolSessionState.Ready);
+        service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
+        Func<Task> inspect = async () => await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null));
+        Func<Task> open = async () => await Open(service);
+        await inspect.Should().ThrowAsync<ProtocolException>(); await open.Should().ThrowAsync<ProtocolException>();
         engine.ThrowRecovery = false;
         (await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game"))).Should().BeOfType<RecoveryCompletedEvent>();
+        service.State.Should().Be(ProtocolSessionState.Ready);
+    }
+
+    [Test]
+    public async Task UnrequestedCoreCancellationIsRecoveryPendingAndBlocksUnsafeCommands()
+    {
+        FakeEngine engine = new() { ThrowUnrequestedRecoveryCancellation = true };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+
+        RecoveryFailureEvent failure = (RecoveryFailureEvent)(await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")))!;
+
+        failure.ErrorCode.Should().Be("RecoveryFailed"); failure.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
+    }
+
+    [Test]
+    public async Task TypedPartialRecoveryFailurePreservesExactKnownAndUnknownProgressWithoutPaths()
+    {
+        FakeEngine engine = new() { ThrowPartialRecovery = true };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+
+        RecoveryFailureEvent failure = (RecoveryFailureEvent)(await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")))!;
+
+        failure.ErrorCode.Should().Be(TransactionErrorCode.RecoveryFailed.ToString()); failure.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        failure.Details.Should().NotBeNull(); failure.Details!.CurrentOperationGeneration.Should().BeNull(); failure.Details.OperationGenerationAdvanced.Should().BeNull(); failure.Details.NamedRootStillSelected.Should().BeNull(); failure.Details.NamedRootSelectionChanged.Should().BeNull();
+        failure.Details.RequiresRecovery.Should().BeTrue(); failure.Details.RequiresFreshInspection.Should().BeTrue();
+        failure.Details.RecoveredTransactionCount.Should().Be(1); failure.Details.RecoveredPathCount.Should().Be(2);
+        string line = ProtocolJsonSerializer.SerializeLine(failure); line.Should().NotContain("private-partial-failure");
+        ProtocolJsonSerializer.DeserializeEventLine(line).Should().BeEquivalentTo(failure);
+        service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
     }
 
     [Test]
@@ -168,9 +203,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
         Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        FluentActions.Invoking(service.Dispose).Should().Throw<InvalidOperationException>().WithMessage("*DisposeAsync*");
-        opener.Owners.Single().DisposeCount.Should().Be(0);
-        await service.DisposeAsync();
+        Task disposal = Task.Run(service.Dispose);
+        await disposal;
         (await execution).Should().BeOfType<CancelledEvent>();
         opener.Owners.Single().DisposeCount.Should().Be(1);
     }
@@ -282,6 +316,29 @@ internal sealed class LinuxInstallerProtocolServiceTests
         service.State.Should().Be(ProtocolSessionState.Completed);
     }
 
+    [Test]
+    public async Task ExplicitCancellationWinningAtTerminalBoundaryCannotEraseCommittedSuccess()
+    {
+        TaskCompletionSource terminalStarting = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseTerminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakeEngine engine = new();
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener(), terminalCompletionStarting: () =>
+        {
+            terminalStarting.TrySetResult();
+            releaseTerminal.Task.GetAwaiter().GetResult();
+        });
+        await Handshake(service);
+        PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
+        await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Task<ProtocolEvent?> execution = Task.Run(async () => await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)));
+        await terminalStarting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeNull();
+        releaseTerminal.TrySetResult();
+        (await execution).Should().BeOfType<SuccessEvent>();
+        service.State.Should().Be(ProtocolSessionState.Completed);
+    }
+
     [TestCase("before", 0)]
     [TestCase("after-progress", 1)]
     [TestCase("during-cancel", 1)]
@@ -334,6 +391,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
     {
         TaskCompletionSource progressEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         TaskCompletionSource releaseProgress = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource terminalStarting = new(TaskCreationOptions.RunContinuationsAsynchronously);
         List<ProtocolEvent> delivered = [];
         FakeEngine engine = new() { ReportUnawaitedProgress = true };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener(), value =>
@@ -344,14 +402,15 @@ internal sealed class LinuxInstallerProtocolServiceTests
                 releaseProgress.Task.GetAwaiter().GetResult();
             }
             delivered.Add(value);
-        });
+        }, terminalCompletionStarting: terminalStarting.SetResult);
         await Handshake(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         await progressEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         engine.ReturnWhileProgressIsBlocked.TrySetResult();
-        await Task.Delay(50); execution.IsCompleted.Should().BeFalse("terminal completion is serialized behind accepted progress dispatch");
+        await terminalStarting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        execution.IsCompleted.Should().BeFalse("terminal completion is serialized behind accepted progress dispatch");
         releaseProgress.TrySetResult();
 
         (await execution).Should().BeOfType<SuccessEvent>();
@@ -474,10 +533,29 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service);
         Task<PackageOpenedEvent> opening = Open(service);
         await opener.OpenStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        FluentActions.Invoking(service.Dispose).Should().Throw<InvalidOperationException>().WithMessage("*DisposeAsync*");
         Task disposal = service.DisposeAsync().AsTask(); disposal.IsCompleted.Should().BeFalse(); opener.Owners.Single().DisposeCount.Should().Be(0);
         opener.ContinueOpen.TrySetResult(); await opening; await disposal;
         opener.Owners.Single().DisposeCount.Should().Be(1); service.Dispose(); opener.Owners.Single().DisposeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task SyncFirstMixedAndTwoSyncDisposersShareOnePublishedCompletion()
+    {
+        TaskCompletionSource disposalPublished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakePackageOpener opener = new() { BlockOpen = true };
+        LinuxInstallerProtocolService service = Create(new FakeEngine(), opener, disposalPublished: disposalPublished.SetResult);
+        await Handshake(service);
+        Task<PackageOpenedEvent> opening = Open(service);
+        await opener.OpenStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task firstSync = Task.Run(service.Dispose);
+        await disposalPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Task asyncFollower = service.DisposeAsync().AsTask(); Task secondSync = Task.Run(service.Dispose);
+        firstSync.IsCompleted.Should().BeFalse(); asyncFollower.IsCompleted.Should().BeFalse(); secondSync.IsCompleted.Should().BeFalse();
+        opener.Owners.Single().DisposeCount.Should().Be(0);
+        opener.ContinueOpen.TrySetResult(); await opening;
+        await Task.WhenAll(firstSync, asyncFollower, secondSync);
+        opener.Owners.Single().DisposeCount.Should().Be(1);
     }
 
     [Test]
@@ -498,6 +576,54 @@ internal sealed class LinuxInstallerProtocolServiceTests
     }
 
     [Test]
+    public async Task DisposalDuringExecutionInitiationWaitsForPublishedOperationBeforeDisposingAuthorities()
+    {
+        FakeEngine engine = new() { BlockExecutionInitiation = true, BlockExecutionUntilCancellation = true }; FakePackageOpener opener = new();
+        LinuxInstallerProtocolService service = Create(engine, opener);
+        await Handshake(service); PackageOpenedEvent package = await Open(service);
+        PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Repair, package.PackageId, null)))!;
+        await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Task<ProtocolEvent?> execution = Task.Run(async () => await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)));
+        await engine.ExecutionInitiationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task disposal = service.DisposeAsync().AsTask(); disposal.IsCompleted.Should().BeFalse(); opener.Owners.Single().DisposeCount.Should().Be(0);
+        engine.ReleaseExecutionInitiation.TrySetResult();
+        (await execution).Should().BeOfType<CancelledEvent>(); await disposal;
+        opener.Owners.Single().DisposeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task DisposalDuringPruneInitiationWaitsForPublishedOperationBeforeDisposingRecoveries()
+    {
+        FakeEngine engine = new() { BlockPruneInitiation = true, BlockPruneUntilCancellation = true, NextPruneStatus = RecoveryPruneOutcomeStatus.CancelledBeforePublication };
+        LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service); RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)(await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game")))!;
+        PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1)))!;
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        Task<ProtocolEvent?> pruning = Task.Run(async () => await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)));
+        await engine.PruneInitiationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task disposal = service.DisposeAsync().AsTask(); disposal.IsCompleted.Should().BeFalse(); engine.OpenedRecoveries.Should().OnlyContain(handle => handle.DisposeCount == 0);
+        engine.ReleasePruneInitiation.TrySetResult();
+        (await pruning).Should().BeOfType<PruneCancelledEvent>(); await disposal;
+        engine.OpenedRecoveries.Should().OnlyContain(handle => handle.DisposeCount == 1);
+    }
+
+    [Test]
+    public async Task DisposalDuringRecoveryInitiationWaitsForPublishedOperationTerminal()
+    {
+        FakeEngine engine = new() { BlockRecoveryInitiation = true, BlockRecoveryUntilCancellation = true };
+        LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        Task<ProtocolEvent?> recovery = Task.Run(async () => await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")));
+        await engine.RecoveryInitiationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task disposal = service.DisposeAsync().AsTask(); disposal.IsCompleted.Should().BeFalse();
+        engine.ReleaseRecoveryInitiation.TrySetResult();
+        (await recovery).Should().BeOfType<RecoveryFailureEvent>(); await disposal;
+    }
+
+    [Test]
     public async Task CandidateApprovalUsesCurrentOpaqueIdsAndReturnsPartialReplacementPlan()
     {
         FakeEngine engine = new() { CandidateApprovalMode = true }; FakePackageOpener opener = new();
@@ -511,8 +637,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await stale.Should().ThrowAsync<ProtocolException>().WithMessage("*stale*");
     }
 
-    private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null) =>
-        new("test", progress => { engine.Progress = progress; return engine; }, new FakeDiscovery(), opener, sink);
+    private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null, Action? terminalCompletionStarting = null, Action? disposalPublished = null) =>
+        new("test", progress => { engine.Progress = progress; return engine; }, new FakeDiscovery(), opener, sink, terminalCompletionStarting: terminalCompletionStarting, disposalPublished: disposalPublished);
     private static Task<ProtocolEvent?> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
     private static async Task<PackageOpenedEvent> Open(LinuxInstallerProtocolService service) => (PackageOpenedEvent)(await service.HandleAsync(new OpenPackageRequest(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest")))!;
 
@@ -622,14 +748,25 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public bool ThrowPruneBeforeProgress { get; set; }
         public bool ThrowPruneAfterProgress { get; set; }
         public bool ThrowPruneAfterCancellation { get; set; }
+        public bool BlockPruneInitiation { get; set; }
         public TaskCompletionSource ExecutionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource PruneStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseDelayedProgress { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource DelayedProgressReported { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReturnWhileProgressIsBlocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool ThrowRecovery { get; set; }
+        public bool ThrowUnrequestedRecoveryCancellation { get; set; }
+        public bool ThrowPartialRecovery { get; set; }
         public bool BlockRecoveryUntilCancellation { get; set; }
+        public bool BlockRecoveryInitiation { get; set; }
+        public bool BlockExecutionInitiation { get; set; }
         public TaskCompletionSource RecoveryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ExecutionInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource PruneInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource RecoveryInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseExecutionInitiation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleasePruneInitiation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseRecoveryInitiation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly Guid First = Guid.ParseExact("11111111111111111111111111111111", "N");
         private readonly Guid Second = Guid.ParseExact("22222222222222222222222222222222", "N");
         private readonly Guid Pending = Guid.ParseExact("33333333333333333333333333333333", "N");
@@ -645,6 +782,9 @@ internal sealed class LinuxInstallerProtocolServiceTests
         }
         public async Task<InterruptedOperationRecoveryResult> RecoverInterruptedOperationAsync(string gameRoot, CancellationToken cancellationToken)
         {
+            if (this.BlockRecoveryInitiation) { this.RecoveryInitiationStarted.TrySetResult(); this.ReleaseRecoveryInitiation.Task.GetAwaiter().GetResult(); }
+            if (this.ThrowUnrequestedRecoveryCancellation) throw new OperationCanceledException("core-origin cancellation");
+            if (this.ThrowPartialRecovery) throw new InterruptedOperationRecoveryException(Root, 7, null, null, [new(Guid.NewGuid(), TransactionStatus.Recovered, 2)], TransactionErrorCode.RecoveryFailed, "Partial recovery failed safely.", new IOException("private-partial-failure"));
             if (this.ThrowRecovery) throw new InvalidOperationException("private-secret");
             this.Progress.Report(new(TransactionStage.AcquiringLock, 0, null)); this.RecoveryStarted.TrySetResult();
             if (this.BlockRecoveryUntilCancellation) await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
@@ -662,6 +802,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         }
         public async Task<InstallationExecutionOutcome> ExecuteAsync(InspectedInstallationState inspection, Sha256Digest confirmedDigest, string? sanitizedLogPath, CancellationToken cancellationToken)
         {
+            if (this.BlockExecutionInitiation) { this.ExecutionInitiationStarted.TrySetResult(); this.ReleaseExecutionInitiation.Task.GetAwaiter().GetResult(); }
             if (this.ThrowExecutionBeforeProgress) throw new InvalidOperationException("private-secret-before");
             this.Progress.Report(new(TransactionStage.Revalidating, 0, null)); this.ExecutionStarted.TrySetResult();
             if (this.ThrowExecutionAfterProgress) throw new InvalidOperationException("private-secret-after-progress");
@@ -702,6 +843,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
             : new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First], [this.Second], [this.Second], [], null));
         public async Task<RecoveryPruneOutcome> ExecuteRecoveryPruneAsync(RecoveryPrunePlan plan, Sha256Digest confirmedDigest, CancellationToken cancellationToken)
         {
+            if (this.BlockPruneInitiation) { this.PruneInitiationStarted.TrySetResult(); this.ReleasePruneInitiation.Task.GetAwaiter().GetResult(); }
             if (this.ThrowPruneBeforeProgress) throw new InvalidOperationException("private-prune-secret-before");
             this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1)); this.PruneStarted.TrySetResult();
             if (this.ThrowPruneAfterProgress) throw new InvalidOperationException("private-prune-secret-after-progress");

@@ -111,7 +111,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.GameDiscoveryEvent] = C("game-discovery.event", typeof(GameDiscoveryEvent), false, "sessionId", "candidates"),
         [ProtocolMessageKind.RecoveryProgressEvent] = C("recovery-progress.event", typeof(RecoveryProgressEvent), false, "sessionId", "sequence", "stage", "completedUnits", "totalUnits", "message"),
         [ProtocolMessageKind.RecoveryCompletedEvent] = C("recovery-completed.event", typeof(RecoveryCompletedEvent), false, "sessionId", "gameRoot", "namedRootStillSelected", "previousOperationGeneration", "currentOperationGeneration", "recoveredTransactionCount", "recoveredPathCount", "summary", "safeNextStep", "sanitizedLogPath"),
-        [ProtocolMessageKind.RecoveryFailureEvent] = C("recovery-failure.event", typeof(RecoveryFailureEvent), false, "sessionId", "errorCode", "message", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
+        [ProtocolMessageKind.RecoveryFailureEvent] = C("recovery-failure.event", typeof(RecoveryFailureEvent), false, "sessionId", "errorCode", "message", "recoveryResult", "safeNextStep", "sanitizedLogPath", "details"),
         [ProtocolMessageKind.PackageOpenedEvent] = C("package-opened.event", typeof(PackageOpenedEvent), false, "sessionId", "packageId", "release"),
         [ProtocolMessageKind.RecoveryCatalogEvent] = C("recovery-catalog.event", typeof(RecoveryCatalogEvent), false, "sessionId", "catalogId", "gameRoot", "headSha256", "generations"),
         [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operations", "conflicts", "candidates", "summary", "warnings", "requiresConfirmation"),
@@ -144,6 +144,11 @@ public static class ProtocolJsonSerializer
                 AssertObjectArray(payload.GetProperty("generations"), ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint"], "recovery generation", MaxRecoveryGenerations); break;
             case ProtocolMessageKind.RecoveryCompletedEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot")); break;
+            case ProtocolMessageKind.RecoveryFailureEvent:
+                JsonElement details = payload.GetProperty("details");
+                AssertOptionalObject(details, ["canonicalGamePath", "deviceMajor", "deviceMinor", "inode", "previousOperationGeneration", "currentOperationGeneration", "operationGenerationAdvanced", "namedRootStillSelected", "namedRootSelectionChanged", "requiresRecovery", "requiresFreshInspection", "recoveredTransactions", "recoveredTransactionCount", "recoveredPathCount"], "interrupted recovery failure details");
+                if (details.ValueKind != JsonValueKind.Null) AssertObjectArray(details.GetProperty("recoveredTransactions"), ["transactionId", "changedPathCount"], "recovered transaction result", InstallerTransactionExecutor.MaximumTransactionStoreEntries);
+                break;
             case ProtocolMessageKind.PlanEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot"));
                 AssertOptionalRecoveryAuthority(payload.GetProperty("recoveryAuthority"));
@@ -182,7 +187,7 @@ public static class ProtocolJsonSerializer
             case GameDiscoveryEvent v: Session(v.SessionId); Objects(v.Candidates, "candidates", MaxGameCandidates); foreach (ProtocolGameCandidate c in v.Candidates) { AbsolutePath(c.CanonicalPath, "candidate.canonicalPath"); Defined(c.State, "candidate.state"); Text(c.DisplayName, "candidate.displayName"); } NoDuplicates(v.Candidates.Select(c => c.CanonicalPath), "game candidate path"); break;
             case RecoveryProgressEvent v: Session(v.SessionId); Progress(v.Sequence, v.Stage, v.CompletedUnits, v.TotalUnits, v.Message); break;
             case RecoveryCompletedEvent v: Session(v.SessionId); GameRoot(v.GameRoot); if (v.CurrentOperationGeneration <= v.PreviousOperationGeneration || v.GameRoot.OperationGeneration != v.CurrentOperationGeneration || v.RecoveredTransactionCount < 0 || v.RecoveredTransactionCount > InstallerTransactionExecutor.MaximumTransactionStoreEntries || v.RecoveredPathCount < 0 || v.RecoveredPathCount > InstallerTransactionExecutor.MaximumTransactionStoreEntries * TransactionPlan.MaximumOperationCount) throw new ProtocolException("The interrupted-recovery result has invalid generation or bounded count data."); Text(v.Summary, "summary"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); break;
-            case RecoveryFailureEvent v: Session(v.SessionId); Text(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Defined(v.RecoveryResult, "recoveryResult"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); break;
+            case RecoveryFailureEvent v: Session(v.SessionId); Text(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Defined(v.RecoveryResult, "recoveryResult"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); ValidateRecoveryFailureDetails(v); break;
             case PackageOpenedEvent v: Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.PackageId.Value, "package"); ValidateRelease(v.Release, "release"); break;
             case RecoveryCatalogEvent v: ValidateCatalog(v); break;
             case PlanEvent v: ValidatePlan(v); break;
@@ -326,6 +331,30 @@ public static class ProtocolJsonSerializer
         if (operation == InstallerOperation.Install && current is not null) throw new ProtocolException("A fresh install must not invent a current release.");
     }
 
+    private static void ValidateRecoveryFailureDetails(RecoveryFailureEvent failure)
+    {
+        ProtocolInterruptedRecoveryFailureDetails? details = failure.Details;
+        if (details is null) return;
+        if (failure.RecoveryResult != ProtocolRecoveryResult.Pending) throw new ProtocolException("Partial interrupted-recovery details require a pending recovery result.");
+        AbsolutePath(details.CanonicalGamePath, "details.canonicalGamePath");
+        if (details.Inode == 0 || details.CurrentOperationGeneration is { } current && current < details.PreviousOperationGeneration)
+            throw new ProtocolException("The interrupted-recovery failure root or generation identity is invalid.");
+        bool? expectedAdvanced = details.CurrentOperationGeneration is { } generation ? generation > details.PreviousOperationGeneration : null;
+        if (details.OperationGenerationAdvanced != expectedAdvanced)
+            throw new ProtocolException("The interrupted-recovery failure generation result is inconsistent.");
+        bool? expectedSelectionChanged = details.NamedRootStillSelected is { } selected ? !selected : null;
+        if (details.NamedRootSelectionChanged != expectedSelectionChanged)
+            throw new ProtocolException("The interrupted-recovery failure named-root result is inconsistent.");
+        if (!details.RequiresRecovery || !details.RequiresFreshInspection)
+            throw new ProtocolException("Partial interrupted-recovery details must require recovery and a fresh inspection.");
+        ProtocolRecoveredTransactionResult[] recovered = details.RecoveredTransactions;
+        Objects(recovered, "details.recoveredTransactions", InstallerTransactionExecutor.MaximumTransactionStoreEntries);
+        if (recovered.Any(result => result.ChangedPathCount is < 0 or > TransactionPlan.MaximumOperationCount) || recovered.Any(result => !Guid.TryParseExact(result.TransactionId, "N", out Guid id) || id == Guid.Empty || result.TransactionId.Any(character => character is >= 'A' and <= 'F')) || recovered.Select(result => result.TransactionId).Distinct(StringComparer.Ordinal).Count() != recovered.Length)
+            throw new ProtocolException("The interrupted-recovery failure has invalid or duplicate transaction results.");
+        if (details.RecoveredTransactionCount != recovered.Length || details.RecoveredPathCount != recovered.Sum(result => result.ChangedPathCount) || details.RecoveredTransactionCount < 0 || details.RecoveredTransactionCount > InstallerTransactionExecutor.MaximumTransactionStoreEntries || details.RecoveredPathCount < 0 || details.RecoveredPathCount > InstallerTransactionExecutor.MaximumTransactionStoreEntries * TransactionPlan.MaximumOperationCount || details.RecoveredTransactionCount == 0 && details.RecoveredPathCount != 0)
+            throw new ProtocolException("The interrupted-recovery failure has invalid bounded recovered counts.");
+    }
+
     private static void ValidateRelease(ProtocolReleaseIdentity? release, string field, bool optional = false)
     {
         if (release is null) { if (optional) return; throw new ProtocolException($"The protocol '{field}' value can't be null."); }
@@ -373,6 +402,7 @@ public static class ProtocolJsonSerializer
     }
     private static void AssertObjectArray(JsonElement element, IReadOnlyCollection<string> properties, string description, int max) { if (element.ValueKind != JsonValueKind.Array) throw new ProtocolException($"The protocol {description} collection must be an array."); int index = 0; foreach (JsonElement item in element.EnumerateArray()) { if (index >= max) throw new ProtocolException($"The protocol {description} collection is too large."); AssertExactObject(item, properties, $"{description} at index {index++}"); } }
     private static void AssertGameRoot(JsonElement e) => AssertExactObject(e, ["canonicalPath", "deviceMajor", "deviceMinor", "inode", "operationGeneration"], "game-root identity");
+    private static void AssertOptionalObject(JsonElement element, IReadOnlyCollection<string> properties, string description) { if (element.ValueKind != JsonValueKind.Null) AssertExactObject(element, properties, description); }
     private static void AssertOptionalRecoveryAuthority(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Null)
