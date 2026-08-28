@@ -262,14 +262,24 @@ public enum TransactionStage
     Verifying,
     Committing,
     RollingBack,
-    Completed
+    Completed,
+    Inspecting,
+    VerifyingRecovery,
+    PreparingRecovery,
+    PreparingPayload
 }
 
-/// <summary>A bounded transaction progress update.</summary>
-public sealed record TransactionProgress(TransactionStage Stage, int CompletedOperations, int TotalOperations)
+/// <summary>A bounded transaction progress update. A <see langword="null"/> total denotes indeterminate pre-mutation work.</summary>
+public sealed record TransactionProgress(TransactionStage Stage, int CompletedOperations, int? TotalOperations)
 {
     /// <summary>Whether an ordinary cancellation request can still stop this operation before mutation.</summary>
-    public bool CanCancel => this.Stage is TransactionStage.AcquiringLock or TransactionStage.Staging or TransactionStage.Revalidating;
+    public bool CanCancel => this.Stage is
+        TransactionStage.Staging
+        or TransactionStage.Revalidating
+        or TransactionStage.Inspecting
+        or TransactionStage.VerifyingRecovery
+        or TransactionStage.PreparingRecovery
+        or TransactionStage.PreparingPayload;
 }
 
 /// <summary>Receives transaction progress updates.</summary>

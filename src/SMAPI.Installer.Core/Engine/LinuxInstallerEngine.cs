@@ -21,6 +21,14 @@ public sealed class InspectedInstallationState : IDisposable
     public ulong OperationGeneration => this.Binding.OperationGeneration;
     public InstallationPlan Plan { get; }
     public Sha256Digest ConfirmationDigest { get; }
+    /// <summary>The authenticated currently installed release, or <see langword="null"/> when no receipt is installed.</summary>
+    public InstallationReleaseIdentity? CurrentRelease { get; }
+    /// <summary>The authenticated release expected after this action, or <see langword="null"/> for an uninstalled result.</summary>
+    public InstallationReleaseIdentity? ExpectedResultRelease { get; }
+    /// <summary>The bounded installed-state classification derived by the core during this inspection.</summary>
+    public ObservedInstallationState ObservedState { get; }
+    /// <summary>The exact recovery-generation capacity observed while this plan was created.</summary>
+    public RecoveryCapacityState RecoveryCapacity { get; }
     /// <summary>Get the deterministic exact modified-file candidates which this blocked repair inspection can authorize.</summary>
     public IReadOnlyList<ModifiedFileReplacementCandidate> ModifiedFileReplacementCandidates { get; }
     internal BoundInstallationPlan Binding { get; }
@@ -35,6 +43,10 @@ public sealed class InspectedInstallationState : IDisposable
         IVerifiedPackageContentAuthority? targetPackageContent,
         ICommittedRecoveryContentAuthority? rollbackContent,
         object repairCandidateAuthority,
+        InstallationReleaseIdentity? currentRelease,
+        InstallationReleaseIdentity? expectedResultRelease,
+        ObservedInstallationState observedState,
+        RecoveryCapacityState recoveryCapacity,
         IEnumerable<ModifiedFileReplacementCandidate>? modifiedFileReplacementCandidates = null,
         IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
     )
@@ -46,6 +58,10 @@ public sealed class InspectedInstallationState : IDisposable
         this.TargetPackageContent = targetPackageContent;
         this.RollbackContent = rollbackContent;
         this.RepairCandidateAuthority = repairCandidateAuthority;
+        this.CurrentRelease = currentRelease;
+        this.ExpectedResultRelease = expectedResultRelease;
+        this.ObservedState = observedState;
+        this.RecoveryCapacity = recoveryCapacity;
         this.ModifiedFileReplacementCandidates = new ReadOnlyCollection<ModifiedFileReplacementCandidate>(
             (modifiedFileReplacementCandidates ?? Array.Empty<ModifiedFileReplacementCandidate>()).ToArray()
         );
@@ -73,21 +89,25 @@ public sealed class LinuxInstallerEngine
     private readonly InstallerTransactionExecutor Executor;
     private readonly InstallationExecutionMaterializer Materializer;
     private readonly IRecoveryPruneFaultInjector RecoveryPruneFaultInjector;
+    private readonly ITransactionProgressSink Progress;
 
     public LinuxInstallerEngine(ITransactionProgressSink? progress = null)
     {
-        this.Executor = new InstallerTransactionExecutor(progress);
-        this.Materializer = new InstallationExecutionMaterializer(this.Executor);
+        this.Progress = new NonThrowingTransactionProgressSink(progress);
+        this.Executor = new InstallerTransactionExecutor(this.Progress);
+        this.Materializer = new InstallationExecutionMaterializer(this.Executor, this.Progress);
         this.RecoveryPruneFaultInjector = NullRecoveryPruneFaultInjector.Instance;
     }
 
     internal LinuxInstallerEngine(
         InstallerTransactionExecutor executor,
-        IRecoveryPruneFaultInjector? recoveryPruneFaultInjector = null
+        IRecoveryPruneFaultInjector? recoveryPruneFaultInjector = null,
+        ITransactionProgressSink? progress = null
     )
     {
         this.Executor = executor ?? throw new ArgumentNullException(nameof(executor));
-        this.Materializer = new InstallationExecutionMaterializer(this.Executor);
+        this.Progress = new NonThrowingTransactionProgressSink(progress);
+        this.Materializer = new InstallationExecutionMaterializer(this.Executor, this.Progress);
         this.RecoveryPruneFaultInjector = recoveryPruneFaultInjector ?? NullRecoveryPruneFaultInjector.Instance;
     }
 
@@ -134,6 +154,7 @@ public sealed class LinuxInstallerEngine
         CancellationToken cancellationToken
     )
     {
+        this.Progress.Report(new(TransactionStage.Inspecting, 0, null));
         cancellationToken.ThrowIfCancellationRequested();
         IVerifiedPackageContentAuthority? packageAuthority = targetPackage;
         ICommittedRecoveryContentAuthority? recoveryAuthority = recovery;
@@ -154,6 +175,7 @@ public sealed class LinuxInstallerEngine
         {
             state.AssertUsable(inspection.Game, inspection.RootIdentity);
             inspection.AssertStable();
+            this.Progress.Report(new(TransactionStage.Inspecting, 1, 1));
             return result;
         }
         catch
@@ -171,6 +193,7 @@ public sealed class LinuxInstallerEngine
     {
         ArgumentNullException.ThrowIfNull(sourceInspection);
         ArgumentNullException.ThrowIfNull(selectedCandidates);
+        this.Progress.Report(new(TransactionStage.Inspecting, 0, null));
         sourceInspection.AssertUsable();
         cancellationToken.ThrowIfCancellationRequested();
         if (sourceInspection.Action != InstallationAction.Repair || sourceInspection.Plan.CanExecute)
@@ -253,6 +276,7 @@ public sealed class LinuxInstallerEngine
             state.AssertUsable(inspection.Game, inspection.RootIdentity);
             inspection.AssertStable();
             sourceInspection.AssertUsable();
+            this.Progress.Report(new(TransactionStage.Inspecting, 1, 1));
             return result;
         }
         catch
@@ -338,6 +362,7 @@ public sealed class LinuxInstallerEngine
         CancellationToken cancellationToken
     )
     {
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 0, null));
         cancellationToken.ThrowIfCancellationRequested();
         using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
@@ -346,11 +371,13 @@ public sealed class LinuxInstallerEngine
             inspection.CanonicalGameRoot,
             inspection.RootIdentity,
             state,
-            cancellationToken
+            cancellationToken,
+            this.Progress
         );
         try
         {
             inspection.AssertStable();
+            this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1));
             return result;
         }
         catch
@@ -374,6 +401,7 @@ public sealed class LinuxInstallerEngine
         CancellationToken cancellationToken
     )
     {
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 0, null));
         cancellationToken.ThrowIfCancellationRequested();
         using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
@@ -383,11 +411,13 @@ public sealed class LinuxInstallerEngine
             inspection.RootIdentity,
             state,
             generationId,
-            cancellationToken
+            cancellationToken,
+            this.Progress
         );
         try
         {
             inspection.AssertStable();
+            this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1));
             return result;
         }
         catch
@@ -406,6 +436,7 @@ public sealed class LinuxInstallerEngine
 
     private RecoveryHistory ListRecoveries(string gameRoot, CancellationToken cancellationToken)
     {
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 0, null));
         cancellationToken.ThrowIfCancellationRequested();
         using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
@@ -414,9 +445,11 @@ public sealed class LinuxInstallerEngine
             inspection.CanonicalGameRoot,
             inspection.RootIdentity,
             state,
-            cancellationToken
+            cancellationToken,
+            this.Progress
         );
         inspection.AssertStable();
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1));
         return result;
     }
 
@@ -437,6 +470,7 @@ public sealed class LinuxInstallerEngine
         CancellationToken cancellationToken
     )
     {
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 0, null));
         cancellationToken.ThrowIfCancellationRequested();
         using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
@@ -446,10 +480,12 @@ public sealed class LinuxInstallerEngine
             inspection.Generation,
             state,
             retainNewest,
-            cancellationToken
+            cancellationToken,
+            this.Progress
         );
         state.AssertUsable(inspection.Game, inspection.RootIdentity);
         inspection.AssertStable();
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1));
         return result;
     }
 
@@ -484,7 +520,8 @@ public sealed class LinuxInstallerEngine
             state,
             plan,
             this.RecoveryPruneFaultInjector,
-            cancellationToken
+            cancellationToken,
+            this.Progress
         );
     }
 
@@ -584,6 +621,10 @@ public sealed class LinuxInstallerEngine
                 targetPackage,
                 recovery,
                 repairCandidateAuthority,
+                request.InstalledReceipt?.Release,
+                GetExpectedResultRelease(request, recovery),
+                request.ObservedState,
+                request.RecoveryCapacity,
                 repairCandidates,
                 approvals
             );
@@ -602,6 +643,10 @@ public sealed class LinuxInstallerEngine
             targetPackage,
             recovery,
             repairCandidateAuthority,
+            request.InstalledReceipt?.Release,
+            GetExpectedResultRelease(request, recovery),
+            request.ObservedState,
+            request.RecoveryCapacity,
             repairCandidates,
             approvals
         );
@@ -629,6 +674,21 @@ public sealed class LinuxInstallerEngine
             null,
             null
         );
+    }
+
+    private static InstallationReleaseIdentity? GetExpectedResultRelease(
+        InstallationPlanningRequest request,
+        ICommittedRecoveryContentAuthority? recovery
+    )
+    {
+        return request.Action switch
+        {
+            InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair => request.TargetManifest?.Release,
+            InstallationAction.Backup => request.InstalledReceipt?.Release,
+            InstallationAction.Uninstall => null,
+            InstallationAction.Rollback => recovery?.RestoreRelease,
+            _ => throw new ArgumentOutOfRangeException(nameof(request))
+        };
     }
 }
 
@@ -675,6 +735,8 @@ internal static class InstallationStateInspector
         );
         InstallationInventory inventory = InstallationInventory.Create(targetManifest, receipt, currentFiles);
         RollbackSnapshot? rollbackSnapshot = recovery?.Snapshot;
+        RecoveryCapacityState recoveryCapacity = CommittedRecoveryHandle.InspectCapacity(game, cancellationToken);
+        ObservedInstallationState observedState = GetObservedState(receipt, inventory, launcher);
 
         InstallationPlanningRequest initial = new(
             action,
@@ -696,7 +758,9 @@ internal static class InstallationStateInspector
                 )
                 : Array.Empty<RecoveryFileObservation>(),
             recovery?.OriginAction,
-            modifiedFileReplacementApprovals
+            modifiedFileReplacementApprovals,
+            recoveryCapacity,
+            observedState
         );
         InstallationPlan plan = new InstallationPlanner().Plan(initial);
         IEnumerable<NormalizedRelativePath> required = action switch
@@ -722,8 +786,36 @@ internal static class InstallationStateInspector
             rollbackSnapshot,
             observations,
             recovery?.OriginAction,
-            modifiedFileReplacementApprovals
+            modifiedFileReplacementApprovals,
+            recoveryCapacity,
+            observedState
         );
+    }
+
+    private static ObservedInstallationState GetObservedState(
+        InstallationReceipt? receipt,
+        InstallationInventory inventory,
+        LauncherState launcher
+    )
+    {
+        if (receipt is null)
+        {
+            bool hasCollision = inventory.Entries.Any(entry =>
+                !entry.Path.Equals(LauncherPath)
+                && entry.Current is not null
+                && entry.Classification is InventoryClassification.Legacy or InventoryClassification.UnknownCollision
+            );
+            return launcher.Classification == LauncherClassification.FreshVanilla && !hasCollision
+                ? ObservedInstallationState.NotInstalled
+                : ObservedInstallationState.Unknown;
+        }
+
+        bool entriesUnmodified = inventory.Entries
+            .Where(entry => entry.Installed is not null)
+            .All(entry => entry.Classification == InventoryClassification.UnchangedOwned);
+        return launcher.Classification == LauncherClassification.InstalledUnchanged && entriesUnmodified
+            ? ObservedInstallationState.KnownUnmodified
+            : ObservedInstallationState.KnownModified;
     }
 
     internal static ModifiedFileReplacementCandidate[] CreateRepairCandidates(

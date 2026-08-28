@@ -621,6 +621,7 @@ public class InstallerExecutionCompilerTests
         public Sha256Digest? PreviousManifestSha256 => this.Snapshot.PreviousReceiptSha256 is null ? null : OwnershipTestData.Digest('a');
         public Sha256Digest? PreviousReceiptSha256 => this.Snapshot.PreviousReceiptSha256;
         public Sha256Digest AuthorizedHeadPointerSha256 => OwnershipTestData.Digest('9');
+        public InstallationReleaseIdentity? RestoreRelease => null;
 
         public FakeRecoveryContentAuthority(RollbackSnapshot snapshot, InstallationAction originAction)
         {

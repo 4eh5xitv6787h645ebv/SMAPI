@@ -130,6 +130,64 @@ public sealed class InstallationExecutionMaterializerTests
     }
 
     [Test]
+    public void Inspection_ExposesAuthenticatedCurrentResultStateAndRecoveryCapacity()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+
+        using (InspectedInstallationState install = this.Inspect(engine, game, InstallationAction.Install, package))
+        {
+            install.CurrentRelease.Should().BeNull();
+            install.ExpectedResultRelease.Should().Be(package.Manifest.Release);
+            install.ObservedState.Should().Be(ObservedInstallationState.NotInstalled);
+            install.RecoveryCapacity.Should().Be(new RecoveryCapacityState(0, 64));
+        }
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+
+        using (InspectedInstallationState backup = engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult())
+        {
+            backup.CurrentRelease.Should().Be(package.Manifest.Release);
+            backup.ExpectedResultRelease.Should().Be(package.Manifest.Release);
+            backup.ObservedState.Should().Be(ObservedInstallationState.KnownUnmodified);
+            backup.RecoveryCapacity.Should().Be(new RecoveryCapacityState(1, 64));
+        }
+
+        Write(game, "StardewModdingAPI.dll", "locally modified", 0x1a4);
+        using InspectedInstallationState repair = this.Inspect(engine, game, InstallationAction.Repair, package);
+        repair.ObservedState.Should().Be(ObservedInstallationState.KnownModified);
+        repair.CurrentRelease.Should().Be(package.Manifest.Release);
+        repair.ExpectedResultRelease.Should().Be(package.Manifest.Release);
+    }
+
+    [Test]
+    public void RecoveryPresentation_ExposesAuthenticatedRestoreRelease()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority first = this.CreatePackage("launcher one", "runtime one");
+        using FilePackageAuthority second = this.CreatePackage("launcher two", "runtime two");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, first), engine);
+        Execute(this.Inspect(engine, game, InstallationAction.Update, second), engine);
+
+        using CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
+        recovery.RestoreRelease.Should().Be(first.Manifest.Release);
+        RecoveryHistory history = engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+        history.Generations[0].RestoreRelease.Should().Be(first.Manifest.Release);
+        history.Generations[1].RestoreRelease.Should().BeNull();
+
+        using InspectedInstallationState rollback = engine.InspectAsync(
+            game,
+            InstallationAction.Rollback,
+            recovery: recovery
+        ).GetAwaiter().GetResult();
+        rollback.CurrentRelease.Should().Be(second.Manifest.Release);
+        rollback.ExpectedResultRelease.Should().Be(first.Manifest.Release);
+    }
+
+    [Test]
     public void Apply_SelectedBackupAfterUpdate_RestoresCheckpointAndOwnershipTuple()
     {
         string game = this.CreateDirectory();
@@ -183,7 +241,7 @@ public sealed class InstallationExecutionMaterializerTests
     }
 
     [Test]
-    public void Execute_FullRecoveryStoreRejectsBeforeGameMutation()
+    public void Inspect_FullRecoveryStoreBlocksBeforeConfirmationAndGameMutation()
     {
         string game = this.CreateDirectory();
         Write(game, "StardewValley", "vanilla launcher", 0x1ed);
@@ -198,10 +256,12 @@ public sealed class InstallationExecutionMaterializerTests
             File.SetUnixFileMode(generation, (UnixFileMode)0x1c0);
         }
         using InspectedInstallationState inspection = engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult();
+        inspection.Plan.CanExecute.Should().BeFalse();
+        inspection.Plan.Conflicts.Should().ContainSingle(conflict => conflict.Code == PlanConflictCode.RecoveryCapacityReached);
 
         Action execute = () => engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult();
 
-        execute.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.WorkspaceConflict);
+        execute.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.NonExecutablePlan);
         File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("launcher one");
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime one");
         using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
@@ -300,6 +360,12 @@ public sealed class InstallationExecutionMaterializerTests
         full.Generations.Should().HaveCount(64);
         full.Generations[0].IsCurrent.Should().BeTrue();
         full.Generations.Skip(1).Should().OnlyContain(item => !item.IsCurrent);
+        using (InspectedInstallationState blocked = engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult())
+        {
+            blocked.RecoveryCapacity.Should().Be(new RecoveryCapacityState(64, 64));
+            blocked.Plan.CanExecute.Should().BeFalse();
+            blocked.Plan.Conflicts.Should().ContainSingle(conflict => conflict.Code == PlanConflictCode.RecoveryCapacityReached);
+        }
 
         RecoveryPrunePlan prune = engine.InspectRecoveryPruneAsync(game, 8).GetAwaiter().GetResult();
         prune.OrderedCatalogGenerationIds.Should().Equal(full.Generations.Select(item => item.GenerationId));
@@ -312,8 +378,36 @@ public sealed class InstallationExecutionMaterializerTests
             full.Generations.Take(8).Select(item => item.GenerationId)
         );
 
+        using (InspectedInstallationState available = engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult())
+            available.RecoveryCapacity.Should().Be(new RecoveryCapacityState(8, 64));
         Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
         engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(9);
+    }
+
+    [Test]
+    public void EngineProgress_CoversInspectionPreparationAndRecoveryAndIsFaultIsolated()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        RecordingProgress progress = new();
+        LinuxInstallerEngine engine = new(progress);
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+        _ = engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+
+        progress.Items.Should().Contain(item => item.Stage == TransactionStage.Inspecting);
+        progress.Items.Should().Contain(item => item.Stage == TransactionStage.VerifyingRecovery && item.TotalOperations == null);
+        progress.Items.Should().Contain(item => item.Stage == TransactionStage.PreparingRecovery && item.TotalOperations == null);
+        progress.Items.Should().Contain(item => item.Stage == TransactionStage.PreparingPayload && item.TotalOperations == null);
+        progress.Items.Should().OnlyContain(item => item.CompletedOperations >= 0);
+
+        LinuxInstallerEngine throwing = new(new ThrowingProgress());
+        using InspectedInstallationState retry = throwing.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult();
+        Action execute = () => throwing.ExecuteAsync(retry, retry.ConfirmationDigest).GetAwaiter().GetResult();
+        execute.Should().NotThrow();
+        Action list = () => throwing.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+        list.Should().NotThrow();
     }
 
     [Test]
@@ -727,6 +821,17 @@ public sealed class InstallationExecutionMaterializerTests
         public void AssertUsable() => this.Payload.GetCurrentRootIdentity().Should().Be(this.Payload.Identity);
 
         public void Dispose() => this.Payload.Dispose();
+    }
+
+    private sealed class RecordingProgress : ITransactionProgressSink
+    {
+        public List<TransactionProgress> Items { get; } = new();
+        public void Report(TransactionProgress progress) => this.Items.Add(progress);
+    }
+
+    private sealed class ThrowingProgress : ITransactionProgressSink
+    {
+        public void Report(TransactionProgress progress) => throw new InvalidOperationException("observer failure");
     }
 
     private sealed class CallbackFaultInjector : ITransactionFaultInjector

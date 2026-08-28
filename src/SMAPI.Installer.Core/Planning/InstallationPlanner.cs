@@ -39,7 +39,10 @@ internal sealed class InstallationPlanner
                 throw new ArgumentOutOfRangeException(nameof(request));
         }
 
-        return new InstallationPlan(request.Action, operations, conflicts);
+        if (!request.RecoveryCapacity.CanCreateGeneration)
+            conflicts.Add(new PlanConflict(PlanConflictCode.RecoveryCapacityReached));
+
+        return new InstallationPlan(request.Action, operations, conflicts, request.ObservedState, request.RecoveryCapacity);
     }
 
     private void PlanInstall(InstallationPlanningRequest request, List<PlannedOperation> operations, List<PlanConflict> conflicts)

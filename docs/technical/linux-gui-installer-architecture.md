@@ -55,11 +55,11 @@ Only absent and unchanged receipt-owned entries are safe to replace automaticall
 
 ### Deterministic planning
 
-`CreatePlan` is read-only and produces a stable ordered list of creates, replacements, removals, preserved paths, conflicts, warnings, required backup bytes, and the expected final receipt. Plans distinguish install, update, repair, uninstall, create-backup, and rollback. Legacy app-data migration is a separate planned action and never an uninstall side effect.
+`CreatePlan` is read-only and produces a stable ordered list of creates, replacements, removals, preserved paths, conflicts, the core-authenticated current and expected-result release, an observed-state classification, and exact recovery capacity. Plans distinguish install, update, repair, uninstall, create-backup, and rollback. A full recovery store blocks before confirmation with a stable prune-required conflict. Legacy app-data migration is a separate planned action and never an uninstall side effect.
 
 Both frontends display the same immutable plan identifier. The executor refuses a stale plan when the game root, package identity, inventory fingerprints, or lock generation changed after planning.
 
-Verified package content and committed recovery handles are caller-owned live authorities. Inspections and execution borrow them without taking ownership: the caller keeps each required handle alive until approval or execution completes, may retain it for a safe retry, and disposes it explicitly afterward. Disposing an inspection invalidates its plan and repair candidates only; success, failure, and cancellation never implicitly dispose either borrowed authority.
+Verified package content and committed recovery handles are caller-owned live authorities. Inspections and execution borrow them without taking ownership: the caller keeps each required handle alive until approval or execution completes, may retain it for a safe retry, and disposes it explicitly afterward. Disposing an inspection invalidates its plan and repair candidates only; success, failure, and cancellation never implicitly dispose either borrowed authority. Recovery catalogs and handles expose the authenticated release restored by each generation, including an explicit uninstalled result, so frontends never parse private receipt state or infer a rollback target.
 
 ### Transaction and recovery
 
@@ -80,7 +80,7 @@ Linux operations are anchored to the canonical game directory and use no-follow 
 
 A recovery backup contains only entries the installer will change, their content/mode/identity, launcher state, configuration, and receipt. Its canonical snapshot binds both sides of the receipt transition: the receipt expected after the completed operation and the exact prior receipt to restore (either may be absent). This makes install, update/repair, and uninstall rollback restore ownership state in the same transaction as game files instead of inferring or discarding it. It excludes custom mods, saves, logs, and health reports. Authoritative recovery generations live under the game-local private `0700` `.smapi-installer` state so publication, game-file changes, receipt changes, and crash recovery stay on one filesystem; files are private `0600`, history depth and bytes are bounded, and nothing is uploaded. An optional future XDG export may copy an authenticated checkpoint for portability, but cannot become installation authority without a fresh verified import. Destructive tail pruning requires an exact reviewed head digest and explicit confirmation.
 
-Cancellation is accepted during download, verification, inventory, planning, and staging. Once the short commit begins, the frontend reports “Finishing safely” and waits for commit or recovery rather than promising immediate cancellation.
+Cancellation is accepted during download, verification, inventory, planning, and staging. Fault-isolated progress covers inspection, recovery verification, recovery preparation, payload preparation, transaction staging, revalidation, apply, verification, commit, and rollback; indeterminate updates precede potentially large single-file work instead of claiming byte precision the core doesn't have. Once the short commit begins, the frontend reports “Finishing safely” and waits for commit or recovery rather than promising immediate cancellation.
 
 ## GUI interaction model
 

@@ -11,13 +11,17 @@ namespace StardewModdingAPI.Installer.Core.Engine;
 internal sealed class InstallationExecutionMaterializer
 {
     private const int PrivateFileMode = 0x180;
-    private const int MaximumRetainedRecoveryGenerations = 64;
     private const long MaximumStagedBytes = 8L * 1024 * 1024 * 1024;
     private readonly InstallerTransactionExecutor Executor;
+    private readonly ITransactionProgressSink Progress;
 
-    public InstallationExecutionMaterializer(InstallerTransactionExecutor? executor = null)
+    public InstallationExecutionMaterializer(
+        InstallerTransactionExecutor? executor = null,
+        ITransactionProgressSink? progress = null
+    )
     {
         this.Executor = executor ?? new InstallerTransactionExecutor();
+        this.Progress = new NonThrowingTransactionProgressSink(progress);
     }
 
     public TransactionResult Apply(
@@ -34,12 +38,17 @@ internal sealed class InstallationExecutionMaterializer
         BoundInstallationPlan binding = preparation.Binding;
         lease.AssertRootAndGeneration(binding.GameRoot, binding.OperationGeneration);
         currentState.AssertUsable(lease);
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 0, 1));
         CommittedRecoveryHandle.AssertAuthenticatedHistory(lease, currentState, cancellationToken);
+        this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1));
         AssertCurrentState(binding, currentState);
-        AssertRecoveryGenerationCapacity(lease.Game);
+        if (!CommittedRecoveryHandle.InspectCapacity(lease.Game, cancellationToken).CanCreateGeneration)
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The bounded recovery-generation store is full; remove an older checkpoint before continuing.");
         RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot
             ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "Every executable action must produce a recovery generation.");
+        this.Progress.Report(new(TransactionStage.PreparingPayload, 0, null));
         AssertAllInstructionPreconditions(lease.Game, preparation.Instructions, cancellationToken);
+        this.Progress.Report(new(TransactionStage.PreparingRecovery, 0, null));
         AssertRecoveryBindings(lease.Game, recovery.PathBindings, cancellationToken);
 
         string stagingRoot = PrivatePackageStaging.CreateDirectory();
@@ -48,6 +57,7 @@ internal sealed class InstallationExecutionMaterializer
         {
             payload = new LinuxAnchoredFileSystem(stagingRoot);
             StagingContext staging = new(payload, cancellationToken);
+            this.Progress.Report(new(TransactionStage.PreparingRecovery, 0, null));
             List<TransactionFileOperation> recoveryOperations = this.StageRecoveryGeneration(
                 lease,
                 preparation,
@@ -56,12 +66,15 @@ internal sealed class InstallationExecutionMaterializer
                 staging,
                 cancellationToken
             );
+            this.Progress.Report(new(TransactionStage.PreparingRecovery, 1, 1));
+            this.Progress.Report(new(TransactionStage.PreparingPayload, 0, null));
             List<TransactionFileOperation> ordinaryOperations = this.StageOrdinaryOperations(
                 lease,
                 preparation.Instructions,
                 staging,
                 cancellationToken
             );
+            this.Progress.Report(new(TransactionStage.PreparingPayload, 1, 1));
             TransactionFileOperation? manifestOperation = this.StageManifestOperation(preparation.Manifest, staging);
             TransactionFileOperation? receiptOperation = this.StageReceiptOperation(preparation.Receipt, staging);
 
@@ -143,36 +156,6 @@ internal sealed class InstallationExecutionMaterializer
         }
     }
 
-    private static void AssertRecoveryGenerationCapacity(LinuxAnchoredFileSystem game)
-    {
-        const string generationsPath = ".smapi-installer/recovery/generations";
-        LinuxFileIdentity? identity = game.Stat(generationsPath);
-        if (identity is null)
-            return;
-        if (identity.Kind != LinuxAnchoredEntryKind.Directory || identity.UnixMode != 0x1c0)
-            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store has unsafe metadata.");
-        using LinuxAnchoredFileSystem generations = game.OpenSubdirectory(generationsPath);
-        IReadOnlyList<string> names;
-        try
-        {
-            names = generations.EnumerateEntryNames(maximumEntries: MaximumRetainedRecoveryGenerations);
-        }
-        catch (IOException exception)
-        {
-            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The bounded recovery-generation store is full or unsafe.", exception);
-        }
-        if (names.Count >= MaximumRetainedRecoveryGenerations)
-            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The bounded recovery-generation store is full; remove an older checkpoint before continuing.");
-        foreach (string name in names)
-        {
-            if (!Guid.TryParseExact(name, "N", out Guid generationId) || generationId == Guid.Empty)
-                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store contains an unknown entry.");
-            LinuxFileIdentity? generation = generations.Stat(name);
-            if (generation?.Kind != LinuxAnchoredEntryKind.Directory || generation.UnixMode != 0x1c0)
-                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store contains an unsafe entry.");
-        }
-    }
-
     private List<TransactionFileOperation> StageRecoveryGeneration(
         InstallerOperationLease lease,
         InstallationExecutionPreparation preparation,
@@ -224,9 +207,11 @@ internal sealed class InstallationExecutionMaterializer
         }
 
         int contentIndex = 0;
-        foreach (RecoveryPathBinding pathBinding in recovery.PathBindings.Where(binding => binding.RequiresContentCapture))
+        RecoveryPathBinding[] captures = recovery.PathBindings.Where(binding => binding.RequiresContentCapture).ToArray();
+        foreach (RecoveryPathBinding pathBinding in captures)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            this.Progress.Report(new(TransactionStage.PreparingRecovery, contentIndex, null));
             RecoveryFileIdentity identity = pathBinding.PriorIdentity
                 ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "A recovery capture path has no prior identity.");
             using LinuxAnchoredFile source = lease.Game.OpenRegularFileForRead(pathBinding.Path.Value);
@@ -240,6 +225,7 @@ internal sealed class InstallationExecutionMaterializer
                 PrivateFileMode
             ));
             contentIndex++;
+            this.Progress.Report(new(TransactionStage.PreparingRecovery, contentIndex, captures.Length));
         }
         return operations;
     }
@@ -252,9 +238,12 @@ internal sealed class InstallationExecutionMaterializer
     )
     {
         List<TransactionFileOperation> operations = new();
-        foreach (FilePreparationInstruction instruction in instructions.Where(instruction => instruction.IsTransactionDestination))
+        FilePreparationInstruction[] destinations = instructions.Where(instruction => instruction.IsTransactionDestination).ToArray();
+        for (int index = 0; index < destinations.Length; index++)
         {
+            FilePreparationInstruction instruction = destinations[index];
             cancellationToken.ThrowIfCancellationRequested();
+            this.Progress.Report(new(TransactionStage.PreparingPayload, index, null));
             if (instruction.Kind == PreparationInstructionKind.RemoveTransactionDestination)
             {
                 operations.Add(new TransactionFileOperation(
@@ -263,6 +252,7 @@ internal sealed class InstallationExecutionMaterializer
                     instruction.ExpectedCurrentSha256?.Value,
                     ExpectedExistingUnixMode: instruction.ExpectedCurrentIdentity?.UnixMode
                 ));
+                this.Progress.Report(new(TransactionStage.PreparingPayload, index + 1, destinations.Length));
                 continue;
             }
             if (
@@ -291,6 +281,7 @@ internal sealed class InstallationExecutionMaterializer
                 instruction.ResultUnixMode.Value,
                 instruction.ExpectedCurrentIdentity?.UnixMode
             ));
+            this.Progress.Report(new(TransactionStage.PreparingPayload, index + 1, destinations.Length));
         }
         return operations;
     }

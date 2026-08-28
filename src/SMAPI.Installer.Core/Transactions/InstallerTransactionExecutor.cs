@@ -42,7 +42,6 @@ internal sealed class InstallerTransactionExecutor
 
         this.Progress.Report(new(TransactionStage.Recovering, 0, plan.Operations.Count));
         this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
-        lease.ReserveNextGeneration(lease.Generation);
         return this.ApplyLockedCore(lease, payload, plan, cancellationToken);
     }
 
@@ -77,7 +76,6 @@ internal sealed class InstallerTransactionExecutor
             );
         }
         lease.AssertRootAndGeneration(expectedRoot, expectedGeneration);
-        lease.ReserveNextGeneration(expectedGeneration);
         return this.ApplyLockedCore(lease, payload, plan, cancellationToken);
     }
 
@@ -148,6 +146,7 @@ internal sealed class InstallerTransactionExecutor
             cancellationToken.ThrowIfCancellationRequested();
             this.RevalidateAll(game, plan, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
+            lease.ReserveNextGeneration(lease.Generation);
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Applying);
             replay = this.ApplyMutations(game, transaction, plan, journal, replay, eventsFile);
 

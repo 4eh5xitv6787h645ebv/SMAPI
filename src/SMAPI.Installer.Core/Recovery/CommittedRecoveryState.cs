@@ -633,7 +633,8 @@ public sealed record RecoveryGenerationInfo(
     Guid GenerationId,
     InstallationAction Action,
     bool IsCurrent,
-    bool IsUserCheckpoint
+    bool IsUserCheckpoint,
+    InstallationReleaseIdentity? RestoreRelease
 );
 
 /// <summary>A bounded recovery catalog tied to the exact current pointer the user reviewed.</summary>
@@ -824,6 +825,8 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
 
     /// <summary>The canonical rollback snapshot digest.</summary>
     public Sha256Digest SnapshotSha256 => this.Pointer.SnapshotSha256;
+    /// <summary>The authenticated installed release restored by this generation, or <see langword="null"/> for an uninstalled result.</summary>
+    public InstallationReleaseIdentity? RestoreRelease { get; }
     internal Sha256Digest? PreviousManifestSha256 => this.Pointer.PreviousManifestSha256;
     internal Sha256Digest? PreviousReceiptSha256 => this.Pointer.PreviousReceiptSha256;
 
@@ -834,6 +837,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
     Sha256Digest? ICommittedRecoveryContentAuthority.PreviousManifestSha256 => this.PreviousManifestSha256;
     Sha256Digest? ICommittedRecoveryContentAuthority.PreviousReceiptSha256 => this.PreviousReceiptSha256;
     Sha256Digest ICommittedRecoveryContentAuthority.AuthorizedHeadPointerSha256 => this.AuthorizedHeadPointerSha256;
+    InstallationReleaseIdentity? ICommittedRecoveryContentAuthority.RestoreRelease => this.RestoreRelease;
 
     private CommittedRecoveryHandle(
         GameRootIdentity gameRoot,
@@ -846,7 +850,8 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         Dictionary<string, RecoveryContentBinding> gameFiles,
         LinuxFileIdentity? previousReceiptIdentity,
         LinuxFileIdentity? previousManifestIdentity,
-        Sha256Digest authorizedHeadPointerSha256
+        Sha256Digest authorizedHeadPointerSha256,
+        InstallationReleaseIdentity? restoreRelease
     )
     {
         this.GameRoot = gameRoot;
@@ -861,6 +866,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         this.PreviousReceiptIdentity = previousReceiptIdentity;
         this.PreviousManifestIdentity = previousManifestIdentity;
         this.AuthorizedHeadPointerSha256 = authorizedHeadPointerSha256;
+        this.RestoreRelease = restoreRelease;
     }
 
     internal static CommittedRecoveryHandle OpenCurrent(
@@ -874,9 +880,11 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         string canonicalGameRoot,
         GameRootIdentity gameRoot,
         AnchoredCoreStateAuthority currentState,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        ITransactionProgressSink? progress = null
     )
     {
+        ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         ArgumentNullException.ThrowIfNull(game);
         if (string.IsNullOrWhiteSpace(canonicalGameRoot))
             throw new ArgumentException("A canonical game root is required.", nameof(canonicalGameRoot));
@@ -885,8 +893,15 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         currentState.AssertUsable(game, gameRoot);
         CommittedRecoveryPointer pointer = currentState.Pointer
             ?? throw new OwnershipDocumentException("There is no committed recovery generation to open.");
-        return Open(game, canonicalGameRoot, gameRoot, pointer, currentState.PointerSha256
-            ?? throw new OwnershipDocumentException("The current recovery pointer digest is unavailable."), cancellationToken);
+        return Open(
+            game,
+            canonicalGameRoot,
+            gameRoot,
+            pointer,
+            currentState.PointerSha256 ?? throw new OwnershipDocumentException("The current recovery pointer digest is unavailable."),
+            cancellationToken,
+            safeProgress
+        );
     }
 
     internal static CommittedRecoveryHandle OpenSelected(
@@ -902,9 +917,11 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         GameRootIdentity gameRoot,
         AnchoredCoreStateAuthority currentState,
         Guid generationId,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        ITransactionProgressSink? progress = null
     )
     {
+        ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         ArgumentNullException.ThrowIfNull(game);
         if (string.IsNullOrWhiteSpace(canonicalGameRoot))
             throw new ArgumentException("A canonical game root is required.", nameof(canonicalGameRoot));
@@ -918,7 +935,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         CommittedRecoveryPointer pointer = ReadHistoryState(game, currentState, cancellationToken).Chain
             .SingleOrDefault(item => item.GenerationId == generationId)
             ?? throw new OwnershipDocumentException("The selected recovery generation isn't present in the retained authenticated history.");
-        return Open(game, canonicalGameRoot, gameRoot, pointer, headDigest, cancellationToken);
+        return Open(game, canonicalGameRoot, gameRoot, pointer, headDigest, cancellationToken, safeProgress);
     }
 
     internal static RecoveryHistory ListHistory(
@@ -926,25 +943,31 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         string canonicalGameRoot,
         GameRootIdentity gameRoot,
         AnchoredCoreStateAuthority currentState,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        ITransactionProgressSink? progress = null
     )
     {
+        ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         currentState.AssertUsable(game, gameRoot);
         Sha256Digest headDigest = currentState.PointerSha256
             ?? throw new OwnershipDocumentException("There is no committed recovery history to list.");
         IReadOnlyList<CommittedRecoveryPointer> chain = ReadHistoryState(game, currentState, cancellationToken).Chain;
         List<RecoveryGenerationInfo> items = new(chain.Count);
+        safeProgress.Report(new(TransactionStage.VerifyingRecovery, 0, chain.Count));
         for (int index = 0; index < chain.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             CommittedRecoveryPointer pointer = chain[index];
-            using CommittedRecoveryHandle verified = Open(game, canonicalGameRoot, gameRoot, pointer, headDigest, cancellationToken);
+            safeProgress.Report(new(TransactionStage.VerifyingRecovery, index, null));
+            using CommittedRecoveryHandle verified = Open(game, canonicalGameRoot, gameRoot, pointer, headDigest, cancellationToken, safeProgress);
             items.Add(new RecoveryGenerationInfo(
                 pointer.GenerationId,
                 pointer.Action,
                 index == 0,
-                pointer.Action == InstallationAction.Backup
+                pointer.Action == InstallationAction.Backup,
+                verified.RestoreRelease
             ));
+            safeProgress.Report(new(TransactionStage.VerifyingRecovery, index + 1, chain.Count));
         }
         return new RecoveryHistory(headDigest, items);
     }
@@ -962,15 +985,51 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             _ = ReadHistoryState(lease.Game, currentState, cancellationToken);
     }
 
+    internal static RecoveryCapacityState InspectCapacity(
+        LinuxAnchoredFileSystem game,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(game);
+        const string generationsPath = ".smapi-installer/recovery/generations";
+        LinuxFileIdentity? identity = game.Stat(generationsPath);
+        if (identity is null)
+            return new RecoveryCapacityState(0, MaximumRecoveryChainDepth);
+        if (identity.Kind != LinuxAnchoredEntryKind.Directory || identity.UnixMode != PrivateDirectoryMode)
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store has unsafe metadata.");
+        using LinuxAnchoredFileSystem generations = game.OpenSubdirectory(generationsPath);
+        IReadOnlyList<string> names;
+        try
+        {
+            names = generations.EnumerateEntryNames(maximumEntries: MaximumRecoveryChainDepth);
+        }
+        catch (IOException exception)
+        {
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The bounded recovery-generation store is full or unsafe.", exception);
+        }
+        foreach (string name in names)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Guid.TryParseExact(name, "N", out Guid generationId) || generationId == Guid.Empty)
+                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store contains an unknown entry.");
+            LinuxFileIdentity? generation = generations.Stat(name);
+            if (generation?.Kind != LinuxAnchoredEntryKind.Directory || generation.UnixMode != PrivateDirectoryMode)
+                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store contains an unsafe entry.");
+        }
+        return new RecoveryCapacityState(names.Count, MaximumRecoveryChainDepth);
+    }
+
     internal static RecoveryPrunePlan CreatePrunePlan(
         LinuxAnchoredFileSystem game,
         GameRootIdentity gameRoot,
         ulong operationGeneration,
         AnchoredCoreStateAuthority currentState,
         int retainNewest,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        ITransactionProgressSink? progress = null
     )
     {
+        ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         if (retainNewest < 1 || retainNewest > MaximumRecoveryChainDepth)
             throw new ArgumentOutOfRangeException(nameof(retainNewest), $"Retention must be between 1 and {MaximumRecoveryChainDepth} generations.");
         currentState.AssertUsable(game, gameRoot);
@@ -982,17 +1041,23 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         Guid[] retained = catalog.Take(retainedCount).ToArray();
         Guid[] newlyRemoved = catalog.Skip(retainedCount).ToArray();
         HashSet<Guid> physical = ReadPhysicalGenerationIds(game, cancellationToken);
+        safeProgress.Report(new(TransactionStage.VerifyingRecovery, 0, state.Chain.Count));
+        int verifiedCount = 0;
         foreach (CommittedRecoveryPointer pointer in state.Chain)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            safeProgress.Report(new(TransactionStage.VerifyingRecovery, verifiedCount, null));
             using CommittedRecoveryHandle verified = Open(
                 game,
                 gameRoot.CanonicalPath,
                 gameRoot,
                 pointer,
                 headDigest,
-                cancellationToken
+                cancellationToken,
+                safeProgress
             );
+            verifiedCount++;
+            safeProgress.Report(new(TransactionStage.VerifyingRecovery, verifiedCount, state.Chain.Count));
         }
         if (state.Retention is not null)
             VerifyPendingRemovedGenerations(game, state, physical, cancellationToken);
@@ -1050,10 +1115,12 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         AnchoredCoreStateAuthority currentState,
         RecoveryPrunePlan plan,
         IRecoveryPruneFaultInjector? faultInjector = null,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        ITransactionProgressSink? progress = null
     )
     {
         ArgumentNullException.ThrowIfNull(plan);
+        ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         faultInjector ??= NullRecoveryPruneFaultInjector.Instance;
         lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
         currentState.AssertUsable(lease);
@@ -1063,7 +1130,8 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             lease.Generation,
             currentState,
             plan.RetainNewest,
-            cancellationToken
+            cancellationToken,
+            safeProgress
         );
         if (exact.ConfirmationDigest != plan.ConfirmationDigest)
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The exact recovery history changed after prune inspection.");
@@ -1587,9 +1655,11 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         GameRootIdentity gameRoot,
         CommittedRecoveryPointer pointer,
         Sha256Digest authorizedHeadPointerSha256,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        ITransactionProgressSink? progress = null
     )
     {
+        ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         string generationPath = $".smapi-installer/recovery/generations/{pointer.GenerationId:N}";
         LinuxAnchoredFileSystem namedGameRoot = new(canonicalGameRoot);
         LinuxAnchoredFileSystem? generation = null;
@@ -1669,9 +1739,14 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             Dictionary<string, RecoveryContentBinding> gameFiles = new(StringComparer.Ordinal);
             int contentIndex = 0;
             long contentBytes = 0;
-            foreach (RollbackSnapshotEntry entry in snapshot.Entries.Where(entry => entry.Kind == RollbackEntryKind.Restore))
+            RollbackSnapshotEntry[] restoreEntries = snapshot.Entries
+                .Where(entry => entry.Kind == RollbackEntryKind.Restore)
+                .ToArray();
+            safeProgress.Report(new(TransactionStage.VerifyingRecovery, 0, restoreEntries.Length));
+            foreach (RollbackSnapshotEntry entry in restoreEntries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                safeProgress.Report(new(TransactionStage.VerifyingRecovery, contentIndex, null));
                 try
                 {
                     contentBytes = checked(contentBytes + entry.Backup!.SizeBytes);
@@ -1687,6 +1762,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                 AssertContentIdentity(generation, file, entry.Backup, cancellationToken);
                 gameFiles.Add(entry.Path.Value, new RecoveryContentBinding(name, file.Identity, entry.Backup!));
                 contentIndex++;
+                safeProgress.Report(new(TransactionStage.VerifyingRecovery, contentIndex, restoreEntries.Length));
             }
 
             HashSet<string> expectedNames = new(StringComparer.Ordinal) { "snapshot.json" };
@@ -1719,7 +1795,8 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                 gameFiles,
                 previousReceiptIdentity,
                 previousManifestIdentity,
-                authorizedHeadPointerSha256
+                authorizedHeadPointerSha256,
+                previousReceiptModel?.Release
             );
             namedGameRoot = null!;
             generation = null!;

@@ -143,6 +143,7 @@ internal interface ICommittedRecoveryContentAuthority
     Sha256Digest? PreviousManifestSha256 { get; }
     Sha256Digest? PreviousReceiptSha256 { get; }
     Sha256Digest AuthorizedHeadPointerSha256 { get; }
+    InstallationReleaseIdentity? RestoreRelease { get; }
     LinuxAnchoredFile OpenGameFile(NormalizedRelativePath path, RecoveryFileIdentity expectedIdentity);
     LinuxAnchoredFile OpenPreviousReceipt(Sha256Digest expectedSha256);
     LinuxAnchoredFile OpenPreviousManifest(Sha256Digest expectedSha256);

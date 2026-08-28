@@ -47,7 +47,39 @@ public enum PlanConflictCode
     MissingOriginalLauncherBackup,
     RollbackSnapshotRequired,
     RollbackReceiptMismatch,
-    RollbackDrift
+    RollbackDrift,
+    RecoveryCapacityReached
+}
+
+/// <summary>A bounded, core-derived summary of the selected game's installed state.</summary>
+public enum ObservedInstallationState
+{
+    NotInstalled,
+    KnownUnmodified,
+    KnownModified,
+    LegacyOrOfficial,
+    Unknown
+}
+
+/// <summary>The exact physical recovery-generation capacity observed while an installation plan was created.</summary>
+public sealed record RecoveryCapacityState
+{
+    /// <summary>The physical generation directories currently consuming bounded capacity, including pending authenticated cleanup.</summary>
+    public int UsedGenerationCount { get; }
+    /// <summary>The maximum physical generation count accepted by the core.</summary>
+    public int MaximumGenerationCount { get; }
+    /// <summary>The remaining physical generation slots.</summary>
+    public int RemainingGenerationCount => this.MaximumGenerationCount - this.UsedGenerationCount;
+    /// <summary>Whether one new recovery generation can be committed without pruning.</summary>
+    public bool CanCreateGeneration => this.UsedGenerationCount < this.MaximumGenerationCount;
+
+    internal RecoveryCapacityState(int usedGenerationCount, int maximumGenerationCount)
+    {
+        if (usedGenerationCount < 0 || maximumGenerationCount <= 0 || usedGenerationCount > maximumGenerationCount)
+            throw new ArgumentOutOfRangeException(nameof(usedGenerationCount));
+        this.UsedGenerationCount = usedGenerationCount;
+        this.MaximumGenerationCount = maximumGenerationCount;
+    }
 }
 
 /// <summary>One deterministically ordered planned operation.</summary>
@@ -151,11 +183,15 @@ public sealed class InstallationPlan
     public IReadOnlyList<PlannedOperation> Operations { get; }
     public IReadOnlyList<PlanConflict> Conflicts { get; }
     public bool CanExecute => this.Conflicts.Count == 0;
+    public ObservedInstallationState ObservedState { get; }
+    public RecoveryCapacityState RecoveryCapacity { get; }
 
     internal InstallationPlan(
         InstallationAction action,
         IEnumerable<PlannedOperation> operations,
-        IEnumerable<PlanConflict> conflicts
+        IEnumerable<PlanConflict> conflicts,
+        ObservedInstallationState observedState = ObservedInstallationState.Unknown,
+        RecoveryCapacityState? recoveryCapacity = null
     )
     {
         PlannedOperation[] orderedOperations = operations
@@ -172,6 +208,8 @@ public sealed class InstallationPlan
         this.Action = action;
         this.Operations = new ReadOnlyCollection<PlannedOperation>(orderedOperations);
         this.Conflicts = new ReadOnlyCollection<PlanConflict>(orderedConflicts);
+        this.ObservedState = observedState;
+        this.RecoveryCapacity = recoveryCapacity ?? new RecoveryCapacityState(0, int.MaxValue);
     }
 
     /// <summary>Serialize the plan with canonical property and item ordering.</summary>
@@ -186,6 +224,11 @@ public sealed class InstallationPlan
             writer.WriteStartObject();
             writer.WriteString("action", GetActionName(this.Action));
             writer.WriteBoolean("can_execute", this.CanExecute);
+            writer.WriteString("observed_state", this.ObservedState.ToString().ToLowerInvariant());
+            writer.WriteStartObject("recovery_capacity");
+            writer.WriteNumber("used_generation_count", this.RecoveryCapacity.UsedGenerationCount);
+            writer.WriteNumber("maximum_generation_count", this.RecoveryCapacity.MaximumGenerationCount);
+            writer.WriteEndObject();
             writer.WriteStartArray("operations");
             foreach (PlannedOperation operation in this.Operations)
             {
@@ -470,6 +513,8 @@ internal sealed class InstallationPlanningRequest
     public InstallationAction? RollbackOriginAction { get; }
     public IReadOnlyList<ModifiedFileReplacementApproval> ModifiedFileReplacementApprovals { get; }
     public IReadOnlyList<RecoveryFileObservation> RecoveryObservations { get; }
+    public RecoveryCapacityState RecoveryCapacity { get; }
+    public ObservedInstallationState ObservedState { get; }
 
     internal InstallationPlanningRequest(
         InstallationAction action,
@@ -480,7 +525,9 @@ internal sealed class InstallationPlanningRequest
         RollbackSnapshot? rollbackSnapshot = null,
         IEnumerable<RecoveryFileObservation>? recoveryObservations = null,
         InstallationAction? rollbackOriginAction = null,
-        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null,
+        RecoveryCapacityState? recoveryCapacity = null,
+        ObservedInstallationState observedState = ObservedInstallationState.Unknown
     )
     {
         ArgumentNullException.ThrowIfNull(inventory);
@@ -492,6 +539,8 @@ internal sealed class InstallationPlanningRequest
         this.Launcher = launcher;
         this.RollbackSnapshot = rollbackSnapshot;
         this.RollbackOriginAction = rollbackOriginAction;
+        this.RecoveryCapacity = recoveryCapacity ?? new RecoveryCapacityState(0, int.MaxValue);
+        this.ObservedState = observedState;
         ModifiedFileReplacementApproval[] approvals = (modifiedFileReplacementApprovals ?? Array.Empty<ModifiedFileReplacementApproval>())
             .OrderBy(approval => approval.Path.Value, StringComparer.Ordinal)
             .ToArray();

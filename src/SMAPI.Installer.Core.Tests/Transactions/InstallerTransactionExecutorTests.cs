@@ -426,7 +426,11 @@ public sealed class InstallerTransactionExecutorTests
         new InstallerTransactionExecutor(progress).Apply(game, payload, plan);
 
         progress.Items.Should().NotBeEmpty();
-        progress.Items.Should().OnlyContain(item => item.CompletedOperations >= 0 && item.CompletedOperations <= item.TotalOperations && item.TotalOperations == 1);
+        progress.Items.Should().OnlyContain(item =>
+            item.CompletedOperations >= 0
+            && item.TotalOperations == 1
+            && item.CompletedOperations <= item.TotalOperations.Value
+        );
         progress.Items.Last().Should().Be(new TransactionProgress(TransactionStage.Completed, 1, 1));
         progress.Items.Where(item => item.Stage is TransactionStage.Staging or TransactionStage.Revalidating)
             .Should().OnlyContain(item => item.CanCancel);
