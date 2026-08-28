@@ -282,6 +282,11 @@ internal class InteractiveInstaller
             this.AwaitConfirmation(allowUserInput);
             return false;
         }
+
+        // Don't scan, delete, or copy through a linked Mods directory. A linked game directory
+        // itself is allowed because that's the root the user selected, but links below it can
+        // redirect installer writes into unrelated locations.
+        this.AssertPathIsConfined(paths.ModsPath, paths.GamePath, allowFinalLink: false);
         Console.Clear();
 
 
@@ -400,7 +405,7 @@ internal class InteractiveInstaller
                         continue;
 
                     this.InteractivelyDelete(Path.Combine(paths.GameDir.FullName, sourceEntry.Name), allowUserInput, paths.GamePath);
-                    this.RecursiveCopy(sourceEntry, paths.GameDir);
+                    this.RecursiveCopy(sourceEntry, paths.GameDir, paths.GamePath);
                 }
 
                 // replace mod launcher (if possible)
@@ -535,7 +540,7 @@ internal class InteractiveInstaller
                             }
 
                             this.InteractivelyDelete(targetDir.FullName, allowUserInput, paths.GamePath);
-                            this.RecursiveCopy(fromDir, parentDir, filter: this.ShouldCopy);
+                            this.RecursiveCopy(fromDir, parentDir, paths.GamePath, filter: this.ShouldCopy);
                         }
 
                         // else add it to default location
@@ -548,7 +553,7 @@ internal class InteractiveInstaller
                             if (targetDir.Exists)
                                 this.InteractivelyDelete(targetDir.FullName, allowUserInput, paths.GamePath);
 
-                            this.RecursiveCopy(fromDir, parentDir, filter: this.ShouldCopy);
+                            this.RecursiveCopy(fromDir, parentDir, paths.GamePath, filter: this.ShouldCopy);
                         }
                     }
                 }
@@ -694,7 +699,7 @@ internal class InteractiveInstaller
         {
             try
             {
-                this.AssertDeleteIsConfined(path, allowedRootPath);
+                this.AssertPathIsConfined(path, allowedRootPath, allowFinalLink: true);
                 FileUtilities.ForceDelete(Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path));
                 break;
             }
@@ -710,10 +715,11 @@ internal class InteractiveInstaller
         }
     }
 
-    /// <summary>Assert that deleting a path can't traverse a linked parent outside its trusted root.</summary>
-    /// <param name="path">The prospective deletion path.</param>
+    /// <summary>Assert that accessing a path can't traverse a link outside its trusted root.</summary>
+    /// <param name="path">The prospective access path.</param>
     /// <param name="allowedRootPath">The trusted root selected by the installer.</param>
-    private void AssertDeleteIsConfined(string path, string allowedRootPath)
+    /// <param name="allowFinalLink">Whether the final entry itself may be a link, such as when unlinking it without traversing it.</param>
+    private void AssertPathIsConfined(string path, string allowedRootPath, bool allowFinalLink)
     {
         string rootPath = Path.GetFullPath(allowedRootPath);
         string targetPath = Path.GetFullPath(path);
@@ -726,12 +732,13 @@ internal class InteractiveInstaller
             || relativePath.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)
         )
         {
-            throw new IOException($"Refusing to delete '{path}' because it is outside the expected folder '{allowedRootPath}'.");
+            throw new IOException($"Refusing to access '{path}' because it is outside the expected folder '{allowedRootPath}'.");
         }
 
         string currentPath = rootPath;
         string[] segments = relativePath.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
-        for (int i = 0; i < segments.Length - 1; i++)
+        int segmentCount = allowFinalLink ? segments.Length - 1 : segments.Length;
+        for (int i = 0; i < segmentCount; i++)
         {
             currentPath = Path.Combine(currentPath, segments[i]);
             FileSystemInfo entry = Directory.Exists(currentPath)
@@ -743,18 +750,21 @@ internal class InteractiveInstaller
             if (!isLink && entry.Exists)
                 isLink = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
             if (isLink)
-                throw new IOException($"Refusing to delete '{path}' because its parent '{currentPath}' is a symbolic link or reparse point.");
+                throw new IOException($"Refusing to access '{path}' because '{currentPath}' is a symbolic link or reparse point.");
         }
     }
 
     /// <summary>Recursively copy a directory or file.</summary>
     /// <param name="source">The file or folder to copy.</param>
     /// <param name="targetFolder">The folder to copy into.</param>
+    /// <param name="allowedRootPath">The trusted root which must contain every copy destination.</param>
     /// <param name="filter">A filter which matches directories and files to copy, or <c>null</c> to match all.</param>
-    private void RecursiveCopy(FileSystemInfo source, DirectoryInfo targetFolder, Func<FileSystemInfo, bool>? filter = null)
+    private void RecursiveCopy(FileSystemInfo source, DirectoryInfo targetFolder, string allowedRootPath, Func<FileSystemInfo, bool>? filter = null)
     {
         if (filter != null && !filter(source))
             return;
+
+        this.AssertPathIsConfined(Path.Combine(targetFolder.FullName, source.Name), allowedRootPath, allowFinalLink: false);
 
         if (!targetFolder.Exists)
             targetFolder.Create();
@@ -768,7 +778,7 @@ internal class InteractiveInstaller
             case DirectoryInfo sourceDir:
                 DirectoryInfo targetSubfolder = new(Path.Combine(targetFolder.FullName, sourceDir.Name));
                 foreach (FileSystemInfo entry in sourceDir.EnumerateFileSystemInfos())
-                    this.RecursiveCopy(entry, targetSubfolder, filter);
+                    this.RecursiveCopy(entry, targetSubfolder, allowedRootPath, filter);
                 break;
 
             default:
