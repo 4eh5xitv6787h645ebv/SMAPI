@@ -6,9 +6,10 @@ kicker: Unofficial SMAPI development fork
 ---
 
 <div class="notice warning" markdown="1">
-**Development preview.** This fork has no tagged player release yet. If you want the supported,
-stable mod loader, install [official SMAPI](https://smapi.io/). This site documents the fork for
-Linux users and contributors evaluating its changes.
+**Experimental prerelease.** This fork now publishes an
+[unofficial Linux x86_64 alpha](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1).
+If you want the supported stable mod loader, install [official SMAPI](https://smapi.io/). Use the
+alpha only if you accept prerelease risk and can follow the documented backup and rollback steps.
 </div>
 
 <div class="metric-grid">
@@ -35,6 +36,7 @@ and troubleshooting blind spots. It aims to preserve normal SMAPI mod compatibil
 Linux performance easier to measure and explain.
 
 <div class="button-row">
+  <a class="button primary" href="technical/linux-alpha-release.html">Get the Linux alpha</a>
   <a class="button primary" href="upstream-comparison.html">Compare with official SMAPI</a>
   <a class="button" href="getting-started.html">Evaluate the fork</a>
 </div>

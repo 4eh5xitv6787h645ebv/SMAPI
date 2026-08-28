@@ -33,7 +33,8 @@ claimed.
 - A normal desktop user account. **Never run the installer with `sudo` or as root.**
 - The game must be closed.
 - Back up saves, `Mods`, and any existing `smapi-internal/config.user.json` before changing loaders.
-- Download only from this repository's [GitHub Releases](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases).
+- Download only from this repository's
+  [alpha 1 release page](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1).
 
 The alpha has no graphical updater. The console installer changes the `StardewValley` launcher,
 preserves the vanilla launcher as `StardewValley-original`, and installs two Linux runtime hosts.

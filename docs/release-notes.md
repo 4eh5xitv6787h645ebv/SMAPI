@@ -6,13 +6,15 @@ title: Release notes
 ← [Documentation home](index.md)
 
 # Release notes
-## Linux fork 4.5.3 alpha 1 release candidate
+## Linux fork 4.5.3 alpha 1
 
 This is an **unofficial experimental Linux x86_64 fork** based on official SMAPI 4.5.2. Its
-embedded version is `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1`; its reserved tag is
-`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1`. Publication remains pending until the exact merged
-commit passes automated qualification, independent reviews, an isolated trusted-workload smoke,
-and post-publication clean-room verification.
+embedded version is `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1`. It was published on
+28 August 2026 under the immutable tag
+[`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1`](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)
+after exact-commit qualification, independent reviews, and an isolated trusted-workload smoke.
+The downloaded public artifact then passed post-publication clean-room verification. See the
+[sanitized validation record](technical/linux-alpha-release-validation.md).
 
 * Added exact-commit Linux-only release automation with pinned source inputs, SHA-256 checksums,
   machine-readable build metadata, GitHub provenance, and tag-only prerelease publication.
@@ -26,7 +28,7 @@ and post-publication clean-room verification.
 * Retained the controlled 4.5.2 comparison and its one-machine limitations; no private modpack or
   save data is included in the repository or release artifacts.
 
-## Upcoming release
+## Additional changes included in this fork snapshot
 * Rebuilt the repository README and GitHub Pages site around an evidence-based comparison with
   official SMAPI, including clearly scoped whole-workload and microbenchmark results.
 * Added a reproducible official-4.5.2-versus-fork Linux benchmark bundle with 20 sanitized raw

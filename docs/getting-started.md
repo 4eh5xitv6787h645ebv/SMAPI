@@ -7,9 +7,10 @@ kicker: Linux desktop evaluation guide
 
 ## Before you install anything
 
-This fork is a development preview with no tagged player release. For an ordinary Stardew Valley
-setup, use the [official SMAPI installer](https://smapi.io/). Continue here only if you want to test
-the fork's Linux performance or diagnostics and are comfortable compiling development code.
+This fork has an [unofficial experimental Linux x86_64 alpha](technical/linux-alpha-release.md).
+For an ordinary Stardew Valley setup, use the [official SMAPI installer](https://smapi.io/).
+Continue here only if you want to test the fork's Linux performance or diagnostics, accept
+prerelease risk, and can keep verified backups.
 
 <div class="notice warning" markdown="1">
 **Protect your normal setup.** Keep save backups and use a disposable copy of the game, `Mods`
@@ -17,7 +18,14 @@ directory, and save root for comparisons. Do not replace your only working SMAPI
 to collect a benchmark.
 </div>
 
-## Get the source
+## Get the alpha or source
+
+Players should download only the
+[published alpha and its checksum/metadata assets](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1),
+then follow the [verification, installation, upgrade, uninstall, and rollback guide](technical/linux-alpha-release.md).
+Do not use unrelated mirrors.
+
+Contributors who need a source build can clone `develop`:
 
 ```bash
 git clone https://github.com/4eh5xitv6787h645ebv/SMAPI.git
@@ -29,8 +37,8 @@ The project is based on SMAPI 4.5.2. Building requires the same developer toolch
 references as upstream. Read the [compile-from-source documentation](technical/smapi.md#compile-from-source-code)
 before building: a Debug rebuild can copy files into the detected game directory.
 
-There is no supported prebuilt fork package at this snapshot. Do not download binaries claiming to
-be this fork from unrelated mirrors.
+Source builds do not have the public package attestation and should not be presented as the tagged
+alpha.
 
 ## Establish a fair baseline
 

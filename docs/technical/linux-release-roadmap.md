@@ -123,11 +123,11 @@ Scope constraints apply throughout:
 ### Versioning and release automation
 
 - [x] Define and document a fork-specific prerelease version/tag scheme that cannot be mistaken for official SMAPI or collide with upstream tags ([scheme and validation](linux-alpha-release.md#release-identity)).
-- [ ] Make GitHub Actions accept and explicitly build an exact reviewed release commit.
-- [ ] Produce the Linux installer/package from that exact reviewed commit.
+- [x] Make GitHub Actions accept and explicitly build an exact reviewed release commit ([exact-tag workflow run](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33177145353)).
+- [x] Produce the Linux installer/package from that exact reviewed commit ([public prerelease](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)).
 - [x] Produce SHA-256 checksums ([exact-head workflow and independent download verification](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
 - [x] Produce build metadata that records the exact commit and build inputs ([metadata assertions](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
-- [ ] Produce GitHub provenance/attestation where supported.
+- [x] Produce GitHub provenance/attestation where supported ([tag workflow and independent public-download verification](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
 
 ### Release qualification
 
@@ -140,33 +140,33 @@ Scope constraints apply throughout:
 - [x] Run isolated installation tests ([hosted and independent downloaded-artifact lifecycle](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
 - [x] Run isolated update tests ([hosted and independent downloaded-artifact lifecycle](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
 - [x] Run isolated uninstall tests ([hosted and independent downloaded-artifact lifecycle](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444)).
-- [ ] Run isolated rollback tests against the exact merged release candidate (the [pre-review candidate rollback](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444) must be repeated after installer hardening).
-- [ ] Run a final trusted-modpack smoke test without publishing the fixtures against the exact merged release candidate (the [pre-review workload evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444) must be repeated after installer hardening).
-- [ ] Obtain an independent Phase 3 release review.
-- [ ] Obtain an independent Phase 3 security/privacy review.
-- [ ] Obtain an independent Phase 3 testing review.
-- [ ] Obtain an independent Phase 3 final-diff review.
-- [ ] Address every actionable release review finding.
+- [x] Run isolated rollback tests against the exact merged release candidate ([exact-merge rollback repeat](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Run a final trusted-modpack smoke test without publishing the fixtures against the exact merged release candidate ([180.019-second exact-merge evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Obtain an independent Phase 3 release review ([final review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452946668); [tag-readiness PASS](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Obtain an independent Phase 3 security/privacy review ([final review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452946668)).
+- [x] Obtain an independent Phase 3 testing review ([final review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452946668)).
+- [x] Obtain an independent Phase 3 final-diff review ([tree-equality and artifact review](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Address every actionable release review finding ([final review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452946668)).
 
 ### Publication and clean-room verification
 
 - [x] Open a focused Phase 3 fork pull request ([#172](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172)).
-- [x] Pass required CI and repository checks ([exact reviewed-head Linux alpha qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33173516873) and [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33173516872)).
-- [ ] Merge the Phase 3 pull request into `develop` and close it.
-- [ ] Verify the release tag points to the exact reviewed commit.
-- [ ] Publish a GitHub prerelease clearly labeled experimental.
-- [ ] Document the supported platform and requirements in the prerelease.
-- [ ] Document known limitations in the prerelease.
-- [ ] Document installation, upgrade, and rollback steps in the prerelease.
-- [ ] Publish checksums, provenance, comparison results, issue-tracker links, and documentation links in the prerelease.
-- [ ] Download the published artifact into a clean isolated environment.
-- [ ] Verify the downloaded artifact checksum.
-- [ ] Verify published provenance/attestation where supported.
-- [ ] Install the downloaded artifact in the clean environment.
-- [ ] Launch the complete trusted workload.
-- [ ] Generate and view a Mod Health Report.
-- [ ] Uninstall or roll back successfully.
-- [ ] Record clean-room verification results without private fixture data.
+- [x] Pass required CI and repository checks ([final reviewed-head Linux alpha qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33174137229), [final reviewed-head deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33174137200), and [exact tagged release qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33177145353)).
+- [x] Merge the Phase 3 pull request into `develop` and close it ([merged PR #172](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172); [`6e5d708a`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/6e5d708a09e7d2b6d9b5434bd1fac52ddbdb5f08)).
+- [x] Verify the release tag points to the exact reviewed commit ([annotated-tag evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Publish a GitHub prerelease clearly labeled experimental ([alpha 1 prerelease](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)).
+- [x] Document the supported platform and requirements in the prerelease ([release notes](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)).
+- [x] Document known limitations in the prerelease ([release notes](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)).
+- [x] Document installation, upgrade, and rollback steps in the prerelease ([release notes and alpha guide](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)).
+- [x] Publish checksums, provenance, comparison results, issue-tracker links, and documentation links in the prerelease ([release page and assets](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)).
+- [x] Download the published artifact into a clean isolated environment ([clean-room record](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Verify the downloaded artifact checksum ([public SHA-256 verification](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Verify published provenance/attestation where supported ([public attestation verification](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Install the downloaded artifact in the clean environment ([normal-user installation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Launch the complete trusted workload ([public-package 180.003-second run](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Generate and view a Mod Health Report ([schema, privacy, and visual verification](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Uninstall or roll back successfully ([public-package uninstall and exact-candidate rollback evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)).
+- [x] Record clean-room verification results without private fixture data ([sanitized validation record](linux-alpha-release-validation.md)).
 - [ ] Update the README with the downloadable prerelease.
 - [ ] Update GitHub Pages with the downloadable prerelease.
 - [ ] Remove inaccurate “no tagged release” wording.

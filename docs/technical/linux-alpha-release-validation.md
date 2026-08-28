@@ -10,34 +10,47 @@ private modpack, save, mod identities, configuration, local paths, logs, and rep
 
 ## Candidate identity
 
-Publication is pending. The final record will identify the exact embedded version, annotated tag,
-source commit and tree, qualification workflow run, release URL, installer filename and size,
-SHA-256, metadata asset, and GitHub attestation verification result.
+The [experimental prerelease](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)
+was published on 28 August 2026 from this immutable identity:
+
+| Field | Verified value |
+| --- | --- |
+| Embedded version | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1` |
+| Annotated tag | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1` |
+| Tag object | `8b9ec025c241da50695471d8f7c7f54ed003a8b4` |
+| Source commit | `6e5d708a09e7d2b6d9b5434bd1fac52ddbdb5f08` |
+| Source tree | `0cbabfd1f7934433f3ad0c0f1874c89ba6f75773` |
+| Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip` |
+| Installer size | 52,183,224 bytes |
+| Installer SHA-256 | `94e5dd4af8075946143ae79ba206d90b1433351c84dceb4f4506c74e638d69c8` |
+
+The annotated tag peels to the source commit above. Its tree exactly matches the independently
+reviewed pull-request head, so the merge introduced no unreviewed tree change. An active repository
+ruleset blocks update and deletion of matching alpha tags with no bypass.
 
 ## Automated qualification
 
-The final record will link the fixture-free runtime-dispatcher and analyzer tests, Release build,
-formatting check, package structure test, and isolated install/update/uninstall/failure lifecycle
-test for the exact release commit. Hosted CI uses pinned public game reference assemblies for
+The [tag-triggered release workflow](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33177145353)
+passed the fixture-free runtime-dispatcher and analyzer tests, all Release builds, formatting check,
+package structure test, and isolated install/update/uninstall/failure lifecycle test for the exact
+release commit. Hosted CI uses pinned public game reference assemblies for
 compilation only; because those assemblies are intentionally non-executable, the complete
 game-bound test suite is run separately against executable assemblies in the authorized disposable
-environment. The record will publish sanitized discovered/passed/skipped/failed counts for that
-exact-commit run. It will also record the required performance-gate result and the independent
-release, security/privacy, testing, and final-diff reviews.
+environment. That exact-commit run discovered 1,871 tests: 1,868 passed, three existing platform
+cases were skipped, and none failed. Hosted fixture-free execution ran 21 dispatcher and 13 analyzer
+tests with zero-test discovery treated as an error.
 
-The pre-review branch candidate at `0085f7559c8c754086584c8f41f72e13599ca75a`
-passed the [Linux alpha qualification workflow](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33170191391)
-and [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33170191358).
-Its public-input suites ran 21 dispatcher and 13 analyzer tests with zero-test discovery treated as
-an error. The full game-bound suite separately discovered 1,871 tests against executable assemblies:
-1,868 passed, three existing platform cases were skipped, and none failed. This checkpoint is not
-the release commit; all exact-commit qualifications will be repeated after review and merge.
+The exact merge candidate also passed the required deterministic performance gate, package
+checksum and metadata checks, lifecycle and failure-path tests, official-4.5.2 rollback, and
+independent release, security/privacy, testing, and final-diff reviews. Every actionable finding was
+fixed before merge and the final tag-readiness review passed. The
+[sanitized evidence record](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770)
+links the workflow, review, and aggregate results.
 
 ## Clean isolated verification
 
-After publication, a fresh download will be verified and exercised in a disposable Linux
-environment. The published record will contain only environment metadata and aggregate pass/fail
-evidence for:
+A fresh download was verified and exercised in a new disposable Linux environment. Only environment
+metadata and aggregate pass/fail evidence were retained:
 
 - tag and full commit equality;
 - `sha256sum --check` and GitHub attestation verification;
@@ -48,20 +61,33 @@ evidence for:
 - Mod Health Report generation and exact in-game viewer opening; and
 - immutable input-manifest equality before and after the run.
 
-Before independent review, the downloaded Actions candidate passed checksum/metadata/package
-verification, install/update/uninstall/failure lifecycle checks, and rollback to the checksum-
-verified official 4.5.2 installer. A disposable default-net6 full-workload session loaded the
-expected 132 code mods and 176 content packs with one expected skip, reached authorized-save
-gameplay, recorded 180.021 seconds of steady gameplay plus both transitions, and exited normally.
-Its normal-shutdown Health Report matched schema v1 and the documented permission, size, local-only,
-and targeted privacy-canary constraints. A separate stable-state run opened the in-game viewer; its
-private screenshot was visually checked and was neither committed nor uploaded. The complete
-sanitized checkpoint is recorded on [pull request #172](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/172#issuecomment-5452607444).
+The public download passed `sha256sum --check`. GitHub attestation verification bound its digest to
+this repository, the tagged workflow, the immutable tag ref, and the exact source commit;
+`build-metadata.json` independently matched the same identity, Release configuration, and
+`linux-x64` runtime identifier.
+
+Normal-user installation preserved the base game payload. The default-net6 complete trusted
+workload loaded the expected 132 code mods and 176 content packs and reached authorized-save
+gameplay. A fresh schema-v1 JSON/text Health Report pair was generated, the exact in-game viewer
+opened, and its private screenshot was visually checked. The reports passed JSON parsing,
+local-only behavior, and host-path, disposable-root, and save-name exclusions.
+
+A separate uninterrupted public-package run recorded 180.003 seconds of steady gameplay, 11,423
+updates, 3,687 draws, zero invalid-world/location/position ticks, bounded buffers, both deterministic
+warp transitions, and normal exit. Normal-user uninstall removed the fork runtime while preserving
+the base game, complete Mods input, save, and local reports. The earlier exact-merge candidate run
+independently recorded 180.019 seconds, 11,406 updates, 4,800 draws, the same state-validity results,
+both transitions, and normal exit. The exact candidate also rolled back successfully to a
+checksum-verified official SMAPI 4.5.2 installer.
+
+The private fixtures, logs, reports, paths, configuration, and screenshots were neither committed
+nor uploaded. The complete sanitized final record is on
+[umbrella issue #168](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5453527770).
 
 The unrelated .NET 10 menu-click issue is not a release gate and is not included in this record.
 
 ## Public documentation and asset checks
 
-After the release and documentation updates are live, this page will record the successful GitHub
-Pages build and HTTP 200 results for the documentation home, getting-started guide, comparison,
-alpha guide, validation page, screenshots, release page, and each public release asset.
+The release page and all three public assets returned HTTP 200 during publication verification.
+The documentation follow-up records its GitHub Pages build and HTTP checks after this page is
+merged, so it does not claim deployment before the published site contains this exact revision.
