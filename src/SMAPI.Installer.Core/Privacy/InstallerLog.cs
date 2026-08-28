@@ -45,7 +45,9 @@ public sealed class InstallerLog : IDisposable
     private static readonly Regex ControlCharacters = new(@"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private readonly InstallerLogOptions Options;
-    private readonly FileStream Stream;
+    private readonly LinuxAnchoredFileSystem FileSystem;
+    private readonly LinuxAnchoredFile File;
+    private readonly string RelativeLogPath;
     private readonly string[] SensitiveValues;
     private readonly Guid OperationId;
     private readonly object SyncRoot = new();
@@ -81,16 +83,40 @@ public sealed class InstallerLog : IDisposable
 
         this.OperationId = operationId;
 
-        string logsDirectory = System.IO.Path.Combine(this.Options.StateRoot, "logs");
-        EnsurePrivateStateRoot(this.Options.StateRoot);
-        EnsureRealDirectory(logsDirectory);
-        SetMode(logsDirectory, Convert.ToInt32("700", 8));
-        Rotate(logsDirectory, this.Options.MaximumFileCount - 1);
-
         string timestamp = now.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", System.Globalization.CultureInfo.InvariantCulture);
-        this.Path = System.IO.Path.Combine(logsDirectory, $"{timestamp}-{operationId:N}.jsonl");
-        this.Stream = new FileStream(this.Path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.SequentialScan);
-        SetMode(this.Path, Convert.ToInt32("600", 8));
+        this.RelativeLogPath = $"{timestamp}-{operationId:N}.jsonl";
+        string logsDirectory = System.IO.Path.Combine(this.Options.StateRoot, "logs");
+        this.Path = System.IO.Path.Combine(logsDirectory, this.RelativeLogPath);
+
+        LinuxAnchoredFileSystem? logsFileSystem = null;
+        LinuxAnchoredFile? logFile = null;
+        try
+        {
+            using LinuxAnchoredFileSystem filesystemRoot = new("/");
+            string stateRelativePath = GetRootRelativePath(this.Options.StateRoot);
+            LinuxFileIdentity stateIdentity = filesystemRoot.EnsureDirectory(stateRelativePath, Convert.ToInt32("700", 8), out bool stateCreated);
+            using LinuxAnchoredFileSystem stateFileSystem = filesystemRoot.OpenSubdirectory(stateRelativePath);
+            if (!stateFileSystem.Identity.IsSameObject(stateIdentity))
+                throw new IOException("The installer state root identity changed while it was opened.");
+            EnsurePrivateStateMarker(stateFileSystem, stateCreated);
+
+            LinuxFileIdentity logsIdentity = stateFileSystem.EnsureDirectory("logs", Convert.ToInt32("700", 8));
+            logsFileSystem = stateFileSystem.OpenSubdirectory("logs");
+            if (!logsFileSystem.Identity.IsSameObject(logsIdentity))
+                throw new IOException("The installer log directory identity changed while it was opened.");
+
+            Rotate(logsFileSystem, this.Options.MaximumFileCount - 1);
+            logFile = logsFileSystem.CreateNewFile(this.RelativeLogPath, Convert.ToInt32("600", 8));
+        }
+        catch
+        {
+            logFile?.Dispose();
+            logsFileSystem?.Dispose();
+            throw;
+        }
+
+        this.FileSystem = logsFileSystem!;
+        this.File = logFile!;
     }
 
     /// <summary>Write an entry if it fits within the configured bound.</summary>
@@ -127,10 +153,16 @@ public sealed class InstallerLog : IDisposable
             if (this.WrittenBytes + line.Length + 1 > this.Options.MaximumFileBytes)
                 return false;
 
-            this.Stream.Write(line);
-            this.Stream.WriteByte((byte)'\n');
-            this.Stream.Flush(flushToDisk: true);
-            this.WrittenBytes += line.Length + 1;
+            byte[] record = new byte[line.Length + 1];
+            line.CopyTo(record, 0);
+            record[^1] = (byte)'\n';
+            this.WrittenBytes = checked((int)this.FileSystem.AppendAndFsync(
+                this.File,
+                this.RelativeLogPath,
+                record,
+                this.WrittenBytes,
+                this.Options.MaximumFileBytes
+            ));
             return true;
         }
     }
@@ -155,7 +187,8 @@ public sealed class InstallerLog : IDisposable
         {
             if (this.Disposed)
                 return;
-            this.Stream.Dispose();
+            this.File.Dispose();
+            this.FileSystem.Dispose();
             this.Disposed = true;
         }
     }
@@ -174,60 +207,44 @@ public sealed class InstallerLog : IDisposable
         return options with { StateRoot = System.IO.Path.GetFullPath(options.StateRoot) };
     }
 
-    private static void Rotate(string directory, int retainedPriorFiles)
+    private static void Rotate(LinuxAnchoredFileSystem fileSystem, int retainedPriorFiles)
     {
-        string[] files = Directory.EnumerateFiles(directory, "*.jsonl", SearchOption.TopDirectoryOnly)
-            .Where(path => InstallerLog.OwnedLogFilename.IsMatch(System.IO.Path.GetFileName(path)))
-            .OrderByDescending(path => File.GetLastWriteTimeUtc(path))
-            .ThenByDescending(path => path, StringComparer.Ordinal)
+        (string Name, LinuxFileIdentity Identity)[] files = fileSystem.EnumerateEntryNames()
+            .Where(name => InstallerLog.OwnedLogFilename.IsMatch(name))
+            .Select(name => (Name: name, Identity: fileSystem.Stat(name) ?? throw new IOException("An installer-owned log disappeared during rotation.")))
+            .OrderByDescending(entry => entry.Identity.ModificationSeconds)
+            .ThenByDescending(entry => entry.Identity.ModificationNanoseconds)
+            .ThenByDescending(entry => entry.Name, StringComparer.Ordinal)
             .ToArray();
-        foreach (string path in files.Skip(retainedPriorFiles))
-            File.Delete(path);
+        foreach ((string name, LinuxFileIdentity identity) in files.Skip(retainedPriorFiles))
+            fileSystem.UnlinkFile(name, identity);
     }
 
-    private static void EnsurePrivateStateRoot(string stateRoot)
+    private static void EnsurePrivateStateMarker(LinuxAnchoredFileSystem fileSystem, bool stateCreated)
     {
-        string marker = System.IO.Path.Combine(stateRoot, "state-version");
-        if (PathExistsIncludingLink(stateRoot))
+        const string markerPath = "state-version";
+        if (stateCreated)
         {
-            AssertRealDirectory(stateRoot, "The installer state root is a link or non-directory entry.");
-            if (!File.Exists(marker) || new FileInfo(marker).LinkTarget is not null || File.ReadAllText(marker) != StateMarkerContents)
-                throw new IOException("An unknown existing installer state root requires manual inspection.");
+            byte[] contents = Encoding.UTF8.GetBytes(StateMarkerContents);
+            using LinuxAnchoredFile marker = fileSystem.CreateNewFile(markerPath, Convert.ToInt32("600", 8));
+            fileSystem.AppendAndFsync(marker, markerPath, contents, 0, contents.Length);
+            return;
         }
-        else
-        {
-            Directory.CreateDirectory(stateRoot);
-            AssertRealDirectory(stateRoot, "The installer state root couldn't be created safely.");
-            SetMode(stateRoot, Convert.ToInt32("700", 8));
-            File.WriteAllText(marker, StateMarkerContents);
-            SetMode(marker, Convert.ToInt32("600", 8));
-        }
+
+        using LinuxAnchoredFile existingMarker = fileSystem.OpenRegularFileForRead(markerPath);
+        byte[] existingContents = fileSystem.ReadAllBytes(existingMarker, 128);
+        if (!existingContents.AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(StateMarkerContents)))
+            throw new IOException("An unknown existing installer state root requires manual inspection.");
     }
 
-    private static void EnsureRealDirectory(string path)
+    private static string GetRootRelativePath(string absolutePath)
     {
-        if (PathExistsIncludingLink(path))
-            AssertRealDirectory(path, "The installer log directory is a link or non-directory entry.");
-        else
-        {
-            Directory.CreateDirectory(path);
-            AssertRealDirectory(path, "The installer log directory couldn't be created safely.");
-        }
-    }
-
-    private static void AssertRealDirectory(string path, string message)
-    {
-        DirectoryInfo info = new(path);
-        info.Refresh();
-        if (!info.Exists || info.LinkTarget is not null || (info.Attributes & FileAttributes.ReparsePoint) != 0)
-            throw new IOException(message);
-    }
-
-    private static bool PathExistsIncludingLink(string path)
-    {
-        FileSystemInfo info = new DirectoryInfo(path);
-        info.Refresh();
-        return info.Exists || info.LinkTarget is not null;
+        if (!absolutePath.StartsWith("/", StringComparison.Ordinal))
+            throw new ArgumentException("The installer state root must be an absolute Linux path.", nameof(absolutePath));
+        string relativePath = absolutePath.TrimStart('/');
+        if (relativePath.Length == 0)
+            throw new ArgumentException("The filesystem root can't be used as installer state.", nameof(absolutePath));
+        return NormalizedRelativePath.Parse(relativePath).Value;
     }
 
     private static string ValidateIdentifier(string value, string parameterName)
@@ -243,15 +260,4 @@ public sealed class InstallerLog : IDisposable
             throw new ArgumentException("A logged path isn't in the compiled installer-owned namespace.", nameof(value));
         return value.Value;
     }
-
-    private static void SetMode(string path, int mode)
-    {
-        if (!OperatingSystem.IsLinux())
-            return;
-        if (chmod(path, (uint)mode) != 0)
-            throw new IOException("Couldn't set private installer-log permissions.");
-    }
-
-    [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
-    private static extern int chmod(string path, uint mode);
 }

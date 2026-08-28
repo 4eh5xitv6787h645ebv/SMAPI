@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 using StardewModdingAPI.Installer.Core.Ownership;
 
@@ -97,6 +98,9 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     private readonly LinuxFileIdentity RootIdentity;
     private bool Disposed;
 
+    /// <summary>The captured identity of this anchored root directory.</summary>
+    public LinuxFileIdentity Identity => this.RootIdentity;
+
     /// <summary>Open and anchor a real Linux directory. A symbolic-link root is rejected.</summary>
     public LinuxAnchoredFileSystem(string rootPath)
     {
@@ -122,6 +126,29 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             this.RootHandle.Dispose();
             throw;
         }
+    }
+
+    private LinuxAnchoredFileSystem(SafeFileHandle rootHandle)
+    {
+        this.RootHandle = rootHandle;
+        try
+        {
+            this.RootIdentity = GetHandleIdentity(this.RootHandle, requireSingleLinkRegularFile: false);
+            if (this.RootIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw new IOException("The anchored root isn't a directory.");
+        }
+        catch
+        {
+            this.RootHandle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Open a real subdirectory as a new anchored filesystem without resolving it again by absolute path.</summary>
+    public LinuxAnchoredFileSystem OpenSubdirectory(string relativePath)
+    {
+        this.AssertUsable();
+        return new LinuxAnchoredFileSystem(this.OpenDirectoryPath(relativePath));
     }
 
     /// <summary>Get a safe regular-file handle without following any path segment.</summary>
@@ -265,6 +292,71 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         }
     }
 
+    /// <summary>Read a bounded stable regular file through its already-open handle.</summary>
+    public byte[] ReadAllBytes(LinuxAnchoredFile file, int maximumBytes)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(file);
+        if (maximumBytes < 0)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        file.AssertOpen();
+
+        LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        if (!before.IsSameObject(file.Identity) || before.Size > maximumBytes)
+            throw new IOException("The open file is too large or no longer refers to its captured object.");
+        byte[] result = new byte[(int)before.Size];
+        int offset = 0;
+        while (offset < result.Length)
+        {
+            int count = RandomAccess.Read(file.Handle, result.AsSpan(offset), offset);
+            if (count == 0)
+                throw new EndOfStreamException("The anchored file became shorter while it was read.");
+            offset += count;
+        }
+
+        LinuxFileIdentity after = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        if (after != before)
+            throw new IOException("The anchored file identity changed while it was read.");
+        return result;
+    }
+
+    /// <summary>Append one bounded record through a captured file handle and durably verify its anchored name and length.</summary>
+    public long AppendAndFsync(
+        LinuxAnchoredFile file,
+        string relativePath,
+        ReadOnlySpan<byte> content,
+        long expectedLength,
+        long maximumLength
+    )
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(file);
+        if (expectedLength < 0)
+            throw new ArgumentOutOfRangeException(nameof(expectedLength));
+        if (maximumLength < expectedLength)
+            throw new ArgumentOutOfRangeException(nameof(maximumLength));
+        file.AssertOpen();
+
+        long resultingLength = checked(expectedLength + content.Length);
+        if (resultingLength > maximumLength)
+            throw new IOException("The anchored write would exceed its configured byte bound.");
+
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        LinuxFileIdentity? namedBefore = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+        if (!before.IsSameObject(file.Identity) || before.Size != expectedLength || namedBefore != before)
+            throw new IOException("The anchored write target identity or expected length changed before mutation.");
+
+        RandomAccess.Write(file.Handle, content, expectedLength);
+        Fsync(file.Handle);
+
+        LinuxFileIdentity after = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
+        LinuxFileIdentity? namedAfter = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+        if (!after.IsSameObject(before) || after.Size != resultingLength || namedAfter != after)
+            throw new IOException("The anchored write target identity changed during mutation.");
+        return resultingLength;
+    }
+
     /// <summary>Get an entry identity without following links, or <see langword="null"/> when absent.</summary>
     /// <remarks>Symbolic links, hardlinked regular files, and special entries are rejected rather than returned.</remarks>
     public LinuxFileIdentity? Stat(string relativePath)
@@ -277,14 +369,22 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     /// <summary>Create and durably flush any missing real-directory segments.</summary>
     public LinuxFileIdentity EnsureDirectory(string relativePath, int unixMode)
     {
+        return this.EnsureDirectory(relativePath, unixMode, out _);
+    }
+
+    /// <summary>Create and durably flush missing real-directory segments and report whether the final segment was created.</summary>
+    public LinuxFileIdentity EnsureDirectory(string relativePath, int unixMode, out bool created)
+    {
         this.AssertUsable();
         ValidateUnixMode(unixMode);
         string[] segments = GetSegments(relativePath);
+        created = false;
         SafeFileHandle current = Duplicate(this.RootHandle);
         try
         {
-            foreach (string segment in segments)
+            for (int index = 0; index < segments.Length; index++)
             {
+                string segment = segments[index];
                 SafeFileHandle next;
                 try
                 {
@@ -292,13 +392,25 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
                 }
                 catch (FileNotFoundException)
                 {
-                    if (mkdirat(current, segment, (uint)unixMode) != 0)
+                    bool createdSegment = mkdirat(current, segment, (uint)unixMode) == 0;
+                    if (!createdSegment)
                     {
                         int error = Marshal.GetLastWin32Error();
                         if (error != ErrorExists)
                             throw CreatePathException("Couldn't create an anchored directory", error);
                     }
+                    if (createdSegment && index == segments.Length - 1)
+                        created = true;
+                    LinuxFileIdentity? createdIdentity = createdSegment
+                        ? GetIdentityAt(current, segment, allowMissing: false, requireSingleLinkRegularFile: false)
+                        : null;
                     next = OpenDirectoryAt(current, segment);
+                    LinuxFileIdentity openedIdentity = GetHandleIdentity(next, requireSingleLinkRegularFile: false);
+                    if (createdIdentity != null && openedIdentity != createdIdentity)
+                    {
+                        next.Dispose();
+                        throw new IOException("An anchored directory identity changed while it was created.");
+                    }
                     SetHandleMode(next, unixMode);
                     Fsync(current);
                 }
@@ -310,12 +422,72 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             LinuxFileIdentity identity = GetHandleIdentity(current, requireSingleLinkRegularFile: false);
             if (identity.Kind != LinuxAnchoredEntryKind.Directory)
                 throw new IOException("An anchored directory path resolved to a non-directory entry.");
-            return identity;
+            SetHandleMode(current, unixMode);
+            Fsync(current);
+            return GetHandleIdentity(current, requireSingleLinkRegularFile: false);
         }
         finally
         {
             current.Dispose();
         }
+    }
+
+    /// <summary>Enumerate the immediate entry names of a real anchored directory.</summary>
+    public IReadOnlyList<string> EnumerateEntryNames(string? relativePath = null)
+    {
+        this.AssertUsable();
+        using SafeFileHandle directory = relativePath is null ? Duplicate(this.RootHandle) : this.OpenDirectoryPath(relativePath);
+        SafeFileHandle duplicate = Duplicate(directory);
+        IntPtr stream = fdopendir(duplicate.DangerousGetHandle().ToInt32());
+        if (stream == IntPtr.Zero)
+        {
+            int error = Marshal.GetLastWin32Error();
+            duplicate.Dispose();
+            throw new IOException($"Couldn't enumerate an anchored directory (errno {error}).");
+        }
+
+        duplicate.SetHandleAsInvalid(); // fdopendir owns the descriptor from here.
+        List<string> names = new();
+        try
+        {
+            while (true)
+            {
+                Marshal.WriteInt32(__errno_location(), 0);
+                IntPtr entry = readdir(stream);
+                if (entry == IntPtr.Zero)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error != 0)
+                        throw new IOException($"Couldn't enumerate an anchored directory (errno {error}).");
+                    break;
+                }
+
+                ushort recordLength = unchecked((ushort)Marshal.ReadInt16(entry, 16));
+                const int nameOffset = 19;
+                if (recordLength <= nameOffset)
+                    throw new IOException("The anchored directory returned an invalid entry record.");
+                int maximumNameBytes = recordLength - nameOffset;
+                byte[] bytes = new byte[maximumNameBytes];
+                Marshal.Copy(IntPtr.Add(entry, nameOffset), bytes, 0, bytes.Length);
+                int length = Array.IndexOf(bytes, (byte)0);
+                if (length < 0)
+                    throw new IOException("The anchored directory returned an unterminated entry name.");
+                string name = new UTF8Encoding(false, true).GetString(bytes, 0, length);
+                if (name is "." or "..")
+                    continue;
+                if (name.Length == 0 || name.Contains('/') || name.Contains('\0'))
+                    throw new IOException("The anchored directory returned an unsafe entry name.");
+                names.Add(name);
+            }
+        }
+        finally
+        {
+            if (closedir(stream) != 0)
+                throw new IOException($"Couldn't close an anchored directory enumeration (errno {Marshal.GetLastWin32Error()}).");
+        }
+
+        names.Sort(StringComparer.Ordinal);
+        return names;
     }
 
     /// <summary>Rename a known regular file without replacing a destination.</summary>
@@ -655,6 +827,18 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int statx(SafeFileHandle directory, string path, int flags, uint mask, out Statx data);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern IntPtr fdopendir(int descriptor);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern IntPtr readdir(IntPtr directory);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int closedir(IntPtr directory);
+
+    [DllImport("libc")]
+    private static extern IntPtr __errno_location();
 
     [StructLayout(LayoutKind.Sequential, Size = 256)]
     private struct Statx

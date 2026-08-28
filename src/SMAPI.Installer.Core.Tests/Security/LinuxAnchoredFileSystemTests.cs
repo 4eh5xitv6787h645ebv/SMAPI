@@ -126,6 +126,49 @@ public sealed class LinuxAnchoredFileSystemTests
     }
 
     [Test]
+    public void AppendAndFsync_LeafReplacedAfterOpen_RejectsWithoutWritingReplacement()
+    {
+        string path = Path.Combine(this.RootPath, "log");
+        string outside = Path.Combine(this.TempRoot, "outside");
+        File.WriteAllText(path, string.Empty);
+        File.WriteAllText(outside, "preserve");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead("log");
+        File.Move(path, Path.Combine(this.RootPath, "captured"));
+        File.CreateSymbolicLink(path, outside);
+
+        Action action = () => fileSystem.AppendAndFsync(opened, "log", Encoding.UTF8.GetBytes("record"), 0, 64);
+
+        action.Should().Throw<IOException>();
+        File.ReadAllText(outside).Should().Be("preserve");
+        new FileInfo(Path.Combine(this.RootPath, "captured")).Length.Should().Be(0);
+    }
+
+    [Test]
+    public void AppendAndFsync_ExceedsBound_RejectsBeforeWriting()
+    {
+        File.WriteAllText(Path.Combine(this.RootPath, "log"), "1234");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead("log");
+
+        Action action = () => fileSystem.AppendAndFsync(opened, "log", Encoding.UTF8.GetBytes("56"), 4, 5);
+
+        action.Should().Throw<IOException>().WithMessage("*byte bound*");
+        File.ReadAllText(Path.Combine(this.RootPath, "log")).Should().Be("1234");
+    }
+
+    [Test]
+    public void EnumerateEntryNames_ReturnsImmediateNamesDeterministically()
+    {
+        File.WriteAllText(Path.Combine(this.RootPath, "zeta"), string.Empty);
+        File.WriteAllText(Path.Combine(this.RootPath, "alpha"), string.Empty);
+        Directory.CreateDirectory(Path.Combine(this.RootPath, "middle"));
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+
+        fileSystem.EnumerateEntryNames().Should().Equal("alpha", "middle", "zeta");
+    }
+
+    [Test]
     public void CopyFile_OpenSource_CreatesPrivateVerifiedDestination()
     {
         string sourceRoot = Path.Combine(this.TempRoot, "source");

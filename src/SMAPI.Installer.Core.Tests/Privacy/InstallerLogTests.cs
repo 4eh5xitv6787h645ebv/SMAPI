@@ -1,4 +1,5 @@
 using System.Runtime.Versioning;
+using System.Runtime.InteropServices;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Privacy;
@@ -122,6 +123,100 @@ public sealed class InstallerLogTests
     }
 
     [Test]
+    public void Constructor_RejectsSymlinkedStateMarkerWithoutReadingTarget()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string state = this.CreateDirectory();
+        Directory.CreateDirectory(state);
+        string external = Path.Combine(this.TemporaryDirectory!, "external-marker");
+        File.WriteAllText(external, "smapi-installer-state-v1\n");
+        File.CreateSymbolicLink(Path.Combine(state, "state-version"), external);
+
+        Action action = () => _ = new InstallerLog(new(state), Guid.NewGuid(), DateTimeOffset.UtcNow);
+
+        action.Should().Throw<IOException>();
+        File.ReadAllText(external).Should().Be("smapi-installer-state-v1\n");
+        Directory.Exists(Path.Combine(state, "logs")).Should().BeFalse();
+    }
+
+    [Test]
+    public void Constructor_RejectsHardlinkedStateMarker()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string state = this.CreateDirectory();
+        Directory.CreateDirectory(state);
+        string marker = Path.Combine(state, "state-version");
+        string secondLink = Path.Combine(this.TemporaryDirectory!, "second-marker-link");
+        File.WriteAllText(marker, "smapi-installer-state-v1\n");
+        link(marker, secondLink).Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
+
+        Action action = () => _ = new InstallerLog(new(state), Guid.NewGuid(), DateTimeOffset.UtcNow);
+
+        action.Should().Throw<IOException>().WithMessage("*multiple hard links*");
+        File.ReadAllText(secondLink).Should().Be("smapi-installer-state-v1\n");
+        Directory.Exists(Path.Combine(state, "logs")).Should().BeFalse();
+    }
+
+    [Test]
+    public void Constructor_RejectsHardlinkedOwnedLogWithoutRotatingIt()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string state = this.CreateDirectory();
+        using (InstallerLog initial = new(new(state), Guid.NewGuid(), DateTimeOffset.UnixEpoch)) { }
+        string ownedLog = Path.Combine(state, "logs", $"20000101T000000Z-{Guid.NewGuid():N}.jsonl");
+        string secondLink = Path.Combine(this.TemporaryDirectory!, "owned-log-second-link");
+        File.WriteAllText(ownedLog, "preserve");
+        link(ownedLog, secondLink).Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
+
+        Action action = () => _ = new InstallerLog(new(state, MaximumFileCount: 1), Guid.NewGuid(), DateTimeOffset.UtcNow);
+
+        action.Should().Throw<IOException>().WithMessage("*multiple hard links*");
+        File.ReadAllText(ownedLog).Should().Be("preserve");
+        File.ReadAllText(secondLink).Should().Be("preserve");
+    }
+
+    [Test]
+    public void Write_LogLeafReplacedWithSymlink_RejectsWithoutTouchingTarget()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string state = this.CreateDirectory();
+        Guid operationId = Guid.NewGuid();
+        using InstallerLog log = new(new(state), operationId, DateTimeOffset.UnixEpoch);
+        string captured = log.Path + ".captured";
+        File.Move(log.Path, captured);
+        string external = Path.Combine(this.TemporaryDirectory!, "outside-log");
+        File.WriteAllText(external, "preserve");
+        File.CreateSymbolicLink(log.Path, external);
+
+        Action action = () => log.Write(new(DateTimeOffset.UnixEpoch, operationId, InstallerLogLevel.Information, "path.swap", "message"));
+
+        action.Should().Throw<IOException>();
+        File.ReadAllText(external).Should().Be("preserve");
+        new FileInfo(captured).Length.Should().Be(0);
+    }
+
+    [Test]
+    public void Write_SelectedStateRootPathMoved_ContinuesOnlyInCapturedDirectory()
+    {
+        Assume.That(OperatingSystem.IsLinux(), Is.True);
+        string state = this.CreateDirectory();
+        Guid operationId = Guid.NewGuid();
+        using InstallerLog log = new(new(state), operationId, DateTimeOffset.UnixEpoch);
+        string movedState = state + "-moved";
+        string outside = Path.Combine(this.TemporaryDirectory!, "outside-state");
+        Directory.Move(state, movedState);
+        Directory.CreateDirectory(outside);
+        Directory.CreateSymbolicLink(state, outside);
+
+        log.Write(new(DateTimeOffset.UnixEpoch, operationId, InstallerLogLevel.Information, "root.swap", "captured-only"))
+            .Should().BeTrue();
+
+        string movedLog = Path.Combine(movedState, "logs", Path.GetFileName(log.Path));
+        File.ReadAllText(movedLog).Should().Contain("captured-only");
+        Directory.EnumerateFileSystemEntries(outside).Should().BeEmpty();
+    }
+
+    [Test]
     public void Write_IsSerializedAndNeverExceedsBoundUnderConcurrency()
     {
         string state = this.CreateDirectory();
@@ -193,4 +288,7 @@ public sealed class InstallerLogTests
         Directory.CreateDirectory(this.TemporaryDirectory);
         return Path.Combine(this.TemporaryDirectory, "state");
     }
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int link(string oldPath, string newPath);
 }
