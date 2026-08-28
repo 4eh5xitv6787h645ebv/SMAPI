@@ -86,7 +86,11 @@ jobs:
                         git merge-base --is-ancestor "$actual_commit" origin/develop
                     fi
                     if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-                        [[ "$(git rev-list -n 1 "$GITHUB_REF")" == "$actual_commit" ]]
+                        if [[ "$(git cat-file -t "$GITHUB_REF")" != "tag" ]]; then
+                            echo "Release tags must be annotated tag objects; lightweight tags are refused." >&2
+                            exit 1
+                        fi
+                        [[ "$(git rev-parse "$GITHUB_REF^{commit}")" == "$actual_commit" ]]
                     fi
 
                     {
@@ -253,6 +257,12 @@ jobs:
                     name: linux-alpha-release-${{ needs.qualify-and-package.outputs.release_commit }}
                     path: artifacts/release
 
+            -   name: Verify downloaded release assets
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+
             -   name: Generate GitHub artifact attestation
                 uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
                 with:
@@ -275,6 +285,12 @@ jobs:
                     name: linux-alpha-release-${{ needs.qualify-and-package.outputs.release_commit }}
                     path: artifacts/release
 
+            -   name: Verify downloaded release assets
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+
             -   name: Publish immutable-identity prerelease
                 shell: bash
                 env:
@@ -291,6 +307,11 @@ jobs:
 
                     package_name="SMAPI-$RELEASE_VERSION-linux-x64-installer.zip"
                     package_sha256="$(cut -d ' ' -f 1 artifacts/release/SHA256SUMS)"
+                    if [[ ! "$RELEASE_TAG" =~ ^fork-4eh5xitv6787h645ebv-linux-v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([1-9][0-9]*)$ ]]; then
+                        echo "The validated release tag has an unexpected format: $RELEASE_TAG" >&2
+                        exit 1
+                    fi
+                    release_title="Experimental SMAPI Linux Fork ${BASH_REMATCH[1]} alpha ${BASH_REMATCH[2]}"
                     notes="$RUNNER_TEMP/release-notes.md"
                     {
                         echo "# Experimental unofficial Linux desktop alpha"
@@ -323,6 +344,6 @@ jobs:
                         --repo "$GITHUB_REPOSITORY" \
                         --verify-tag \
                         --target "$RELEASE_COMMIT" \
-                        --title "Experimental SMAPI Linux Fork 4.5.3 alpha 1" \
+                        --title "$release_title" \
                         --notes-file "$notes" \
                         --prerelease
