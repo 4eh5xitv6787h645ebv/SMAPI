@@ -327,43 +327,49 @@ Scope constraints apply throughout:
 - [ ] Merge the Phase 6 pull request into `develop` and close it.
 - [ ] Verify `develop` equals `origin/develop` after the merge.
 
-## Phase 7 — Upstream-ready optimizations
+## Phase 7 — Upstream-ready optimizations (deferred by user)
+
+The user explicitly deferred all Phase 7 work on 2026-08-28. The scope decision is checked below, while
+the original requirements remain unchecked and visibly deferred; no upstream review, branch change,
+or pull request was performed.
+
+- [x] Record the user's 2026-08-28 decision to defer Phase 7 for now.
 
 ### Selection and preparation
 
-- [ ] Fetch and review the complete fork delta against current `Pathoschild/SMAPI` `develop`.
-- [ ] Identify low-risk, platform-neutral correctness or performance improvements that separate cleanly from Linux-only features.
-- [ ] Keep Linux-only or high-risk experimental changes in this fork.
-- [ ] Document Linux-only or high-risk experimental changes not submitted upstream and explain why.
-- [ ] Rebase every selected change onto current upstream `develop`.
-- [ ] Minimize every selected upstream diff.
-- [ ] Add upstream-appropriate correctness tests.
-- [ ] Add upstream-appropriate benchmarks or performance evidence.
-- [ ] Preserve upstream style.
-- [ ] Preserve upstream platform and API compatibility.
-- [ ] Ensure no private fixture data appears in commits, test assets, PR bodies, or artifacts.
+- [ ] Deferred/out of current scope: fetch and review the complete fork delta against current `Pathoschild/SMAPI` `develop`.
+- [ ] Deferred/out of current scope: identify low-risk, platform-neutral correctness or performance improvements that separate cleanly from Linux-only features.
+- [ ] Deferred/out of current scope: keep Linux-only or high-risk experimental changes in this fork.
+- [ ] Deferred/out of current scope: document Linux-only or high-risk experimental changes not submitted upstream and explain why.
+- [ ] Deferred/out of current scope: rebase every selected change onto current upstream `develop`.
+- [ ] Deferred/out of current scope: minimize every selected upstream diff.
+- [ ] Deferred/out of current scope: add upstream-appropriate correctness tests.
+- [ ] Deferred/out of current scope: add upstream-appropriate benchmarks or performance evidence.
+- [ ] Deferred/out of current scope: preserve upstream style.
+- [ ] Deferred/out of current scope: preserve upstream platform and API compatibility.
+- [ ] Deferred/out of current scope: ensure no private fixture data appears in commits, test assets, PR bodies, or artifacts.
 
 ### Submission and follow-through
 
-- [ ] Obtain an independent Phase 7 upstream-readiness review.
-- [ ] Obtain an independent Phase 7 architecture review.
-- [ ] Obtain an independent Phase 7 performance review.
-- [ ] Obtain an independent Phase 7 testing review.
-- [ ] Obtain an independent Phase 7 documentation review.
-- [ ] Obtain an independent Phase 7 final-diff review.
-- [ ] Address every actionable Phase 7 review finding.
-- [ ] Submit a focused upstream GitHub pull request for each justified change.
-- [ ] Verify every submitted upstream PR is valid and CI-clean.
-- [ ] Respond to actionable upstream review or CI findings received during this goal.
-- [ ] Mark maintainer-only approval or merge items **externally pending** when applicable; upstream merge is not required for completion.
-- [ ] Open a focused Phase 7 documentation/integration pull request on the fork.
-- [ ] Pass required fork CI and repository checks.
-- [ ] Merge the Phase 7 fork pull request into `develop` and close it.
-- [ ] Verify `develop` equals `origin/develop` after the merge.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 upstream-readiness review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 architecture review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 performance review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 testing review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 documentation review.
+- [ ] Deferred/out of current scope: obtain an independent Phase 7 final-diff review.
+- [ ] Deferred/out of current scope: address every actionable Phase 7 review finding.
+- [ ] Deferred/out of current scope: submit a focused upstream GitHub pull request for each justified change.
+- [ ] Deferred/out of current scope: verify every submitted upstream PR is valid and CI-clean.
+- [ ] Deferred/out of current scope: respond to actionable upstream review or CI findings received during this goal.
+- [ ] Deferred/out of current scope: mark maintainer-only approval or merge items **externally pending** when applicable.
+- [ ] Deferred/out of current scope: open a focused Phase 7 documentation/integration pull request on the fork.
+- [ ] Deferred/out of current scope: pass required fork CI and repository checks.
+- [ ] Deferred/out of current scope: merge the Phase 7 fork pull request into `develop` and close it.
+- [ ] Deferred/out of current scope: verify `develop` equals `origin/develop` after the merge.
 
 ## Final definition of done
 
-- [ ] Every umbrella issue and roadmap checkbox is complete with linked evidence, or explicitly marked **externally pending** where only an upstream maintainer can act.
+- [ ] Every umbrella issue and roadmap checkbox is complete with linked evidence, explicitly deferred by the user, or marked **externally pending** where only an upstream maintainer can act.
 - [ ] All fork pull requests are reviewed, fixed, merged into `develop`, and closed.
 - [ ] The Linux alpha release artifact is publicly downloadable.
 - [ ] The graphical installer artifact is publicly downloadable.

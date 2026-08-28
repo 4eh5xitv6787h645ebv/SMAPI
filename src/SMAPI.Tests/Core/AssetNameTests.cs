@@ -14,6 +14,8 @@ namespace SMAPI.Tests.Core;
 internal class AssetNameTests
 {
     [Test(Description = "Assert that a localized name reuses one immutable base-name instance without cache-hit allocations.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
     public void GetBaseAssetName_CachesLocalizedName()
     {
         IAssetName name = new AssetName("Data/Test", "fr-FR", LocalizedContentManager.LanguageCode.fr);

@@ -88,6 +88,7 @@ internal class ContentCoordinatorTests
     }
 
     [Test]
+    [Category("PerformanceRegression")]
     public void AssetInfoPredicateCache_EvaluatesEquivalentAssetsOnce()
     {
         List<(IAssetName Name, Type DataType)> requests = [];
@@ -113,6 +114,38 @@ internal class ContentCoordinatorTests
             (firstCase, typeof(string)),
             (firstCase, typeof(object))
         );
+    }
+
+    [Test(Description = "Assert that warmed invalidation-predicate cache hits don't allocate or reevaluate the predicate.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void AssetInfoPredicateCache_WarmedHitsDoNotAllocate()
+    {
+        int predicateCalls = 0;
+        var cache = new AssetInfoPredicateCache(
+            locale: "en-US",
+            normalizeAssetName: static raw => raw,
+            predicate: _ =>
+            {
+                predicateCalls++;
+                return true;
+            }
+        );
+        IAssetName name = new AssetName("Data/Example", localeCode: null, languageCode: null);
+
+        for (int i = 0; i < 10_000; i++)
+            cache.Matches(name, typeof(string));
+
+        const int iterations = 10_000;
+        bool matched = false;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+            matched |= cache.Matches(name, typeof(string));
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        matched.Should().BeTrue();
+        predicateCalls.Should().Be(1);
+        allocatedBytes.Should().Be(0, "equivalent manager copies should reuse the transaction-local predicate result");
     }
 
     [Test(Description = "Assert that the deferred invalidation report preserves its contents and case-insensitive asset order.")]

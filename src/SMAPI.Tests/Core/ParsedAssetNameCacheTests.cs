@@ -81,6 +81,8 @@ internal class ParsedAssetNameCacheTests
     }
 
     [Test(Description = "Assert that warmed cache hits allocate no managed memory.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
     public void GetOrAdd_CacheHitDoesNotAllocate()
     {
         ParsedAssetNameCache cache = new(ParseLocale);

@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using FluentAssertions;
@@ -234,6 +235,38 @@ internal class PathUtilitiesTests
 
         // assert
         normalized.Should().BeSameAs(original);
+    }
+
+    [Test(Description = "Assert that warmed canonical file and asset paths don't allocate.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void NormalizeCanonicalPaths_DoesNotAllocate()
+    {
+        string filePath = new(Path.DirectorySeparatorChar == '/'
+            ? "/home/user/Stardew Valley/Mods/Content Pack/assets/data.json".ToCharArray()
+            : @"C:\Users\User\Stardew Valley\Mods\Content Pack\assets\data.json".ToCharArray());
+        string assetName = new("Maps/Custom/Farmhouse".ToCharArray());
+
+        for (int i = 0; i < 10_000; i++)
+        {
+            PathUtilities.NormalizePath(filePath);
+            PathUtilities.NormalizeAssetName(assetName);
+        }
+
+        const int iterations = 100_000;
+        string? normalizedFilePath = null;
+        string? normalizedAssetName = null;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+        {
+            normalizedFilePath = PathUtilities.NormalizePath(filePath);
+            normalizedAssetName = PathUtilities.NormalizeAssetName(assetName);
+        }
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        normalizedFilePath.Should().BeSameAs(filePath);
+        normalizedAssetName.Should().BeSameAs(assetName);
+        allocatedBytes.Should().Be(0, "already-canonical paths should take the reference-preserving fast path");
     }
 
     [TestCase("  folder//nested\\file  ", "folder/nested/file")]

@@ -104,6 +104,45 @@ internal sealed class JsonHelperTests
         }
     }
 
+    [Test(Description = "Assert that successful streamed reads don't allocate in proportion to valid JSON file length.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void ReadJsonFileIfExists_ValidJsonAvoidsWholeFileAllocation()
+    {
+        const int largePaddingLength = 4 * 1024 * 1024;
+        string smallPath = WriteTempJson("{ \"Value\": \"loaded\", \"Day\": \"Friday\" }");
+        string largePath = WriteTempJson($"{{ \"Value\": \"loaded\", \"Day\": \"Friday\" }}{new string(' ', largePaddingLength)}");
+        try
+        {
+            JsonHelper helper = new();
+
+            // Warm both paths so the comparison covers steady-state reader allocation, not JIT or metadata setup.
+            helper.ReadJsonFileIfExists(smallPath, out TestModel? _).Should().BeTrue();
+            helper.ReadJsonFileIfExists(largePath, out TestModel? _).Should().BeTrue();
+
+            long smallBefore = GC.GetAllocatedBytesForCurrentThread();
+            bool smallFound = helper.ReadJsonFileIfExists(smallPath, out TestModel? small);
+            long smallAllocated = GC.GetAllocatedBytesForCurrentThread() - smallBefore;
+
+            long largeBefore = GC.GetAllocatedBytesForCurrentThread();
+            bool largeFound = helper.ReadJsonFileIfExists(largePath, out TestModel? large);
+            long largeAllocated = GC.GetAllocatedBytesForCurrentThread() - largeBefore;
+
+            smallFound.Should().BeTrue();
+            largeFound.Should().BeTrue();
+            small.Should().BeEquivalentTo(large);
+            largeAllocated.Should().BeLessThanOrEqualTo(
+                smallAllocated + (64 * 1024),
+                "streaming may allocate fixed reader buffers, but must not materialize a multi-megabyte UTF-16 copy"
+            );
+        }
+        finally
+        {
+            File.Delete(smallPath);
+            File.Delete(largePath);
+        }
+    }
+
     /// <summary>Write a temporary JSON file.</summary>
     private static string WriteTempJson(string json, Encoding? encoding = null)
     {

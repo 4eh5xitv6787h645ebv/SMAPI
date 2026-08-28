@@ -57,6 +57,39 @@ internal class ManagedEventTests
         Context.HeuristicModsRunningCode.Should().BeEmpty();
     }
 
+    [Test(Description = "Assert that warmed stateful event dispatch doesn't allocate per raise or handler.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void Raise_Lazy_WarmedDispatchDoesNotAllocate()
+    {
+        ManagedEvent<EventArgs> managedEvent = new("test event", new ModRegistry());
+        Mock<IModMetadata> mod = new(MockBehavior.Strict);
+        EventHandler<EventArgs> handler = static (_, _) => { };
+        const int handlerCount = 8;
+        for (int i = 0; i < handlerCount; i++)
+            managedEvent.Add(handler, mod.Object);
+        ManagedEventInvoker<int, EventArgs> invoke = static (ref int count, IModMetadata _, Action<EventArgs> callback) =>
+        {
+            count++;
+            callback(EventArgs.Empty);
+        };
+
+        int warmupInvocations = 0;
+        for (int i = 0; i < 10_000; i++)
+            managedEvent.Raise(ref warmupInvocations, invoke);
+
+        const int iterations = 10_000;
+        int invocations = 0;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+            managedEvent.Raise(ref invocations, invoke);
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        invocations.Should().Be(iterations * handlerCount);
+        Context.HeuristicModsRunningCode.Should().BeEmpty();
+        allocatedBytes.Should().Be(0, "handlers and the stateful invoker should reuse their cached delegates");
+    }
+
     [Test]
     public void Raise_Profiled_AttributesExclusiveTimeAndFailureToMod()
     {

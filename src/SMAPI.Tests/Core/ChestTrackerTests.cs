@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Events;
@@ -123,6 +125,62 @@ internal class ChestTrackerTests
         tracker.Update(trackInventoryChanges: true);
         tracker.TryGetInventoryChanges(out SnapshotItemListDiff? removedChanges).Should().BeTrue();
         removedChanges!.Removed.Should().ContainSingle().Which.Should().BeSameAs(original);
+    }
+
+    [Test(Description = "Assert that unchanged observed chests have an allocation-free idle path.")]
+    [Category("PerformanceRegression")]
+    [NonParallelizable]
+    public void Update_NormalIdleChestsDoNotAllocate()
+    {
+        const int chestCount = 32;
+        const int itemsPerChest = 12;
+        List<ChestTracker> trackers = new(chestCount);
+        try
+        {
+            for (int chestIndex = 0; chestIndex < chestCount; chestIndex++)
+            {
+                Chest chest = new();
+                for (int itemIndex = 0; itemIndex < itemsPerChest; itemIndex++)
+                    chest.Items.Add(new StardewValley.Object { Stack = itemIndex + 1 });
+
+                ChestTracker tracker = new($"chest-{chestIndex}", chest);
+                tracker.Update(trackInventoryChanges: true);
+                tracker.Reset();
+                trackers.Add(tracker);
+            }
+
+            for (int iteration = 0; iteration < 100; iteration++)
+            {
+                foreach (ChestTracker tracker in trackers)
+                {
+                    tracker.Update(trackInventoryChanges: true);
+                    tracker.TryGetInventoryChanges(out _);
+                    tracker.Reset();
+                }
+            }
+
+            const int iterations = 1_000;
+            bool changed = false;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int iteration = 0; iteration < iterations; iteration++)
+            {
+                foreach (ChestTracker tracker in trackers)
+                {
+                    tracker.Update(trackInventoryChanges: true);
+                    changed |= tracker.TryGetInventoryChanges(out _);
+                    tracker.Reset();
+                }
+            }
+            long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            changed.Should().BeFalse();
+            allocatedBytes.Should().Be(0, "unchanged normal stacks should remain event-driven instead of being rescanned or snapshotted");
+        }
+        finally
+        {
+            foreach (ChestTracker tracker in trackers)
+                tracker.Dispose();
+        }
     }
 
     /// <summary>A representative mod item whose quantity isn't backed by <see cref="Item.stack"/>.</summary>
