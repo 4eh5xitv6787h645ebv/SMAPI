@@ -3,6 +3,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Ownership.Persistence;
+using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
 
 namespace StardewModdingAPI.Installer.Core.Engine;
@@ -22,7 +23,8 @@ internal sealed class InstallerExecutionCompiler
         InstallationPlan plan,
         InstallationPlanningRequest request,
         GameRootIdentity gameRoot,
-        ulong operationGeneration
+        ulong operationGeneration,
+        IVerifiedPackageContentAuthority? targetPackageContent
     )
     {
         ArgumentNullException.ThrowIfNull(plan);
@@ -32,6 +34,22 @@ internal sealed class InstallerExecutionCompiler
             throw Error(ExecutionCompilationError.NonExecutablePlan, "A plan with conflicts can't be bound for execution.");
         if (plan.Action != request.Action)
             throw Error(ExecutionCompilationError.PlanDoesNotMatchRequest, "The plan action doesn't match its planning request.");
+        bool requiresTarget = request.Action is InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair;
+        if (requiresTarget)
+        {
+            if (
+                targetPackageContent is null
+                || request.TargetManifest is null
+                || !ReferenceEquals(targetPackageContent.Manifest, request.TargetManifest)
+                || targetPackageContent.ManifestSha256 != request.TargetManifest.GetCanonicalDigest()
+            )
+            {
+                throw Error(ExecutionCompilationError.StaleManifest, "The target manifest isn't backed by its live verified package-content authority.");
+            }
+            targetPackageContent.AssertUsable();
+        }
+        else if (targetPackageContent is not null)
+            throw Error(ExecutionCompilationError.InvalidOperationMapping, "This action must not invent a target package-content authority.");
 
         InstallationPlan expected = this.Planner.Plan(request);
         if (!expected.CanExecute || expected.GetCanonicalDigest() != plan.GetCanonicalDigest())
@@ -47,7 +65,8 @@ internal sealed class InstallerExecutionCompiler
             request.TargetManifest?.GetCanonicalDigest(),
             request.InstalledReceipt?.GetCanonicalDigest(),
             GetRollbackSnapshotDigest(request.RollbackSnapshot),
-            GetRecoveryObservationsDigest(request.RecoveryObservations)
+            GetRecoveryObservationsDigest(request.RecoveryObservations),
+            targetPackageContent
         );
     }
 
@@ -70,6 +89,7 @@ internal sealed class InstallerExecutionCompiler
             throw Error(ExecutionCompilationError.StalePlan, "The bound action no longer matches the plan and request.");
         if (binding.PlanSha256 != plan.GetCanonicalDigest())
             throw Error(ExecutionCompilationError.StalePlan, "The canonical plan changed after it was bound.");
+        binding.TargetPackageContent?.AssertUsable();
 
         AssertSameDigest(
             binding.ManifestSha256,
@@ -125,7 +145,7 @@ internal sealed class InstallerExecutionCompiler
         {
             case PlanOperationKind.Create:
             case PlanOperationKind.Replace:
-                return this.CompileWrite(operation, request, observations);
+                return this.CompileWrite(operation, request, binding, observations);
 
             case PlanOperationKind.Restore:
                 return this.CompileRestore(operation, request, binding, observations);
@@ -151,6 +171,7 @@ internal sealed class InstallerExecutionCompiler
     private FilePreparationInstruction CompileWrite(
         PlannedOperation operation,
         InstallationPlanningRequest request,
+        BoundInstallationPlan binding,
         IReadOnlyDictionary<string, RecoveryFileObservation> observations
     )
     {
@@ -183,7 +204,11 @@ internal sealed class InstallerExecutionCompiler
         return new FilePreparationInstruction(
             operation,
             PreparationInstructionKind.WriteTransactionDestination,
-            new VerifiedPackageFileSource(target),
+            new VerifiedPackageFileSource(
+                target,
+                binding.TargetPackageContent
+                    ?? throw Error(ExecutionCompilationError.StaleManifest, "A package write has no live verified content authority.")
+            ),
             target.UnixMode,
             target.SizeBytes,
             RecoveryFileType.RegularFile
@@ -404,35 +429,52 @@ internal sealed class InstallerExecutionCompiler
             ReceiptPreparationKind.WriteAtomically => receipt.Source switch
             {
                 GeneratedCanonicalReceiptSource generated => generated.Sha256,
+                RecoverySnapshotSource recoveryReceipt when recoveryReceipt.Content == RecoverySnapshotContent.InstalledReceipt
+                    => recoveryReceipt.ExpectedContentSha256,
                 _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A new recovery snapshot requires a generated receipt source.")
             },
             ReceiptPreparationKind.RemoveAtomically => null,
-            _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A mutating action must have an atomic receipt transition.")
+            ReceiptPreparationKind.None when request.Action == InstallationAction.Backup
+                => request.InstalledReceipt?.GetCanonicalDigest(),
+            _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A mutating action must have an exact receipt transition.")
         };
         Sha256Digest? previousReceipt = request.InstalledReceipt?.GetCanonicalDigest();
 
         List<RollbackSnapshotEntry> entries = new();
-        foreach (FilePreparationInstruction instruction in instructions.Where(item => item.IsTransactionDestination))
+        FilePreparationInstruction[] recoveryInstructions = request.Action == InstallationAction.Backup
+            ? instructions.Where(item => item.Kind == PreparationInstructionKind.CaptureRecoveryFile).ToArray()
+            : instructions.Where(item => item.IsTransactionDestination).ToArray();
+        foreach (FilePreparationInstruction instruction in recoveryInstructions)
         {
             RecoveryFileIdentity? prior = observations[instruction.Path.Value].Identity;
             RecoveryFileIdentity? result = instruction.Kind switch
             {
                 PreparationInstructionKind.WriteTransactionDestination => GetInstructionResultIdentity(instruction),
                 PreparationInstructionKind.RemoveTransactionDestination => null,
+                PreparationInstructionKind.CaptureRecoveryFile when request.Action == InstallationAction.Backup => prior,
                 _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A transaction destination has no recovery result rule.")
             };
-            if (prior == result)
+            if (request.Action != InstallationAction.Backup && prior == result)
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Changed path '{instruction.Path}' doesn't describe a state transition.");
 
             OwnedEntryKind ownedKind = GetRecoveryOwnedKind(instruction.Path, request);
-            entries.Add(prior is null
-                ? new RollbackSnapshotEntry(instruction.Path, ownedKind, RollbackEntryKind.Remove, result, null)
-                : new RollbackSnapshotEntry(instruction.Path, ownedKind, RollbackEntryKind.Restore, result, prior));
+            if (request.Action == InstallationAction.Backup)
+            {
+                if (prior is null)
+                    throw Error(ExecutionCompilationError.InvalidOperationMapping, "A backup capture source is unexpectedly absent.");
+                entries.Add(new RollbackSnapshotEntry(instruction.Path, ownedKind, RollbackEntryKind.Restore, prior, prior));
+            }
+            else
+            {
+                entries.Add(prior is null
+                    ? new RollbackSnapshotEntry(instruction.Path, ownedKind, RollbackEntryKind.Remove, result, null)
+                    : new RollbackSnapshotEntry(instruction.Path, ownedKind, RollbackEntryKind.Restore, result, prior));
+            }
         }
 
         RollbackSnapshot snapshot = new(expectedReceipt, previousReceipt, entries);
         byte[] snapshotBytes = CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot);
-        HashSet<string> changed = instructions.Where(item => item.IsTransactionDestination)
+        HashSet<string> changed = recoveryInstructions
             .Select(item => item.Path.Value)
             .ToHashSet(StringComparer.Ordinal);
         RecoveryPathBinding[] bindings = observations.Values
@@ -520,7 +562,7 @@ internal sealed class InstallerExecutionCompiler
 
     private static bool RequiresNewRecoverySnapshot(InstallationAction action)
     {
-        return action is InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair or InstallationAction.Uninstall;
+        return Enum.IsDefined(typeof(InstallationAction), action);
     }
 
     private static Sha256Digest? GetRecoveryObservationsDigest(IReadOnlyList<RecoveryFileObservation> observations)

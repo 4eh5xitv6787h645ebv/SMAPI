@@ -195,8 +195,9 @@ internal sealed class InstallerTransactionExecutor
     {
         HashSet<string> destinations = new(StringComparer.Ordinal);
         HashSet<string> caseInsensitiveDestinations = new(StringComparer.OrdinalIgnoreCase);
-        foreach (TransactionFileOperation operation in plan.Operations)
+        for (int operationIndex = 0; operationIndex < plan.Operations.Count; operationIndex++)
         {
+            TransactionFileOperation operation = plan.Operations[operationIndex];
             if (!Enum.IsDefined(typeof(TransactionOperationKind), operation.Kind))
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction contains an unknown operation kind.");
             string relativePath = TransactionPath.NormalizeRelativePath(operation.RelativePath, nameof(operation.RelativePath));
@@ -204,11 +205,7 @@ internal sealed class InstallerTransactionExecutor
             try
             {
                 allowed = OwnedNamespacePolicy.IsAllowedTransactionDestination(NormalizedRelativePath.Parse(relativePath))
-                    || (
-                        relativePath == TransactionPlan.CoreReceiptRelativePath
-                        && plan.HasCoreAuthorizedReceiptMutation
-                        && ReferenceEquals(operation, plan.Operations[^1])
-                    );
+                    || IsAuthorizedCoreStatePath(plan, operationIndex, relativePath);
             }
             catch (ArgumentException exception)
             {
@@ -242,6 +239,35 @@ internal sealed class InstallerTransactionExecutor
         }
     }
 
+    private static bool IsAuthorizedCoreStatePath(TransactionPlan plan, int operationIndex, string relativePath)
+    {
+        CoreReservedMutationAuthorization? authorization = plan.CoreAuthorization;
+        if (authorization is null)
+        {
+            return relativePath == TransactionPlan.CoreReceiptRelativePath
+                && plan.HasCoreAuthorizedReceiptMutation
+                && operationIndex == plan.Operations.Count - 1;
+        }
+
+        if (authorization.GenerationId != plan.TransactionId)
+            return false;
+        if (operationIndex < authorization.RecoveryOperationCount)
+        {
+            string prefix = $".smapi-installer/recovery/generations/{plan.TransactionId:N}/";
+            return relativePath.StartsWith(prefix, StringComparison.Ordinal);
+        }
+        if (operationIndex == plan.Operations.Count - 1)
+            return relativePath == TransactionPlan.CoreRecoveryPointerRelativePath;
+
+        int receiptIndex = plan.Operations.Count - 2;
+        if (authorization.HasReceiptMutation && operationIndex == receiptIndex)
+            return relativePath == TransactionPlan.CoreReceiptRelativePath;
+        int manifestIndex = receiptIndex - (authorization.HasReceiptMutation ? 1 : 0);
+        return authorization.HasManifestMutation
+            && operationIndex == manifestIndex
+            && relativePath == TransactionPlan.CoreManifestRelativePath;
+    }
+
     private static void ValidateSha256(string? value, bool allowNull, string name)
     {
         if (value is null && allowNull)
@@ -261,7 +287,12 @@ internal sealed class InstallerTransactionExecutor
             GameRootInode = game.Identity.Inode,
             GameRootDeviceMajor = game.Identity.DeviceMajor,
             GameRootDeviceMinor = game.Identity.DeviceMinor,
-            HasCoreAuthorizedReceiptMutation = plan.HasCoreAuthorizedReceiptMutation
+            HasCoreAuthorizedReceiptMutation = plan.HasCoreAuthorizedReceiptMutation,
+            CoreGenerationId = plan.CoreAuthorization?.GenerationId,
+            CoreRecoveryOperationCount = plan.CoreAuthorization?.RecoveryOperationCount ?? 0,
+            CoreRecoveryContentCount = plan.CoreAuthorization?.RecoveryContentCount ?? 0,
+            HasCoreAuthorizedManifestMutation = plan.CoreAuthorization?.HasManifestMutation ?? false,
+            HasCoreAuthorizedRecoveryPointerMutation = plan.CoreAuthorization is not null
         };
         for (int index = 0; index < plan.Operations.Count; index++)
         {

@@ -560,6 +560,134 @@ public sealed class InstallerTransactionExecutorTests
     }
 
     [Test]
+    public void Apply_CoreStateCommitsRecoveryContentAndOwnershipTupleAtomically()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().BeEmpty();
+        Write(game, "StardewModdingAPI.dll", "old runtime");
+        Write(game, TransactionPlan.CoreManifestRelativePath, "old manifest");
+        Write(game, TransactionPlan.CoreReceiptRelativePath, "old receipt");
+        Write(game, TransactionPlan.CoreRecoveryPointerRelativePath, "old pointer");
+        foreach ((string path, string contents) in new[]
+        {
+            ("recovery/snapshot", "snapshot"),
+            ("recovery/receipt", "old receipt"),
+            ("recovery/manifest", "old manifest"),
+            ("recovery/pointer", "old pointer"),
+            ("recovery/file", "old runtime"),
+            ("runtime", "new runtime"),
+            ("manifest", "new manifest"),
+            ("receipt", "new receipt"),
+            ("pointer", "new pointer")
+        })
+        {
+            Write(payload, path, contents);
+        }
+        Guid transactionId = Guid.NewGuid();
+        string prefix = $".smapi-installer/recovery/generations/{transactionId:N}";
+        TransactionPlan plan = TransactionPlan.CreateWithCoreState(
+            transactionId,
+            new[]
+            {
+                WriteOperation($"{prefix}/snapshot.json", null, "recovery/snapshot", Hash("snapshot"), 0x180),
+                WriteOperation($"{prefix}/previous-receipt.json", null, "recovery/receipt", Hash("old receipt"), 0x180),
+                WriteOperation($"{prefix}/previous-manifest.json", null, "recovery/manifest", Hash("old manifest"), 0x180),
+                WriteOperation($"{prefix}/previous-pointer.json", null, "recovery/pointer", Hash("old pointer"), 0x180),
+                WriteOperation($"{prefix}/files/00000000", null, "recovery/file", Hash("old runtime"), 0x180)
+            },
+            new[] { WriteOperation("StardewModdingAPI.dll", Hash("old runtime"), "runtime", Hash("new runtime"), 0x1ed) },
+            WriteOperation(TransactionPlan.CoreManifestRelativePath, Hash("old manifest"), "manifest", Hash("new manifest"), 0x180),
+            WriteOperation(TransactionPlan.CoreReceiptRelativePath, Hash("old receipt"), "receipt", Hash("new receipt"), 0x180),
+            WriteOperation(TransactionPlan.CoreRecoveryPointerRelativePath, Hash("old pointer"), "pointer", Hash("new pointer"), 0x180)
+        );
+
+        new InstallerTransactionExecutor().Apply(game, payload, plan).Status.Should().Be(TransactionStatus.Committed);
+
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new runtime");
+        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreManifestRelativePath)).Should().Be("new manifest");
+        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreReceiptRelativePath)).Should().Be("new receipt");
+        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreRecoveryPointerRelativePath)).Should().Be("new pointer");
+        File.ReadAllText(Path.Combine(game, $"{prefix}/files/00000000")).Should().Be("old runtime");
+    }
+
+    [Test]
+    public void Apply_CoreStateFailureAfterPointer_RestoresPreviousTupleAndRemovesGeneration()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().BeEmpty();
+        Write(game, "StardewModdingAPI.dll", "old runtime");
+        Write(game, TransactionPlan.CoreManifestRelativePath, "old manifest");
+        Write(game, TransactionPlan.CoreReceiptRelativePath, "old receipt");
+        Write(game, TransactionPlan.CoreRecoveryPointerRelativePath, "old pointer");
+        Write(payload, "snapshot", "snapshot");
+        Write(payload, "runtime", "new runtime");
+        Write(payload, "manifest", "new manifest");
+        Write(payload, "receipt", "new receipt");
+        Write(payload, "pointer", "new pointer");
+        Guid transactionId = Guid.NewGuid();
+        string prefix = $".smapi-installer/recovery/generations/{transactionId:N}";
+        TransactionPlan plan = TransactionPlan.CreateWithCoreState(
+            transactionId,
+            new[] { WriteOperation($"{prefix}/snapshot.json", null, "snapshot", Hash("snapshot"), 0x180) },
+            new[] { WriteOperation("StardewModdingAPI.dll", Hash("old runtime"), "runtime", Hash("new runtime")) },
+            WriteOperation(TransactionPlan.CoreManifestRelativePath, Hash("old manifest"), "manifest", Hash("new manifest"), 0x180),
+            WriteOperation(TransactionPlan.CoreReceiptRelativePath, Hash("old receipt"), "receipt", Hash("new receipt"), 0x180),
+            WriteOperation(TransactionPlan.CoreRecoveryPointerRelativePath, Hash("old pointer"), "pointer", Hash("new pointer"), 0x180)
+        );
+        InstallerTransactionExecutor executor = new(faultInjector: new ThrowingFaultInjector(afterOperation: plan.Operations.Count - 1));
+
+        Action apply = () => executor.Apply(game, payload, plan);
+
+        apply.Should().Throw<InvalidOperationException>();
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old runtime");
+        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreManifestRelativePath)).Should().Be("old manifest");
+        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreReceiptRelativePath)).Should().Be("old receipt");
+        File.ReadAllText(Path.Combine(game, TransactionPlan.CoreRecoveryPointerRelativePath)).Should().Be("old pointer");
+        Directory.Exists(Path.Combine(game, prefix)).Should().BeFalse();
+    }
+
+    [TestCase(TransactionPlan.CoreManifestRelativePath)]
+    [TestCase(TransactionPlan.CoreReceiptRelativePath)]
+    [TestCase(TransactionPlan.CoreRecoveryPointerRelativePath)]
+    [TestCase(".smapi-installer/recovery/generations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/snapshot.json")]
+    public void Apply_OrdinaryPlanCannotForgeReservedCoreState(string destination)
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "state", "forged");
+        TransactionPlan plan = new(Guid.NewGuid(), new[] { WriteOperation(destination, null, "state", Hash("forged")) });
+
+        Action apply = () => new InstallerTransactionExecutor().Apply(game, payload, plan);
+
+        apply.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.InvalidPlan);
+        Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CreateWithCoreState_RejectsNonCanonicalRecoveryPublicationOrder()
+    {
+        Guid transactionId = Guid.NewGuid();
+        string prefix = $".smapi-installer/recovery/generations/{transactionId:N}";
+
+        Action create = () => TransactionPlan.CreateWithCoreState(
+            transactionId,
+            new[]
+            {
+                WriteOperation($"{prefix}/files/00000000", null, "file", Hash("file")),
+                WriteOperation($"{prefix}/snapshot.json", null, "snapshot", Hash("snapshot"))
+            },
+            Array.Empty<TransactionFileOperation>(),
+            null,
+            null,
+            WriteOperation(TransactionPlan.CoreRecoveryPointerRelativePath, null, "pointer", Hash("pointer"))
+        );
+
+        create.Should().Throw<ArgumentException>();
+    }
+
+    [Test]
     public void Apply_RetainsAtMostBoundedFinalTransactionRecords()
     {
         string game = this.CreateDirectory();

@@ -35,6 +35,8 @@ internal sealed record TransactionFileOperation(
 internal sealed class TransactionPlan
 {
     internal const string CoreReceiptRelativePath = ".smapi-installer/ownership/receipt.json";
+    internal const string CoreManifestRelativePath = ".smapi-installer/ownership/manifest.json";
+    internal const string CoreRecoveryPointerRelativePath = ".smapi-installer/recovery/current.json";
     /// <summary>The maximum bounded operation count accepted by one transaction.</summary>
     public const int MaximumOperationCount = 20_000;
     /// <summary>The unique transaction ID.</summary>
@@ -45,16 +47,22 @@ internal sealed class TransactionPlan
 
     /// <summary>Whether the core engine, rather than an external caller, appended the reserved receipt mutation.</summary>
     internal bool HasCoreAuthorizedReceiptMutation { get; }
+    internal CoreReservedMutationAuthorization? CoreAuthorization { get; }
 
     /// <summary>Construct an instance.</summary>
     /// <param name="transactionId">The unique transaction ID.</param>
     /// <param name="operations">The ordered operations.</param>
     public TransactionPlan(Guid transactionId, IEnumerable<TransactionFileOperation> operations)
-        : this(transactionId, operations, hasCoreAuthorizedReceiptMutation: false)
+        : this(transactionId, operations, hasCoreAuthorizedReceiptMutation: false, coreAuthorization: null)
     {
     }
 
-    private TransactionPlan(Guid transactionId, IEnumerable<TransactionFileOperation> operations, bool hasCoreAuthorizedReceiptMutation)
+    private TransactionPlan(
+        Guid transactionId,
+        IEnumerable<TransactionFileOperation> operations,
+        bool hasCoreAuthorizedReceiptMutation,
+        CoreReservedMutationAuthorization? coreAuthorization
+    )
     {
         if (transactionId == Guid.Empty)
             throw new ArgumentException("A transaction ID is required.", nameof(transactionId));
@@ -68,6 +76,7 @@ internal sealed class TransactionPlan
         this.TransactionId = transactionId;
         this.Operations = new ReadOnlyCollection<TransactionFileOperation>(array);
         this.HasCoreAuthorizedReceiptMutation = hasCoreAuthorizedReceiptMutation;
+        this.CoreAuthorization = coreAuthorization;
     }
 
     /// <summary>Create a plan whose one reserved receipt mutation was produced by the typed core engine.</summary>
@@ -84,9 +93,102 @@ internal sealed class TransactionPlan
             throw new ArgumentException("The ordinary operation set can't contain the reserved receipt path.", nameof(ordinaryOperations));
         if (receiptOperation.RelativePath != CoreReceiptRelativePath)
             throw new ArgumentException("The authorized receipt operation must target the exact reserved receipt path.", nameof(receiptOperation));
-        return new TransactionPlan(transactionId, ordinary.Append(receiptOperation), hasCoreAuthorizedReceiptMutation: true);
+        return new TransactionPlan(
+            transactionId,
+            ordinary.Append(receiptOperation),
+            hasCoreAuthorizedReceiptMutation: true,
+            coreAuthorization: null
+        );
+    }
+
+    /// <summary>Create the sole fully authorized engine plan, with recovery published first and its pointer last.</summary>
+    internal static TransactionPlan CreateWithCoreState(
+        Guid transactionId,
+        IEnumerable<TransactionFileOperation> recoveryOperations,
+        IEnumerable<TransactionFileOperation> ordinaryOperations,
+        TransactionFileOperation? manifestOperation,
+        TransactionFileOperation? receiptOperation,
+        TransactionFileOperation pointerOperation
+    )
+    {
+        ArgumentNullException.ThrowIfNull(recoveryOperations);
+        ArgumentNullException.ThrowIfNull(ordinaryOperations);
+        ArgumentNullException.ThrowIfNull(pointerOperation);
+        TransactionFileOperation[] recovery = recoveryOperations.ToArray();
+        TransactionFileOperation[] ordinary = ordinaryOperations.ToArray();
+        string generationPrefix = $".smapi-installer/recovery/generations/{transactionId:N}/";
+        if (recovery.Length == 0 || recovery.Any(operation => !operation.RelativePath.StartsWith(generationPrefix, StringComparison.Ordinal)))
+            throw new ArgumentException("Core recovery operations must populate only their exact transaction generation.", nameof(recoveryOperations));
+        if (ordinary.Any(operation => operation.RelativePath.StartsWith(".smapi-installer/", StringComparison.Ordinal)))
+            throw new ArgumentException("Ordinary operations can't target reserved installer state.", nameof(ordinaryOperations));
+        if (manifestOperation is not null && manifestOperation.RelativePath != CoreManifestRelativePath)
+            throw new ArgumentException("The core manifest operation targets an unexpected path.", nameof(manifestOperation));
+        if (receiptOperation is not null && receiptOperation.RelativePath != CoreReceiptRelativePath)
+            throw new ArgumentException("The core receipt operation targets an unexpected path.", nameof(receiptOperation));
+        if (pointerOperation.RelativePath != CoreRecoveryPointerRelativePath || pointerOperation.Kind != TransactionOperationKind.WriteFile)
+            throw new ArgumentException("The core recovery pointer must be one exact write operation.", nameof(pointerOperation));
+
+        string[] relativeRecoveryPaths = recovery.Select(operation => operation.RelativePath[generationPrefix.Length..]).ToArray();
+        if (relativeRecoveryPaths[0] != "snapshot.json")
+            throw new ArgumentException("The core recovery generation must publish its canonical snapshot first.", nameof(recoveryOperations));
+        string[] contentNames = relativeRecoveryPaths
+            .Where(path => path.StartsWith("files/", StringComparison.Ordinal))
+            .Select(path => path["files/".Length..])
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        if (contentNames.Where((name, index) => name != index.ToString("D8")).Any())
+            throw new ArgumentException("Core recovery content indices aren't canonical and contiguous.", nameof(recoveryOperations));
+        HashSet<string> fixedNames = new(StringComparer.Ordinal)
+        {
+            "snapshot.json",
+            "previous-receipt.json",
+            "previous-manifest.json",
+            "previous-pointer.json"
+        };
+        if (relativeRecoveryPaths.Any(path => !fixedNames.Contains(path) && !path.StartsWith("files/", StringComparison.Ordinal)))
+            throw new ArgumentException("The core recovery generation contains an unknown path.", nameof(recoveryOperations));
+        string[] expectedOrder = new[] { "snapshot.json", "previous-receipt.json", "previous-manifest.json", "previous-pointer.json" }
+            .Where(relativeRecoveryPaths.Contains)
+            .Concat(contentNames.Select(name => $"files/{name}"))
+            .ToArray();
+        if (!relativeRecoveryPaths.SequenceEqual(expectedOrder, StringComparer.Ordinal))
+            throw new ArgumentException("Core recovery generation paths aren't in canonical publication order.", nameof(recoveryOperations));
+        if (
+            relativeRecoveryPaths.Distinct(StringComparer.Ordinal).Count() != relativeRecoveryPaths.Length
+            || recovery.Any(operation => operation.Kind != TransactionOperationKind.WriteFile || operation.ExpectedExistingSha256 is not null)
+        )
+        {
+            throw new ArgumentException("Core recovery generation paths must be unique absent-file writes.", nameof(recoveryOperations));
+        }
+
+        CoreReservedMutationAuthorization authorization = new(
+            transactionId,
+            recovery.Length,
+            contentNames.Length,
+            manifestOperation is not null,
+            receiptOperation is not null
+        );
+        IEnumerable<TransactionFileOperation> ordered = recovery
+            .Concat(ordinary)
+            .Concat(manifestOperation is null ? [] : [manifestOperation])
+            .Concat(receiptOperation is null ? [] : [receiptOperation])
+            .Append(pointerOperation);
+        return new TransactionPlan(
+            transactionId,
+            ordered,
+            hasCoreAuthorizedReceiptMutation: receiptOperation is not null,
+            coreAuthorization: authorization
+        );
     }
 }
+
+internal sealed record CoreReservedMutationAuthorization(
+    Guid GenerationId,
+    int RecoveryOperationCount,
+    int RecoveryContentCount,
+    bool HasManifestMutation,
+    bool HasReceiptMutation
+);
 
 /// <summary>The result of applying or recovering a transaction.</summary>
 /// <param name="TransactionId">The transaction ID.</param>

@@ -8,8 +8,16 @@ using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
 
+internal interface IVerifiedPackageContentAuthority
+{
+    PackageManifest Manifest { get; }
+    Sha256Digest ManifestSha256 { get; }
+    LinuxAnchoredFile OpenFile(PackageManifestEntry expected);
+    void AssertUsable();
+}
+
 /// <summary>An opaque, descriptor-anchored extraction of every file in a verified install manifest.</summary>
-public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable
+public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable, IVerifiedPackageContentAuthority
 {
     private readonly string StagingRoot;
     private bool Disposed;
@@ -22,6 +30,7 @@ public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable
 
     internal VerifiedInstallerPackage Authority { get; }
     internal LinuxAnchoredFileSystem Payload { get; }
+    PackageManifest IVerifiedPackageContentAuthority.Manifest => this.Authority.Manifest;
 
     internal VerifiedPackageContent(
         VerifiedInstallerPackage authority,
@@ -34,7 +43,7 @@ public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable
         this.Payload = payload;
     }
 
-    internal LinuxAnchoredFile OpenFile(PackageManifestEntry expected)
+    LinuxAnchoredFile IVerifiedPackageContentAuthority.OpenFile(PackageManifestEntry expected)
     {
         if (this.Disposed)
             throw new ObjectDisposedException(nameof(VerifiedPackageContent));
@@ -56,6 +65,13 @@ public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable
             file.Dispose();
             throw;
         }
+    }
+
+    void IVerifiedPackageContentAuthority.AssertUsable()
+    {
+        if (this.Disposed)
+            throw new ObjectDisposedException(nameof(VerifiedPackageContent));
+        this.Authority.AssertUsable();
     }
 
     /// <inheritdoc />

@@ -8,7 +8,7 @@ namespace StardewModdingAPI.Installer.Core.Transactions;
 
 internal sealed class TransactionJournal
 {
-    public int SchemaVersion { get; init; } = 2;
+    public int SchemaVersion { get; init; } = 3;
     public Guid TransactionId { get; init; }
     public long CreatedUtcTicks { get; init; }
     public string CanonicalGameRoot { get; init; } = null!;
@@ -16,6 +16,11 @@ internal sealed class TransactionJournal
     public uint GameRootDeviceMajor { get; init; }
     public uint GameRootDeviceMinor { get; init; }
     public bool HasCoreAuthorizedReceiptMutation { get; init; }
+    public Guid? CoreGenerationId { get; init; }
+    public int CoreRecoveryOperationCount { get; init; }
+    public int CoreRecoveryContentCount { get; init; }
+    public bool HasCoreAuthorizedManifestMutation { get; init; }
+    public bool HasCoreAuthorizedRecoveryPointerMutation { get; init; }
     public List<TransactionJournalEntry> Entries { get; init; } = new();
 }
 
@@ -244,7 +249,7 @@ internal static class TransactionJournalStore
     private static void ValidateJournal(TransactionJournal journal, Guid expectedId, string expectedRoot, LinuxFileIdentity? expectedIdentity)
     {
         if (
-            journal.SchemaVersion != 2
+            journal.SchemaVersion != 3
             || journal.TransactionId == Guid.Empty
             || journal.TransactionId != expectedId
             || journal.CreatedUtcTicks < DateTime.UnixEpoch.Ticks
@@ -268,7 +273,7 @@ internal static class TransactionJournalStore
             if (
                 entry.Index != index
                 || !Enum.IsDefined(typeof(TransactionOperationKind), entry.Kind)
-                || !IsAllowedDestination(path, journal.HasCoreAuthorizedReceiptMutation, index == journal.Entries.Count - 1)
+                || !IsAllowedDestination(journal, index, path)
                 || !exact.Add(path)
                 || !insensitive.Add(path)
                 || entry.HadOriginal != (entry.ExpectedExistingSha256 is not null)
@@ -293,12 +298,47 @@ internal static class TransactionJournalStore
         }
         if (journal.HasCoreAuthorizedReceiptMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreReceiptRelativePath))
             throw RecoveryError("The immutable recovery plan's receipt authorization is inconsistent.");
+        if (
+            journal.HasCoreAuthorizedManifestMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreManifestRelativePath)
+            || journal.HasCoreAuthorizedRecoveryPointerMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreRecoveryPointerRelativePath)
+            || (journal.CoreGenerationId is null) != !journal.HasCoreAuthorizedRecoveryPointerMutation
+            || journal.CoreRecoveryOperationCount < 0
+            || journal.CoreRecoveryContentCount < 0
+            || journal.CoreRecoveryContentCount > journal.CoreRecoveryOperationCount
+        )
+        {
+            throw RecoveryError("The immutable recovery plan's core-state authorization is inconsistent.");
+        }
     }
 
-    private static bool IsAllowedDestination(string path, bool receiptAuthorized, bool isLast)
+    private static bool IsAllowedDestination(TransactionJournal journal, int index, string path)
     {
-        return OwnedNamespacePolicy.IsAllowedTransactionDestination(NormalizedRelativePath.Parse(path))
-            || (path == TransactionPlan.CoreReceiptRelativePath && receiptAuthorized && isLast);
+        if (OwnedNamespacePolicy.IsAllowedTransactionDestination(NormalizedRelativePath.Parse(path)))
+            return true;
+        if (journal.CoreGenerationId is null)
+        {
+            return path == TransactionPlan.CoreReceiptRelativePath
+                && journal.HasCoreAuthorizedReceiptMutation
+                && index == journal.Entries.Count - 1;
+        }
+        if (journal.CoreGenerationId != journal.TransactionId)
+            return false;
+        if (index < journal.CoreRecoveryOperationCount)
+        {
+            return path.StartsWith(
+                $".smapi-installer/recovery/generations/{journal.TransactionId:N}/",
+                StringComparison.Ordinal
+            );
+        }
+        if (index == journal.Entries.Count - 1)
+            return journal.HasCoreAuthorizedRecoveryPointerMutation && path == TransactionPlan.CoreRecoveryPointerRelativePath;
+        int receiptIndex = journal.Entries.Count - 2;
+        if (journal.HasCoreAuthorizedReceiptMutation && index == receiptIndex)
+            return path == TransactionPlan.CoreReceiptRelativePath;
+        int manifestIndex = receiptIndex - (journal.HasCoreAuthorizedReceiptMutation ? 1 : 0);
+        return journal.HasCoreAuthorizedManifestMutation
+            && index == manifestIndex
+            && path == TransactionPlan.CoreManifestRelativePath;
     }
 
     private static string NormalizeRecoveryPath(string path, string name)
@@ -446,7 +486,23 @@ internal static class TransactionJournalStore
         try
         {
             using JsonDocument document = JsonDocument.Parse(bytes, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 16 });
-            AssertExactProperties(document.RootElement, "schemaVersion", "transactionId", "createdUtcTicks", "canonicalGameRoot", "gameRootInode", "gameRootDeviceMajor", "gameRootDeviceMinor", "hasCoreAuthorizedReceiptMutation", "entries");
+            AssertExactProperties(
+                document.RootElement,
+                "schemaVersion",
+                "transactionId",
+                "createdUtcTicks",
+                "canonicalGameRoot",
+                "gameRootInode",
+                "gameRootDeviceMajor",
+                "gameRootDeviceMinor",
+                "hasCoreAuthorizedReceiptMutation",
+                "coreGenerationId",
+                "coreRecoveryOperationCount",
+                "coreRecoveryContentCount",
+                "hasCoreAuthorizedManifestMutation",
+                "hasCoreAuthorizedRecoveryPointerMutation",
+                "entries"
+            );
             JsonElement entries = document.RootElement.GetProperty("entries");
             if (entries.ValueKind != JsonValueKind.Array)
                 throw new JsonException();

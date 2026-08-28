@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
 
 namespace StardewModdingAPI.Installer.Core.Engine;
@@ -44,6 +45,7 @@ public sealed class BoundInstallationPlan
     public Sha256Digest? InstalledReceiptSha256 { get; }
     public Sha256Digest? RollbackSnapshotSha256 { get; }
     public Sha256Digest? RecoveryObservationsSha256 { get; }
+    internal IVerifiedPackageContentAuthority? TargetPackageContent { get; }
 
     internal BoundInstallationPlan(
         InstallationAction action,
@@ -53,7 +55,8 @@ public sealed class BoundInstallationPlan
         Sha256Digest? manifestSha256,
         Sha256Digest? installedReceiptSha256,
         Sha256Digest? rollbackSnapshotSha256,
-        Sha256Digest? recoveryObservationsSha256
+        Sha256Digest? recoveryObservationsSha256,
+        IVerifiedPackageContentAuthority? targetPackageContent
     )
     {
         ArgumentNullException.ThrowIfNull(gameRoot);
@@ -65,6 +68,7 @@ public sealed class BoundInstallationPlan
         this.InstalledReceiptSha256 = installedReceiptSha256;
         this.RollbackSnapshotSha256 = rollbackSnapshotSha256;
         this.RecoveryObservationsSha256 = recoveryObservationsSha256;
+        this.TargetPackageContent = targetPackageContent;
     }
 
     /// <summary>Serialize every execution-relevant plan and observed-state identity deterministically.</summary>
@@ -132,13 +136,18 @@ public sealed class VerifiedPackageFileSource : PreparationSource
     public Sha256Digest Sha256 { get; }
     public long SizeBytes { get; }
     public int UnixMode { get; }
+    internal IVerifiedPackageContentAuthority Authority { get; }
 
-    internal VerifiedPackageFileSource(PackageManifestEntry entry)
+    internal VerifiedPackageFileSource(PackageManifestEntry entry, IVerifiedPackageContentAuthority authority)
     {
+        ArgumentNullException.ThrowIfNull(authority);
+        if (!authority.Manifest.Entries.Contains(entry))
+            throw new ArgumentException("The package source entry isn't owned by its verified content authority.", nameof(entry));
         this.PackagePath = entry.Path;
         this.Sha256 = entry.Sha256;
         this.SizeBytes = entry.SizeBytes;
         this.UnixMode = entry.UnixMode;
+        this.Authority = authority;
     }
 }
 

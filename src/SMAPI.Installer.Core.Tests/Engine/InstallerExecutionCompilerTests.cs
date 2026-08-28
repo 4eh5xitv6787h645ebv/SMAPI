@@ -2,7 +2,9 @@ using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
+using StardewModdingAPI.Installer.Core.Security;
 using StardewModdingAPI.Installer.Core.Tests.Ownership;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Engine;
@@ -232,7 +234,11 @@ public class InstallerExecutionCompilerTests
         preparation.Instructions.Single(item => item.Path.Value == "StardewValley").Source.As<CurrentGameLauncherSource>().Role.Should().Be(CurrentGameLauncherRole.CurrentLauncher);
         preparation.Instructions.Single(item => item.Path.Value == "StardewValley-original").Source.As<CurrentGameLauncherSource>().Role.Should().Be(CurrentGameLauncherRole.OriginalLauncherBackup);
         preparation.Receipt.Kind.Should().Be(ReceiptPreparationKind.None);
-        preparation.RecoverySnapshot.Should().BeNull();
+        preparation.RecoverySnapshot.Should().NotBeNull();
+        preparation.RecoverySnapshot!.Snapshot.ExpectedCurrentReceiptSha256.Should().Be(receipt.GetCanonicalDigest());
+        preparation.RecoverySnapshot.Snapshot.PreviousReceiptSha256.Should().Be(receipt.GetCanonicalDigest());
+        preparation.RecoverySnapshot.Snapshot.Entries.Should().HaveCount(preparation.Instructions.Count);
+        preparation.RecoverySnapshot.PathBindings.Should().OnlyContain(binding => binding.RequiresContentCapture);
     }
 
     [Test]
@@ -330,7 +336,14 @@ public class InstallerExecutionCompilerTests
         RecoverySnapshotSource receiptSource = preparation.Receipt.Source.Should().BeOfType<RecoverySnapshotSource>().Subject;
         receiptSource.Content.Should().Be(RecoverySnapshotContent.InstalledReceipt);
         receiptSource.ExpectedContentSha256.Should().Be(priorReceiptSha256);
-        preparation.RecoverySnapshot.Should().BeNull();
+        preparation.RecoverySnapshot.Should().NotBeNull();
+        preparation.RecoverySnapshot!.Snapshot.ExpectedCurrentReceiptSha256.Should().Be(priorReceiptSha256);
+        preparation.RecoverySnapshot.Snapshot.PreviousReceiptSha256.Should().BeNull();
+        preparation.RecoverySnapshot.Snapshot.Entries.Should().ContainSingle(entry =>
+            entry.Path.Equals(runtimePath)
+            && entry.Kind == RollbackEntryKind.Remove
+            && entry.ExpectedCurrentSha256 == OwnershipTestData.Digest('8')
+        );
     }
 
     [Test]
@@ -365,7 +378,7 @@ public class InstallerExecutionCompilerTests
     public void BoundPlan_RejectsRecoveryMetadataTamperingEvenWhenPlanHashesAreUnchanged()
     {
         (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration, Authority(request));
         RecoveryFileObservation[] tampered = request.RecoveryObservations
             .Select(observation => observation.Path.Value == "StardewValley"
                 ? new RecoveryFileObservation(
@@ -395,21 +408,34 @@ public class InstallerExecutionCompilerTests
     }
 
     [Test]
+    public void BindPlan_RawManifestWithoutLivePackageContentAuthority_Rejects()
+    {
+        (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
+
+        Action action = () => this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration, null);
+
+        action.Should().Throw<ExecutionCompilationException>()
+            .Which.Error.Should().Be(ExecutionCompilationError.StaleManifest);
+    }
+
+    [Test]
     public void BindAndPrepare_RejectNonExecutableStaleAndMismatchedState()
     {
         (InstallationPlanningRequest firstRequest, InstallationPlan firstPlan) = this.CreateFreshInstallRequest('2', size: 10);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest, GameRoot, OperationGeneration);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest, GameRoot, OperationGeneration, Authority(firstRequest));
         BoundInstallationPlan changedRootBinding = this.Compiler.BindPlan(
             firstPlan,
             firstRequest,
             new GameRootIdentity(GameRoot.CanonicalPath, GameRoot.DeviceMajor, GameRoot.DeviceMinor, GameRoot.Inode + 1),
-            OperationGeneration
+            OperationGeneration,
+            Authority(firstRequest)
         );
         BoundInstallationPlan changedGenerationBinding = this.Compiler.BindPlan(
             firstPlan,
             firstRequest,
             GameRoot,
-            OperationGeneration + 1
+            OperationGeneration + 1,
+            Authority(firstRequest)
         );
 
         (InstallationPlanningRequest changedPlanRequest, InstallationPlan changedPlan) = this.CreateFreshInstallRequest('3', size: 10);
@@ -417,7 +443,13 @@ public class InstallerExecutionCompilerTests
 
         (InstallationPlanningRequest changedManifestRequest, InstallationPlan samePlan) = this.CreateFreshInstallRequest('2', size: 11);
         samePlan.GetCanonicalDigest().Should().Be(firstPlan.GetCanonicalDigest(), "manifest sizes aren't represented as file-operation digests");
-        BoundInstallationPlan changedManifestBinding = this.Compiler.BindPlan(samePlan, changedManifestRequest, GameRoot, OperationGeneration);
+        BoundInstallationPlan changedManifestBinding = this.Compiler.BindPlan(
+            samePlan,
+            changedManifestRequest,
+            GameRoot,
+            OperationGeneration,
+            Authority(changedManifestRequest)
+        );
         Action staleManifest = () => this.Compiler.Prepare(binding, firstPlan, changedManifestRequest, TransactionId);
 
         PackageManifest collisionManifest = OwnershipTestData.Manifest(
@@ -432,7 +464,13 @@ public class InstallerExecutionCompilerTests
             targetManifest: collisionManifest
         );
         InstallationPlan conflictPlan = this.Planner.Plan(collisionRequest);
-        Action nonExecutable = () => this.Compiler.BindPlan(conflictPlan, collisionRequest, GameRoot, OperationGeneration);
+        Action nonExecutable = () => this.Compiler.BindPlan(
+            conflictPlan,
+            collisionRequest,
+            GameRoot,
+            OperationGeneration,
+            Authority(collisionRequest)
+        );
 
         stalePlan.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StalePlan);
         staleManifest.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StaleManifest);
@@ -461,7 +499,7 @@ public class InstallerExecutionCompilerTests
         InstallationPlan firstPlan = this.Planner.Plan(firstRequest);
         InstallationPlan secondPlan = this.Planner.Plan(secondRequest);
         secondPlan.GetCanonicalDigest().Should().Be(firstPlan.GetCanonicalDigest());
-        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest, GameRoot, OperationGeneration);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest, GameRoot, OperationGeneration, null);
 
         Action prepare = () => this.Compiler.Prepare(binding, firstPlan, secondRequest, TransactionId);
 
@@ -473,7 +511,7 @@ public class InstallerExecutionCompilerTests
     {
         (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
         InstallationExecutionPreparation preparation = this.Compiler.Prepare(
-            this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration),
+            this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration, Authority(request)),
             plan,
             request,
             TransactionId
@@ -492,7 +530,7 @@ public class InstallerExecutionCompilerTests
     {
         request = AddRequiredRecoveryObservations(request);
         InstallationPlan plan = this.Planner.Plan(request);
-        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request, GameRoot, OperationGeneration, Authority(request));
         return (plan, this.Compiler.Prepare(binding, plan, request, TransactionId));
     }
 
@@ -502,6 +540,32 @@ public class InstallerExecutionCompilerTests
         preparation.Instructions.Select(item => (item.PlanKind, item.Path.Value, item.ExpectedCurrentSha256, item.ExpectedResultSha256))
             .Should().Equal(plan.Operations.Select(item => (item.Kind, item.Path.Value, item.ExpectedCurrentSha256, item.ResultSha256)));
         preparation.Binding.PlanSha256.Should().Be(plan.GetCanonicalDigest());
+    }
+
+    private static IVerifiedPackageContentAuthority? Authority(InstallationPlanningRequest request)
+    {
+        bool requiresTarget = request.Action is InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair;
+        return requiresTarget && request.TargetManifest is not null
+            ? new FakePackageContentAuthority(request.TargetManifest)
+            : null;
+    }
+
+    private sealed class FakePackageContentAuthority : IVerifiedPackageContentAuthority
+    {
+        public PackageManifest Manifest { get; }
+        public Sha256Digest ManifestSha256 => this.Manifest.GetCanonicalDigest();
+
+        public FakePackageContentAuthority(PackageManifest manifest)
+        {
+            this.Manifest = manifest;
+        }
+
+        public LinuxAnchoredFile OpenFile(PackageManifestEntry expected)
+        {
+            throw new NotSupportedException("The pure compiler tests never materialize package bytes.");
+        }
+
+        public void AssertUsable() { }
     }
 
     private (InstallationPlanningRequest Request, InstallationPlan Plan) CreateFreshInstallRequest(char runtimeDigest, long size)
