@@ -4,6 +4,7 @@ using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Ownership.Persistence;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Recovery;
@@ -300,8 +301,11 @@ public sealed class InstallationExecutionMaterializerTests
         full.Generations[0].IsCurrent.Should().BeTrue();
         full.Generations.Skip(1).Should().OnlyContain(item => !item.IsCurrent);
 
-        engine.PruneRecoveryHistoryAsync(game, 8, full.HeadConfirmationDigest).GetAwaiter().GetResult()
-            .Should().Be(56);
+        RecoveryPrunePlan prune = engine.InspectRecoveryPruneAsync(game, 8).GetAwaiter().GetResult();
+        prune.OrderedCatalogGenerationIds.Should().Equal(full.Generations.Select(item => item.GenerationId));
+        prune.RetainedGenerationIds.Should().Equal(full.Generations.Take(8).Select(item => item.GenerationId));
+        prune.RemovedGenerationIds.Should().Equal(full.Generations.Skip(8).Select(item => item.GenerationId));
+        engine.ExecuteRecoveryPruneAsync(prune, prune.ConfirmationDigest).GetAwaiter().GetResult().Should().Be(56);
         RecoveryHistory retained = engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
         retained.Generations.Should().HaveCount(8);
         retained.Generations.Select(item => item.GenerationId).Should().Equal(
@@ -310,6 +314,119 @@ public sealed class InstallationExecutionMaterializerTests
 
         Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
         engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(9);
+    }
+
+    [Test]
+    public void RecoveryPrune_StaleReplayedAndMismatchedConfirmationsAreRejected()
+    {
+        (string game, LinuxInstallerEngine engine, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryPrunePlan stale = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            Action mismatch = () => engine.ExecuteRecoveryPruneAsync(stale, Hash("wrong confirmation")).GetAwaiter().GetResult();
+            mismatch.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PathChanged);
+            Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+
+            Action changed = () => engine.ExecuteRecoveryPruneAsync(stale, stale.ConfirmationDigest).GetAwaiter().GetResult();
+            changed.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PathChanged);
+
+            RecoveryPrunePlan exact = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            engine.ExecuteRecoveryPruneAsync(exact, exact.ConfirmationDigest).GetAwaiter().GetResult().Should().Be(3);
+            Action replay = () => engine.ExecuteRecoveryPruneAsync(exact, exact.ConfirmationDigest).GetAwaiter().GetResult();
+            replay.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PathChanged);
+
+            RecoveryPrunePlan noOp = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            noOp.RemovedGenerationIds.Should().BeEmpty();
+            noOp.CleanupGenerationIds.Should().BeEmpty();
+            Action noOpExecution = () => engine.ExecuteRecoveryPruneAsync(noOp, noOp.ConfirmationDigest).GetAwaiter().GetResult();
+            noOpExecution.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.InvalidPlan);
+            engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult().ConfirmationDigest.Should().Be(noOp.ConfirmationDigest);
+        }
+    }
+
+    [Test]
+    public void RecoveryHistory_ExternalTailDeletionWithoutCutoffIsDetected()
+    {
+        (string game, LinuxInstallerEngine engine, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryHistory history = engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+            Guid oldest = history.Generations[^1].GenerationId;
+            Directory.Delete(Path.Combine(game, ".smapi-installer", "recovery", "generations", oldest.ToString("N")), recursive: true);
+
+            Action list = () => engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+
+            list.Should().Throw<OwnershipDocumentException>().WithMessage("*retained*missing*");
+        }
+    }
+
+    [Test]
+    public void RecoveryHistory_TamperedRetentionBoundaryIsRejected()
+    {
+        (string game, LinuxInstallerEngine engine, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryPrunePlan plan = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            engine.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest).GetAwaiter().GetResult();
+            string retention = Path.Combine(game, ".smapi-installer", "recovery", "retention.json");
+            File.WriteAllText(retention, "{}");
+            File.SetUnixFileMode(retention, (UnixFileMode)0x180);
+
+            Action list = () => engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+
+            list.Should().Throw<OwnershipDocumentException>();
+        }
+    }
+
+    [TestCase(0, 4)]
+    [TestCase(1, 2)]
+    [TestCase(2, 2)]
+    [TestCase(3, 2)]
+    public void RecoveryPrune_InterruptionHasOneAuthenticatedVisibilityBoundaryAndResumableCleanup(
+        int boundaryValue,
+        int visibleAfterFault
+    )
+    {
+        RecoveryPruneBoundary boundary = (RecoveryPruneBoundary)boundaryValue;
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryPrunePlan plan = normal.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            LinuxInstallerEngine faulting = new(
+                new InstallerTransactionExecutor(),
+                new OneShotRecoveryPruneFaultInjector(boundary)
+            );
+
+            Action execute = () => faulting.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest).GetAwaiter().GetResult();
+
+            execute.Should().Throw<SimulatedProcessTerminationException>();
+            normal.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(visibleAfterFault);
+            RecoveryPrunePlan resume = normal.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            normal.ExecuteRecoveryPruneAsync(resume, resume.ConfirmationDigest).GetAwaiter().GetResult();
+            RecoveryHistory retained = normal.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+            retained.Generations.Should().HaveCount(2);
+            Directory.EnumerateDirectories(Path.Combine(game, ".smapi-installer", "recovery", "generations"))
+                .Should().HaveCount(2);
+        }
+    }
+
+    [Test]
+    public void RecoveryPrune_CancelledBeforeExecutionLeavesExactStateUnchanged()
+    {
+        (string game, LinuxInstallerEngine engine, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryPrunePlan before = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            using CancellationTokenSource cancellation = new();
+            cancellation.Cancel();
+
+            Action execute = () => engine.ExecuteRecoveryPruneAsync(before, before.ConfirmationDigest, cancellation.Token).GetAwaiter().GetResult();
+
+            execute.Should().Throw<OperationCanceledException>();
+            RecoveryPrunePlan after = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            after.ConfirmationDigest.Should().Be(before.ConfirmationDigest);
+            engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(4);
+        }
     }
 
     [Test]
@@ -349,6 +466,18 @@ public sealed class InstallationExecutionMaterializerTests
         Directory.CreateDirectory(path);
         this.TemporaryDirectories.Add(path);
         return path;
+    }
+
+    private (string Game, LinuxInstallerEngine Engine, FilePackageAuthority Package) CreateRecoveryHistory(int generationCount)
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        for (int index = 1; index < generationCount; index++)
+            Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+        return (game, engine, package);
     }
 
     private FilePackageAuthority CreatePackage(string launcher, string runtime)
@@ -414,7 +543,7 @@ public sealed class InstallationExecutionMaterializerTests
             this.Payload = new LinuxAnchoredFileSystem(payloadRoot);
         }
 
-        public LinuxAnchoredFile OpenFile(PackageManifestEntry expected)
+        public LinuxAnchoredFile OpenFile(PackageManifestEntry expected, CancellationToken cancellationToken = default)
         {
             if (!this.Manifest.Entries.Contains(expected))
                 throw new InvalidOperationException("The requested entry isn't in this test authority.");
@@ -422,7 +551,7 @@ public sealed class InstallationExecutionMaterializerTests
             if (
                 file.Identity.Size != expected.SizeBytes
                 || file.Identity.UnixMode != expected.UnixMode
-                || Sha256Digest.Parse(this.Payload.ComputeSha256(file)) != expected.Sha256
+                || Sha256Digest.Parse(this.Payload.ComputeSha256(file, cancellationToken)) != expected.Sha256
             )
             {
                 file.Dispose();
@@ -449,5 +578,25 @@ public sealed class InstallationExecutionMaterializerTests
 
         public void BeforeMutation(Guid transactionId, int operationIndex) => this.Before?.Invoke();
         public void AfterMutation(Guid transactionId, int operationIndex) => this.After?.Invoke();
+    }
+
+    private sealed class OneShotRecoveryPruneFaultInjector : IRecoveryPruneFaultInjector
+    {
+        private readonly RecoveryPruneBoundary Boundary;
+        private bool Triggered;
+
+        public OneShotRecoveryPruneFaultInjector(RecoveryPruneBoundary boundary)
+        {
+            this.Boundary = boundary;
+        }
+
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null)
+        {
+            if (!this.Triggered && boundary == this.Boundary)
+            {
+                this.Triggered = true;
+                throw new SimulatedProcessTerminationException($"Simulated recovery-prune interruption at {boundary}.");
+            }
+        }
     }
 }

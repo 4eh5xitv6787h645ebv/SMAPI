@@ -56,17 +56,23 @@ public sealed class LinuxInstallerEngine
     private readonly InstallerExecutionCompiler Compiler = new();
     private readonly InstallerTransactionExecutor Executor;
     private readonly InstallationExecutionMaterializer Materializer;
+    private readonly IRecoveryPruneFaultInjector RecoveryPruneFaultInjector;
 
     public LinuxInstallerEngine(ITransactionProgressSink? progress = null)
     {
         this.Executor = new InstallerTransactionExecutor(progress);
         this.Materializer = new InstallationExecutionMaterializer(this.Executor);
+        this.RecoveryPruneFaultInjector = NullRecoveryPruneFaultInjector.Instance;
     }
 
-    internal LinuxInstallerEngine(InstallerTransactionExecutor executor)
+    internal LinuxInstallerEngine(
+        InstallerTransactionExecutor executor,
+        IRecoveryPruneFaultInjector? recoveryPruneFaultInjector = null
+    )
     {
         this.Executor = executor ?? throw new ArgumentNullException(nameof(executor));
         this.Materializer = new InstallationExecutionMaterializer(this.Executor);
+        this.RecoveryPruneFaultInjector = recoveryPruneFaultInjector ?? NullRecoveryPruneFaultInjector.Instance;
     }
 
     /// <summary>Inspect and plan one action without changing game or ownership files.</summary>
@@ -215,7 +221,8 @@ public sealed class LinuxInstallerEngine
             inspection.Game,
             inspection.CanonicalGameRoot,
             inspection.RootIdentity,
-            state
+            state,
+            cancellationToken
         );
         try
         {
@@ -251,7 +258,8 @@ public sealed class LinuxInstallerEngine
             inspection.CanonicalGameRoot,
             inspection.RootIdentity,
             state,
-            generationId
+            generationId,
+            cancellationToken
         );
         try
         {
@@ -281,46 +289,78 @@ public sealed class LinuxInstallerEngine
             inspection.Game,
             inspection.CanonicalGameRoot,
             inspection.RootIdentity,
-            state
+            state,
+            cancellationToken
         );
         inspection.AssertStable();
         return result;
     }
 
-    /// <summary>
-    /// Explicitly prune the oldest authenticated recovery tail while retaining at least the current generation.
-    /// The confirmation digest must come from the exact <see cref="RecoveryHistory"/> the user reviewed.
-    /// </summary>
-    public Task<int> PruneRecoveryHistoryAsync(
+    /// <summary>Inspect an exact bounded recovery-pruning decision without changing installer state.</summary>
+    public Task<RecoveryPrunePlan> InspectRecoveryPruneAsync(
         string gameRoot,
         int retainNewest,
-        Sha256Digest confirmedHeadPointer,
         CancellationToken cancellationToken = default
     )
         => Task.Run(
-            () => this.PruneRecoveryHistory(gameRoot, retainNewest, confirmedHeadPointer, cancellationToken),
+            () => this.InspectRecoveryPrune(gameRoot, retainNewest, cancellationToken),
             cancellationToken
         );
 
-    private int PruneRecoveryHistory(
+    private RecoveryPrunePlan InspectRecoveryPrune(
         string gameRoot,
         int retainNewest,
-        Sha256Digest confirmedHeadPointer,
         CancellationToken cancellationToken
     )
     {
-        ArgumentNullException.ThrowIfNull(confirmedHeadPointer);
         cancellationToken.ThrowIfCancellationRequested();
-        using InstallerOperationLease lease = InstallerOperationLease.Acquire(gameRoot);
-        if (this.Executor.RecoverLocked(lease).Count > 0)
-            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "Crash recovery changed the recovery history; review it again before pruning.");
-        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
-        cancellationToken.ThrowIfCancellationRequested();
-        return CommittedRecoveryHandle.PruneHistoryTail(
-            lease,
+        using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
+        RecoveryPrunePlan result = CommittedRecoveryHandle.CreatePrunePlan(
+            inspection.Game,
+            inspection.RootIdentity,
+            inspection.Generation,
             state,
             retainNewest,
-            confirmedHeadPointer
+            cancellationToken
+        );
+        state.AssertUsable(inspection.Game, inspection.RootIdentity);
+        inspection.AssertStable();
+        return result;
+    }
+
+    /// <summary>Execute only the exact opaque recovery-pruning decision and digest the user reviewed.</summary>
+    public Task<int> ExecuteRecoveryPruneAsync(
+        RecoveryPrunePlan plan,
+        Sha256Digest confirmedDigest,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(() => this.ExecuteRecoveryPrune(plan, confirmedDigest, cancellationToken), cancellationToken);
+
+    private int ExecuteRecoveryPrune(
+        RecoveryPrunePlan plan,
+        Sha256Digest confirmedDigest,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(confirmedDigest);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (plan.ConfirmationDigest != confirmedDigest)
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The supplied recovery-prune confirmation digest doesn't match the inspected plan.");
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(plan.GameRoot.CanonicalPath);
+        lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
+        if (this.Executor.RecoverLocked(lease).Count > 0)
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "Crash recovery invalidated the inspected recovery-prune plan.");
+        lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        cancellationToken.ThrowIfCancellationRequested();
+        return CommittedRecoveryHandle.ExecutePrunePlan(
+            lease,
+            state,
+            plan,
+            this.RecoveryPruneFaultInjector,
+            cancellationToken
         );
     }
 
