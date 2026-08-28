@@ -36,14 +36,14 @@ Scope constraints apply throughout:
 
 ### Inputs, isolation, and methodology
 
-- [ ] Pin official SMAPI 4.5.2 commit `79f9bbbe3edbb7ca3369e7ad0d3dd45131b34fc0` as the A build.
+- [x] Pin official SMAPI 4.5.2 commit `79f9bbbe3edbb7ca3369e7ad0d3dd45131b34fc0` as the A build ([verified preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
 - [ ] Record the exact fork commit used as the B build.
-- [ ] Retrieve the complete trusted PR #158 modpack release and Blossom save without committing, mirroring, republishing, or artifacting either fixture.
-- [ ] Audit the disposable fixture extraction paths before extraction.
-- [ ] Build a disposable isolated Linux test environment that cannot modify the live game installation, live `Mods` directory, or live saves.
+- [x] Retrieve the complete trusted PR #158 modpack release and Blossom save without committing, mirroring, republishing, or artifacting either fixture ([private-fixture preflight evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
+- [x] Audit the disposable fixture extraction paths before extraction ([containment-audited preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
+- [x] Build a disposable isolated Linux test environment that cannot modify the live game installation, live `Mods` directory, or live saves ([isolation preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
 - [ ] Verify the A and B builds use the same game build, mods, configurations, save state, resolution, session, launch wrapper, warm-up, and scenarios.
-- [ ] Define repeatable startup, steady-state gameplay, and important load/warp transition scenarios.
-- [ ] Automate alternating A/B sample order.
+- [x] Define repeatable startup, steady-state gameplay, and important load/warp transition scenarios ([verified preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
+- [x] Automate alternating A/B sample order ([preregistered runner](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170)).
 - [ ] Run at least five A/B samples per build in the defined alternating order.
 - [ ] Measure at least 180 seconds of steady-state gameplay in every sample.
 - [ ] Record sanitized raw results, environment metadata, exact commits, scripts, and calculation methods in the repository.
@@ -61,7 +61,7 @@ Scope constraints apply throughout:
 - [ ] Measure diagnostics-disabled overhead.
 - [ ] Measure diagnostics-enabled overhead.
 - [ ] Report distributions and run-to-run variation.
-- [ ] State clearly that one-machine results are not universal FPS claims.
+- [x] State clearly that one-machine results are not universal FPS claims ([benchmark methodology](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/3c98eadd2bddc24d43c889afb11b155e92469882/benchmarks/linux-real-world/README.md)).
 - [ ] Identify and fix every confirmed fork regression.
 - [ ] Rerun comparisons affected by fixes.
 - [ ] Obtain an independent performance-results review.
@@ -74,7 +74,7 @@ Scope constraints apply throughout:
 - [ ] Update the GitHub Pages comparison with current evidence and limitations.
 - [ ] Update the performance audit with current evidence and limitations.
 - [ ] Update release notes with current evidence and limitations.
-- [ ] Open a focused Phase 1 fork pull request.
+- [x] Open a focused [Phase 1 fork pull request #170](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170).
 - [ ] Obtain an independent Phase 1 final-diff review.
 - [ ] Obtain an independent Phase 1 documentation review.
 - [ ] Pass required CI and repository checks.
