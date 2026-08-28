@@ -38,6 +38,7 @@ public sealed class LinuxInstallManifestBuilder
     private const int UnixRegularFile = 0x8000;
     private const int UnixDirectory = 0x4000;
     private const int UnixSpecialModeMask = 0xE00;
+    private const int UnixExecutableModeMask = 0x49;
     private static readonly Regex WindowsDrivePattern = new(@"\A[A-Za-z]:", RegexOptions.CultureInvariant);
 
     /// <summary>Build a canonical manifest from one finalized Linux installer ZIP.</summary>
@@ -261,6 +262,8 @@ public sealed class LinuxInstallManifestBuilder
             if (actualTotal > limits.MaxTotalExpandedBytes || actualLength != entry.Length)
                 throw new PackageSecurityException("The nested Linux install payload changed while it was read.");
             int unixMode = (entry.ExternalAttributes >> 16) & 0x1ff;
+            if (path == "unix-launcher.sh" && (unixMode & LinuxInstallManifestBuilder.UnixExecutableModeMask) == 0)
+                throw new PackageSecurityException("The nested Linux launcher must have at least one executable permission bit.");
             manifestEntries.Add(new PackageManifestEntry(destination!, sha256, actualLength, unixMode, kind));
         }
 

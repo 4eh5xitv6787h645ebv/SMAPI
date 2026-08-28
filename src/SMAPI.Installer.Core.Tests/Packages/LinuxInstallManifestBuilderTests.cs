@@ -66,6 +66,7 @@ public sealed class LinuxInstallManifestBuilderTests
         entries.Should().Contain(("smapi-internal/config.json", OwnedEntryKind.InternalFile));
         entries.Should().Contain(("Mods/ConsoleCommands/ConsoleCommands.dll", OwnedEntryKind.BundledModFile));
         entries.Should().Contain(("Mods/SaveBackup/SaveBackup.dll", OwnedEntryKind.BundledModFile));
+        first.Manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher).UnixMode.Should().Be(493).And.Match(mode => (mode & 0x49) != 0);
         GeneratedFileRecipe generated = first.Manifest.GeneratedFiles.Should().ContainSingle().Subject;
         generated.Path.Value.Should().Be("StardewModdingAPI-net6.deps.json");
         generated.Recipe.Should().Be("copy_game_deps_v1");
@@ -75,6 +76,8 @@ public sealed class LinuxInstallManifestBuilderTests
     [TestCase("StardewModdingAPI-net6.deps.json", 420, "unexpected")]
     [TestCase("unexpected.dll", 420, "unexpected")]
     [TestCase("smapi-internal/privileged.dll", 2541, "setuid")]
+    [TestCase("smapi-internal/setgid.dll", 1508, "setgid")]
+    [TestCase("smapi-internal/sticky.dll", 1005, "sticky")]
     public async Task BuildAsync_RejectsGeneratedUnexpectedAndPrivilegedPackageEntries(string path, int mode, string message)
     {
         string package = this.CreatePackage((path, "bad", 0x8000, mode));
@@ -90,17 +93,115 @@ public sealed class LinuxInstallManifestBuilderTests
         await action.Should().ThrowAsync<PackageSecurityException>().WithMessage($"*{message}*");
     }
 
+    [TestCase("../smapi-internal/traversal.dll")]
+    [TestCase("/smapi-internal/absolute.dll")]
+    [TestCase("smapi-internal\\backslash.dll")]
+    [TestCase("smapi-internal/\u0001control.dll")]
+    [TestCase("smapi-internal/e\u0301.dll")]
+    [TestCase("smapi-internal/trailing ")]
+    [TestCase("smapi-internal/trailing.")]
+    public async Task BuildAsync_RejectsUnsafeOrAmbiguousNestedPaths(string path)
+    {
+        string package = this.CreatePackage((path, "bad", 0x8000, 420));
+
+        Func<Task> action = () => this.BuildAsync(package);
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
+    }
+
+    [Test]
+    public async Task BuildAsync_RejectsEmbeddedNulPath()
+    {
+        string package = this.CreatePackage(
+            ("smapi-internal/nulx.dll", "bad", 0x8000, 420),
+            mutateNested: bytes => ReplaceAll(bytes, Encoding.UTF8.GetBytes("nulx.dll"), [.. "nul"u8, 0, .. ".dll"u8])
+        );
+
+        Func<Task> action = () => this.BuildAsync(package);
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
+    }
+
+    [TestCase("smapi-internal/CONFIG.json", "duplicate or case-colliding")]
+    [TestCase("smapi-internal", "both a directory and file")]
+    [TestCase("smapi-internal/empty/", "empty directory", 0x4000)]
+    public async Task BuildAsync_RejectsCasePrefixCollisionsAndEmptyDirectories(string path, string message, int type = 0x8000)
+    {
+        string package = this.CreatePackage((path, "", type, 493));
+
+        Func<Task> action = () => this.BuildAsync(package);
+
+        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage($"*{message}*");
+    }
+
     [Test]
     public async Task BuildAsync_RejectsLinkEntriesAndUnexpectedOuterLayout()
     {
         string linkPackage = this.CreatePackage(("smapi-internal/link", "target", 0xA000, 420));
+        string socketPackage = this.CreatePackage(("smapi-internal/socket", "socket", 0xC000, 420), suffix: "socket");
         string extraOuterPackage = this.CreatePackage(extraOuterFile: true, suffix: "extra");
 
         Func<Task> link = () => this.BuildAsync(linkPackage);
+        Func<Task> socket = () => this.BuildAsync(socketPackage);
         Func<Task> outer = () => this.BuildAsync(extraOuterPackage);
 
         await link.Should().ThrowAsync<PackageSecurityException>().WithMessage("*link or special*");
+        await socket.Should().ThrowAsync<PackageSecurityException>().WithMessage("*link or special*");
         await outer.Should().ThrowAsync<PackageSecurityException>().WithMessage("*exact Linux-only outer layout*");
+    }
+
+    [Test]
+    public async Task BuildAsync_RequiresExecutableLauncher()
+    {
+        string package = this.CreatePackage(launcherMode: 420);
+
+        Func<Task> action = () => this.BuildAsync(package);
+
+        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*launcher*executable*");
+    }
+
+    [TestCase(false, true, false)]
+    [TestCase(true, false, false)]
+    [TestCase(false, false, true)]
+    public async Task BuildAsync_RejectsMissingDuplicateOrCorruptNestedArchive(bool omit, bool duplicate, bool corrupt)
+    {
+        string package = this.CreatePackage(omitInstallDat: omit, duplicateInstallDat: duplicate, corruptInstallDat: corrupt);
+
+        Func<Task> action = () => this.BuildAsync(package);
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
+    }
+
+    [Test]
+    public async Task BuildAsync_EnforcesRepresentativeArchiveCountSizeAndCompressionBounds()
+    {
+        string normal = this.CreatePackage();
+        string compressed = this.CreatePackage(compressionBomb: true, suffix: "compressed");
+        ZipPackageLimits countLimit = new(16 * 1024 * 1024, 5, 16, 8 * 1024 * 1024, 16 * 1024 * 1024, 200);
+        ZipPackageLimits sizeLimit = new(new FileInfo(normal).Length - 1, 1024, 16, 8 * 1024 * 1024, 16 * 1024 * 1024, 200);
+        ZipPackageLimits ratioLimit = new(16 * 1024 * 1024, 1024, 16, 8 * 1024 * 1024, 16 * 1024 * 1024, 2);
+
+        Func<Task> count = () => this.BuildAsync(normal, countLimit);
+        Func<Task> size = () => this.BuildAsync(normal, sizeLimit);
+        Func<Task> ratio = () => this.BuildAsync(compressed, ratioLimit);
+
+        await count.Should().ThrowAsync<PackageSecurityException>();
+        await size.Should().ThrowAsync<PackageSecurityException>();
+        await ratio.Should().ThrowAsync<PackageSecurityException>().WithMessage("*compression-ratio*");
+    }
+
+    [Test]
+    public async Task BuildAsync_CancellationCleansPrivateStaging()
+    {
+        string package = this.CreatePackage();
+        HashSet<string> before = Directory.GetDirectories(Path.GetTempPath(), "smapi-installer-verified-*").ToHashSet(StringComparer.Ordinal);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        Func<Task> action = () => this.BuildAsync(package, cancellationToken: cancellation.Token);
+
+        await action.Should().ThrowAsync<OperationCanceledException>();
+        Directory.GetDirectories(Path.GetTempPath(), "smapi-installer-verified-*").Should().OnlyContain(path => before.Contains(path));
     }
 
     [Test]
@@ -129,14 +230,20 @@ public sealed class LinuxInstallManifestBuilderTests
         await action.Should().ThrowAsync<ArgumentException>().WithMessage("*exact reviewed release tag*");
     }
 
-    private Task<LinuxInstallManifestBuildResult> BuildAsync(string package)
+    private Task<LinuxInstallManifestBuildResult> BuildAsync(
+        string package,
+        ZipPackageLimits? limits = null,
+        CancellationToken cancellationToken = default
+    )
     {
         return new LinuxInstallManifestBuilder().BuildAsync(
             package,
             this.Identity,
             LinuxInstallManifestBuilderTests.Commit,
             LinuxInstallManifestBuilderTests.Tree,
-            this.Workflow
+            this.Workflow,
+            limits,
+            cancellationToken
         );
     }
 
@@ -145,20 +252,33 @@ public sealed class LinuxInstallManifestBuilderTests
         bool extraOuterFile = false,
         bool extraLinuxSupportFiles = false,
         bool extraLinuxSupportDirectory = false,
+        int launcherMode = 493,
+        bool omitInstallDat = false,
+        bool duplicateInstallDat = false,
+        bool corruptInstallDat = false,
+        bool compressionBomb = false,
+        Func<byte[], byte[]>? mutateNested = null,
         string suffix = ""
     )
     {
         string directory = suffix.Length == 0 ? this.TempRoot : Path.Combine(this.TempRoot, suffix);
         Directory.CreateDirectory(directory);
         string package = Path.Combine(directory, this.Identity.PackageAssetName);
-        byte[] nested = CreateNestedArchive(additionalNested);
+        byte[] nested = CreateNestedArchive(additionalNested, launcherMode, compressionBomb);
+        if (mutateNested != null)
+            nested = mutateNested(nested);
+        if (corruptInstallDat)
+            nested = "not a zip"u8.ToArray();
         string root = $"SMAPI {this.Identity.EmbeddedVersion} Linux installer";
         using FileStream stream = File.Create(package);
         using ZipArchive archive = new(stream, ZipArchiveMode.Create);
         AddFile(archive, $"{root}/README.txt", "README", 420);
         AddFile(archive, $"{root}/install on Linux.sh", "#!/bin/sh", 493);
         AddFile(archive, $"{root}/internal/linux/SMAPI.Installer", "installer", 493);
-        AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
+        if (!omitInstallDat)
+            AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
+        if (duplicateInstallDat)
+            AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
         if (extraLinuxSupportFiles)
         {
             AddFile(archive, $"{root}/internal/linux/SMAPI.Installer.dll", "managed support", 420);
@@ -171,12 +291,16 @@ public sealed class LinuxInstallManifestBuilderTests
         return package;
     }
 
-    private static byte[] CreateNestedArchive((string Path, string Contents, int Type, int Mode)? additional)
+    private static byte[] CreateNestedArchive(
+        (string Path, string Contents, int Type, int Mode)? additional,
+        int launcherMode,
+        bool compressionBomb
+    )
     {
         using MemoryStream stream = new();
         using (ZipArchive archive = new(stream, ZipArchiveMode.Create, leaveOpen: true))
         {
-            AddFile(archive, "unix-launcher.sh", "launcher", 493);
+            AddFile(archive, "unix-launcher.sh", "launcher", launcherMode);
             AddFile(archive, "StardewModdingAPI", "runtime", 493);
             AddFile(archive, "StardewModdingAPI.dll", "assembly", 420);
             AddFile(archive, "smapi-internal/config.json", "{}", 420);
@@ -184,6 +308,8 @@ public sealed class LinuxInstallManifestBuilderTests
             AddFile(archive, "Mods/SaveBackup/SaveBackup.dll", "backup", 420);
             if (additional is { } value)
                 AddFile(archive, value.Path, value.Contents, value.Mode, value.Type);
+            if (compressionBomb)
+                AddFile(archive, "smapi-internal/compressed.bin", new byte[1024 * 1024], 420, compressionLevel: CompressionLevel.SmallestSize);
         }
         return stream.ToArray();
     }
@@ -193,12 +319,35 @@ public sealed class LinuxInstallManifestBuilderTests
         AddFile(archive, path, Encoding.UTF8.GetBytes(contents), mode, type);
     }
 
-    private static void AddFile(ZipArchive archive, string path, byte[] contents, int mode, int type = 0x8000)
+    private static void AddFile(
+        ZipArchive archive,
+        string path,
+        byte[] contents,
+        int mode,
+        int type = 0x8000,
+        CompressionLevel compressionLevel = CompressionLevel.NoCompression
+    )
     {
-        ZipArchiveEntry entry = archive.CreateEntry(path, CompressionLevel.NoCompression);
+        ZipArchiveEntry entry = archive.CreateEntry(path, compressionLevel);
         entry.LastWriteTime = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         entry.ExternalAttributes = (type | mode) << 16;
         using Stream output = entry.Open();
         output.Write(contents);
+    }
+
+    private static byte[] ReplaceAll(byte[] source, byte[] expected, byte[] replacement)
+    {
+        replacement.Length.Should().Be(expected.Length);
+        byte[] result = source.ToArray();
+        int replacements = 0;
+        for (int index = 0; index <= result.Length - expected.Length; index++)
+        {
+            if (!result.AsSpan(index, expected.Length).SequenceEqual(expected))
+                continue;
+            replacement.CopyTo(result, index);
+            replacements++;
+        }
+        replacements.Should().BeGreaterThanOrEqualTo(2);
+        return result;
     }
 }
