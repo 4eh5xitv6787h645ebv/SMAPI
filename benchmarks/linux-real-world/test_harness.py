@@ -29,14 +29,12 @@ analyzer = load_module("linux_benchmark_analyzer", "analyze.py")
 common = load_module("linux_benchmark_common", "harness_common.py")
 
 
-def valid_probe_records() -> list[dict]:
+def valid_probe_records(steady_draws: int = 300, transition_draws: int = 10) -> list[dict]:
     frequency = 1_000_000
     steady_updates = 3_000
     transition_updates = 100
-    steady_draws = 1_000
-    transition_draws = 50
     records: list[dict] = [{
-        "type": "header", "schema": 1, "probeVersion": "1.0.0", "stopwatchFrequency": frequency,
+        "type": "header", "schema": 1, "probeVersion": "1.1.0", "stopwatchFrequency": frequency,
         "warmupSeconds": 60, "measurementSeconds": 180, "transitionSettleTicks": 300,
         "updateCapacity": 30_000, "drawCapacity": 30_000,
         "recordedUpdates": steady_updates + transition_updates,
@@ -70,11 +68,18 @@ def valid_probe_records() -> list[dict]:
         for phase, count in (("steady", steady_updates), ("transition", transition_updates))
         for _ in range(count)
     )
-    records.extend(
-        {"type": "draw", "phase": phase, "drawTicks": 1_000, "updateTicks": 1_000, "updateCount": 1}
-        for phase, count in (("steady", steady_draws), ("transition", transition_draws))
-        for _ in range(count)
-    )
+    for phase, count, start, end in (
+        ("steady", steady_draws, marker_ticks[3], marker_ticks[4]),
+        ("transition", transition_draws, marker_ticks[4], marker_ticks[10]),
+    ):
+        records.extend(
+            {
+                "type": "draw", "phase": phase,
+                "capturedAtTicks": start + ((index + 1) * (end - start) // (count + 1)),
+                "drawTicks": 1_000, "updateTicks": 1_000, "updateCount": 1,
+            }
+            for index in range(count)
+        )
     return records
 
 
@@ -191,7 +196,7 @@ class HarnessTests(unittest.TestCase):
                 runner.probe_summary(path)
 
             header = {
-                "type": "header", "schema": 1, "probeVersion": "1.0.0", "stopwatchFrequency": 1_000_000,
+                "type": "header", "schema": 1, "probeVersion": "1.1.0", "stopwatchFrequency": 1_000_000,
                 "warmupSeconds": 60, "measurementSeconds": 180, "transitionSettleTicks": 300,
                 "bufferOverflow": False, "expectedSaveLoaded": True, "invalidWorldStateTicks": 0,
                 "locationChangedTicks": 0, "positionChangedTicks": 0, "gameTimeAtSteadyStart": 600,
@@ -212,7 +217,46 @@ class HarnessTests(unittest.TestCase):
             result = runner.probe_summary(path)
             self.assertEqual(result["steadyUpdates"], 3_000)
             self.assertEqual(result["transitionUpdates"], 100)
+            self.assertEqual(result["steadyDraws"], 300)
+            self.assertEqual(result["transitionDraws"], 10)
             self.assertEqual(result["steadySeconds"], 180)
+
+    def test_probe_summary_enforces_draw_count_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "probe.jsonl"
+            for steady_draws, transition_draws in ((299, 10), (300, 9)):
+                with self.subTest(steady=steady_draws, transition=transition_draws):
+                    write_jsonl(path, valid_probe_records(steady_draws, transition_draws))
+                    with self.assertRaisesRegex(ValueError, "insufficient steady or transition"):
+                        runner.probe_summary(path)
+
+    def test_probe_summary_accepts_transition_draw_before_warp_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "probe.jsonl"
+            records = valid_probe_records()
+            first_transition = next(
+                record for record in records
+                if record.get("type") == "draw" and record.get("phase") == "transition"
+            )
+            first_transition["capturedAtTicks"] = 240_500_000
+            write_jsonl(path, records)
+            self.assertEqual(runner.probe_summary(path)["transitionDraws"], 10)
+
+    def test_probe_summary_rejects_clustered_draw_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "probe.jsonl"
+            for phase, timestamp, message in (
+                ("steady", 61_000_000, "do not span the measurement"),
+                ("transition", 242_000_000, "do not span the transition"),
+            ):
+                with self.subTest(phase=phase):
+                    records = valid_probe_records()
+                    for record in records:
+                        if record.get("type") == "draw" and record.get("phase") == phase:
+                            record["capturedAtTicks"] = timestamp
+                    write_jsonl(path, records)
+                    with self.assertRaisesRegex(ValueError, message):
+                        runner.probe_summary(path)
 
     def test_analyzer_allowlist_preserves_only_numeric_probe_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

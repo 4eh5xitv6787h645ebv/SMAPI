@@ -274,13 +274,18 @@ public sealed class ModEntry : Mod
 
     private static void AfterOuterDraw(DrawState __state)
     {
-        long drawTicks = Stopwatch.GetTimestamp() - __state.Timestamp;
+        long finished = Stopwatch.GetTimestamp();
+        long drawTicks = finished - __state.Timestamp;
         long updateTicks = UpdatesSinceDrawTicks;
         int updateCount = UpdatesSinceDrawCount;
         UpdatesSinceDrawTicks = 0;
         UpdatesSinceDrawCount = 0;
         if (__state.Phase is ProbePhase.Measurement or ProbePhase.Transition)
-            Instance?.RecordDraw(new DrawSample(__state.Phase, drawTicks, updateTicks, updateCount));
+        {
+            ModEntry? instance = Instance;
+            if (instance is not null)
+                instance.RecordDraw(new DrawSample(__state.Phase, finished - instance.EntryTimestamp, drawTicks, updateTicks, updateCount));
+        }
     }
 
     private void RecordUpdate(UpdateSample sample)
@@ -326,7 +331,7 @@ public sealed class ModEntry : Mod
             Directory.CreateDirectory(parent);
 
         using StreamWriter writer = new(this.OutputPath, false, new UTF8Encoding(false));
-        writer.WriteLine($"{{\"type\":\"header\",\"schema\":1,\"probeVersion\":\"1.0.0\",\"stopwatchFrequency\":{Stopwatch.Frequency},\"warmupSeconds\":{this.Config.WarmupSeconds.ToString(CultureInfo.InvariantCulture)},\"measurementSeconds\":{this.Config.MeasurementSeconds.ToString(CultureInfo.InvariantCulture)},\"transitionSettleTicks\":{this.Config.TransitionSettleTicks},\"updateCapacity\":{this.Updates.Length},\"drawCapacity\":{this.Draws.Length},\"recordedUpdates\":{Math.Min(this.UpdateCount, this.Updates.Length)},\"recordedDraws\":{Math.Min(this.DrawCount, this.Draws.Length)},\"bufferOverflow\":{this.BufferOverflow.ToString().ToLowerInvariant()},\"expectedSaveLoaded\":{this.ExpectedSaveLoaded.ToString().ToLowerInvariant()},\"invalidWorldStateTicks\":{this.InvalidWorldStateTicks},\"locationChangedTicks\":{this.LocationChangedTicks},\"positionChangedTicks\":{this.PositionChangedTicks},\"gameTimeAtSteadyStart\":{this.GameTimeAtSteadyStart},\"gameTimeAtSteadyEnd\":{this.GameTimeAtSteadyEnd}}}");
+        writer.WriteLine($"{{\"type\":\"header\",\"schema\":1,\"probeVersion\":\"1.1.0\",\"stopwatchFrequency\":{Stopwatch.Frequency},\"warmupSeconds\":{this.Config.WarmupSeconds.ToString(CultureInfo.InvariantCulture)},\"measurementSeconds\":{this.Config.MeasurementSeconds.ToString(CultureInfo.InvariantCulture)},\"transitionSettleTicks\":{this.Config.TransitionSettleTicks},\"updateCapacity\":{this.Updates.Length},\"drawCapacity\":{this.Draws.Length},\"recordedUpdates\":{Math.Min(this.UpdateCount, this.Updates.Length)},\"recordedDraws\":{Math.Min(this.DrawCount, this.Draws.Length)},\"bufferOverflow\":{this.BufferOverflow.ToString().ToLowerInvariant()},\"expectedSaveLoaded\":{this.ExpectedSaveLoaded.ToString().ToLowerInvariant()},\"invalidWorldStateTicks\":{this.InvalidWorldStateTicks},\"locationChangedTicks\":{this.LocationChangedTicks},\"positionChangedTicks\":{this.PositionChangedTicks},\"gameTimeAtSteadyStart\":{this.GameTimeAtSteadyStart},\"gameTimeAtSteadyEnd\":{this.GameTimeAtSteadyEnd}}}");
 
         for (int index = 0; index < this.MarkerCount; index++)
         {
@@ -347,7 +352,7 @@ public sealed class ModEntry : Mod
         for (int index = 0; index < drawLimit; index++)
         {
             DrawSample sample = this.Draws[index];
-            writer.WriteLine($"{{\"type\":\"draw\",\"phase\":\"{PhaseName(sample.Phase)}\",\"drawTicks\":{sample.DrawTicks},\"updateTicks\":{sample.UpdateTicks},\"updateCount\":{sample.UpdateCount}}}");
+            writer.WriteLine($"{{\"type\":\"draw\",\"phase\":\"{PhaseName(sample.Phase)}\",\"capturedAtTicks\":{sample.CapturedAtTicks},\"drawTicks\":{sample.DrawTicks},\"updateTicks\":{sample.UpdateTicks},\"updateCount\":{sample.UpdateCount}}}");
         }
     }
 
@@ -380,7 +385,7 @@ public sealed class ModEntry : Mod
     private readonly record struct OuterUpdateState(long Timestamp, long AllocatedBytes, int Gen0, int Gen1, int Gen2, ProbePhase Phase);
     private readonly record struct DrawState(long Timestamp, ProbePhase Phase);
     private readonly record struct UpdateSample(ProbePhase Phase, long ElapsedTicks, long BaseGameTicks, long AllocatedBytes, int Gen0, int Gen1, int Gen2);
-    private readonly record struct DrawSample(ProbePhase Phase, long DrawTicks, long UpdateTicks, int UpdateCount);
+    private readonly record struct DrawSample(ProbePhase Phase, long CapturedAtTicks, long DrawTicks, long UpdateTicks, int UpdateCount);
     private readonly record struct Marker(string Name, long Timestamp);
     private readonly record struct PhaseTotals(long AllocatedBytes, int Gen0, int Gen1, int Gen2);
 

@@ -109,7 +109,7 @@ def load_probe(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         elif record_type == "update":
             allowed.append({key: record[key] for key in ("type", "phase", "elapsedTicks", "baseGameTicks", "allocatedBytes", "gc0", "gc1", "gc2")})
         elif record_type == "draw":
-            allowed.append({key: record[key] for key in ("type", "phase", "drawTicks", "updateTicks", "updateCount")})
+            allowed.append({key: record[key] for key in ("type", "phase", "capturedAtTicks", "drawTicks", "updateTicks", "updateCount")})
         else:
             raise ValueError(f"unexpected probe record type: {record_type}")
     return header, allowed
@@ -187,6 +187,7 @@ def summarize_sample(run_root: Path, raw_root: Path) -> dict[str, Any]:
         "frameworkEnvelopeMilliseconds": distribution(framework_ms),
         "drawMilliseconds": distribution(draw_ms),
         "updateAndDrawMilliseconds": distribution(update_draw_ms),
+        "steadyDrawsPerMeasuredSecond": len(draws) / private["probe"]["steadySeconds"],
         "mainThreadAllocatedBytesPerUpdate": distribution(allocation_bytes),
         "processAllocatedBytesPerUpdate": steady_process_allocated / len(updates),
         "processGcCollections": steady_gc,
@@ -220,6 +221,8 @@ def aggregate(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "maxUpdateMilliseconds": [sample["updateMilliseconds"]["max"] for sample in samples],
         "meanFrameworkEnvelopeMilliseconds": [sample["frameworkEnvelopeMilliseconds"]["mean"] for sample in samples],
         "meanUpdateAndDrawMilliseconds": [sample["updateAndDrawMilliseconds"]["mean"] for sample in samples],
+        "steadyDrawCount": [sample["drawMilliseconds"]["count"] for sample in samples],
+        "steadyDrawsPerMeasuredSecond": [sample["steadyDrawsPerMeasuredSecond"] for sample in samples],
         "meanMainThreadAllocatedBytesPerUpdate": [sample["mainThreadAllocatedBytesPerUpdate"]["mean"] for sample in samples],
         "processAllocatedBytesPerUpdate": [sample["processAllocatedBytesPerUpdate"] for sample in samples],
         "warpTownObservedMilliseconds": [sample["transitionsMilliseconds"]["warpTownObserved"] for sample in samples],

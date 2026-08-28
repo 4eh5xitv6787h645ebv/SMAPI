@@ -22,6 +22,12 @@ from harness_common import load_jsonc
 
 
 EXPECTED_RESOLUTION = "1280x720"
+MIN_STEADY_UPDATES = 3000
+MIN_TRANSITION_UPDATES = 100
+MIN_STEADY_DRAWS = 300
+MIN_TRANSITION_DRAWS = 10
+MAX_STEADY_DRAW_EDGE_GAP_SECONDS = 5
+MAX_TRANSITION_DRAW_EDGE_GAP_SECONDS = 2
 REQUIRED_STARTUP_PHASES = (
     "logStarted", "waitingForGame", "maliciousScan", "metadataLoad", "assemblyLoad", "entryLaunch", "modsReady", "contentReady",
 )
@@ -234,6 +240,7 @@ def probe_summary(path: Path) -> dict[str, Any]:
     transition_updates = 0
     steady_draws = 0
     transition_draws = 0
+    draw_capture_ticks: dict[str, list[int]] = {"steady": [], "transition": []}
     update_records = 0
     draw_records = 0
     phase_totals: dict[str, Any] | None = None
@@ -282,13 +289,17 @@ def probe_summary(path: Path) -> dict[str, Any]:
                     raise ValueError(f"invalid draw phase: {phase}")
                 if any(not isinstance(record.get(key), int) or record[key] < 0 for key in ("drawTicks", "updateTicks", "updateCount")):
                     raise ValueError("invalid draw record")
+                captured_at = record.get("capturedAtTicks")
+                if not isinstance(captured_at, int) or captured_at < 0:
+                    raise ValueError("invalid draw capture timestamp")
+                draw_capture_ticks[phase].append(captured_at)
                 if record["drawTicks"] <= 0:
                     raise ValueError("draw timing must be positive")
             else:
                 raise ValueError(f"unknown probe record type: {record_type}")
     if header is None:
         raise ValueError("probe header missing")
-    if header.get("schema") != 1 or header.get("probeVersion") != "1.0.0":
+    if header.get("schema") != 1 or header.get("probeVersion") != "1.1.0":
         raise ValueError("unsupported probe schema/version")
     if header.get("warmupSeconds") != 60 or header.get("measurementSeconds") != 180 or header.get("transitionSettleTicks") != 300:
         raise ValueError("unexpected probe timing configuration")
@@ -307,7 +318,12 @@ def probe_summary(path: Path) -> dict[str, Any]:
         raise ValueError("in-game time did not advance during steady state")
     if header.get("recordedUpdates") != update_records or header.get("recordedDraws") != draw_records:
         raise ValueError("probe record counts do not match header")
-    if steady_updates < 3000 or transition_updates < 100 or steady_draws < 1000 or transition_draws < 50:
+    if (
+        steady_updates < MIN_STEADY_UPDATES
+        or transition_updates < MIN_TRANSITION_UPDATES
+        or steady_draws < MIN_STEADY_DRAWS
+        or transition_draws < MIN_TRANSITION_DRAWS
+    ):
         raise ValueError("insufficient steady or transition update/draw samples")
     frequency = header.get("stopwatchFrequency")
     if not isinstance(frequency, int) or frequency < 1000 or frequency > 10_000_000_000:
@@ -315,6 +331,27 @@ def probe_summary(path: Path) -> dict[str, Any]:
     duration = (markers["steady_state_end"] - markers["steady_state_start"]) / frequency
     if duration < 180:
         raise ValueError(f"steady-state duration too short: {duration:.6f}s")
+    steady_capture = draw_capture_ticks["steady"]
+    transition_capture = draw_capture_ticks["transition"]
+    all_draw_capture = steady_capture + transition_capture
+    if all_draw_capture != sorted(all_draw_capture):
+        raise ValueError("draw capture timestamps are not monotonic")
+    steady_gap = MAX_STEADY_DRAW_EDGE_GAP_SECONDS * frequency
+    if (
+        steady_capture[0] < markers["steady_state_start"]
+        or steady_capture[-1] > markers["steady_state_end"]
+        or steady_capture[0] > markers["steady_state_start"] + steady_gap
+        or steady_capture[-1] < markers["steady_state_end"] - steady_gap
+    ):
+        raise ValueError("steady draw samples do not span the measurement window")
+    transition_gap = MAX_TRANSITION_DRAW_EDGE_GAP_SECONDS * frequency
+    if (
+        transition_capture[0] < markers["steady_state_end"]
+        or transition_capture[-1] > markers["warp_farm_settled"]
+        or transition_capture[0] > markers["steady_state_end"] + transition_gap
+        or transition_capture[-1] < markers["warp_farm_settled"] - transition_gap
+    ):
+        raise ValueError("transition draw samples do not span the transition window")
     if phase_totals is None:
         raise ValueError("phaseTotals record missing")
     allocated_keys = ("entryAllocatedBytes", "steadyStartAllocatedBytes", "steadyEndAllocatedBytes", "exitAllocatedBytes")
