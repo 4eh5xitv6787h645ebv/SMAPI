@@ -20,9 +20,9 @@ This document defines the Phase 4 safety boundary for the fork's Linux desktop i
 - operation locks, recovery backups, journals, apply/recovery/rollback, and post-verification;
 - structured progress, stable error codes, and bounded private logs.
 
-`SMAPI.Installer` remains the console adapter. Its prompts describe a core-generated plan and then invoke the core; it must not retain an independent mutation path.
+`SMAPI.Installer` remains the console adapter and the only backend process allowed to mutate a game directory. Its prompts describe a core-generated plan and then invoke the core; it must not retain an independent mutation path. It also exposes a versioned one-shot JSONL protocol for the GUI. One backend process owns the complete handshake, inspect/plan, confirmation, revalidation, apply, and result session. Standard output contains protocol JSON only, standard error is diagnostic, communication uses inherited stdin/stdout with no listener or socket, and the GUI launches it with an argument list rather than a shell.
 
-`SMAPI.Installer.Gui` is a Linux-only `net10.0` Avalonia 12.1.1 adapter. View models are toolkit-independent where practical. The first package is self-contained, not trimmed, and not Native AOT so correctness and accessibility remain observable. Avalonia is pinned because its current Linux support includes X11, XWayland, an opt-in experimental native Wayland backend, and AT-SPI2 exposure. If packaged Orca/AT-SPI qualification fails, GTK 4 is the documented fallback rather than weakening the acceptance criteria.
+`SMAPI.Installer.Gui` is a Linux-only `net10.0` Avalonia 12.1.1 adapter. It selects and verifies releases, stages the matching package/backend, and drives only the structured backend protocol; it never writes the game directory directly. View models are toolkit-independent where practical. The first package is self-contained, not trimmed, and not Native AOT so correctness and accessibility remain observable. Avalonia is pinned because its current Linux support includes X11, XWayland, an opt-in experimental native Wayland backend, and AT-SPI2 exposure. If packaged Orca/AT-SPI qualification fails, GTK 4 is the documented fallback rather than weakening the acceptance criteria.
 
 ## Core model
 
@@ -31,6 +31,8 @@ This document defines the Phase 4 safety boundary for the fork's Linux desktop i
 A release identity contains the fork-specific tag, semantic fork version, exact commit and tree, package filename and size, SHA-256, and build-workflow identity. Selection accepts only releases from the configured fork repository over HTTPS whose tag matches the fork namespace. A downgrade or prerelease is always labelled explicitly.
 
 The downloader writes a unique mode-0600 `.part` file, enforces cancellation, timeout and size bounds while streaming, and discards incomplete downloads. Redirects are restricted to HTTPS GitHub release-asset hosts. The package filename, size, digest, tag, version, commit, tree, and embedded build metadata must agree before extraction. A checksum is never described as provenance; provenance is shown as verified only after an attestation has actually been verified.
+
+Networking stays in the GUI service boundary behind an injectable transport. The core supplies the release-identity, digest, metadata-agreement, and bounded-extraction policies so protocol and console/package tests cannot disagree with the GUI.
 
 The bounded extractor rejects absolute paths, traversal, links, devices, FIFOs, duplicate or case-colliding entries, excess entry count/depth/expanded size/compression ratio, and unexpected package layout.
 
@@ -113,4 +115,3 @@ The release workflow builds an exact reviewed commit, retains the console fallba
 2. Build the GUI, release acquisition, desktop tests, documentation, and packaging on a new branch from that merged `develop`.
 3. Address independent security/privacy and UX/accessibility review findings before packaging.
 4. Merge the GUI PR, publish the next fork-specific Linux alpha from its exact reviewed commit, and verify its public artifact in a clean isolated environment.
-

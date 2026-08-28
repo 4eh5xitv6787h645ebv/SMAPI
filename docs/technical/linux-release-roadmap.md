@@ -214,7 +214,7 @@ Scope constraints apply throughout:
 - [ ] Add corrupted-package tests.
 - [ ] Add rollback tests.
 - [ ] Add accessibility-focused tests.
-- [ ] Obtain independent installer architecture review.
+- [x] Obtain [independent installer architecture review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453931128).
 - [x] Obtain [independent security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890576).
 - [x] Obtain [independent UX/accessibility review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
 - [x] Obtain [independent Phase 4 testing review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
