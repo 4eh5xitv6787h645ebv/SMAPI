@@ -234,7 +234,7 @@ Scope constraints apply throughout:
 - [ ] Address every actionable Phase 4 review finding.
 - [ ] Package and document the GUI through the release workflow only after independent security/privacy and UX/accessibility findings are addressed.
 - [ ] Document GUI installation, update, repair, uninstall, backup, rollback, logs, errors, and troubleshooting.
-- [ ] Open a focused Phase 4 fork pull request.
+- [x] Open focused [Phase 4 fork pull request #175](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175).
 - [ ] Pass required CI and repository checks.
 - [ ] Merge the Phase 4 pull request into `develop` and close it.
 - [ ] Publish a publicly downloadable GUI package tied to an exact reviewed commit.

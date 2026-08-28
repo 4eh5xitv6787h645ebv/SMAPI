@@ -101,6 +101,10 @@ internal sealed class TransactionPlan
             throw new ArgumentException("The core manifest operation targets an unexpected path.", nameof(manifestOperation));
         if (receiptOperation is not null && receiptOperation.RelativePath != CoreReceiptRelativePath)
             throw new ArgumentException("The core receipt operation targets an unexpected path.", nameof(receiptOperation));
+        if ((manifestOperation is null) != (receiptOperation is null))
+            throw new ArgumentException("The core manifest and receipt must mutate as one ownership tuple.", nameof(manifestOperation));
+        if (manifestOperation is not null && manifestOperation.Kind != receiptOperation!.Kind)
+            throw new ArgumentException("The core manifest and receipt must use the same mutation kind.", nameof(manifestOperation));
         if (pointerOperation.RelativePath != CoreRecoveryPointerRelativePath || pointerOperation.Kind != TransactionOperationKind.WriteFile)
             throw new ArgumentException("The core recovery pointer must be one exact write operation.", nameof(pointerOperation));
 

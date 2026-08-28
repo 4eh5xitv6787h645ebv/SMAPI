@@ -267,6 +267,23 @@ public class InstallationPlannerTests
     }
 
     [Test]
+    public void Backup_WithoutInstalledReceipt_IsNonExecutableAtPlanningTime()
+    {
+        CurrentFile launcher = new(OwnershipTestData.Path("StardewValley"), OwnershipTestData.Digest('f'), 493);
+        InstallationInventory inventory = InstallationInventory.Create(null, null, [launcher]);
+
+        InstallationPlan plan = this.Planner.Plan(new InstallationPlanningRequest(
+            InstallationAction.Backup,
+            inventory,
+            LauncherState.Assess(launcher.Sha256, null, null)
+        ));
+
+        plan.CanExecute.Should().BeFalse();
+        plan.Conflicts.Should().ContainSingle(conflict => conflict.Code == PlanConflictCode.InstalledReceiptRequired);
+        plan.Operations.Should().BeEmpty();
+    }
+
+    [Test]
     public void Rollback_RequiresExactReceiptAndCurrentHashes()
     {
         PackageManifest manifest = OwnershipTestData.Manifest(

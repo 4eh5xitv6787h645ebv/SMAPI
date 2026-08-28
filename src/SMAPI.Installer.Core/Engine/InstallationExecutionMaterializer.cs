@@ -11,6 +11,7 @@ namespace StardewModdingAPI.Installer.Core.Engine;
 internal sealed class InstallationExecutionMaterializer
 {
     private const int PrivateFileMode = 0x180;
+    private const int MaximumRetainedRecoveryGenerations = 64;
     private const long MaximumStagedBytes = 8L * 1024 * 1024 * 1024;
     private readonly InstallerTransactionExecutor Executor;
 
@@ -33,6 +34,7 @@ internal sealed class InstallationExecutionMaterializer
         lease.AssertRootAndGeneration(binding.GameRoot, binding.OperationGeneration);
         currentState.AssertUsable(lease);
         AssertCurrentState(binding, currentState);
+        AssertRecoveryGenerationCapacity(lease.Game);
         RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot
             ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "Every executable action must produce a recovery generation.");
         AssertAllInstructionPreconditions(lease.Game, preparation.Instructions);
@@ -122,6 +124,36 @@ internal sealed class InstallationExecutionMaterializer
         {
             payload?.Dispose();
             PrivatePackageStaging.TryDeleteDirectory(stagingRoot);
+        }
+    }
+
+    private static void AssertRecoveryGenerationCapacity(LinuxAnchoredFileSystem game)
+    {
+        const string generationsPath = ".smapi-installer/recovery/generations";
+        LinuxFileIdentity? identity = game.Stat(generationsPath);
+        if (identity is null)
+            return;
+        if (identity.Kind != LinuxAnchoredEntryKind.Directory || identity.UnixMode != 0x1c0)
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store has unsafe metadata.");
+        using LinuxAnchoredFileSystem generations = game.OpenSubdirectory(generationsPath);
+        IReadOnlyList<string> names;
+        try
+        {
+            names = generations.EnumerateEntryNames(maximumEntries: MaximumRetainedRecoveryGenerations);
+        }
+        catch (IOException exception)
+        {
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The bounded recovery-generation store is full or unsafe.", exception);
+        }
+        if (names.Count >= MaximumRetainedRecoveryGenerations)
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The bounded recovery-generation store is full; remove an older checkpoint before continuing.");
+        foreach (string name in names)
+        {
+            if (!Guid.TryParseExact(name, "N", out Guid generationId) || generationId == Guid.Empty)
+                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store contains an unknown entry.");
+            LinuxFileIdentity? generation = generations.Stat(name);
+            if (generation?.Kind != LinuxAnchoredEntryKind.Directory || generation.UnixMode != 0x1c0)
+                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The recovery-generation store contains an unsafe entry.");
         }
     }
 

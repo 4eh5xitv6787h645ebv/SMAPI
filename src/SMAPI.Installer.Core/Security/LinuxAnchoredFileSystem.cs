@@ -539,9 +539,11 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     }
 
     /// <summary>Enumerate the immediate entry names of a real anchored directory.</summary>
-    public IReadOnlyList<string> EnumerateEntryNames(string? relativePath = null)
+    public IReadOnlyList<string> EnumerateEntryNames(string? relativePath = null, int maximumEntries = int.MaxValue)
     {
         this.AssertUsable();
+        if (maximumEntries < 0)
+            throw new ArgumentOutOfRangeException(nameof(maximumEntries));
         using SafeFileHandle directory = relativePath is null ? Duplicate(this.RootHandle) : this.OpenDirectoryPath(relativePath);
         SafeFileHandle duplicate = Duplicate(directory);
         IntPtr stream = fdopendir(duplicate.DangerousGetHandle().ToInt32());
@@ -584,6 +586,8 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
                 if (name.Length == 0 || name.Contains('/') || name.Contains('\0'))
                     throw new IOException("The anchored directory returned an unsafe entry name.");
                 names.Add(name);
+                if (names.Count > maximumEntries)
+                    throw new IOException("The anchored directory exceeds its bounded entry limit.");
             }
         }
         finally

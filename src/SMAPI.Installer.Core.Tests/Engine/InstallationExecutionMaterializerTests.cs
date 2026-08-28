@@ -1,5 +1,5 @@
-using System.Text;
 using System.Runtime.Versioning;
+using System.Text;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Engine;
@@ -53,46 +53,15 @@ public sealed class InstallationExecutionMaterializerTests
         );
         using FilePackageAuthority package = new(manifest, packageRoot);
         Sha256Digest vanillaSha = Hash("vanilla launcher");
-        InstallationPlanningRequest request = new(
-            InstallationAction.Install,
-            InstallationInventory.Create(
-                manifest,
-                null,
-                [new CurrentFile(NormalizedRelativePath.Parse("StardewValley"), vanillaSha, 0x1ed)]
-            ),
-            LauncherState.Assess(vanillaSha, null, null),
-            targetManifest: manifest,
-            recoveryObservations:
-            [
-                new RecoveryFileObservation(
-                    NormalizedRelativePath.Parse("StardewValley"),
-                    new RecoveryFileIdentity(vanillaSha, Encoding.UTF8.GetByteCount("vanilla launcher"), 0x1ed)
-                ),
-                new RecoveryFileObservation(NormalizedRelativePath.Parse("StardewValley-original"), null),
-                new RecoveryFileObservation(NormalizedRelativePath.Parse("StardewModdingAPI.dll"), null)
-            ]
-        );
-
+        LinuxInstallerEngine engine = new();
+        InspectedInstallationState inspection;
         using (InstallerOperationLease lease = InstallerOperationLease.Acquire(game))
+            inspection = engine.InspectLocked(lease, InstallationAction.Install, package, null);
+        using (inspection)
         {
-            AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
-            InstallationPlan plan = new InstallationPlanner().Plan(request);
-            BoundInstallationPlan binding = new InstallerExecutionCompiler().BindPlan(
-                plan,
-                request,
-                lease.RootIdentity,
-                lease.Generation,
-                package,
-                currentRecoveryPointerSha256: state.PointerSha256
-            );
-            InstallationExecutionPreparation preparation = new InstallerExecutionCompiler().Prepare(
-                binding,
-                plan,
-                request,
-                Guid.NewGuid()
-            );
-
-            new InstallationExecutionMaterializer().Apply(lease, preparation, state).Status.Should().Be(TransactionStatus.Committed);
+            inspection.Plan.CanExecute.Should().BeTrue();
+            engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult().Status
+                .Should().Be(TransactionStatus.Committed);
         }
 
         File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("smapi launcher");
@@ -115,12 +84,174 @@ public sealed class InstallationExecutionMaterializerTests
         );
     }
 
+    [Test]
+    public void Apply_AllSixActions_UpdateRepairBackupUninstallAndRollbackRoundTrip()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority first = this.CreatePackage("launcher one", "runtime one");
+        using FilePackageAuthority second = this.CreatePackage("launcher two", "runtime two");
+
+        Execute(this.Inspect(engine, game, InstallationAction.Install, first), engine);
+        Execute(this.Inspect(engine, game, InstallationAction.Update, second), engine);
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("launcher two");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime two");
+
+        File.Delete(Path.Combine(game, "StardewModdingAPI.dll"));
+        Execute(this.Inspect(engine, game, InstallationAction.Repair, second), engine);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime two");
+
+        Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+        using (CommittedRecoveryHandle backup = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult())
+            backup.Action.Should().Be(InstallationAction.Backup);
+
+        Execute(engine.InspectAsync(game, InstallationAction.Uninstall).GetAwaiter().GetResult(), engine);
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("vanilla launcher");
+        File.Exists(Path.Combine(game, "StardewValley-original")).Should().BeFalse();
+        File.Exists(Path.Combine(game, "StardewModdingAPI.dll")).Should().BeFalse();
+
+        using CommittedRecoveryHandle uninstallRecovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
+        uninstallRecovery.Action.Should().Be(InstallationAction.Uninstall);
+        Execute(
+            engine.InspectAsync(game, InstallationAction.Rollback, recovery: uninstallRecovery).GetAwaiter().GetResult(),
+            engine
+        );
+
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("launcher two");
+        File.ReadAllText(Path.Combine(game, "StardewValley-original")).Should().Be("vanilla launcher");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime two");
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.Manifest!.Release.Should().Be(second.Manifest.Release);
+        state.Receipt.Should().NotBeNull();
+        state.Pointer!.Action.Should().Be(InstallationAction.Rollback);
+    }
+
+    [Test]
+    public void Apply_SelectedBackupAfterUpdate_RestoresCheckpointAndOwnershipTuple()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority checkpointPackage = this.CreatePackage("launcher one", "runtime one");
+        using FilePackageAuthority laterPackage = this.CreatePackage("launcher two", "runtime two");
+
+        Execute(this.Inspect(engine, game, InstallationAction.Install, checkpointPackage), engine);
+        Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+        Guid backupGeneration;
+        using (CommittedRecoveryHandle backup = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult())
+            backupGeneration = backup.GenerationId;
+
+        Execute(this.Inspect(engine, game, InstallationAction.Update, laterPackage), engine);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime two");
+
+        using CommittedRecoveryHandle selected = engine.OpenRecoveryAsync(game, backupGeneration).GetAwaiter().GetResult();
+        selected.Action.Should().Be(InstallationAction.Backup);
+        Execute(engine.InspectAsync(game, InstallationAction.Rollback, recovery: selected).GetAwaiter().GetResult(), engine);
+
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("launcher one");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime one");
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.Manifest!.Release.Should().Be(checkpointPackage.Manifest.Release);
+        state.Receipt!.ManifestSha256.Should().Be(checkpointPackage.Manifest.GetCanonicalDigest());
+        state.Pointer!.Action.Should().Be(InstallationAction.Rollback);
+    }
+
+    [Test]
+    public void Execute_ModeOnlyDriftAfterInspection_DoesNotCommitFalseReceipt()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        InspectedInstallationState inspection = this.Inspect(engine, game, InstallationAction.Repair, package);
+        File.SetUnixFileMode(Path.Combine(game, "StardewModdingAPI.dll"), (UnixFileMode)0x1ed);
+
+        Action execute = () => engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult();
+
+        using (inspection)
+            execute.Should().Throw<Exception>();
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.Receipt!.ManifestSha256.Should().Be(package.Manifest.GetCanonicalDigest());
+        state.Pointer!.Action.Should().Be(InstallationAction.Install);
+        File.GetUnixFileMode(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be((UnixFileMode)0x1ed);
+    }
+
+    [Test]
+    public void Execute_FullRecoveryStoreRejectsBeforeGameMutation()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        string generations = Path.Combine(game, ".smapi-installer", "recovery", "generations");
+        for (int index = 0; index < 63; index++)
+        {
+            string generation = Path.Combine(generations, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(generation);
+            File.SetUnixFileMode(generation, (UnixFileMode)0x1c0);
+        }
+        using InspectedInstallationState inspection = engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult();
+
+        Action execute = () => engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult();
+
+        execute.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.WorkspaceConflict);
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("launcher one");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("runtime one");
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.Pointer!.Action.Should().Be(InstallationAction.Install);
+    }
+
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-materializer-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         this.TemporaryDirectories.Add(path);
         return path;
+    }
+
+    private FilePackageAuthority CreatePackage(string launcher, string runtime)
+    {
+        string root = this.CreateDirectory();
+        Write(root, "StardewValley", launcher, 0x1ed);
+        Write(root, "StardewModdingAPI.dll", runtime, 0x1a4);
+        int alpha = launcher.EndsWith("two", StringComparison.Ordinal) ? 2 : 1;
+        PackageManifest manifest = new(
+            OwnershipTestData.Release(alpha),
+            new[]
+            {
+                Entry("StardewValley", launcher, 0x1ed, OwnedEntryKind.Launcher),
+                Entry("StardewModdingAPI.dll", runtime, 0x1a4, OwnedEntryKind.RuntimeFile)
+            }
+        );
+        return new FilePackageAuthority(manifest, root);
+    }
+
+    private InspectedInstallationState Inspect(
+        LinuxInstallerEngine engine,
+        string game,
+        InstallationAction action,
+        IVerifiedPackageContentAuthority? package = null
+    )
+    {
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        return engine.InspectLocked(lease, action, package, null);
+    }
+
+    private static void Execute(InspectedInstallationState inspection, LinuxInstallerEngine engine)
+    {
+        using (inspection)
+        {
+            inspection.Plan.CanExecute.Should().BeTrue(string.Join(", ", inspection.Plan.Conflicts.Select(conflict => conflict.Code)));
+            engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult().Status
+                .Should().Be(TransactionStatus.Committed);
+        }
     }
 
     private static PackageManifestEntry Entry(string path, string contents, int mode, OwnedEntryKind kind)

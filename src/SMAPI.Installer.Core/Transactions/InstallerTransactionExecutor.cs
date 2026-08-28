@@ -191,6 +191,21 @@ internal sealed class InstallerTransactionExecutor
         return results;
     }
 
+    /// <summary>Recover under an already-held operation lease and invalidate its prior generation when needed.</summary>
+    internal IReadOnlyList<TransactionResult> RecoverLocked(InstallerOperationLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        IReadOnlyList<TransactionResult> results = this.RecoverIncompleteTransactionsLocked(
+            lease.Game,
+            lease.Workspace,
+            lease.CanonicalGameRoot
+        );
+        if (results.Count > 0)
+            lease.ReserveNextGeneration(lease.Generation);
+        this.TrimFinalTransactions(lease.Game, lease.Workspace, lease.CanonicalGameRoot);
+        return results;
+    }
+
     private static void ValidatePlan(TransactionPlan plan)
     {
         HashSet<string> destinations = new(StringComparer.Ordinal);

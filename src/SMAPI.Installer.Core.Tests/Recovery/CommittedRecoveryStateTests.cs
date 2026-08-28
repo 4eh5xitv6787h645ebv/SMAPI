@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
 using NUnit.Framework;
+using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Ownership.Persistence;
 using StardewModdingAPI.Installer.Core.Planning;
@@ -69,6 +70,39 @@ public sealed class CommittedRecoveryStateTests
         parse.Should().Throw<OwnershipDocumentException>();
     }
 
+    [TestCase(InstallationAction.Install, true, true, false)]
+    [TestCase(InstallationAction.Update, true, false, true)]
+    [TestCase(InstallationAction.Repair, true, false, true)]
+    [TestCase(InstallationAction.Uninstall, true, true, true)]
+    [TestCase(InstallationAction.Backup, true, true, true)]
+    [TestCase(InstallationAction.Rollback, false, false, false)]
+    public void Pointer_RejectsActionTupleMismatch(
+        InstallationAction action,
+        bool hasResult,
+        bool hasPrevious,
+        bool useDifferentTuples
+    )
+    {
+        Sha256Digest resultManifest = OwnershipTestData.Digest('b');
+        Sha256Digest resultReceipt = OwnershipTestData.Digest('c');
+        Sha256Digest previousManifest = useDifferentTuples ? OwnershipTestData.Digest('d') : resultManifest;
+        Sha256Digest previousReceipt = useDifferentTuples ? OwnershipTestData.Digest('e') : resultReceipt;
+
+        Action create = () => _ = new CommittedRecoveryPointer(
+            Guid.NewGuid(),
+            action,
+            OwnershipTestData.Digest('a'),
+            hasResult ? resultManifest : null,
+            hasResult ? resultReceipt : null,
+            hasPrevious ? previousManifest : null,
+            hasPrevious ? previousReceipt : null,
+            null,
+            null
+        );
+
+        create.Should().Throw<ArgumentException>();
+    }
+
     [Test]
     public void OpenCurrent_AuthenticatesCommittedSnapshotAndOwnershipTuple()
     {
@@ -125,6 +159,10 @@ public sealed class CommittedRecoveryStateTests
         handle.GenerationId.Should().Be(generation);
         handle.Action.Should().Be(InstallationAction.Install);
         handle.SnapshotSha256.Should().Be(Sha256Digest.Hash(snapshotBytes));
+
+        File.WriteAllText(Path.Combine(game, prefix, "snapshot.json"), "{}");
+        Action reuse = () => ((ICommittedRecoveryContentAuthority)handle).AssertUsable();
+        reuse.Should().Throw<OwnershipDocumentException>();
     }
 
     private string CreateDirectory()

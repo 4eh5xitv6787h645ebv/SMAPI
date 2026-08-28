@@ -1,5 +1,5 @@
-using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluentAssertions;
@@ -714,6 +714,42 @@ public sealed class InstallerTransactionExecutorTests
             null,
             null,
             WriteOperation(TransactionPlan.CoreRecoveryPointerRelativePath, null, "pointer", Hash("pointer"))
+        );
+
+        create.Should().Throw<ArgumentException>();
+    }
+
+    [Test]
+    public void CreateWithCoreState_RejectsPartialOwnershipTuple()
+    {
+        Guid transactionId = Guid.NewGuid();
+        string prefix = $".smapi-installer/recovery/generations/{transactionId:N}";
+
+        Action create = () => TransactionPlan.CreateWithCoreState(
+            transactionId,
+            new[] { WriteOperation($"{prefix}/snapshot.json", null, "snapshot", Hash("snapshot"), 0x180) },
+            Array.Empty<TransactionFileOperation>(),
+            WriteOperation(TransactionPlan.CoreManifestRelativePath, null, "manifest", Hash("manifest"), 0x180),
+            null,
+            WriteOperation(TransactionPlan.CoreRecoveryPointerRelativePath, null, "pointer", Hash("pointer"), 0x180)
+        );
+
+        create.Should().Throw<ArgumentException>();
+    }
+
+    [Test]
+    public void CreateWithCoreState_RejectsMixedOwnershipTupleMutationKinds()
+    {
+        Guid transactionId = Guid.NewGuid();
+        string prefix = $".smapi-installer/recovery/generations/{transactionId:N}";
+
+        Action create = () => TransactionPlan.CreateWithCoreState(
+            transactionId,
+            new[] { WriteOperation($"{prefix}/snapshot.json", null, "snapshot", Hash("snapshot"), 0x180) },
+            Array.Empty<TransactionFileOperation>(),
+            WriteOperation(TransactionPlan.CoreManifestRelativePath, Hash("old manifest"), "manifest", Hash("manifest"), 0x180),
+            new TransactionFileOperation(TransactionOperationKind.RemoveFile, TransactionPlan.CoreReceiptRelativePath, Hash("old receipt")),
+            WriteOperation(TransactionPlan.CoreRecoveryPointerRelativePath, null, "pointer", Hash("pointer"), 0x180)
         );
 
         create.Should().Throw<ArgumentException>();

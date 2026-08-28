@@ -355,6 +355,15 @@ public sealed class RollbackSnapshot
 
     public IReadOnlyList<RollbackSnapshotEntry> Entries { get; }
 
+    /// <summary>Whether this is a user checkpoint whose safe current-state preconditions are rebound at restore time.</summary>
+    public bool IsUserBackup => this.ExpectedCurrentReceiptSha256 == this.PreviousReceiptSha256
+        && this.ExpectedCurrentReceiptSha256 is not null
+        && this.Entries.All(entry =>
+            entry.Kind == RollbackEntryKind.Restore
+            && entry.ExpectedCurrent is not null
+            && entry.ExpectedCurrent == entry.Backup
+        );
+
     internal RollbackSnapshot(
         Sha256Digest? expectedCurrentReceiptSha256,
         Sha256Digest? previousReceiptSha256,

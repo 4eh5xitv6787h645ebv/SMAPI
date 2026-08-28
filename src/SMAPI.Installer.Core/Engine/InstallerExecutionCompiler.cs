@@ -60,6 +60,7 @@ internal sealed class InstallerExecutionCompiler
                 || !ReferenceEquals(rollbackContent.Snapshot, request.RollbackSnapshot)
                 || rollbackContent.SnapshotSha256 != GetRollbackSnapshotDigest(request.RollbackSnapshot)
                 || rollbackContent.GameRoot != gameRoot
+                || rollbackContent.AuthorizedHeadPointerSha256 != currentRecoveryPointerSha256
             )
             {
                 throw Error(ExecutionCompilationError.StaleRollbackSnapshot, "The rollback snapshot isn't backed by a live committed recovery authority for this game root.");
@@ -324,7 +325,17 @@ internal sealed class InstallerExecutionCompiler
 
         if (request.Action == InstallationAction.Rollback)
         {
-            RollbackSnapshotEntry snapshotEntry = request.RollbackSnapshot?.Entries.SingleOrDefault(entry => entry.Path.Equals(operation.Path))
+            RollbackSnapshot snapshot = request.RollbackSnapshot
+                ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Remove destination '{operation.Path}' has no recovery snapshot.");
+            if (snapshot.IsUserBackup)
+            {
+                InstallationReceiptEntry backupInstalled = request.InstalledReceipt?.Entries.SingleOrDefault(entry => entry.Path.Equals(operation.Path))
+                    ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Backup restore removal '{operation.Path}' isn't in the current receipt.");
+                if (backupInstalled.InstalledSha256 != operation.ExpectedCurrentSha256)
+                    throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Backup restore removal '{operation.Path}' doesn't match the current receipt.");
+                return;
+            }
+            RollbackSnapshotEntry snapshotEntry = snapshot.Entries.SingleOrDefault(entry => entry.Path.Equals(operation.Path))
                 ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Remove destination '{operation.Path}' isn't in the recovery snapshot.");
             if (snapshotEntry.Kind != RollbackEntryKind.Remove || snapshotEntry.ExpectedCurrentSha256 != operation.ExpectedCurrentSha256)
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Remove destination '{operation.Path}' doesn't match its recovery snapshot entry.");
@@ -547,7 +558,11 @@ internal sealed class InstallerExecutionCompiler
                 PreparationInstructionKind.CaptureRecoveryFile when request.Action == InstallationAction.Backup => prior,
                 _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A transaction destination has no recovery result rule.")
             };
-            if (request.Action != InstallationAction.Backup && prior == result)
+            if (
+                request.Action != InstallationAction.Backup
+                && !(request.Action == InstallationAction.Rollback && request.RollbackSnapshot?.IsUserBackup == true)
+                && prior == result
+            )
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Changed path '{instruction.Path}' doesn't describe a state transition.");
 
             OwnedEntryKind ownedKind = GetRecoveryOwnedKind(instruction.Path, request);
@@ -620,12 +635,15 @@ internal sealed class InstallerExecutionCompiler
         HashSet<string> required = plan.Action switch
         {
             InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair or InstallationAction.Uninstall => plan.Operations
-                .Where(operation => operation.Kind is PlanOperationKind.Create or PlanOperationKind.Replace or PlanOperationKind.Remove or PlanOperationKind.Restore)
                 .Select(operation => operation.Path.Value)
                 .Append(LauncherPath.Value)
                 .Append(LauncherBackupPath.Value)
                 .ToHashSet(StringComparer.Ordinal),
             InstallationAction.Backup => plan.Operations.Select(operation => operation.Path.Value).ToHashSet(StringComparer.Ordinal),
+            InstallationAction.Rollback when request.RollbackSnapshot?.IsUserBackup == true => request.RollbackSnapshot.Entries
+                .Select(entry => entry.Path.Value)
+                .Concat(request.InstalledReceipt?.Entries.Select(entry => entry.Path.Value) ?? Array.Empty<string>())
+                .ToHashSet(StringComparer.Ordinal),
             InstallationAction.Rollback => request.RollbackSnapshot?.Entries.Select(entry => entry.Path.Value).ToHashSet(StringComparer.Ordinal)
                 ?? new HashSet<string>(StringComparer.Ordinal),
             _ => throw new ArgumentOutOfRangeException(nameof(plan))

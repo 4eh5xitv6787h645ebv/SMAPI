@@ -354,6 +354,7 @@ internal static class TransactionJournalStore
         if (
             journal.HasCoreAuthorizedManifestMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreManifestRelativePath)
             || journal.HasCoreAuthorizedRecoveryPointerMutation != journal.Entries.Any(entry => entry.RelativePath == TransactionPlan.CoreRecoveryPointerRelativePath)
+            || journal.HasCoreAuthorizedManifestMutation != journal.HasCoreAuthorizedReceiptMutation
             || (journal.CoreGenerationId is null) != !journal.HasCoreAuthorizedRecoveryPointerMutation
             || journal.CoreRecoveryOperationCount < 0
             || journal.CoreRecoveryContentCount < 0
@@ -361,6 +362,13 @@ internal static class TransactionJournalStore
         )
         {
             throw RecoveryError("The immutable recovery plan's core-state authorization is inconsistent.");
+        }
+        if (journal.HasCoreAuthorizedManifestMutation)
+        {
+            TransactionOperationKind manifestKind = journal.Entries.Single(entry => entry.RelativePath == TransactionPlan.CoreManifestRelativePath).Kind;
+            TransactionOperationKind receiptKind = journal.Entries.Single(entry => entry.RelativePath == TransactionPlan.CoreReceiptRelativePath).Kind;
+            if (manifestKind != receiptKind)
+                throw RecoveryError("The immutable recovery plan mixes ownership-tuple mutation kinds.");
         }
         if (journal.CoreGenerationId is not null)
             ValidateCoreRecoveryLayout(journal);

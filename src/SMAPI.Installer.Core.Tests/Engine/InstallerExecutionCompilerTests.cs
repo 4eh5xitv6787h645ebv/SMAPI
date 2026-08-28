@@ -371,7 +371,11 @@ public class InstallerExecutionCompilerTests
         recovery.Snapshot.ExpectedCurrentReceiptSha256.Should().Be(
             preparation.Receipt.Source.As<GeneratedCanonicalReceiptSource>().Sha256
         );
-        recovery.PathBindings.Select(binding => binding.Path.Value).Should().BeEquivalentTo("StardewValley", "StardewValley-original");
+        recovery.PathBindings.Select(binding => binding.Path.Value).Should().BeEquivalentTo(
+            "StardewModdingAPI",
+            "StardewValley",
+            "StardewValley-original"
+        );
         recovery.PathBindings.Should().OnlyContain(binding => !binding.RequiresContentCapture);
     }
 
@@ -538,13 +542,15 @@ public class InstallerExecutionCompilerTests
     {
         request = AddRequiredRecoveryObservations(request);
         InstallationPlan plan = this.Planner.Plan(request);
+        ICommittedRecoveryContentAuthority? recovery = RecoveryAuthority(request);
         BoundInstallationPlan binding = this.Compiler.BindPlan(
             plan,
             request,
             GameRoot,
             OperationGeneration,
             Authority(request),
-            RecoveryAuthority(request)
+            recovery,
+            recovery?.AuthorizedHeadPointerSha256
         );
         return (plan, this.Compiler.Prepare(binding, plan, request, TransactionId));
     }
@@ -598,6 +604,7 @@ public class InstallerExecutionCompilerTests
         public Sha256Digest SnapshotSha256 => Sha256Digest.Hash(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(this.Snapshot));
         public Sha256Digest? PreviousManifestSha256 => this.Snapshot.PreviousReceiptSha256 is null ? null : OwnershipTestData.Digest('a');
         public Sha256Digest? PreviousReceiptSha256 => this.Snapshot.PreviousReceiptSha256;
+        public Sha256Digest AuthorizedHeadPointerSha256 => OwnershipTestData.Digest('9');
 
         public FakeRecoveryContentAuthority(RollbackSnapshot snapshot)
         {
@@ -658,7 +665,6 @@ public class InstallerExecutionCompilerTests
         IEnumerable<NormalizedRelativePath> required = request.Action == InstallationAction.Backup
             ? plan.Operations.Select(operation => operation.Path)
             : plan.Operations
-                .Where(operation => operation.Kind is PlanOperationKind.Create or PlanOperationKind.Replace or PlanOperationKind.Remove or PlanOperationKind.Restore)
                 .Select(operation => operation.Path)
                 .Append(OwnershipTestData.Path("StardewValley"))
                 .Append(OwnershipTestData.Path("StardewValley-original"));

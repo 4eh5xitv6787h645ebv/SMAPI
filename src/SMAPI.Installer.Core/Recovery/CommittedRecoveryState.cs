@@ -48,6 +48,22 @@ internal sealed record CommittedRecoveryPointer
             throw new ArgumentException("The previous generation and pointer digest must be present or absent together.");
         if (previousGenerationId == Guid.Empty || previousGenerationId == generationId)
             throw new ArgumentException("The previous recovery generation ID is invalid.", nameof(previousGenerationId));
+        bool hasResult = resultManifestSha256 is not null;
+        bool hasPrevious = previousManifestSha256 is not null;
+        bool validTransition = action switch
+        {
+            InstallationAction.Install => hasResult && !hasPrevious,
+            InstallationAction.Update or InstallationAction.Repair => hasResult && hasPrevious,
+            InstallationAction.Uninstall => !hasResult && hasPrevious,
+            InstallationAction.Backup => hasResult
+                && hasPrevious
+                && resultManifestSha256 == previousManifestSha256
+                && resultReceiptSha256 == previousReceiptSha256,
+            InstallationAction.Rollback => hasResult || hasPrevious,
+            _ => false
+        };
+        if (!validTransition)
+            throw new ArgumentException("The recovery action doesn't match its ownership-tuple transition.", nameof(action));
 
         this.GenerationId = generationId;
         this.Action = action;
@@ -347,13 +363,19 @@ internal sealed class AnchoredCoreStateAuthority
 /// <summary>An opaque descriptor-anchored authority for one committed recovery generation.</summary>
 public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryContentAuthority
 {
+    private const int MaximumRecoveryChainDepth = 64;
+    private const long MaximumGenerationContentBytes = 8L * 1024 * 1024 * 1024;
     private const int PrivateFileMode = 0x180;
     private const int PrivateDirectoryMode = 0x1c0;
+    private readonly LinuxAnchoredFileSystem NamedGameRoot;
     private readonly LinuxAnchoredFileSystem Generation;
+    private readonly string GenerationPath;
     private readonly LinuxFileIdentity GenerationIdentity;
-    private readonly Dictionary<string, string> GameFileNames;
+    private readonly LinuxFileIdentity SnapshotIdentity;
+    private readonly Dictionary<string, RecoveryContentBinding> GameFiles;
     private readonly LinuxFileIdentity? PreviousReceiptIdentity;
     private readonly LinuxFileIdentity? PreviousManifestIdentity;
+    private readonly Sha256Digest AuthorizedHeadPointerSha256;
     private bool Disposed;
 
     /// <summary>The immutable recovery generation ID.</summary>
@@ -375,25 +397,34 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
     GameRootIdentity ICommittedRecoveryContentAuthority.GameRoot => this.GameRoot;
     Sha256Digest? ICommittedRecoveryContentAuthority.PreviousManifestSha256 => this.PreviousManifestSha256;
     Sha256Digest? ICommittedRecoveryContentAuthority.PreviousReceiptSha256 => this.PreviousReceiptSha256;
+    Sha256Digest ICommittedRecoveryContentAuthority.AuthorizedHeadPointerSha256 => this.AuthorizedHeadPointerSha256;
 
     private CommittedRecoveryHandle(
         GameRootIdentity gameRoot,
         CommittedRecoveryPointer pointer,
         RollbackSnapshot snapshot,
+        LinuxAnchoredFileSystem namedGameRoot,
         LinuxAnchoredFileSystem generation,
-        Dictionary<string, string> gameFileNames,
+        string generationPath,
+        LinuxFileIdentity snapshotIdentity,
+        Dictionary<string, RecoveryContentBinding> gameFiles,
         LinuxFileIdentity? previousReceiptIdentity,
-        LinuxFileIdentity? previousManifestIdentity
+        LinuxFileIdentity? previousManifestIdentity,
+        Sha256Digest authorizedHeadPointerSha256
     )
     {
         this.GameRoot = gameRoot;
         this.Pointer = pointer;
         this.Snapshot = snapshot;
+        this.NamedGameRoot = namedGameRoot;
         this.Generation = generation;
+        this.GenerationPath = generationPath;
         this.GenerationIdentity = generation.Identity;
-        this.GameFileNames = gameFileNames;
+        this.SnapshotIdentity = snapshotIdentity;
+        this.GameFiles = gameFiles;
         this.PreviousReceiptIdentity = previousReceiptIdentity;
         this.PreviousManifestIdentity = previousManifestIdentity;
+        this.AuthorizedHeadPointerSha256 = authorizedHeadPointerSha256;
     }
 
     internal static CommittedRecoveryHandle OpenCurrent(
@@ -406,13 +437,54 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         currentState.AssertUsable(lease);
         CommittedRecoveryPointer pointer = currentState.Pointer
             ?? throw new OwnershipDocumentException("There is no committed recovery generation to open.");
+        return Open(lease, pointer, currentState.PointerSha256
+            ?? throw new OwnershipDocumentException("The current recovery pointer digest is unavailable."));
+    }
+
+    internal static CommittedRecoveryHandle OpenSelected(
+        InstallerOperationLease lease,
+        AnchoredCoreStateAuthority currentState,
+        Guid generationId
+    )
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(currentState);
+        if (generationId == Guid.Empty)
+            throw new ArgumentException("A recovery generation ID is required.", nameof(generationId));
+        currentState.AssertUsable(lease);
+        CommittedRecoveryPointer pointer = currentState.Pointer
+            ?? throw new OwnershipDocumentException("There is no committed recovery generation to select.");
+        Sha256Digest headDigest = currentState.PointerSha256
+            ?? throw new OwnershipDocumentException("The current recovery pointer digest is unavailable.");
+        HashSet<Guid> visited = new();
+        for (int depth = 0; depth < MaximumRecoveryChainDepth; depth++)
+        {
+            if (!visited.Add(pointer.GenerationId))
+                throw new OwnershipDocumentException("The committed recovery chain contains a cycle.");
+            if (pointer.GenerationId == generationId)
+                return Open(lease, pointer, headDigest);
+            pointer = ReadPreviousPointer(lease.Game, pointer);
+        }
+        throw new OwnershipDocumentException("The selected recovery generation isn't present in the bounded committed chain.");
+    }
+
+    private static CommittedRecoveryHandle Open(
+        InstallerOperationLease lease,
+        CommittedRecoveryPointer pointer,
+        Sha256Digest authorizedHeadPointerSha256
+    )
+    {
         string generationPath = $".smapi-installer/recovery/generations/{pointer.GenerationId:N}";
-        LinuxAnchoredFileSystem generation = lease.Game.OpenSubdirectory(generationPath);
+        LinuxAnchoredFileSystem namedGameRoot = new(lease.CanonicalGameRoot);
+        LinuxAnchoredFileSystem? generation = null;
         try
         {
+            if (!lease.RootIdentity.Matches(namedGameRoot.Identity))
+                throw new OwnershipDocumentException("The named game root changed while opening committed recovery state.");
+            generation = namedGameRoot.OpenSubdirectory(generationPath);
             if (generation.Identity.UnixMode != PrivateDirectoryMode)
                 throw new OwnershipDocumentException("The committed recovery generation directory isn't private.");
-            (byte[] snapshotBytes, _) = ReadRequired(
+            (byte[] snapshotBytes, LinuxFileIdentity snapshotIdentity) = ReadRequired(
                 generation,
                 "snapshot.json",
                 OwnershipPersistenceLimits.Default.MaxDocumentBytes
@@ -471,14 +543,25 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                     throw new OwnershipDocumentException("The previous recovery generation reference doesn't match its pointer bytes.");
             }
 
-            Dictionary<string, string> gameFiles = new(StringComparer.Ordinal);
+            Dictionary<string, RecoveryContentBinding> gameFiles = new(StringComparer.Ordinal);
             int contentIndex = 0;
+            long contentBytes = 0;
             foreach (RollbackSnapshotEntry entry in snapshot.Entries.Where(entry => entry.Kind == RollbackEntryKind.Restore))
             {
+                try
+                {
+                    contentBytes = checked(contentBytes + entry.Backup!.SizeBytes);
+                }
+                catch (OverflowException exception)
+                {
+                    throw new OwnershipDocumentException("The committed recovery content size overflows its bound.", exception);
+                }
+                if (contentBytes > MaximumGenerationContentBytes)
+                    throw new OwnershipDocumentException("The committed recovery generation exceeds its aggregate content limit.");
                 string name = $"files/{contentIndex:D8}";
                 using LinuxAnchoredFile file = generation.OpenRegularFileForRead(name);
-                AssertContentIdentity(generation, file, entry.Backup!);
-                gameFiles.Add(entry.Path.Value, name);
+                AssertContentIdentity(generation, file, entry.Backup);
+                gameFiles.Add(entry.Path.Value, new RecoveryContentBinding(name, file.Identity, entry.Backup!));
                 contentIndex++;
             }
 
@@ -492,12 +575,12 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                 expectedNames.Add("previous-pointer.json");
             if (contentIndex > 0)
                 expectedNames.Add("files");
-            if (!generation.EnumerateEntryNames().ToHashSet(StringComparer.Ordinal).SetEquals(expectedNames))
+            if (!generation.EnumerateEntryNames(maximumEntries: expectedNames.Count).ToHashSet(StringComparer.Ordinal).SetEquals(expectedNames))
                 throw new OwnershipDocumentException("The committed recovery generation contains an unexpected entry.");
             if (contentIndex > 0)
             {
                 string[] expectedFiles = Enumerable.Range(0, contentIndex).Select(index => index.ToString("D8")).ToArray();
-                if (!generation.EnumerateEntryNames("files").SequenceEqual(expectedFiles, StringComparer.Ordinal))
+                if (!generation.EnumerateEntryNames("files", contentIndex).SequenceEqual(expectedFiles, StringComparer.Ordinal))
                     throw new OwnershipDocumentException("The committed recovery generation content indices aren't exact and contiguous.");
             }
 
@@ -505,18 +588,50 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                 lease.RootIdentity,
                 pointer,
                 snapshot,
+                namedGameRoot,
                 generation,
+                generationPath,
+                snapshotIdentity,
                 gameFiles,
                 previousReceiptIdentity,
-                previousManifestIdentity
+                previousManifestIdentity,
+                authorizedHeadPointerSha256
             );
+            namedGameRoot = null!;
             generation = null!;
             return result;
         }
         finally
         {
             generation?.Dispose();
+            namedGameRoot?.Dispose();
         }
+    }
+
+    private static CommittedRecoveryPointer ReadPreviousPointer(
+        LinuxAnchoredFileSystem game,
+        CommittedRecoveryPointer current
+    )
+    {
+        if (current.PreviousGenerationId is null || current.PreviousPointerSha256 is null)
+            throw new OwnershipDocumentException("The selected recovery generation isn't present in the committed chain.");
+        string generationPath = $".smapi-installer/recovery/generations/{current.GenerationId:N}";
+        using LinuxAnchoredFileSystem generation = game.OpenSubdirectory(generationPath);
+        if (generation.Identity.UnixMode != PrivateDirectoryMode)
+            throw new OwnershipDocumentException("A committed recovery-chain directory isn't private.");
+        (byte[] bytes, _) = ReadRequired(generation, "previous-pointer.json", CanonicalRecoveryPointerDocument.MaximumBytes);
+        if (Sha256Digest.Hash(bytes) != current.PreviousPointerSha256)
+            throw new OwnershipDocumentException("A previous recovery pointer doesn't match the committed chain digest.");
+        CommittedRecoveryPointer previous = CanonicalRecoveryPointerDocument.Parse(bytes);
+        if (
+            previous.GenerationId != current.PreviousGenerationId
+            || previous.ResultManifestSha256 != current.PreviousManifestSha256
+            || previous.ResultReceiptSha256 != current.PreviousReceiptSha256
+        )
+        {
+            throw new OwnershipDocumentException("A previous recovery pointer doesn't match the committed chain transition.");
+        }
+        return previous;
     }
 
     LinuxAnchoredFile ICommittedRecoveryContentAuthority.OpenGameFile(
@@ -525,11 +640,15 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
     )
     {
         this.AssertUsable();
-        if (!this.GameFileNames.TryGetValue(path.Value, out string? name))
+        if (!this.GameFiles.TryGetValue(path.Value, out RecoveryContentBinding? binding))
             throw new OwnershipDocumentException("The selected recovery generation doesn't contain the requested game file.");
-        LinuxAnchoredFile file = this.Generation.OpenRegularFileForRead(name);
+        if (binding.Expected != expectedIdentity)
+            throw new OwnershipDocumentException("The requested recovery identity doesn't match the selected generation.");
+        LinuxAnchoredFile file = this.Generation.OpenRegularFileForRead(binding.Name);
         try
         {
+            if (file.Identity != binding.FileIdentity)
+                throw new OwnershipDocumentException("A committed recovery content file changed after selection.");
             AssertContentIdentity(this.Generation, file, expectedIdentity);
             return file;
         }
@@ -555,6 +674,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             return;
         this.Disposed = true;
         this.Generation.Dispose();
+        this.NamedGameRoot.Dispose();
     }
 
     private LinuxAnchoredFile OpenPreviousDocument(
@@ -590,8 +710,27 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
     {
         if (this.Disposed)
             throw new ObjectDisposedException(nameof(CommittedRecoveryHandle));
-        if (this.Generation.GetCurrentRootIdentity() != this.GenerationIdentity)
+        if (
+            !this.GameRoot.Matches(this.NamedGameRoot.GetCurrentRootIdentity())
+            || this.NamedGameRoot.Stat(this.GenerationPath)?.IsSameObject(this.GenerationIdentity) != true
+            || this.Generation.GetCurrentRootIdentity() != this.GenerationIdentity
+        )
             throw new OwnershipDocumentException("The committed recovery generation changed after it was opened.");
+        using (LinuxAnchoredFile snapshot = this.Generation.OpenRegularFileForRead("snapshot.json"))
+        {
+            if (
+                snapshot.Identity != this.SnapshotIdentity
+                || Sha256Digest.Parse(this.Generation.ComputeSha256(snapshot)) != this.SnapshotSha256
+            )
+                throw new OwnershipDocumentException("The committed recovery snapshot changed after selection.");
+        }
+        foreach (RecoveryContentBinding binding in this.GameFiles.Values)
+        {
+            using LinuxAnchoredFile file = this.Generation.OpenRegularFileForRead(binding.Name);
+            if (file.Identity != binding.FileIdentity)
+                throw new OwnershipDocumentException("A committed recovery content file changed after selection.");
+            AssertContentIdentity(this.Generation, file, binding.Expected);
+        }
     }
 
     private static (byte[] Bytes, LinuxFileIdentity Identity) ReadRequired(
@@ -623,4 +762,10 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             throw new OwnershipDocumentException("A committed recovery content file doesn't match its snapshot identity.");
         }
     }
+
+    private sealed record RecoveryContentBinding(
+        string Name,
+        LinuxFileIdentity FileIdentity,
+        RecoveryFileIdentity Expected
+    );
 }

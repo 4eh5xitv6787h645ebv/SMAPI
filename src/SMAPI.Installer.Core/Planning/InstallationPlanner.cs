@@ -30,7 +30,7 @@ internal sealed class InstallationPlanner
                 this.PlanUninstall(request, operations, conflicts);
                 break;
             case InstallationAction.Backup:
-                this.PlanBackup(request, operations);
+                this.PlanBackup(request, operations, conflicts);
                 break;
             case InstallationAction.Rollback:
                 this.PlanRollback(request, operations, conflicts);
@@ -176,8 +176,17 @@ internal sealed class InstallationPlanner
         }
     }
 
-    private void PlanBackup(InstallationPlanningRequest request, List<PlannedOperation> operations)
+    private void PlanBackup(
+        InstallationPlanningRequest request,
+        List<PlannedOperation> operations,
+        List<PlanConflict> conflicts
+    )
     {
+        if (request.InstalledReceipt is null)
+        {
+            conflicts.Add(new PlanConflict(PlanConflictCode.InstalledReceiptRequired));
+            return;
+        }
         HashSet<string> planned = new(StringComparer.Ordinal);
         foreach (InventoryEntry entry in request.Inventory.Entries.Where(entry => entry.Installed is not null))
         {
@@ -212,6 +221,11 @@ internal sealed class InstallationPlanner
             conflicts.Add(new PlanConflict(PlanConflictCode.RollbackSnapshotRequired));
             return;
         }
+        if (request.RollbackSnapshot.IsUserBackup)
+        {
+            this.PlanUserBackupRollback(request, operations, conflicts);
+            return;
+        }
         Sha256Digest? observedReceiptSha256 = request.InstalledReceipt?.GetCanonicalDigest();
         if (observedReceiptSha256 != request.RollbackSnapshot.ExpectedCurrentReceiptSha256)
         {
@@ -236,6 +250,70 @@ internal sealed class InstallationPlanner
                 entry.BackupSha256
             ));
         }
+    }
+
+    private void PlanUserBackupRollback(
+        InstallationPlanningRequest request,
+        List<PlannedOperation> operations,
+        List<PlanConflict> conflicts
+    )
+    {
+        RollbackSnapshot snapshot = request.RollbackSnapshot!;
+        InstallationReceipt? currentReceipt = request.InstalledReceipt;
+        if (currentReceipt is null)
+        {
+            conflicts.Add(new PlanConflict(PlanConflictCode.RollbackReceiptMismatch));
+            return;
+        }
+        Dictionary<string, RecoveryFileObservation> observed = request.RecoveryObservations
+            .ToDictionary(item => item.Path.Value, StringComparer.Ordinal);
+        HashSet<string> planned = new(StringComparer.Ordinal);
+        foreach (RollbackSnapshotEntry target in snapshot.Entries)
+        {
+            observed.TryGetValue(target.Path.Value, out RecoveryFileObservation? current);
+            if (!IsSafeCurrentOwnedState(request, target.Path, current?.Identity))
+            {
+                conflicts.Add(new PlanConflict(PlanConflictCode.RollbackDrift, target.Path));
+                continue;
+            }
+            operations.Add(new PlannedOperation(
+                PlanOperationKind.Restore,
+                target.Path,
+                current?.Identity?.Sha256,
+                target.BackupSha256
+            ));
+            planned.Add(target.Path.Value);
+        }
+        foreach (InstallationReceiptEntry installed in currentReceipt.Entries.Where(entry => !planned.Contains(entry.Path.Value)))
+        {
+            observed.TryGetValue(installed.Path.Value, out RecoveryFileObservation? current);
+            if (!IsSafeCurrentOwnedState(request, installed.Path, current?.Identity))
+            {
+                conflicts.Add(new PlanConflict(PlanConflictCode.RollbackDrift, installed.Path));
+                continue;
+            }
+            if (current?.Identity is not null)
+                operations.Add(new PlannedOperation(PlanOperationKind.Remove, installed.Path, current.Identity.Sha256, null));
+        }
+    }
+
+    private static bool IsSafeCurrentOwnedState(
+        InstallationPlanningRequest request,
+        NormalizedRelativePath path,
+        RecoveryFileIdentity? current
+    )
+    {
+        if (current is null)
+            return true;
+        if (path.Equals(LauncherBackupPath))
+        {
+            return request.Launcher.BackupLauncherSha256 == current.Sha256
+                && request.InstalledReceipt?.Launcher.OriginalLauncherSha256 == current.Sha256;
+        }
+        InstallationReceiptEntry? installed = request.InstalledReceipt?.Entries.SingleOrDefault(entry => entry.Path.Equals(path));
+        return installed is not null
+            && installed.InstalledSha256 == current.Sha256
+            && installed.UnixMode == current.UnixMode;
     }
 
     private bool AssertManifestAndReceiptPresent(InstallationPlanningRequest request, List<PlanConflict> conflicts)
