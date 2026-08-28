@@ -2,102 +2,88 @@ name: Build SMAPI
 
 on:
     push:
-        tags:
-            - "[0-9]+.[0-9]+.[0-9]+" # stable version tag
         branches:
             - develop
             - build-test
 
+concurrency:
+    group: build-smapi-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
 jobs:
-    build_and_release:
-        runs-on: ubuntu-latest
-        permissions:
-            contents: write          # for creating releases
-            id-token: write          # for `actions/attest` ("to mint the OIDC token necessary to request a Sigstore signing certificate")
-            attestations: write      # for `actions/attest` ("to persist the attestation")
-            artifact-metadata: write # for `actions/attest` ("to create the artifact storage record")
+    build:
+        name: Build Linux installer
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
         steps:
             -   name: Checkout code
-                uses: actions/checkout@v6
+                uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
                 with:
-                    fetch-depth: 0
+                    persist-credentials: false
 
-            -   name: Get SMAPI assembly version
-                id: smapi-version
-                shell: pwsh
+            -   name: Install pinned .NET SDKs
+                uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+                with:
+                    dotnet-version: |
+                        10.0.108
+                        6.0.428
+
+            -   name: Read committed SMAPI version
+                id: version
+                shell: bash
                 run: |
-                    [xml]$xml = Get-Content build/common.targets
-                    [string]$version = $xml.Project.PropertyGroup.Version
-                    $version = $version.Trim()
-
-                    $pattern = '^(\d+)\.(\d+)\.(\d+)$'
-                    if ($version -match $pattern) {
-                        $major = $Matches[1]
-                        $minor = $Matches[2]
-                        $patch = $Matches[3]
-                    }
-                    else {
-                        Write-Error "The version '$version' found in build/common.targets did not match the strict x.y.z format. Aborting."
-                        Write-Host 'Debug info:'
-                        Write-Host "Extracted version: $version"
+                    set -euo pipefail
+                    version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' build/common.targets)"
+                    if [[ -z "$version" ]]; then
+                        echo "Couldn't read the committed version." >&2
                         exit 1
-                    }
+                    fi
+                    echo "version=$version" >> "$GITHUB_OUTPUT"
 
-                    "smapi_version=$version" | Out-File $env:GITHUB_OUTPUT -Append
-                    "smapi_major=$major"     | Out-File $env:GITHUB_OUTPUT -Append
-                    "smapi_minor=$minor"     | Out-File $env:GITHUB_OUTPUT -Append
-                    "smapi_patch=$patch"     | Out-File $env:GITHUB_OUTPUT -Append
-                    "VERSION=$major.$minor.$patch" | Out-File $env:GITHUB_ENV -Append
+            -   name: Checkout pinned game reference assemblies
+                shell: bash
+                env:
+                    REFERENCE_ASSEMBLIES_COMMIT: 0141355fecb8536715ecff22f99374b5e632cbed
+                run: |
+                    set -euo pipefail
+                    git init "$RUNNER_TEMP/StardewValley"
+                    git -C "$RUNNER_TEMP/StardewValley" fetch --depth 1 https://github.com/StardewModders/mod-reference-assemblies.git "$REFERENCE_ASSEMBLIES_COMMIT"
+                    git -C "$RUNNER_TEMP/StardewValley" checkout --detach FETCH_HEAD
+                    [[ "$(git -C "$RUNNER_TEMP/StardewValley" rev-parse HEAD)" == "$REFERENCE_ASSEMBLIES_COMMIT" ]]
 
-                    Write-Host "Version: $major.$minor.$patch"
-
-            -   name: Verify SMAPI assembly version matches tag
-                if: github.ref_type == 'tag'
+            -   name: Build Linux installer
                 shell: pwsh
+                env:
+                    VERSION: ${{ steps.version.outputs.version }}
+                run: >-
+                    ./build/scripts/prepare-install-package.ps1
+                    "$env:VERSION"
+                    --linux-only
+                    "--game-path=$env:RUNNER_TEMP/StardewValley"
+
+            -   name: Validate Linux installer
+                shell: bash
+                env:
+                    VERSION: ${{ steps.version.outputs.version }}
                 run: |
-                    if ($env:VERSION -ne '${{github.ref_name}}') {
-                        Write-Error "The pushed tag '${{github.ref_name}}' doesn't match the version '$env:VERSION' found in build/common.targets. Aborting."
-                        Write-Host 'Debug info:'
-                        Write-Host 'Tag: ${{github.ref_name}}'
-                        Write-Host "In common.targets: $env:VERSION"
-                        exit 1
-                    }
+                    set -euo pipefail
+                    build/scripts/test-linux-release-package.sh \
+                        "bin/SMAPI-$VERSION-linux-x64-installer.zip" \
+                        "$VERSION"
+                    build/scripts/test-linux-installer-lifecycle.sh \
+                        "bin/SMAPI-$VERSION-linux-x64-installer.zip" \
+                        "$VERSION" \
+                        "$RUNNER_TEMP/StardewValley"
+                    git diff --exit-code
 
-            -   name: Update SMAPI assembly version
-                if: github.ref_type != 'tag'
-                shell: pwsh
-                run: |
-                    $updatedPatch = [int]${{steps.smapi-version.outputs.smapi_patch}} + 1
-                    $timestamp = Get-Date -Format 'yyyyMMdd-HHmm'
-                    $updatedVersion = "${{steps.smapi-version.outputs.smapi_major}}.${{steps.smapi-version.outputs.smapi_minor}}.$updatedPatch-alpha.$timestamp"
-
-                    "VERSION=$updatedVersion" | Out-File $env:GITHUB_ENV -Append
-
-                    Write-Host "This is a dev version. Building as version: $updatedVersion"
-
-                    ./build/scripts/set-smapi-version.ps1 "$updatedVersion"
-                    Write-Host 'Version updated.'
-
-            -   name: Checkout game reference assemblies
-                run: |
-                    git clone --depth 1 https://github.com/StardewModders/mod-reference-assemblies.git "$HOME/StardewValley"
-
-            -   name: Build SMAPI
-                shell: pwsh
-                run: |
-                    Write-Host "Building SMAPI $env:VERSION."
-                    ./build/scripts/prepare-install-package.ps1 "$env:VERSION"
-
-            -   name: Upload installer
-                uses: actions/upload-artifact@v7
+            -   name: Upload Linux installer
+                uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
                 with:
-                    name: 'SMAPI ${{env.VERSION}} installer'
-                    path: 'bin/SMAPI-${{env.VERSION}}-installer.zip'
-                    archive: false
-                    if-no-files-found: 'error'
-
-            -   name: Generate artifact attestations
-                uses: actions/attest@v4
-                if: github.ref_type == 'tag'
-                with:
-                    subject-path: bin/SMAPI-${{env.VERSION}}-installer.zip
+                    name: linux-installer-${{ github.sha }}
+                    path: bin/SMAPI-${{ steps.version.outputs.version }}-linux-x64-installer.zip
+                    if-no-files-found: error
+                    retention-days: 14
+                    compression-level: 0

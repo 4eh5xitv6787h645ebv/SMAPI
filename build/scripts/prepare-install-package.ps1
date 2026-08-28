@@ -22,21 +22,35 @@ $ErrorActionPreference = "Stop"
 ## Read arguments
 ##########
 $windowsOnly = $false # Windows-only build
+$linuxOnly = $false # Linux-only build
 $skipBundleDeletion = $false # skip bundle deletion (only applies when using WSL to finalize the build on Windows)
+$gamePathOverride = $null # explicit reference-assembly path for reproducible builds
 foreach ($arg in $args) {
     if ($arg -eq "--windows-only" -and $IsWindows) {
         $windowsOnly = $true
     }
+    elseif ($arg -eq "--linux-only") {
+        $linuxOnly = $true
+    }
     elseif ($arg -eq "--skip-bundle-deletion") {
         $skipBundleDeletion = $true
     }
+    elseif ($arg.StartsWith("--game-path=")) {
+        $gamePathOverride = $arg.Substring("--game-path=".Length)
+    }
+}
+if ($windowsOnly -and $linuxOnly) {
+    throw "The --windows-only and --linux-only options can't be combined."
 }
 
 
 ##########
 ## Find the game folder
 ##########
-if ($IsWindows) {
+if ($gamePathOverride) {
+    $possibleGamePaths = @($gamePathOverride)
+}
+elseif ($IsWindows) {
     $possibleGamePaths=(
         # GOG
         "C:\Program Files\GalaxyClient\Games\Stardew Valley",
@@ -90,6 +104,11 @@ if ($windowsOnly) {
     $folders = "windows"
     $runtimes = @{ windows = "win-x64" }
     $msBuildPlatformNames = @{ windows = "Windows_NT" }
+}
+elseif ($linuxOnly) {
+    $folders = "linux"
+    $runtimes = @{ linux = "linux-x64" }
+    $msBuildPlatformNames = @{ linux = "Unix" }
 }
 else {
     $folders = "linux", "macOS", "windows"
@@ -196,7 +215,8 @@ Write-Output "----------------------------"
 
 # init paths
 $installAssets = "src/SMAPI.Installer/assets"
-$packagePath = "bin/SMAPI installer"
+$packageTitle = if ($linuxOnly) { "SMAPI $version Linux installer" } else { "SMAPI $version installer" }
+$packagePath = "bin/$packageTitle"
 
 # init structure
 Write-Host "Setting up structure..."
@@ -216,6 +236,9 @@ foreach ($folder in $folders) {
 # copy base installer files
 foreach ($name in @("install on Linux.sh", "install on macOS.command", "install on Windows.bat", "README.txt")) {
     if ($windowsOnly -and ($name -eq "install on Linux.sh" -or $name -eq "install on macOS.command")) {
+        continue;
+    }
+    if ($linuxOnly -and ($name -eq "install on macOS.command" -or $name -eq "install on Windows.bat")) {
         continue;
     }
 
@@ -397,15 +420,15 @@ foreach ($folder in $folders) {
 ### Create release zips
 ###########
 Write-Host "Creating release zip..."
-Move-Item "$packagePath" "bin/SMAPI $version installer"
+$archiveName = if ($linuxOnly) { "SMAPI-$version-linux-x64-installer.zip" } else { "SMAPI-$version-installer.zip" }
 
 if ($IsWindows) {
-    Compress-Archive -Path "bin/SMAPI $version installer" -DestinationPath "bin/SMAPI-$version-installer.zip" -CompressionLevel Optimal
+    Compress-Archive -Path "$packagePath" -DestinationPath "bin/$archiveName" -CompressionLevel Optimal
 }
 else {
     # Compress-Archive doesn't keep Unix permissions, so use zip directly on Linux/macOS
     pushd bin > /dev/null
-    zip -9 "SMAPI-$version-installer.zip" "SMAPI $version installer" --recurse-paths --quiet
+    zip -9 "$archiveName" "$packageTitle" --recurse-paths --quiet
     if ($LASTEXITCODE -ne 0) {
         throw "Failed creating the release ZIP (exit code $LASTEXITCODE)."
     }

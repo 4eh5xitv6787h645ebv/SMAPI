@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 ##########
 ## Read config
@@ -25,7 +26,7 @@ buildFolders=("linux" "macOS" "windows")
 ## Finalize release package
 ##########
 # move files to Linux filesystem
-folderName = "SMAPI $version installer"
+folderName="SMAPI $version installer"
 echo "Preparing $folderName.zip..."
 echo "-------------------------------------------------"
 echo "copying '$windowsBinPath/$folderName' to Linux filesystem..."
@@ -41,7 +42,7 @@ find "$folderName" -name "SMAPI.Installer" -exec chmod 755 {} \;
 find "$folderName" -name "StardewModdingAPI" -exec chmod 755 {} \;
 
 # convert bundle folder into final 'install.dat' files
-for build in ${buildFolders[@]}; do
+for build in "${buildFolders[@]}"; do
     echo "packaging $folderName/internal/$build/install.dat..."
     pushd "$folderName/internal/$build/bundle" > /dev/null
     zip "install.dat" * --recurse-paths --quiet

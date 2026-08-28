@@ -84,8 +84,8 @@ internal class InteractiveInstaller
         yield return GetInstallPath("StardewModdingAPI.Toolkit.CoreInterfaces.xml"); // moved in 2.8
         yield return GetInstallPath("StardewModdingAPI-x64.exe");         // before 3.13
 
-        // old log files
-        yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StardewValley", "ErrorLogs");
+        // Don't remove the current ErrorLogs folder here. It contains user-owned logs and local
+        // diagnostic reports, and has been the active SMAPI log path for many years.
     }
 
     /// <summary>Handles writing text to the console.</summary>
@@ -122,7 +122,7 @@ internal class InteractiveInstaller
     ///     5. Copy the bundled mods into the 'Mods' directory (deleting any existing versions).
     ///     6. Move any mods from app data into game's mods directory.
     /// </remarks>
-    public void Run(string[] args)
+    public bool Run(string[] args)
     {
         /*********
         ** Step 1: initial setup
@@ -148,20 +148,29 @@ internal class InteractiveInstaller
         {
             this.PrintError("You can't specify both --install and --uninstall command-line flags.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
         if (!allowUserInput && !installArg && !uninstallArg)
         {
             this.PrintError("You must specify --install or --uninstall when running with --no-prompt.");
-            return;
+            return false;
         }
 
         // get game path from CLI
         string? gamePathArg = null;
         {
-            int pathIndex = Array.LastIndexOf(args, "--game-path") + 1;
-            if (pathIndex >= 1 && args.Length >= pathIndex)
+            int flagIndex = Array.LastIndexOf(args, "--game-path");
+            if (flagIndex >= 0)
+            {
+                int pathIndex = flagIndex + 1;
+                if (pathIndex >= args.Length || args[pathIndex].StartsWith("--", StringComparison.Ordinal))
+                {
+                    this.PrintError("The --game-path option must be followed by a folder path.");
+                    this.AwaitConfirmation(allowUserInput);
+                    return false;
+                }
                 gamePathArg = args[pathIndex];
+            }
         }
 
         /****
@@ -172,14 +181,14 @@ internal class InteractiveInstaller
         {
             this.PrintError($"This is the installer for Windows. Run the 'install on {context.Platform}.{(context.Platform == Platform.Mac ? "command" : "sh")}' file instead.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
 #else
         if (context.IsWindows)
         {
             this.PrintError($"This is the installer for Linux/macOS. Run the 'install on Windows.exe' file instead.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
 #endif
 
@@ -254,7 +263,7 @@ internal class InteractiveInstaller
             {
                 this.PrintError("Failed finding your game path.");
                 this.AwaitConfirmation(allowUserInput);
-                return;
+                return false;
             }
 
             // get folders
@@ -271,7 +280,7 @@ internal class InteractiveInstaller
         {
             this.PrintError("The detected game install path doesn't contain a Stardew Valley executable.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
         Console.Clear();
 
@@ -582,6 +591,7 @@ internal class InteractiveInstaller
         }
 
         this.AwaitConfirmation(allowUserInput);
+        return true;
     }
 
 
@@ -689,6 +699,9 @@ internal class InteractiveInstaller
             catch (Exception ex)
             {
                 this.PrintError($"Oops! The installer couldn't delete {path}: [{ex.GetType().Name}] {ex.Message}.");
+                if (!allowUserInput)
+                    throw new IOException($"The installer couldn't delete '{path}' in non-interactive mode.", ex);
+
                 this.PrintError("Try rebooting your computer and then run the installer again. If that doesn't work, try deleting it yourself then press any key to retry.");
                 this.AwaitConfirmation(allowUserInput);
             }
