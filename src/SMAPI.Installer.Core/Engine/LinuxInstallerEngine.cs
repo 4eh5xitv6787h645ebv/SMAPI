@@ -21,12 +21,14 @@ public sealed class InspectedInstallationState : IDisposable
     internal BoundInstallationPlan Binding { get; }
     internal IVerifiedPackageContentAuthority? TargetPackageContent { get; }
     internal ICommittedRecoveryContentAuthority? RollbackContent { get; }
+    internal IReadOnlyList<ModifiedFileReplacementApproval> ModifiedFileReplacementApprovals { get; }
 
     internal InspectedInstallationState(
         InstallationPlan plan,
         BoundInstallationPlan binding,
         IVerifiedPackageContentAuthority? targetPackageContent,
-        ICommittedRecoveryContentAuthority? rollbackContent
+        ICommittedRecoveryContentAuthority? rollbackContent,
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
     )
     {
         this.Plan = plan;
@@ -34,6 +36,7 @@ public sealed class InspectedInstallationState : IDisposable
         this.ConfirmationDigest = binding.GetCanonicalDigest();
         this.TargetPackageContent = targetPackageContent;
         this.RollbackContent = rollbackContent;
+        this.ModifiedFileReplacementApprovals = (modifiedFileReplacementApprovals ?? Array.Empty<ModifiedFileReplacementApproval>()).ToArray();
     }
 
     internal void AssertUsable()
@@ -75,7 +78,26 @@ public sealed class LinuxInstallerEngine
         CancellationToken cancellationToken = default
     )
         => Task.Run(
-            () => this.Inspect(gameRoot, action, targetPackage, recovery, cancellationToken),
+            () => this.Inspect(gameRoot, action, targetPackage, recovery, null, cancellationToken),
+            cancellationToken
+        );
+
+    /// <summary>Inspect repair with narrow full-identity approvals for specific modified owned files.</summary>
+    public Task<InspectedInstallationState> InspectRepairAsync(
+        string gameRoot,
+        VerifiedPackageContent targetPackage,
+        IEnumerable<ModifiedFileReplacementApproval> modifiedFileReplacementApprovals,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(
+            () => this.Inspect(
+                gameRoot,
+                InstallationAction.Repair,
+                targetPackage,
+                null,
+                modifiedFileReplacementApprovals,
+                cancellationToken
+            ),
             cancellationToken
         );
 
@@ -84,6 +106,7 @@ public sealed class LinuxInstallerEngine
         InstallationAction action,
         VerifiedPackageContent? targetPackage,
         CommittedRecoveryHandle? recovery,
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals,
         CancellationToken cancellationToken
     )
     {
@@ -99,6 +122,7 @@ public sealed class LinuxInstallerEngine
             action,
             packageAuthority,
             recoveryAuthority,
+            modifiedFileReplacementApprovals,
             state
         );
         try
@@ -146,7 +170,8 @@ public sealed class LinuxInstallerEngine
             lease,
             inspection.Action,
             inspection.TargetPackageContent,
-            inspection.RollbackContent
+            inspection.RollbackContent,
+            inspection.ModifiedFileReplacementApprovals
         );
         using (current)
         {
@@ -158,7 +183,8 @@ public sealed class LinuxInstallerEngine
                 inspection.Action,
                 inspection.TargetPackageContent,
                 inspection.RollbackContent,
-                coreState
+                coreState,
+                inspection.ModifiedFileReplacementApprovals
             );
             InstallationExecutionPreparation preparation = this.Compiler.Prepare(
                 current.Binding,
@@ -302,7 +328,8 @@ public sealed class LinuxInstallerEngine
         InstallerOperationLease lease,
         InstallationAction action,
         IVerifiedPackageContentAuthority? targetPackage,
-        ICommittedRecoveryContentAuthority? recovery
+        ICommittedRecoveryContentAuthority? recovery,
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
     )
     {
         ArgumentNullException.ThrowIfNull(lease);
@@ -324,6 +351,7 @@ public sealed class LinuxInstallerEngine
             action,
             targetPackage,
             recovery,
+            modifiedFileReplacementApprovals,
             state
         );
     }
@@ -335,6 +363,7 @@ public sealed class LinuxInstallerEngine
         InstallationAction action,
         IVerifiedPackageContentAuthority? targetPackage,
         ICommittedRecoveryContentAuthority? recovery,
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals,
         AnchoredCoreStateAuthority state
     )
     {
@@ -353,7 +382,8 @@ public sealed class LinuxInstallerEngine
             action,
             targetPackage,
             recovery,
-            state
+            state,
+            modifiedFileReplacementApprovals
         );
         InstallationPlan plan = new InstallationPlanner().Plan(request);
         if (!plan.CanExecute)
@@ -361,7 +391,8 @@ public sealed class LinuxInstallerEngine
                 plan,
                 CreateNonExecutableBinding(plan, gameRoot, operationGeneration, state),
                 targetPackage,
-                recovery
+                recovery,
+                modifiedFileReplacementApprovals
             );
         BoundInstallationPlan binding = this.Compiler.BindPlan(
             plan,
@@ -372,7 +403,13 @@ public sealed class LinuxInstallerEngine
             recovery,
             state.PointerSha256
         );
-        return new InspectedInstallationState(plan, binding, targetPackage, recovery);
+        return new InspectedInstallationState(
+            plan,
+            binding,
+            targetPackage,
+            recovery,
+            modifiedFileReplacementApprovals
+        );
     }
 
     private static BoundInstallationPlan CreateNonExecutableBinding(
@@ -410,7 +447,8 @@ internal static class InstallationStateInspector
         InstallationAction action,
         IVerifiedPackageContentAuthority? targetPackage,
         ICommittedRecoveryContentAuthority? recovery,
-        AnchoredCoreStateAuthority state
+        AnchoredCoreStateAuthority state,
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
     )
     {
         PackageManifest? targetManifest = targetPackage?.Manifest;
@@ -456,7 +494,8 @@ internal static class InstallationStateInspector
                         )
                 )
                 : Array.Empty<RecoveryFileObservation>(),
-            recovery?.OriginAction
+            recovery?.OriginAction,
+            modifiedFileReplacementApprovals
         );
         InstallationPlan plan = new InstallationPlanner().Plan(initial);
         IEnumerable<NormalizedRelativePath> required = action switch
@@ -481,7 +520,8 @@ internal static class InstallationStateInspector
             receipt,
             rollbackSnapshot,
             observations,
-            recovery?.OriginAction
+            recovery?.OriginAction,
+            modifiedFileReplacementApprovals
         );
     }
 

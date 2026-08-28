@@ -112,7 +112,14 @@ internal sealed class InstallationPlanner
             return;
         }
 
-        this.PlanLauncherInstallOrUpdate(request.TargetManifest, request.Launcher, isFreshInstall: false, operations, conflicts);
+        this.PlanLauncherInstallOrUpdate(
+            request.TargetManifest,
+            request.Launcher,
+            isFreshInstall: false,
+            operations,
+            conflicts,
+            request.ModifiedFileReplacementApprovals
+        );
         foreach (InventoryEntry entry in request.Inventory.Entries.Where(entry => entry.Path.Value != "StardewValley"))
         {
             if (entry.Target != null && entry.Installed != null)
@@ -126,7 +133,10 @@ internal sealed class InstallationPlanner
                         operations.Add(Create(entry));
                         break;
                     case InventoryClassification.ModifiedOwned:
-                        conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
+                        if (IsApprovedReplacement(request.ModifiedFileReplacementApprovals, entry.Path, entry.Current))
+                            operations.Add(Replace(entry));
+                        else
+                            conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
                         break;
                     default:
                         this.AddCollisionConflict(entry, conflicts);
@@ -405,7 +415,8 @@ internal sealed class InstallationPlanner
         LauncherState launcher,
         bool isFreshInstall,
         List<PlannedOperation> operations,
-        List<PlanConflict> conflicts
+        List<PlanConflict> conflicts,
+        IReadOnlyList<ModifiedFileReplacementApproval>? modifiedApprovals = null
     )
     {
         PackageManifestEntry target = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
@@ -427,7 +438,26 @@ internal sealed class InstallationPlanner
                 conflicts.Add(new PlanConflict(PlanConflictCode.MissingGameLauncher, InstallationPlanner.LauncherPath));
                 break;
             case LauncherClassification.InstalledModified:
-                conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedInstalledLauncher, InstallationPlanner.LauncherPath));
+                if (
+                    !isFreshInstall
+                    && modifiedApprovals is not null
+                    && IsApprovedReplacement(
+                        modifiedApprovals,
+                        InstallationPlanner.LauncherPath,
+                        launcher.CurrentLauncherSha256,
+                        launcher.CurrentLauncherUnixMode
+                    )
+                )
+                {
+                    operations.Add(new PlannedOperation(
+                        PlanOperationKind.Replace,
+                        InstallationPlanner.LauncherPath,
+                        launcher.CurrentLauncherSha256,
+                        target.Sha256
+                    ));
+                }
+                else
+                    conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedInstalledLauncher, InstallationPlanner.LauncherPath));
                 break;
             case LauncherClassification.AmbiguousBackup:
                 conflicts.Add(new PlanConflict(PlanConflictCode.AmbiguousLauncherBackup, InstallationPlanner.LauncherBackupPath));
@@ -443,6 +473,27 @@ internal sealed class InstallationPlanner
                 break;
         }
     }
+
+    private static bool IsApprovedReplacement(
+        IReadOnlyList<ModifiedFileReplacementApproval> approvals,
+        NormalizedRelativePath path,
+        CurrentFile? current
+    )
+        => current is not null && IsApprovedReplacement(approvals, path, current.Sha256, current.UnixMode);
+
+    private static bool IsApprovedReplacement(
+        IReadOnlyList<ModifiedFileReplacementApproval> approvals,
+        NormalizedRelativePath path,
+        Sha256Digest? sha256,
+        int? unixMode
+    )
+        => sha256 is not null
+            && unixMode is not null
+            && approvals.Any(approval =>
+                approval.Path.Equals(path)
+                && approval.ObservedSha256 == sha256
+                && approval.ObservedUnixMode == unixMode
+            );
 
     private void PlanLauncherUninstall(LauncherState launcher, List<PlannedOperation> operations, List<PlanConflict> conflicts)
     {

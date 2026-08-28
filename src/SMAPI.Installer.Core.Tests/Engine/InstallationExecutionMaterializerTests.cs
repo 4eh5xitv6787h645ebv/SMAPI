@@ -282,6 +282,37 @@ public sealed class InstallationExecutionMaterializerTests
         engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(9);
     }
 
+    [Test]
+    public void Repair_ApprovedModifiedOwnedFile_IsCapturedAndRollbackRestoresIt()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        string runtimePath = Path.Combine(game, "StardewModdingAPI.dll");
+        File.WriteAllText(runtimePath, "user modified runtime");
+        File.SetUnixFileMode(runtimePath, (UnixFileMode)0x1a4);
+        using (InspectedInstallationState blocked = this.Inspect(engine, game, InstallationAction.Repair, package))
+            blocked.Plan.Conflicts.Should().Contain(conflict => conflict.Code == PlanConflictCode.ModifiedOwnedFile);
+        ModifiedFileReplacementApproval approval = new(
+            NormalizedRelativePath.Parse("StardewModdingAPI.dll"),
+            Hash("user modified runtime"),
+            0x1a4
+        );
+
+        Execute(this.Inspect(engine, game, InstallationAction.Repair, package, [approval]), engine);
+        File.ReadAllText(runtimePath).Should().Be("runtime one");
+        using CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
+        recovery.Action.Should().Be(InstallationAction.Repair);
+        recovery.Snapshot.Entries.Single(entry => entry.Path.Value == "StardewModdingAPI.dll").Backup!.Sha256
+            .Should().Be(Hash("user modified runtime"));
+
+        Execute(engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult(), engine);
+        File.ReadAllText(runtimePath).Should().Be("user modified runtime");
+        File.GetUnixFileMode(runtimePath).Should().Be((UnixFileMode)0x1a4);
+    }
+
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-materializer-tests-{Guid.NewGuid():N}");
@@ -311,11 +342,12 @@ public sealed class InstallationExecutionMaterializerTests
         LinuxInstallerEngine engine,
         string game,
         InstallationAction action,
-        IVerifiedPackageContentAuthority? package = null
+        IVerifiedPackageContentAuthority? package = null,
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
     )
     {
         using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
-        return engine.InspectLocked(lease, action, package, null);
+        return engine.InspectLocked(lease, action, package, null, modifiedFileReplacementApprovals);
     }
 
     private static void Execute(InspectedInstallationState inspection, LinuxInstallerEngine engine)

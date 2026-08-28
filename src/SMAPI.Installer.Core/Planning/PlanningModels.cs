@@ -73,6 +73,29 @@ public sealed record PlannedOperation
     }
 }
 
+/// <summary>An explicit, full-identity approval to replace one observed modified owned file during repair.</summary>
+public sealed record ModifiedFileReplacementApproval
+{
+    public NormalizedRelativePath Path { get; }
+    public Sha256Digest ObservedSha256 { get; }
+    public int ObservedUnixMode { get; }
+
+    public ModifiedFileReplacementApproval(
+        NormalizedRelativePath path,
+        Sha256Digest observedSha256,
+        int observedUnixMode
+    )
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(observedSha256);
+        if (observedUnixMode is < 0 or > 0x1ff)
+            throw new ArgumentOutOfRangeException(nameof(observedUnixMode));
+        this.Path = path;
+        this.ObservedSha256 = observedSha256;
+        this.ObservedUnixMode = observedUnixMode;
+    }
+}
+
 /// <summary>One stable conflict which must be resolved before execution.</summary>
 public sealed record PlanConflict
 {
@@ -410,6 +433,7 @@ internal sealed class InstallationPlanningRequest
     public LauncherState Launcher { get; }
     public RollbackSnapshot? RollbackSnapshot { get; }
     public InstallationAction? RollbackOriginAction { get; }
+    public IReadOnlyList<ModifiedFileReplacementApproval> ModifiedFileReplacementApprovals { get; }
     public IReadOnlyList<RecoveryFileObservation> RecoveryObservations { get; }
 
     internal InstallationPlanningRequest(
@@ -420,7 +444,8 @@ internal sealed class InstallationPlanningRequest
         InstallationReceipt? installedReceipt = null,
         RollbackSnapshot? rollbackSnapshot = null,
         IEnumerable<RecoveryFileObservation>? recoveryObservations = null,
-        InstallationAction? rollbackOriginAction = null
+        InstallationAction? rollbackOriginAction = null,
+        IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null
     )
     {
         ArgumentNullException.ThrowIfNull(inventory);
@@ -432,6 +457,11 @@ internal sealed class InstallationPlanningRequest
         this.Launcher = launcher;
         this.RollbackSnapshot = rollbackSnapshot;
         this.RollbackOriginAction = rollbackOriginAction;
+        ModifiedFileReplacementApproval[] approvals = (modifiedFileReplacementApprovals ?? Array.Empty<ModifiedFileReplacementApproval>())
+            .OrderBy(approval => approval.Path.Value, StringComparer.Ordinal)
+            .ToArray();
+        OwnershipCollectionValidation.AssertDistinctFilePaths(approvals.Select(approval => approval.Path), nameof(modifiedFileReplacementApprovals));
+        this.ModifiedFileReplacementApprovals = new ReadOnlyCollection<ModifiedFileReplacementApproval>(approvals);
         RecoveryFileObservation[] observations = (recoveryObservations ?? Array.Empty<RecoveryFileObservation>())
             .OrderBy(observation => observation.Path.Value, StringComparer.Ordinal)
             .ToArray();
