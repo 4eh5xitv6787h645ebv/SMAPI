@@ -5,410 +5,127 @@ using StardewModdingAPI.Installer.Core.Protocol.V1;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Protocol.V1;
 
-/// <summary>Contract tests for the strict deterministic version 1 JSONL serializer.</summary>
 [TestFixture]
 internal sealed class ProtocolJsonSerializerTests
 {
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    private static readonly ProtocolPlanDigest ExecutionBindingDigest = ProtocolPlanDigest.Parse("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
-    private static readonly ProtocolGameRootIdentity GameRoot = new("/game", 10, 11, 20, 7);
+    private static readonly ProtocolGameRootIdentity GameRoot = new("/game", 1, 2, 3, 4);
+    private static readonly ProtocolPlanDigest ExecutionDigest = ProtocolPlanDigest.Parse(HashB);
 
     [Test]
-    public void SerializeLine_UsesDeterministicEnvelopeAndPropertyOrder()
+    public void AllMessageKinds_RoundTripWithStrictContracts()
     {
-        ProtocolSessionId sessionId = ProtocolSessionId.Parse("0123456789abcdef0123456789abcdef");
-        InspectPlanRequest request = new(sessionId, "/games/Stardew Valley", InstallerOperation.Repair, "4.5.3-alpha.2");
-
-        string first = ProtocolJsonSerializer.SerializeLine(request);
-        string second = ProtocolJsonSerializer.SerializeLine(request);
-
-        first.Should().Be(second).And.Be(
-            "{\"protocolVersion\":1,\"messageType\":\"inspect-plan.request\",\"payload\":{"
-            + "\"sessionId\":\"0123456789abcdef0123456789abcdef\","
-            + "\"gamePath\":\"/games/Stardew Valley\","
-            + "\"operation\":\"repair\","
-            + "\"targetPackageVersion\":\"4.5.3-alpha.2\"}}"
-        );
-        first.Should().NotContain("\n").And.NotContain("\r");
-    }
-
-    [Test]
-    public void RoundTrip_AcceptsEveryRequestAndEventKind()
-    {
-        ProtocolSessionId sessionId = ProtocolSessionId.Parse("0123456789abcdef0123456789abcdef");
-        ProtocolPlanId planId = ProtocolPlanId.Parse("fedcba9876543210fedcba9876543210");
-        ProtocolPlanOperation[] operations = CreateOperations();
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom();
+        ProtocolPackageId package = ProtocolPackageId.CreateRandom();
+        ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom();
+        ProtocolRecoverySelectionId recovery = ProtocolRecoverySelectionId.CreateRandom();
+        ProtocolCandidateId candidate = ProtocolCandidateId.CreateRandom();
+        ProtocolPlanCandidate[] candidates = [new(candidate, ProtocolCandidateKind.LegacyInstallerFile, "legacy", HashA, 10, 420, HashB, true, "Observed legacy file.")];
+        ProtocolPlanOperation[] operations = [new(PlanOperationKind.Create, "a", null, HashA)];
         ProtocolPlanConflict[] conflicts = [];
-        ProtocolPlanDigest digest = ComputeDigest(InstallerOperation.Update, ObservedInstallState.KnownModified, operations, conflicts, CreateRelease(), CreateRelease());
+        ProtocolPlanId plan = ProtocolPlanId.CreateRandom();
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
+        ProtocolPrunePlanId prune = ProtocolPrunePlanId.CreateRandom();
+        ProtocolPlanDigest pruneDigest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 0, [], [recovery], "Prune.", [], true);
+
         ProtocolRequest[] requests =
         [
-            new HandshakeRequest("smapi-gui", "1.0.0"),
-            new InspectPlanRequest(sessionId, "/game", InstallerOperation.Install, "4.5.3-alpha.2"),
-            new ConfirmPlanRequest(sessionId, planId, digest),
-            new ExecutePlanRequest(sessionId, planId, digest),
-            new CancelPlanRequest(sessionId, planId, digest)
+            new HandshakeRequest("gui", "1"), new DiscoverGamesRequest(session),
+            new OpenPackageRequest(session, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json"),
+            new ListRecoveriesRequest(session, "/game"), new InspectPlanRequest(session, "/game", InstallerOperation.Repair, package, null),
+            new SelectPlanCandidatesRequest(session, plan, digest, [candidate]), new ConfirmPlanRequest(session, plan, digest), new ExecutePlanRequest(session, plan, digest), new CancelPlanRequest(session, plan, digest),
+            new InspectPruneRequest(session, catalog, 0), new ConfirmPruneRequest(session, prune, pruneDigest), new ExecutePruneRequest(session, prune, pruneDigest)
         ];
         ProtocolEvent[] events =
         [
-            new HandshakeEvent(sessionId, "4.5.3-alpha.2", ["inspect-plan", "transaction-v1"]),
-            new PlanEvent(sessionId, planId, digest, ExecutionBindingDigest, InstallerOperation.Update, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, "Update two files.", ["One managed file was modified."], true),
-            new ProgressEvent(sessionId, planId, digest, 0, InstallerProgressStage.BackingUp, 1, 2, "Backing up managed files."),
-            new SuccessEvent(sessionId, planId, digest, InstallerOperation.Update, "Update verified."),
-            new RolledBackFailureEvent(sessionId, planId, digest, "copy-failed", "Copy failed.", "Original files restored."),
-            new RecoverableInterruptionEvent(sessionId, planId, digest, "power-loss", "Execution was interrupted.", InstallerRecoveryAction.InspectAgain, "The durable journal can be inspected."),
-            new CancelledEvent(sessionId, planId, digest, "Cancelled.", "No incomplete transaction remains.")
+            new HandshakeEvent(session, "server", ["v1"]), new GameDiscoveryEvent(session, [new("/game", ProtocolGameCandidateState.Valid, "Stardew Valley")]),
+            new PackageOpenedEvent(session, package, CreateRelease()), new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(recovery, "11111111111111111111111111111111", InstallerOperation.Backup, true, true)]),
+            new PlanEvent(session, plan, digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true),
+            new PrunePlanEvent(session, prune, pruneDigest, ExecutionDigest, catalog, GameRoot, HashA, 0, [], [recovery], "Prune.", [], true),
+            new ProgressEvent(session, plan, digest, 0, InstallerProgressStage.BackingUp, 0, null, "Hashing."),
+            new SuccessEvent(session, plan, digest, InstallerOperation.Repair, "Done.", 1, ProtocolRecoveryResult.NotNeeded, "Launch.", "/tmp/smapi.log"),
+            new RolledBackFailureEvent(session, plan, digest, "copy-failed", "Failed.", "Restored.", 1, ProtocolRecoveryResult.Succeeded, "Retry.", null),
+            new RecoverableInterruptionEvent(session, plan, digest, "power-loss", "Interrupted.", InstallerRecoveryAction.InspectAgain, "Journal retained.", 1, ProtocolRecoveryResult.Pending, "Inspect.", null),
+            new CancelledEvent(session, plan, digest, "Cancelled.", "Safe.", 0, ProtocolRecoveryResult.NotNeeded, "Close.", null),
+            new PruneSuccessEvent(session, prune, pruneDigest, 1, "Pruned.", "Close.", null), new PrePlanErrorEvent(session, "invalid-package", "Invalid.", "Choose another.", false, null)
         ];
 
-        foreach (ProtocolRequest expected in requests)
-        {
-            ProtocolRequest actual = ProtocolJsonSerializer.DeserializeRequestLine(ProtocolJsonSerializer.SerializeLine(expected));
-            actual.GetType().Should().Be(expected.GetType());
-            ProtocolJsonSerializer.SerializeLine(actual).Should().Be(ProtocolJsonSerializer.SerializeLine(expected));
-            actual.Kind.Should().Be(expected.Kind);
-        }
-        foreach (ProtocolEvent expected in events)
-        {
-            ProtocolEvent actual = ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(expected));
-            actual.GetType().Should().Be(expected.GetType());
-            ProtocolJsonSerializer.SerializeLine(actual).Should().Be(ProtocolJsonSerializer.SerializeLine(expected));
-            actual.Kind.Should().Be(expected.Kind);
-        }
+        foreach (ProtocolRequest request in requests)
+            ProtocolJsonSerializer.DeserializeRequestLine(ProtocolJsonSerializer.SerializeLine(request)).Should().BeEquivalentTo(request);
+        foreach (ProtocolEvent item in events)
+            ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(item)).Should().BeEquivalentTo(item);
     }
 
     [Test]
-    public void SerializePlan_WritesStructuredIdentityOperationsAndConflictsInStableOrder()
+    public void Deserialize_RejectsUnknownDuplicateAndWrongDirection()
     {
-        ProtocolSessionId sessionId = ProtocolSessionId.Parse("0123456789abcdef0123456789abcdef");
-        ProtocolPlanId planId = ProtocolPlanId.Parse("fedcba9876543210fedcba9876543210");
-        ProtocolPlanOperation[] operations = CreateOperations();
-        ProtocolPlanConflict[] conflicts = [];
-        ProtocolPlanDigest digest = ComputeDigest(InstallerOperation.Update, ObservedInstallState.KnownModified, operations, conflicts, CreateRelease(), CreateRelease());
-        PlanEvent plan = new(sessionId, planId, digest, ExecutionBindingDigest, InstallerOperation.Update, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, "Update.", [], true);
-
-        string json = ProtocolJsonSerializer.SerializeLine(plan);
-
-        json.Should().Contain(
-            $"\"planDigest\":\"{digest.Value}\",\"executionBindingDigest\":\"{ExecutionBindingDigest.Value}\",\"operation\":\"update\","
-            + "\"gameRoot\":{\"canonicalPath\":\"/game\",\"deviceMajor\":10,\"deviceMinor\":11,\"inode\":20,\"operationGeneration\":7},\"currentRelease\":{\"repository\":\"https://github.com/4eh5xitv6787h645ebv/SMAPI\","
-        );
-        json.Should().Contain(
-            $"\"operations\":[{{\"kind\":\"create\",\"path\":\"smapi-internal/a.dll\",\"expectedCurrentSha256\":null,\"resultSha256\":\"{HashA}\"}},"
-            + $"{{\"kind\":\"replace\",\"path\":\"smapi-internal/b.dll\",\"expectedCurrentSha256\":\"{HashA}\",\"resultSha256\":\"{HashB}\"}}],\"conflicts\":[]"
-        );
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine("{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"clientName\":\"a\",\"clientVersion\":\"1\",\"extra\":true}}"))
+            .Should().Throw<ProtocolException>().WithMessage("*unknown 'extra'*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine("{\"protocolVersion\":1,\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"clientName\":\"a\",\"clientVersion\":\"1\"}}"))
+            .Should().Throw<ProtocolException>().WithMessage("*duplicate 'protocolVersion'*");
+        string eventLine = ProtocolJsonSerializer.SerializeLine(new HandshakeEvent(ProtocolSessionId.CreateRandom(), "server", []));
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(eventLine)).Should().Throw<ProtocolException>().WithMessage("*event can't be accepted as a request*");
     }
 
     [Test]
-    public void PlanDigest_BindsExecutionStateGameRootReleasesObservedStateAndDetails()
+    public void Deserialize_RejectsUnknownNestedCandidateFieldAndDuplicateSelection()
     {
-        ProtocolPlanOperation[] operations = CreateOperations();
-        ProtocolPlanConflict[] conflicts = [];
-        ProtocolReleaseIdentity current = CreateRelease() with { SourceCommit = "3333333333333333333333333333333333333333" };
-        ProtocolReleaseIdentity target = CreateRelease();
-        ProtocolPlanDigest digest = ComputeDigest(InstallerOperation.Update, ObservedInstallState.KnownModified, operations, conflicts, current, target);
-        ProtocolSessionId sessionId = ProtocolSessionId.CreateRandom();
-        ProtocolPlanId planId = ProtocolPlanId.CreateRandom();
+        string line = ProtocolJsonSerializer.SerializeLine(CreatePlan());
+        string unknown = line.Replace("\"evidence\":", "\"unknown\":0,\"evidence\":", StringComparison.Ordinal);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(unknown)).Should().Throw<ProtocolException>().WithMessage("*unknown 'unknown'*");
 
-        AssertDigestMismatch(ProtocolPlanDigest.Parse(HashB), GameRoot, current, target, ObservedInstallState.KnownModified, operations);
-        AssertDigestMismatch(ExecutionBindingDigest, GameRoot with { Inode = 21 }, current, target, ObservedInstallState.KnownModified, operations);
-        AssertDigestMismatch(ExecutionBindingDigest, GameRoot, current with { SourceTree = "4444444444444444444444444444444444444444" }, target, ObservedInstallState.KnownModified, operations);
-        AssertDigestMismatch(ExecutionBindingDigest, GameRoot, current, target with { PackageSha256 = HashB }, ObservedInstallState.KnownModified, operations);
-        AssertDigestMismatch(ExecutionBindingDigest, GameRoot, current, target, ObservedInstallState.KnownUnmodified, operations);
-        AssertDigestMismatch(ExecutionBindingDigest, GameRoot, current, target, ObservedInstallState.KnownModified, [operations[0], operations[1] with { ResultSha256 = HashA }]);
-
-        void AssertDigestMismatch(
-            ProtocolPlanDigest executionBinding,
-            ProtocolGameRootIdentity gameRoot,
-            ProtocolReleaseIdentity? currentRelease,
-            ProtocolReleaseIdentity? targetRelease,
-            ObservedInstallState state,
-            ProtocolPlanOperation[] displayedOperations
-        )
-        {
-            PlanEvent altered = new(
-                sessionId,
-                planId,
-                digest,
-                executionBinding,
-                InstallerOperation.Update,
-                gameRoot,
-                currentRelease,
-                targetRelease,
-                state,
-                displayedOperations,
-                conflicts,
-                "Update.",
-                [],
-                true
-            );
-            FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(altered)).Should()
-                .Throw<ProtocolException>().WithMessage("*digest doesn't match*");
-        }
+        PlanEvent plan = CreatePlan(); ProtocolCandidateId id = plan.Candidates[0].CandidateId;
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new SelectPlanCandidatesRequest(plan.SessionId, plan.PlanId, plan.PlanDigest, [id, id])))
+            .Should().Throw<ProtocolException>().WithMessage("*duplicate IDs*");
     }
 
     [Test]
-    public void TargetRelease_IsNullableOnlyForOperationsWhichDoNotRequireOne()
+    public void PlanDigest_BindsCandidatesRecoveryAndDisplayData()
     {
-        ProtocolSessionId sessionId = ProtocolSessionId.CreateRandom();
-        ProtocolPlanId planId = ProtocolPlanId.CreateRandom();
-        ProtocolPlanOperation[] operations = [new(PlanOperationKind.Create, "backup/file", null, HashA)];
-        ProtocolPlanDigest backupDigest = ComputeDigest(InstallerOperation.Backup, ObservedInstallState.KnownUnmodified, operations, [], CreateRelease(), null);
-        PlanEvent backup = new(sessionId, planId, backupDigest, ExecutionBindingDigest, InstallerOperation.Backup, GameRoot, CreateRelease(), null, ObservedInstallState.KnownUnmodified, operations, [], "Backup.", [], true);
-
-        ProtocolJsonSerializer.SerializeLine(new InspectPlanRequest(sessionId, "/game", InstallerOperation.Backup, null)).Should().Contain("\"targetPackageVersion\":null");
-        ProtocolJsonSerializer.SerializeLine(backup).Should().Contain("\"targetRelease\":null");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPlanRequest(sessionId, "/game", InstallerOperation.Backup, "invented"))).Should()
-            .Throw<ProtocolException>().WithMessage("*must not invent a target package version*");
-
-        ProtocolPlanDigest invalidInstallDigest = ComputeDigest(InstallerOperation.Install, ObservedInstallState.NotInstalled, operations, [], null, null);
-        PlanEvent invalidInstall = new(sessionId, planId, invalidInstallDigest, ExecutionBindingDigest, InstallerOperation.Install, GameRoot, null, null, ObservedInstallState.NotInstalled, operations, [], "Install.", [], true);
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(invalidInstall)).Should()
-            .Throw<ProtocolException>().WithMessage("*requires an exact target release identity*");
+        PlanEvent plan = CreatePlan();
+        AlterPlan(plan, summary: "Altered.").Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
+        ProtocolPlanCandidate changed = plan.Candidates[0] with { Selected = !plan.Candidates[0].Selected };
+        AlterPlan(plan, candidates: [changed]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
+        AlterPlan(plan, packageId: ProtocolPackageId.CreateRandom()).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
     }
 
     [Test]
-    public void PlanEvent_DefensivelySnapshotsStructuredCollections()
+    public void PruneDigest_BindsExactCatalogMembershipAndDisplayData()
     {
-        ProtocolPlanOperation[] operations = CreateOperations();
-        ProtocolPlanConflict[] conflicts = [];
-        string[] warnings = ["Initial warning."];
-        ProtocolPlanDigest digest = ComputeDigest(InstallerOperation.Update, ObservedInstallState.KnownModified, operations, conflicts, CreateRelease(), CreateRelease());
-        PlanEvent plan = new(ProtocolSessionId.CreateRandom(), ProtocolPlanId.CreateRandom(), digest, ExecutionBindingDigest, InstallerOperation.Update, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, "Update.", warnings, true);
-
-        operations[0] = operations[0] with { Path = "tampered" };
-        warnings[0] = "Tampered.";
-        ProtocolPlanOperation[] returned = plan.Operations;
-        returned[0] = returned[0] with { Path = "also-tampered" };
-
-        plan.Operations[0].Path.Should().Be("smapi-internal/a.dll");
-        plan.Warnings.Should().Equal("Initial warning.");
-        ProtocolJsonSerializer.SerializeLine(plan).Should().Contain("smapi-internal/a.dll");
-    }
-
-    [TestCase("{\"protocolVersion\":2,\"messageType\":\"handshake.request\",\"payload\":{\"clientName\":\"gui\",\"clientVersion\":\"1\"}}", "Unsupported protocol version")]
-    [TestCase("{\"protocolVersion\":1,\"messageType\":\"future.request\",\"payload\":{}}", "Unknown version 1 protocol message type")]
-    [TestCase("{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"clientName\":\"gui\",\"clientVersion\":\"1\",\"extra\":true}}", "unknown 'extra' property")]
-    [TestCase("{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"clientName\":\"gui\"}}", "missing the required 'clientVersion' property")]
-    [TestCase("{\"protocolVersion\":1,\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"clientName\":\"gui\",\"clientVersion\":\"1\"}}", "duplicate 'protocolVersion' property")]
-    [TestCase("{\"protocolVersion\":1,\"messageType\":\"inspect-plan.request\",\"payload\":{\"sessionId\":\"0123456789abcdef0123456789abcdef\",\"gamePath\":\"/game\",\"operation\":0,\"targetPackageVersion\":\"1\"}}", "isn't valid strict version 1 JSON")]
-    public void DeserializeRequestLine_RejectsNonContractInput(string line, string expectedMessage)
-    {
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(line)).Should()
-            .Throw<ProtocolException>()
-            .WithMessage($"*{expectedMessage}*");
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId removed = ProtocolRecoverySelectionId.CreateRandom(); ProtocolPrunePlanId id = ProtocolPrunePlanId.CreateRandom();
+        ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 0, [], [removed], "Prune.", [], true);
+        PrunePlanEvent plan = new(session, id, digest, ExecutionDigest, catalog, GameRoot, HashA, 0, [], [removed], "Prune.", [], true);
+        ProtocolJsonSerializer.SerializeLine(plan).Should().NotBeEmpty();
+        new PrunePlanEvent(plan.SessionId, plan.PrunePlanId, plan.PruneDigest, plan.ExecutionBindingDigest, plan.CatalogId, plan.GameRoot, plan.HeadSha256, plan.RetainNewest, plan.RetainedSelectionIds, [ProtocolRecoverySelectionId.CreateRandom()], plan.Summary, plan.Warnings, true)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact catalog selection*");
     }
 
     [Test]
-    public void DeserializePlan_RejectsUnknownDuplicateAndMissingNestedProperties()
+    public void BoundedAndCanonicalValues_AreRejected()
     {
-        string valid = SerializePlanWithConflict();
-        string duplicateRelease = valid.Replace(
-            "\"repository\":\"https://github.com/4eh5xitv6787h645ebv/SMAPI\",",
-            "\"repository\":\"https://github.com/4eh5xitv6787h645ebv/SMAPI\",\"repository\":\"https://example.invalid/repo\",",
-            StringComparison.Ordinal
-        );
-        string unknownOperation = valid.Replace("\"kind\":\"replace\",", "\"kind\":\"replace\",\"extra\":true,", StringComparison.Ordinal);
-        string missingConflictPath = valid.Replace(",\"path\":\"smapi-internal/b.dll\"}],\"summary\"", "}],\"summary\"", StringComparison.Ordinal);
-
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(duplicateRelease)).Should()
-            .Throw<ProtocolException>().WithMessage("*duplicate 'repository' property*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(unknownOperation)).Should()
-            .Throw<ProtocolException>().WithMessage("*unknown 'extra' property*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(missingConflictPath)).Should()
-            .Throw<ProtocolException>().WithMessage("*missing the required 'path' property*");
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom();
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new GameDiscoveryEvent(session, Enumerable.Range(0, ProtocolJsonSerializer.MaxGameCandidates + 1).Select(i => new ProtocolGameCandidate($"/game/{i}", ProtocolGameCandidateState.Valid, "Game")).ToArray())))
+            .Should().Throw<ProtocolException>().WithMessage("*too large*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrePlanErrorEvent(session, "bad", new string('x', 4097), "Retry.", false, null))).Should().Throw<ProtocolException>();
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new DiscoverGamesRequest(new ProtocolSessionId(new string('0', 32))))).Should().Throw<ProtocolException>().WithMessage("*session ID*");
     }
 
-    [Test]
-    public void DeserializeLine_RejectsWrongDirection()
+    private static PlanEvent CreatePlan()
     {
-        ProtocolSessionId sessionId = ProtocolSessionId.CreateRandom();
-        string eventLine = ProtocolJsonSerializer.SerializeLine(new HandshakeEvent(sessionId, "1.0.0", []));
-        string requestLine = ProtocolJsonSerializer.SerializeLine(new HandshakeRequest("gui", "1.0.0"));
-
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(eventLine)).Should()
-            .Throw<ProtocolException>().WithMessage("*event can't be accepted as a request*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(requestLine)).Should()
-            .Throw<ProtocolException>().WithMessage("*request can't be accepted as an event*");
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolPackageId package = ProtocolPackageId.CreateRandom(); ProtocolCandidateId candidateId = ProtocolCandidateId.CreateRandom();
+        ProtocolPlanOperation[] operations = [new(PlanOperationKind.Create, "a", null, HashA)]; ProtocolPlanConflict[] conflicts = [];
+        ProtocolPlanCandidate[] candidates = [new(candidateId, ProtocolCandidateKind.LegacyInstallerFile, "legacy", HashA, 1, 420, HashB, false, "Observed.")];
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
+        return new(session, ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
     }
 
-    [Test]
-    public void DeserializeLine_EnforcesLineAndDepthBounds()
-    {
-        string oversized = new('x', ProtocolJsonSerializer.MaxLineBytes + 1);
-        string nested = "{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":" + new string('[', ProtocolJsonSerializer.MaxDepth + 1) + "null" + new string(']', ProtocolJsonSerializer.MaxDepth + 1) + "}";
+    private static PlanEvent AlterPlan(PlanEvent plan, string? summary = null, ProtocolPlanCandidate[]? candidates = null, ProtocolPackageId? packageId = null) =>
+        new(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, packageId ?? plan.PackageId, plan.RecoverySelectionId, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, candidates ?? plan.Candidates, summary ?? plan.Summary, plan.Warnings, plan.RequiresConfirmation);
 
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(oversized)).Should()
-            .Throw<ProtocolException>().WithMessage("*exceeds*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(nested)).Should()
-            .Throw<ProtocolException>().WithMessage("*isn't valid strict version 1 JSON*");
-    }
-
-    [Test]
-    public void SerializeLine_EnforcesSizeDigestAndSemanticBounds()
-    {
-        HandshakeRequest oversized = new(new string('x', ProtocolJsonSerializer.MaxLineBytes), "1");
-        ProtocolPlanDigest digest = ProtocolPlanDigest.Parse(HashA);
-        ProgressEvent inconsistent = new(
-            ProtocolSessionId.CreateRandom(),
-            ProtocolPlanId.CreateRandom(),
-            digest,
-            0,
-            InstallerProgressStage.BackingUp,
-            2,
-            1,
-            "invalid"
-        );
-
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(oversized)).Should().Throw<ProtocolException>();
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(inconsistent)).Should()
-            .Throw<ProtocolException>().WithMessage("*progress counters are inconsistent*");
-
-        ProtocolPlanOperation[] operations = CreateOperations();
-        PlanEvent digestMismatch = new(
-            inconsistent.SessionId,
-            inconsistent.PlanId,
-            digest,
-            ExecutionBindingDigest,
-            InstallerOperation.Install,
-            GameRoot,
-            null,
-            CreateRelease(),
-            ObservedInstallState.NotInstalled,
-            operations,
-            [],
-            "Install.",
-            [],
-            requiresConfirmation: true
-        );
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(digestMismatch)).Should()
-            .Throw<ProtocolException>().WithMessage("*digest doesn't match*");
-    }
-
-    [Test]
-    public void SerializePlan_RejectsUnsafeOrNoncanonicalStructuredValues()
-    {
-        ProtocolSessionId sessionId = ProtocolSessionId.CreateRandom();
-        ProtocolPlanId planId = ProtocolPlanId.CreateRandom();
-        ProtocolReleaseIdentity release = CreateRelease();
-
-        AssertInvalidPlan([new(PlanOperationKind.Create, "../escape", null, HashA)], [], release, "*canonical relative path*");
-        AssertInvalidPlan([new(PlanOperationKind.Create, "b", null, HashA), new(PlanOperationKind.Create, "a", null, HashB)], [], release, "*canonical order*");
-        AssertInvalidPlan([new(PlanOperationKind.Create, "a", HashA, HashB)], [], release, "*hashes are inconsistent*");
-        AssertInvalidPlan([new(PlanOperationKind.Create, "a", null, HashA)], [new(PlanConflictCode.ModifiedOwnedFile, "b"), new(PlanConflictCode.UnknownCollision, "a")], release, "*canonical order*");
-        AssertInvalidPlan(
-            [new(PlanOperationKind.Create, "a", null, HashA)],
-            [],
-            release with { SourceCommit = "A" + release.SourceCommit[1..] },
-            "*isn't canonical lowercase hexadecimal*"
-        );
-
-        void AssertInvalidPlan(
-            ProtocolPlanOperation[] operations,
-            ProtocolPlanConflict[] conflicts,
-            ProtocolReleaseIdentity identity,
-            string expected
-        )
-        {
-            ProtocolPlanDigest candidate = ComputeDigest(InstallerOperation.Install, ObservedInstallState.NotInstalled, operations, conflicts, null, identity);
-            PlanEvent plan = new(sessionId, planId, candidate, ExecutionBindingDigest, InstallerOperation.Install, GameRoot, null, identity, ObservedInstallState.NotInstalled, operations, conflicts, "Install.", [], true);
-            FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(plan)).Should().Throw<ProtocolException>().WithMessage(expected);
-        }
-    }
-
-    [Test]
-    public void PlanDigest_IsCanonicalStableAndRejectsNoncanonicalValues()
-    {
-        ProtocolPlanOperation[] operations = CreateOperations();
-        ProtocolPlanDigest first = ComputeDigest(InstallerOperation.Update, ObservedInstallState.KnownModified, operations, [], CreateRelease(), CreateRelease());
-        ProtocolPlanDigest second = ComputeDigest(InstallerOperation.Update, ObservedInstallState.KnownModified, operations, [], CreateRelease(), CreateRelease());
-
-        first.Should().Be(second);
-        first.Value.Should().MatchRegex("^[0-9a-f]{64}$");
-        FluentActions.Invoking(() => ProtocolPlanDigest.Parse(first.Value.ToUpperInvariant())).Should().Throw<ProtocolException>();
-        FluentActions.Invoking(() => ProtocolPlanDigest.Parse(first.Value[..63])).Should().Throw<ProtocolException>();
-    }
-
-    [Test]
-    public void Identifiers_AreRandomCanonicalAndRejectInvalidValues()
-    {
-        ProtocolSessionId firstSession = ProtocolSessionId.CreateRandom();
-        ProtocolSessionId secondSession = ProtocolSessionId.CreateRandom();
-        ProtocolPlanId firstPlan = ProtocolPlanId.CreateRandom();
-        ProtocolPlanId secondPlan = ProtocolPlanId.CreateRandom();
-
-        firstSession.Value.Should().MatchRegex("^[0-9a-f]{32}$").And.NotBe(secondSession.Value);
-        firstPlan.Value.Should().MatchRegex("^[0-9a-f]{32}$").And.NotBe(secondPlan.Value);
-        FluentActions.Invoking(() => ProtocolSessionId.Parse("00000000000000000000000000000000")).Should().Throw<ProtocolException>();
-        FluentActions.Invoking(() => ProtocolPlanId.Parse("0123456789ABCDEF0123456789ABCDEF")).Should().Throw<ProtocolException>();
-    }
-
-    private static string SerializePlanWithConflict()
-    {
-        ProtocolPlanOperation[] operations = [new(PlanOperationKind.Replace, "smapi-internal/a.dll", HashA, HashB)];
-        ProtocolPlanConflict[] conflicts = [new(PlanConflictCode.ModifiedOwnedFile, "smapi-internal/b.dll")];
-        ProtocolPlanDigest digest = ComputeDigest(InstallerOperation.Update, ObservedInstallState.KnownModified, operations, conflicts, CreateRelease(), CreateRelease());
-        return ProtocolJsonSerializer.SerializeLine(new PlanEvent(
-            ProtocolSessionId.Parse("0123456789abcdef0123456789abcdef"),
-            ProtocolPlanId.Parse("fedcba9876543210fedcba9876543210"),
-            digest,
-            ExecutionBindingDigest,
-            InstallerOperation.Update,
-            GameRoot,
-            CreateRelease(),
-            CreateRelease(),
-            ObservedInstallState.KnownModified,
-            operations,
-            conflicts,
-            "Blocked update.",
-            [],
-            true
-        ));
-    }
-
-    private static ProtocolPlanOperation[] CreateOperations()
-    {
-        return
-        [
-            new ProtocolPlanOperation(PlanOperationKind.Create, "smapi-internal/a.dll", null, HashA),
-            new ProtocolPlanOperation(PlanOperationKind.Replace, "smapi-internal/b.dll", HashA, HashB)
-        ];
-    }
-
-    private static ProtocolReleaseIdentity CreateRelease()
-    {
-        return new ProtocolReleaseIdentity(
-            "https://github.com/4eh5xitv6787h645ebv/SMAPI",
-            "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2",
-            "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2",
-            "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip",
-            "1111111111111111111111111111111111111111",
-            "2222222222222222222222222222222222222222",
-            HashA,
-            123456,
-            "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2",
-            "Release",
-            "linux-x64"
-        );
-    }
-
-    private static ProtocolPlanDigest ComputeDigest(
-        InstallerOperation operation,
-        ObservedInstallState observedState,
-        ProtocolPlanOperation[] operations,
-        ProtocolPlanConflict[] conflicts,
-        ProtocolReleaseIdentity? currentRelease,
-        ProtocolReleaseIdentity? targetRelease
-    )
-    {
-        return ProtocolPlanDigest.Compute(
-            ExecutionBindingDigest,
-            operation,
-            GameRoot,
-            currentRelease,
-            targetRelease,
-            observedState,
-            operations,
-            conflicts
-        );
-    }
+    private static ProtocolReleaseIdentity CreateRelease() => new(
+        "https://github.com/4eh5xitv6787h645ebv/SMAPI", "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2",
+        "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", HashA, 123456,
+        "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "Release", "linux-x64"
+    );
 }

@@ -3,24 +3,36 @@ using StardewModdingAPI.Installer.Core.Planning;
 
 namespace StardewModdingAPI.Installer.Core.Protocol.V1;
 
-/// <summary>The exact message variants in the version 1 protocol.</summary>
+/// <summary>The exact message variants in the unshipped version 1 protocol.</summary>
 public enum ProtocolMessageKind
 {
     HandshakeRequest,
+    DiscoverGamesRequest,
+    OpenPackageRequest,
+    ListRecoveriesRequest,
     InspectPlanRequest,
+    SelectPlanCandidatesRequest,
     ConfirmPlanRequest,
     ExecutePlanRequest,
     CancelPlanRequest,
+    InspectPruneRequest,
+    ConfirmPruneRequest,
+    ExecutePruneRequest,
     HandshakeEvent,
+    GameDiscoveryEvent,
+    PackageOpenedEvent,
+    RecoveryCatalogEvent,
     PlanEvent,
+    PrunePlanEvent,
     ProgressEvent,
     SuccessEvent,
     RolledBackFailureEvent,
     RecoverableInterruptionEvent,
-    CancelledEvent
+    CancelledEvent,
+    PruneSuccessEvent,
+    PrePlanErrorEvent
 }
 
-/// <summary>An installer operation exposed by the machine protocol.</summary>
 public enum InstallerOperation
 {
     Install,
@@ -31,7 +43,6 @@ public enum InstallerOperation
     Rollback
 }
 
-/// <summary>The observed state of the selected game installation.</summary>
 public enum ObservedInstallState
 {
     NotInstalled,
@@ -41,7 +52,14 @@ public enum ObservedInstallState
     Unknown
 }
 
-/// <summary>A bounded high-level execution stage.</summary>
+public enum ProtocolRecoveryResult
+{
+    NotNeeded,
+    Succeeded,
+    Pending,
+    Failed
+}
+
 public enum InstallerProgressStage
 {
     Revalidating,
@@ -54,7 +72,6 @@ public enum InstallerProgressStage
     Finalizing
 }
 
-/// <summary>The safe next action after a recoverable interruption.</summary>
 public enum InstallerRecoveryAction
 {
     Resume,
@@ -63,90 +80,139 @@ public enum InstallerRecoveryAction
     InspectAgain
 }
 
-/// <summary>The base type for all version 1 messages.</summary>
+public enum ProtocolGameCandidateState
+{
+    Valid,
+    Missing,
+    LegacyVersion,
+    LegacyCompatibilityBranch,
+    Invalid
+}
+
+public enum ProtocolCandidateKind
+{
+    ModifiedReceiptOwnedFile,
+    LegacyInstallerFile,
+    UnknownCollision
+}
+
 public abstract record ProtocolMessage
 {
-    /// <summary>The discriminator written into the JSON envelope.</summary>
     [JsonIgnore]
     public abstract ProtocolMessageKind Kind { get; }
 }
 
-/// <summary>The base type for client-to-backend requests.</summary>
 public abstract record ProtocolRequest : ProtocolMessage;
 
-/// <summary>The base type for backend-to-client events.</summary>
 public abstract record ProtocolEvent : ProtocolMessage;
 
-/// <summary>Start a version 1 session.</summary>
 public sealed record HandshakeRequest(string ClientName, string ClientVersion) : ProtocolRequest
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.HandshakeRequest;
 }
 
-/// <summary>Inspect a game path and create an immutable operation plan.</summary>
+public sealed record DiscoverGamesRequest(ProtocolSessionId SessionId) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.DiscoverGamesRequest;
+}
+
+/// <summary>Ask the backend to independently verify one complete local release asset set.</summary>
+public sealed record OpenPackageRequest(
+    ProtocolSessionId SessionId,
+    string ReleaseTag,
+    string ExpectedSourceCommit,
+    string PackagePath,
+    string ChecksumsPath,
+    string BuildMetadataPath,
+    string InstallManifestPath
+) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.OpenPackageRequest;
+}
+
+public sealed record ListRecoveriesRequest(ProtocolSessionId SessionId, string GamePath) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.ListRecoveriesRequest;
+}
+
+/// <summary>Inspect a game path using only session-local package and recovery selections.</summary>
 public sealed record InspectPlanRequest(
     ProtocolSessionId SessionId,
     string GamePath,
     InstallerOperation Operation,
-    string? TargetPackageVersion
+    ProtocolPackageId? PackageId,
+    ProtocolRecoverySelectionId? RecoverySelectionId
 ) : ProtocolRequest
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.InspectPlanRequest;
 }
 
-/// <summary>Confirm the exact currently issued plan.</summary>
-public sealed record ConfirmPlanRequest(
+public sealed record SelectPlanCandidatesRequest(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
-    ProtocolPlanDigest PlanDigest
+    ProtocolPlanDigest PlanDigest,
+    ProtocolCandidateId[] SelectedCandidateIds
 ) : ProtocolRequest
 {
-    /// <inheritdoc />
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.SelectPlanCandidatesRequest;
+}
+
+public sealed record ConfirmPlanRequest(ProtocolSessionId SessionId, ProtocolPlanId PlanId, ProtocolPlanDigest PlanDigest) : ProtocolRequest
+{
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.ConfirmPlanRequest;
 }
 
-/// <summary>Execute the exact confirmed plan.</summary>
-public sealed record ExecutePlanRequest(
-    ProtocolSessionId SessionId,
-    ProtocolPlanId PlanId,
-    ProtocolPlanDigest PlanDigest
-) : ProtocolRequest
+public sealed record ExecutePlanRequest(ProtocolSessionId SessionId, ProtocolPlanId PlanId, ProtocolPlanDigest PlanDigest) : ProtocolRequest
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.ExecutePlanRequest;
 }
 
-/// <summary>Request cancellation of the exact current plan at a safe boundary.</summary>
-public sealed record CancelPlanRequest(
-    ProtocolSessionId SessionId,
-    ProtocolPlanId PlanId,
-    ProtocolPlanDigest PlanDigest
-) : ProtocolRequest
+public sealed record CancelPlanRequest(ProtocolSessionId SessionId, ProtocolPlanId PlanId, ProtocolPlanDigest PlanDigest) : ProtocolRequest
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.CancelPlanRequest;
 }
 
-/// <summary>Accept a handshake and assign the random backend session ID.</summary>
-public sealed record HandshakeEvent(
-    ProtocolSessionId SessionId,
-    string ServerVersion,
-    string[] Capabilities
-) : ProtocolEvent
+public sealed record InspectPruneRequest(ProtocolSessionId SessionId, ProtocolRecoveryCatalogId CatalogId, int RetainNewest) : ProtocolRequest
 {
-    /// <inheritdoc />
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.InspectPruneRequest;
+}
+
+public sealed record ConfirmPruneRequest(ProtocolSessionId SessionId, ProtocolPrunePlanId PrunePlanId, ProtocolPlanDigest PruneDigest) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.ConfirmPruneRequest;
+}
+
+public sealed record ExecutePruneRequest(ProtocolSessionId SessionId, ProtocolPrunePlanId PrunePlanId, ProtocolPlanDigest PruneDigest) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.ExecutePruneRequest;
+}
+
+public sealed record HandshakeEvent(ProtocolSessionId SessionId, string ServerVersion, string[] Capabilities) : ProtocolEvent
+{
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.HandshakeEvent;
 }
 
-/// <summary>The exact reviewed release identity shown by the frontend for a plan.</summary>
+public sealed record ProtocolGameCandidate(string CanonicalPath, ProtocolGameCandidateState State, string DisplayName);
+
+public sealed record GameDiscoveryEvent(ProtocolSessionId SessionId, ProtocolGameCandidate[] Candidates) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.GameDiscoveryEvent;
+}
+
 public sealed record ProtocolReleaseIdentity(
     string Repository,
     string Tag,
@@ -161,7 +227,12 @@ public sealed record ProtocolReleaseIdentity(
     string RuntimeIdentifier
 );
 
-/// <summary>The canonical selected Linux game-root identity observed during inspection.</summary>
+public sealed record PackageOpenedEvent(ProtocolSessionId SessionId, ProtocolPackageId PackageId, ProtocolReleaseIdentity Release) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PackageOpenedEvent;
+}
+
 public sealed record ProtocolGameRootIdentity(
     string CanonicalPath,
     uint DeviceMajor,
@@ -170,22 +241,86 @@ public sealed record ProtocolGameRootIdentity(
     ulong OperationGeneration
 );
 
-/// <summary>One structured, deterministically ordered execution-plan operation.</summary>
-public sealed record ProtocolPlanOperation(
-    PlanOperationKind Kind,
-    string Path,
-    string? ExpectedCurrentSha256,
-    string? ResultSha256
+public sealed record ProtocolRecoveryGeneration(
+    ProtocolRecoverySelectionId SelectionId,
+    string GenerationId,
+    InstallerOperation OriginOperation,
+    bool IsCurrent,
+    bool IsUserCheckpoint
 );
 
-/// <summary>One structured, deterministically ordered reason a plan can't execute.</summary>
+/// <summary>Host-side source metadata used to mint opaque recovery selections.</summary>
+public sealed record ProtocolRecoveryGenerationSource(
+    string GenerationId,
+    InstallerOperation OriginOperation,
+    bool IsCurrent,
+    bool IsUserCheckpoint
+);
+
+public sealed record RecoveryCatalogEvent : ProtocolEvent
+{
+    private readonly ProtocolRecoveryGeneration[] GenerationValues;
+
+    public ProtocolSessionId SessionId { get; }
+    public ProtocolRecoveryCatalogId CatalogId { get; }
+    public ProtocolGameRootIdentity GameRoot { get; }
+    public string HeadSha256 { get; }
+    public ProtocolRecoveryGeneration[] Generations => this.GenerationValues.ToArray();
+
+    [JsonConstructor]
+    public RecoveryCatalogEvent(
+        ProtocolSessionId sessionId,
+        ProtocolRecoveryCatalogId catalogId,
+        ProtocolGameRootIdentity gameRoot,
+        string headSha256,
+        ProtocolRecoveryGeneration[] generations
+    )
+    {
+        this.SessionId = sessionId;
+        this.CatalogId = catalogId;
+        this.GameRoot = gameRoot;
+        this.HeadSha256 = headSha256;
+        this.GenerationValues = generations?.ToArray()
+            ?? throw new ProtocolException("The protocol 'generations' collection can't be null.");
+    }
+
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryCatalogEvent;
+}
+
+public sealed record ProtocolPlanOperation(PlanOperationKind Kind, string Path, string? ExpectedCurrentSha256, string? ResultSha256);
+
 public sealed record ProtocolPlanConflict(PlanConflictCode Code, string? Path);
 
-/// <summary>The immutable inspected operation plan presented for confirmation.</summary>
+public sealed record ProtocolPlanCandidate(
+    ProtocolCandidateId CandidateId,
+    ProtocolCandidateKind Kind,
+    string Path,
+    string ObservedSha256,
+    long ObservedSizeBytes,
+    int ObservedUnixMode,
+    string ProposedResultSha256,
+    bool Selected,
+    string Evidence
+);
+
+/// <summary>Core-observed candidate data from which the protocol mints an opaque selection ID.</summary>
+public sealed record ProtocolPlanCandidateSource(
+    ProtocolCandidateKind Kind,
+    string Path,
+    string ObservedSha256,
+    long ObservedSizeBytes,
+    int ObservedUnixMode,
+    string ProposedResultSha256,
+    bool Selected,
+    string Evidence
+);
+
 public sealed record PlanEvent : ProtocolEvent
 {
     private readonly ProtocolPlanOperation[] OperationValues;
     private readonly ProtocolPlanConflict[] ConflictValues;
+    private readonly ProtocolPlanCandidate[] CandidateValues;
     private readonly string[] WarningValues;
 
     public ProtocolSessionId SessionId { get; }
@@ -193,17 +328,19 @@ public sealed record PlanEvent : ProtocolEvent
     public ProtocolPlanDigest PlanDigest { get; }
     public ProtocolPlanDigest ExecutionBindingDigest { get; }
     public InstallerOperation Operation { get; }
+    public ProtocolPackageId? PackageId { get; }
+    public ProtocolRecoverySelectionId? RecoverySelectionId { get; }
     public ProtocolGameRootIdentity GameRoot { get; }
     public ProtocolReleaseIdentity? CurrentRelease { get; }
     public ProtocolReleaseIdentity? TargetRelease { get; }
     public ObservedInstallState ObservedState { get; }
     public ProtocolPlanOperation[] Operations => this.OperationValues.ToArray();
     public ProtocolPlanConflict[] Conflicts => this.ConflictValues.ToArray();
+    public ProtocolPlanCandidate[] Candidates => this.CandidateValues.ToArray();
     public string Summary { get; }
     public string[] Warnings => this.WarningValues.ToArray();
     public bool RequiresConfirmation { get; }
 
-    /// <summary>Construct an immutable plan-event snapshot.</summary>
     [JsonConstructor]
     public PlanEvent(
         ProtocolSessionId sessionId,
@@ -211,12 +348,15 @@ public sealed record PlanEvent : ProtocolEvent
         ProtocolPlanDigest planDigest,
         ProtocolPlanDigest executionBindingDigest,
         InstallerOperation operation,
+        ProtocolPackageId? packageId,
+        ProtocolRecoverySelectionId? recoverySelectionId,
         ProtocolGameRootIdentity gameRoot,
         ProtocolReleaseIdentity? currentRelease,
         ProtocolReleaseIdentity? targetRelease,
         ObservedInstallState observedState,
         ProtocolPlanOperation[] operations,
         ProtocolPlanConflict[] conflicts,
+        ProtocolPlanCandidate[] candidates,
         string summary,
         string[] warnings,
         bool requiresConfirmation
@@ -227,23 +367,82 @@ public sealed record PlanEvent : ProtocolEvent
         this.PlanDigest = planDigest;
         this.ExecutionBindingDigest = executionBindingDigest;
         this.Operation = operation;
+        this.PackageId = packageId;
+        this.RecoverySelectionId = recoverySelectionId;
         this.GameRoot = gameRoot;
         this.CurrentRelease = currentRelease;
         this.TargetRelease = targetRelease;
         this.ObservedState = observedState;
         this.OperationValues = operations?.ToArray() ?? throw new ProtocolException("The protocol 'operations' collection can't be null.");
         this.ConflictValues = conflicts?.ToArray() ?? throw new ProtocolException("The protocol 'conflicts' collection can't be null.");
+        this.CandidateValues = candidates?.ToArray() ?? throw new ProtocolException("The protocol 'candidates' collection can't be null.");
         this.Summary = summary;
         this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
         this.RequiresConfirmation = requiresConfirmation;
     }
 
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.PlanEvent;
 }
 
-/// <summary>Bounded progress for an executing plan.</summary>
+public sealed record PrunePlanEvent : ProtocolEvent
+{
+    private readonly ProtocolRecoverySelectionId[] RetainedValues;
+    private readonly ProtocolRecoverySelectionId[] RemovedValues;
+    private readonly string[] WarningValues;
+
+    public ProtocolSessionId SessionId { get; }
+    public ProtocolPrunePlanId PrunePlanId { get; }
+    public ProtocolPlanDigest PruneDigest { get; }
+    public ProtocolPlanDigest ExecutionBindingDigest { get; }
+    public ProtocolRecoveryCatalogId CatalogId { get; }
+    public ProtocolGameRootIdentity GameRoot { get; }
+    public string HeadSha256 { get; }
+    public int RetainNewest { get; }
+    public ProtocolRecoverySelectionId[] RetainedSelectionIds => this.RetainedValues.ToArray();
+    public ProtocolRecoverySelectionId[] RemovedSelectionIds => this.RemovedValues.ToArray();
+    public string Summary { get; }
+    public string[] Warnings => this.WarningValues.ToArray();
+    public bool RequiresConfirmation { get; }
+
+    [JsonConstructor]
+    public PrunePlanEvent(
+        ProtocolSessionId sessionId,
+        ProtocolPrunePlanId prunePlanId,
+        ProtocolPlanDigest pruneDigest,
+        ProtocolPlanDigest executionBindingDigest,
+        ProtocolRecoveryCatalogId catalogId,
+        ProtocolGameRootIdentity gameRoot,
+        string headSha256,
+        int retainNewest,
+        ProtocolRecoverySelectionId[] retainedSelectionIds,
+        ProtocolRecoverySelectionId[] removedSelectionIds,
+        string summary,
+        string[] warnings,
+        bool requiresConfirmation
+    )
+    {
+        this.SessionId = sessionId;
+        this.PrunePlanId = prunePlanId;
+        this.PruneDigest = pruneDigest;
+        this.ExecutionBindingDigest = executionBindingDigest;
+        this.CatalogId = catalogId;
+        this.GameRoot = gameRoot;
+        this.HeadSha256 = headSha256;
+        this.RetainNewest = retainNewest;
+        this.RetainedValues = retainedSelectionIds?.ToArray()
+            ?? throw new ProtocolException("The protocol 'retainedSelectionIds' collection can't be null.");
+        this.RemovedValues = removedSelectionIds?.ToArray()
+            ?? throw new ProtocolException("The protocol 'removedSelectionIds' collection can't be null.");
+        this.Summary = summary;
+        this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
+        this.RequiresConfirmation = requiresConfirmation;
+    }
+
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PrunePlanEvent;
+}
+
 public sealed record ProgressEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
@@ -255,41 +454,43 @@ public sealed record ProgressEvent(
     string Message
 ) : ProtocolEvent
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.ProgressEvent;
 }
 
-/// <summary>The plan completed and passed its final verification.</summary>
 public sealed record SuccessEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
     InstallerOperation Operation,
-    string Summary
+    string Summary,
+    int FilesChanged,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
 ) : ProtocolEvent
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.SuccessEvent;
 }
 
-/// <summary>The plan failed and its transaction was successfully rolled back.</summary>
 public sealed record RolledBackFailureEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
     string ErrorCode,
     string Message,
-    string RollbackSummary
+    string RollbackSummary,
+    int FilesChanged,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
 ) : ProtocolEvent
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RolledBackFailureEvent;
 }
 
-/// <summary>The process stopped with durable state from which the user can safely recover.</summary>
 public sealed record RecoverableInterruptionEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
@@ -297,24 +498,56 @@ public sealed record RecoverableInterruptionEvent(
     string ErrorCode,
     string Message,
     InstallerRecoveryAction RecoveryAction,
-    string RecoverySummary
+    string RecoverySummary,
+    int FilesChanged,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
 ) : ProtocolEvent
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoverableInterruptionEvent;
 }
 
-/// <summary>Cancellation completed at a safe boundary and left no incomplete transaction.</summary>
 public sealed record CancelledEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
     string Summary,
-    string SafeStateSummary
+    string SafeStateSummary,
+    int FilesChanged,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
 ) : ProtocolEvent
 {
-    /// <inheritdoc />
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.CancelledEvent;
+}
+
+public sealed record PruneSuccessEvent(
+    ProtocolSessionId SessionId,
+    ProtocolPrunePlanId PrunePlanId,
+    ProtocolPlanDigest PruneDigest,
+    int RemovedGenerationCount,
+    string Summary,
+    string SafeNextStep,
+    string? SanitizedLogPath
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PruneSuccessEvent;
+}
+
+public sealed record PrePlanErrorEvent(
+    ProtocolSessionId SessionId,
+    string ErrorCode,
+    string Message,
+    string SafeNextStep,
+    bool IsTerminal,
+    string? SanitizedLogPath
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PrePlanErrorEvent;
 }
