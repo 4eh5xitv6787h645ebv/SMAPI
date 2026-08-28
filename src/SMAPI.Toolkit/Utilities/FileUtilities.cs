@@ -19,7 +19,11 @@ public static class FileUtilities
         // reparse point. In particular, recursively enumerating a directory link here could
         // delete files outside the caller's intended tree.
         entry.Refresh();
-        bool isLink = entry.LinkTarget != null;
+        bool isLink = false;
+#if NET6_0_OR_GREATER
+        // LinkTarget also detects dangling links, for which Exists is false.
+        isLink = entry.LinkTarget != null;
+#endif
         if (!entry.Exists && !isLink)
             return;
 
