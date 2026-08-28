@@ -315,7 +315,7 @@ inspect_unique_regular_file() {
     local metadata file_type link_count size_bytes identity remainder
 
     [ ! -L "$path" ] || return 1
-    metadata=$(LC_ALL=C stat --printf='%F\n%h\n%s\n%d:%i:%h:%s:%f:%y:%z' -- "$path" 2>/dev/null) || return 1
+    metadata=$(LC_ALL=C stat --printf='%F\n%h\n%s\n%f:%d:%i:%h:%s:%y:%z' -- "$path" 2>/dev/null) || return 1
     file_type=${metadata%%$'\n'*}
     remainder=${metadata#*$'\n'}
     link_count=${remainder%%$'\n'*}
@@ -352,7 +352,8 @@ if [ "$runtime" = "net6" ]; then
         print_dependency_repair_guidance
         exit 1
     }
-    if ! timeout --signal=KILL 5s cmp -s -- "$source_deps" "$target_deps"; then
+    if [ "${source_identity%%:*}" != "${target_identity%%:*}" ] \
+        || ! timeout --signal=KILL 5s cmp -s -- "$source_deps" "$target_deps"; then
         print_dependency_repair_guidance
         exit 1
     fi

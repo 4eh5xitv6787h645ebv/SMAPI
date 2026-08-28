@@ -126,6 +126,7 @@ internal class LinuxRuntimeDispatcherTests
     [TestCase("missing-source")]
     [TestCase("missing-target")]
     [TestCase("mismatch")]
+    [TestCase("mode-mismatch")]
     public async Task RefusesMissingOrMismatchedDependencyMetadataWithoutWriting(string scenario)
     {
         LinuxRuntimeDispatcherTests.RequireLinux();
@@ -137,6 +138,8 @@ internal class LinuxRuntimeDispatcherTests
                 await LinuxRuntimeDispatcherTests.WriteGameDeps(root, "current dependency metadata\n");
             if (scenario != "missing-target")
                 await LinuxRuntimeDispatcherTests.WriteTargetDeps(root, scenario == "mismatch" ? "stale dependency metadata\n" : "current dependency metadata\n");
+            if (scenario == "mode-mismatch")
+                File.SetUnixFileMode(Path.Combine(root, "StardewModdingAPI-net6.deps.json"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
             await LinuxRuntimeDispatcherTests.WriteHost(root, "net6", "printf '%s\\n' 'HOST_STARTED'");
             string before = await LinuxRuntimeDispatcherTests.CaptureTreeSnapshot(root);
 
