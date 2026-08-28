@@ -368,7 +368,16 @@ public sealed class InstallationExecutionMaterializerTests
         {
             RecoveryPrunePlan plan = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
             engine.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest).GetAwaiter().GetResult();
-            string retention = Path.Combine(game, ".smapi-installer", "recovery", "retention.json");
+            CommittedRecoveryPointer pointer = CanonicalRecoveryPointerDocument.Parse(File.ReadAllBytes(
+                Path.Combine(game, ".smapi-installer", "recovery", "current.json")
+            ));
+            string retention = Path.Combine(
+                game,
+                ".smapi-installer",
+                "recovery",
+                "retention",
+                $"{pointer.RetentionSha256!.Value}.json"
+            );
             File.WriteAllText(retention, "{}");
             File.SetUnixFileMode(retention, (UnixFileMode)0x180);
 
@@ -379,9 +388,11 @@ public sealed class InstallationExecutionMaterializerTests
     }
 
     [TestCase(0, 4)]
-    [TestCase(1, 2)]
-    [TestCase(2, 2)]
+    [TestCase(1, 4)]
+    [TestCase(2, 4)]
     [TestCase(3, 2)]
+    [TestCase(4, 2)]
+    [TestCase(5, 2)]
     public void RecoveryPrune_InterruptionHasOneAuthenticatedVisibilityBoundaryAndResumableCleanup(
         int boundaryValue,
         int visibleAfterFault

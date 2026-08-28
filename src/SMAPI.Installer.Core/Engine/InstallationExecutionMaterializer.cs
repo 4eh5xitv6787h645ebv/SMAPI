@@ -34,6 +34,7 @@ internal sealed class InstallationExecutionMaterializer
         BoundInstallationPlan binding = preparation.Binding;
         lease.AssertRootAndGeneration(binding.GameRoot, binding.OperationGeneration);
         currentState.AssertUsable(lease);
+        CommittedRecoveryHandle.AssertAuthenticatedHistory(lease, currentState, cancellationToken);
         AssertCurrentState(binding, currentState);
         AssertRecoveryGenerationCapacity(lease.Game);
         RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot
@@ -90,7 +91,9 @@ internal sealed class InstallationExecutionMaterializer
                 currentState.ManifestSha256,
                 currentState.ReceiptSha256,
                 currentState.Pointer?.GenerationId,
-                currentState.PointerSha256
+                currentState.PointerSha256,
+                currentState.Pointer?.RetentionSha256,
+                currentState.Pointer?.SchemaVersion ?? CommittedRecoveryPointer.LegacySchemaVersion
             );
             byte[] pointerBytes = CanonicalRecoveryPointerDocument.Serialize(pointer);
             string pointerSource = staging.StageBytes(pointerBytes);

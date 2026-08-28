@@ -63,6 +63,31 @@ public sealed class CommittedRecoveryStateTests
         );
     }
 
+    [Test]
+    public void Pointer_V2RoundTripsOptionalAuthenticatedRetentionDigest()
+    {
+        CommittedRecoveryPointer pointer = new(
+            Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            InstallationAction.Backup,
+            OwnershipTestData.Digest('a'),
+            OwnershipTestData.Digest('b'),
+            OwnershipTestData.Digest('c'),
+            OwnershipTestData.Digest('b'),
+            OwnershipTestData.Digest('c'),
+            Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            OwnershipTestData.Digest('f'),
+            OwnershipTestData.Digest('9'),
+            CommittedRecoveryPointer.CurrentSchemaVersion
+        );
+
+        byte[] bytes = CanonicalRecoveryPointerDocument.Serialize(pointer);
+
+        CanonicalRecoveryPointerDocument.Parse(bytes).Should().Be(pointer);
+        Encoding.UTF8.GetString(bytes).Should().EndWith(
+            ",\"retention_sha256\":\"" + new string('9', 64) + "\"}"
+        );
+    }
+
     [TestCase("{}")]
     [TestCase("[]")]
     [TestCase("{\"schema_version\":1}")]
@@ -228,18 +253,37 @@ public sealed class CommittedRecoveryStateTests
     }
 
     [Test]
-    public void Prune_PendingRetentionPathSwapBeforePublicationIsRejected()
+    public void Prune_PendingPointerPathSwapBeforePublicationIsRejected()
     {
         (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
         using (package)
         {
             RecoveryPrunePlan plan = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
-            PendingRetentionSwapFaultInjector fault = new(game);
+            PendingPointerSwapFaultInjector fault = new(game);
             LinuxInstallerEngine engine = new(new InstallerTransactionExecutor(), fault);
 
             Action execute = () => engine.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest).GetAwaiter().GetResult();
 
             execute.Should().Throw<OwnershipDocumentException>().WithMessage("*path changed*");
+            fault.DisplacedPath.Should().NotBeNull();
+            File.Exists(fault.DisplacedPath!).Should().BeTrue();
+            normal.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(3);
+        }
+    }
+
+    [Test]
+    public void Prune_CurrentPointerPathSwapBeforePublicationIsRejected()
+    {
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
+        using (package)
+        {
+            RecoveryPrunePlan plan = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            CurrentPointerSwapFaultInjector fault = new(game);
+            LinuxInstallerEngine engine = new(new InstallerTransactionExecutor(), fault);
+
+            Action execute = () => engine.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest).GetAwaiter().GetResult();
+
+            execute.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PathChanged);
             fault.DisplacedPath.Should().NotBeNull();
             File.Exists(fault.DisplacedPath!).Should().BeTrue();
             normal.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(3);
@@ -267,12 +311,162 @@ public sealed class CommittedRecoveryStateTests
         }
     }
 
+    [Test]
+    public void Prune_MigratesV1HeadAndCarriesAuthenticatedRetentionThroughLaterActions()
+    {
+        (string game, LinuxInstallerEngine engine, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
+        using (package)
+        {
+            byte[] v1Bytes = File.ReadAllBytes(CurrentPointerPath(game));
+            CommittedRecoveryPointer v1 = CanonicalRecoveryPointerDocument.Parse(v1Bytes);
+            v1.SchemaVersion.Should().Be(CommittedRecoveryPointer.LegacySchemaVersion);
+            RecoveryPrunePlan plan = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+
+            engine.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest).GetAwaiter().GetResult().Should().Be(1);
+
+            byte[] prunedBytes = File.ReadAllBytes(CurrentPointerPath(game));
+            CommittedRecoveryPointer pruned = CanonicalRecoveryPointerDocument.Parse(prunedBytes);
+            pruned.SchemaVersion.Should().Be(CommittedRecoveryPointer.CurrentSchemaVersion);
+            pruned.RetentionSha256.Should().NotBeNull();
+            CanonicalRecoveryPointerDocument.Serialize(
+                pruned.WithRetention(null, CommittedRecoveryPointer.LegacySchemaVersion)
+            ).Should().Equal(v1Bytes);
+            byte[] retentionBytes = File.ReadAllBytes(RetentionDocumentPath(game, pruned.RetentionSha256!));
+            RecoveryRetentionRecord retention = CanonicalRecoveryRetentionDocument.Parse(retentionBytes);
+            retention.PublicationHeadPointerSha256.Should().Be(Sha256Digest.Hash(v1Bytes));
+            retention.PublicationHeadPointerSchemaVersion.Should().Be(CommittedRecoveryPointer.LegacySchemaVersion);
+            retention.PreviousRetentionSha256.Should().BeNull();
+
+            Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+
+            CommittedRecoveryPointer carried = CanonicalRecoveryPointerDocument.Parse(File.ReadAllBytes(CurrentPointerPath(game)));
+            carried.SchemaVersion.Should().Be(CommittedRecoveryPointer.CurrentSchemaVersion);
+            carried.RetentionSha256.Should().Be(pruned.RetentionSha256);
+            carried.PreviousPointerSha256.Should().Be(Sha256Digest.Hash(prunedBytes));
+            string previous = Path.Combine(
+                game,
+                ".smapi-installer",
+                "recovery",
+                "generations",
+                carried.GenerationId.ToString("N"),
+                "previous-pointer.json"
+            );
+            File.ReadAllBytes(previous).Should().Equal(prunedBytes);
+            engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(3);
+        }
+    }
+
+    [Test]
+    public void RecoveryHistory_ValidAlternateRetentionDocumentCannotChangeVisibleHistory()
+    {
+        (string game, LinuxInstallerEngine engine, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryPrunePlan prune = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            engine.ExecuteRecoveryPruneAsync(prune, prune.ConfirmationDigest).GetAwaiter().GetResult();
+            CommittedRecoveryPointer pointer = CanonicalRecoveryPointerDocument.Parse(File.ReadAllBytes(CurrentPointerPath(game)));
+            RecoveryRetentionRecord active = CanonicalRecoveryRetentionDocument.Parse(
+                File.ReadAllBytes(RetentionDocumentPath(game, pointer.RetentionSha256!))
+            );
+            RecoveryRetentionRecord alternate = active with
+            {
+                PublicationHeadPointerSha256 = OwnershipTestData.Digest('7')
+            };
+            byte[] alternateBytes = CanonicalRecoveryRetentionDocument.Serialize(alternate);
+            Sha256Digest alternateDigest = Sha256Digest.Hash(alternateBytes);
+            WritePrivate(RetentionDocumentPath(game, alternateDigest), alternateBytes);
+
+            engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(2);
+            File.WriteAllBytes(CurrentPointerPath(game), CanonicalRecoveryPointerDocument.Serialize(pointer.WithRetention(alternateDigest)));
+            File.SetUnixFileMode(CurrentPointerPath(game), (UnixFileMode)0x180);
+
+            Action list = () => engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+            list.Should().Throw<OwnershipDocumentException>().WithMessage("*isn't bound*");
+        }
+    }
+
+    [Test]
+    public void RecoveryPrune_GarbageCollectsOnlyUnreferencedBoundedRetentionDocuments()
+    {
+        (string game, LinuxInstallerEngine engine, FilePackageAuthority package) = this.CreateRecoveryHistory(4);
+        using (package)
+        {
+            RecoveryPrunePlan first = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            engine.ExecuteRecoveryPruneAsync(first, first.ConfirmationDigest).GetAwaiter().GetResult();
+            CommittedRecoveryPointer pointer = CanonicalRecoveryPointerDocument.Parse(File.ReadAllBytes(CurrentPointerPath(game)));
+            RecoveryRetentionRecord active = CanonicalRecoveryRetentionDocument.Parse(
+                File.ReadAllBytes(RetentionDocumentPath(game, pointer.RetentionSha256!))
+            );
+            byte[] orphanBytes = CanonicalRecoveryRetentionDocument.Serialize(active with
+            {
+                PublicationHeadPointerSha256 = OwnershipTestData.Digest('8')
+            });
+            Sha256Digest orphanDigest = Sha256Digest.Hash(orphanBytes);
+            WritePrivate(RetentionDocumentPath(game, orphanDigest), orphanBytes);
+            Directory.EnumerateFiles(RetentionDirectoryPath(game)).Should().HaveCount(2);
+
+            RecoveryPrunePlan cleanup = engine.InspectRecoveryPruneAsync(game, 2).GetAwaiter().GetResult();
+            engine.ExecuteRecoveryPruneAsync(cleanup, cleanup.ConfirmationDigest).GetAwaiter().GetResult().Should().Be(0);
+
+            Directory.EnumerateFiles(RetentionDirectoryPath(game)).Should().ContainSingle()
+                .Which.Should().EndWith($"{pointer.RetentionSha256!.Value}.json");
+            engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(2);
+
+            Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+            RecoveryPrunePlan second = engine.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            engine.ExecuteRecoveryPruneAsync(second, second.ConfirmationDigest).GetAwaiter().GetResult().Should().Be(2);
+            engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().ContainSingle();
+            Directory.EnumerateFiles(RetentionDirectoryPath(game)).Should().ContainSingle();
+        }
+    }
+
+    [Test]
+    public void RecoveryPrune_RejectsCrossRootPlanAndInvalidatesEarlierHandle()
+    {
+        (string firstGame, LinuxInstallerEngine engine, FilePackageAuthority firstPackage) = this.CreateRecoveryHistory(3);
+        (string secondGame, LinuxInstallerEngine _, FilePackageAuthority secondPackage) = this.CreateRecoveryHistory(3);
+        using (firstPackage)
+        using (secondPackage)
+        using (CommittedRecoveryHandle staleHandle = engine.OpenCurrentRecoveryAsync(firstGame).GetAwaiter().GetResult())
+        {
+            RecoveryPrunePlan firstPlan = engine.InspectRecoveryPruneAsync(firstGame, 1).GetAwaiter().GetResult();
+            using InstallerOperationLease secondLease = InstallerOperationLease.Acquire(secondGame);
+            AnchoredCoreStateAuthority secondState = AnchoredCoreStateAuthority.Inspect(secondLease);
+            Action crossRoot = () => CommittedRecoveryHandle.ExecutePrunePlan(secondLease, secondState, firstPlan);
+            crossRoot.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PathChanged);
+            engine.ExecuteRecoveryPruneAsync(firstPlan, firstPlan.ConfirmationDigest).GetAwaiter().GetResult();
+
+            Action stale = () => engine.InspectAsync(
+                firstGame,
+                InstallationAction.Rollback,
+                recovery: staleHandle
+            ).GetAwaiter().GetResult();
+            stale.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StaleRollbackSnapshot);
+        }
+    }
+
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-recovery-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         this.TemporaryDirectories.Add(path);
         return path;
+    }
+
+    private static string CurrentPointerPath(string game)
+        => Path.Combine(game, ".smapi-installer", "recovery", "current.json");
+
+    private static string RetentionDirectoryPath(string game)
+        => Path.Combine(game, ".smapi-installer", "recovery", "retention");
+
+    private static string RetentionDocumentPath(string game, Sha256Digest digest)
+        => Path.Combine(RetentionDirectoryPath(game), $"{digest.Value}.json");
+
+    private static void WritePrivate(string path, byte[] bytes)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, bytes);
+        File.SetUnixFileMode(path, (UnixFileMode)0x180);
     }
 
     private (string Game, LinuxInstallerEngine Engine, FilePackageAuthority Package) CreateRecoveryHistory(int generationCount)
@@ -416,22 +610,22 @@ public sealed class CommittedRecoveryStateTests
         }
     }
 
-    private sealed class PendingRetentionSwapFaultInjector : IRecoveryPruneFaultInjector
+    private sealed class PendingPointerSwapFaultInjector : IRecoveryPruneFaultInjector
     {
         private readonly string Game;
         public string? DisplacedPath { get; private set; }
 
-        public PendingRetentionSwapFaultInjector(string game)
+        public PendingPointerSwapFaultInjector(string game)
         {
             this.Game = game;
         }
 
         public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null)
         {
-            if (boundary != RecoveryPruneBoundary.BeforePendingRetentionIdentityCheck || this.DisplacedPath is not null)
+            if (boundary != RecoveryPruneBoundary.BeforePointerPublish || this.DisplacedPath is not null)
                 return;
-            string pending = Path.Combine(this.Game, ".smapi-installer", "recovery", "retention.pending");
-            this.DisplacedPath = Path.Combine(this.Game, "displaced-retention.pending");
+            string pending = Path.Combine(this.Game, ".smapi-installer", "recovery", "current.pending");
+            this.DisplacedPath = Path.Combine(this.Game, "displaced-current.pending");
             File.Move(pending, this.DisplacedPath);
             File.Copy(this.DisplacedPath, pending);
             File.SetUnixFileMode(pending, (UnixFileMode)0x180);
@@ -468,6 +662,28 @@ public sealed class CommittedRecoveryStateTests
             Directory.Move(original, this.DisplacedPath);
             Directory.CreateDirectory(original);
             File.SetUnixFileMode(original, (UnixFileMode)0x1c0);
+        }
+    }
+
+    private sealed class CurrentPointerSwapFaultInjector : IRecoveryPruneFaultInjector
+    {
+        private readonly string Game;
+        public string? DisplacedPath { get; private set; }
+
+        public CurrentPointerSwapFaultInjector(string game)
+        {
+            this.Game = game;
+        }
+
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null)
+        {
+            if (boundary != RecoveryPruneBoundary.BeforePointerPublish || this.DisplacedPath is not null)
+                return;
+            string current = CurrentPointerPath(this.Game);
+            this.DisplacedPath = Path.Combine(this.Game, "displaced-current.json");
+            File.Move(current, this.DisplacedPath);
+            File.Copy(this.DisplacedPath, current);
+            File.SetUnixFileMode(current, (UnixFileMode)0x180);
         }
     }
 }
