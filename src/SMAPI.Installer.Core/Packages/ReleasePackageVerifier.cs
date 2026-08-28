@@ -651,6 +651,13 @@ internal static class PrivatePackageStaging
         SetMode(path, Convert.ToInt32("600", 8));
     }
 
+    public static void SetFileMode(string path, int unixMode)
+    {
+        if (unixMode is < 0 or > 511)
+            throw new ArgumentOutOfRangeException(nameof(unixMode));
+        SetMode(path, unixMode);
+    }
+
     public static void TryDeleteFile(string path)
     {
         try
