@@ -1,40 +1,55 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace StardewModdingAPI.Framework.Content;
 
-/// <summary>Handle one populated cell decoded by the production TMX layer traversal.</summary>
-internal delegate void DecodedTmxTileConsumer<TState>(ref TState state, int x, int y, DecodedTmxTileTransform transform);
+/// <summary>Read a raw global ID from a source tile without delegate dispatch.</summary>
+internal interface ITmxRawGidReader<TTile>
+{
+    uint GetRawGid(TTile tile);
+}
+
+/// <summary>Handle one populated cell without delegate dispatch.</summary>
+internal interface IDecodedTmxTileConsumer<TState>
+{
+    void Consume(ref TState state, int x, int y, DecodedTmxTileTransform transform);
+}
 
 /// <summary>Game-independent layer traversal and indexed tile resolution used by the optimized TMX converter.</summary>
 internal static class OptimizedTmxLayerConversion
 {
     /// <summary>Visit each populated tile in row-major order without materializing empty cells.</summary>
-    public static void ForEachPopulated<TTile, TState>(
-        IReadOnlyList<TTile> sourceTiles,
-        int layerWidth,
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void ForEachPopulated<TTile, TState, TReader, TConsumer>(
+        List<TTile> sourceTiles,
+        int rowWidth,
         int originX,
         int originY,
-        Func<TTile, uint> getRawGid,
         ref TState state,
-        DecodedTmxTileConsumer<TState> consume
+        TReader reader,
+        TConsumer consumer
     )
+        where TReader : struct, ITmxRawGidReader<TTile>
+        where TConsumer : struct, IDecodedTmxTileConsumer<TState>
     {
-        if (layerWidth <= 0)
-            throw new ArgumentOutOfRangeException(nameof(layerWidth));
+        if (rowWidth <= 0)
+            throw new ArgumentOutOfRangeException(nameof(rowWidth));
 
         int x = originX;
         int y = originY;
-        for (int index = 0; index < sourceTiles.Count; index++)
+        int rowEnd = checked(originX + rowWidth);
+        int count = sourceTiles.Count;
+        for (int index = 0; index < count; index++)
         {
-            uint rawGid = getRawGid(sourceTiles[index]);
+            uint rawGid = reader.GetRawGid(sourceTiles[index]);
             if (rawGid != 0)
-                consume(ref state, x, y, OptimizedTmxTileTransform.Decode(rawGid));
+                consumer.Consume(ref state, x, y, OptimizedTmxTileTransform.Decode(rawGid));
 
             x++;
-            if (x >= layerWidth)
+            if (x >= rowEnd)
             {
-                x = 0;
+                x = originX;
                 y++;
             }
         }
@@ -46,7 +61,7 @@ internal readonly record struct TmxTileRange<TSheet, TAnimation>(
     uint FirstGid,
     uint LastGid,
     TSheet TileSheet,
-    IReadOnlyDictionary<int, TAnimation>? Animations
+    Dictionary<int, TAnimation>? Animations
 );
 
 /// <summary>A resolved global tile ID.</summary>

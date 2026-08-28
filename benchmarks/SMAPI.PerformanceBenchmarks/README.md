@@ -33,7 +33,7 @@ paths that must execute through the test host in an isolated game environment.
 
 | Area | Blocking coverage |
 | --- | --- |
-| map/TMX conversion | exact-zero console gate for production layer traversal, transform decoding, and indexed sheet/animation resolution; absolute and relative allocation gates for full xTile-object conversion in NUnit |
+| map/TMX conversion | exact-zero console gate for dense and nonzero-origin chunk traversal, transform decoding, and indexed sheet/animation resolution; absolute and relative allocation gates for full xTile-object conversion in NUnit |
 | canonical paths | exact-zero console gate and NUnit gate; allocating normalization has an absolute console ceiling |
 | JSON streaming | console ceiling for a one-megabyte file and NUnit large-versus-small allocation delta |
 | parsed asset names | absolute console parser ceiling; exact-zero NUnit cache-hit and localized base-name gates |

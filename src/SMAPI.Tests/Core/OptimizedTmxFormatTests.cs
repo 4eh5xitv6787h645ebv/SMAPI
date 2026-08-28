@@ -121,6 +121,37 @@ internal class OptimizedTmxFormatTests
     }
 
     [Test]
+    public void Load_PreservesChunkOriginAndRowWidth()
+    {
+        const string xml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <map version="1.10" tiledversion="1.11.2" orientation="orthogonal" renderorder="right-down" width="8" height="8" tilewidth="16" tileheight="16" infinite="1" nextlayerid="2">
+              <tileset firstgid="1" name="sheet" tilewidth="16" tileheight="16" tilecount="1" columns="1">
+                <image source="sheet.png" width="16" height="16"/>
+              </tileset>
+              <layer id="1" name="Back" width="8" height="8">
+                <data encoding="csv">
+                  <chunk x="2" y="3" width="3" height="2">1,0,1,0,1,0</chunk>
+                </data>
+              </layer>
+            </map>
+            """;
+
+        Map map;
+        using (MemoryStream input = new(Encoding.UTF8.GetBytes(xml)))
+            map = ((IMapFormat)new OptimizedTmxFormat(16, 16, 4, 4)).Load(input);
+
+        Layer layer = map.GetLayer("Back");
+        layer.Tiles[2, 3].Should().NotBeNull();
+        layer.Tiles[3, 3].Should().BeNull();
+        layer.Tiles[4, 3].Should().NotBeNull();
+        layer.Tiles[2, 4].Should().BeNull();
+        layer.Tiles[3, 4].Should().NotBeNull();
+        layer.Tiles[4, 4].Should().BeNull();
+        layer.Tiles[0, 4].Should().BeNull("chunk rows must reset to the chunk origin instead of the layer origin");
+    }
+
+    [Test]
     public void LoadTile_ReturnsNullForEmptyTile()
     {
         (Layer layer, TMXMap source) = CreateMap();

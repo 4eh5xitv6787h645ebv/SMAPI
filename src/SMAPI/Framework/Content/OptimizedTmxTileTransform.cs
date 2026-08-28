@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace StardewModdingAPI.Framework.Content;
 
 /// <summary>Decode a Tiled global tile ID into its tilesheet ID and xTile transform values.</summary>
@@ -10,6 +12,7 @@ internal static class OptimizedTmxTileTransform
     private const uint FlipMask = OptimizedTmxTileTransform.FlippedHorizontallyFlag | OptimizedTmxTileTransform.FlippedVerticallyFlag | OptimizedTmxTileTransform.FlippedDiagonallyFlag;
 
     /// <summary>Decode one raw Tiled global tile ID.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static DecodedTmxTileTransform Decode(uint rawGid)
     {
         bool horizontal = (rawGid & OptimizedTmxTileTransform.FlippedHorizontallyFlag) != 0;

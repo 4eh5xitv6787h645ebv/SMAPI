@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using SMAPI.PerformanceBenchmarks.Framework;
 using StardewModdingAPI.Framework.Content;
 
@@ -8,10 +9,8 @@ namespace SMAPI.PerformanceBenchmarks;
 /// <summary>Measure the game-independent production cores used while converting each TMX layer.</summary>
 internal sealed class TmxLayerConversionScenario : IPerformanceScenario
 {
-    private static readonly Func<uint, uint> GetRawGid = static rawGid => rawGid;
-    private static readonly DecodedTmxTileConsumer<ConversionState> ConsumeTile = TmxLayerConversionScenario.Consume;
-
-    private uint[] RawGids = [];
+    private List<uint> RawGids = [];
+    private List<uint> ChunkRawGids = [];
     private OptimizedTmxTileIndex<int, int[]>? Index;
 
     /// <inheritdoc />
@@ -24,7 +23,7 @@ internal sealed class TmxLayerConversionScenario : IPerformanceScenario
     public void Setup()
     {
         const int tileCount = 64 * 64;
-        this.RawGids = new uint[tileCount];
+        this.RawGids = new List<uint>(tileCount);
         uint[] transforms =
         [
             0,
@@ -36,11 +35,14 @@ internal sealed class TmxLayerConversionScenario : IPerformanceScenario
             0x60000000u,
             0xE0000000u
         ];
-        for (int index = 0; index < this.RawGids.Length; index++)
+        for (int index = 0; index < tileCount; index++)
         {
             if (index % 11 != 0)
-                this.RawGids[index] = (uint)(index % 128 + 1) | transforms[index & 7];
+                this.RawGids.Add((uint)(index % 128 + 1) | transforms[index & 7]);
+            else
+                this.RawGids.Add(0);
         }
+        this.ChunkRawGids = [1, 0, 0x80000041u, 66, 0, 67, 68, 0, 69, 70, 0, 71];
 
         Dictionary<int, int[]> secondSheetAnimations = new()
         {
@@ -65,9 +67,18 @@ internal sealed class TmxLayerConversionScenario : IPerformanceScenario
                 64,
                 0,
                 0,
-                TmxLayerConversionScenario.GetRawGid,
                 ref state,
-                TmxLayerConversionScenario.ConsumeTile
+                default(UIntRawGidReader),
+                default(ConversionConsumer)
+            );
+            OptimizedTmxLayerConversion.ForEachPopulated(
+                this.ChunkRawGids,
+                4,
+                5,
+                7,
+                ref state,
+                default(UIntRawGidReader),
+                default(ConversionConsumer)
             );
             digest = ScenarioDigest.Add(digest, state.Digest);
             digest = ScenarioDigest.Add(digest, (ulong)state.Visited);
@@ -79,28 +90,42 @@ internal sealed class TmxLayerConversionScenario : IPerformanceScenario
     public void Cleanup()
     {
         this.RawGids = [];
+        this.ChunkRawGids = [];
         this.Index = null;
     }
 
-    /// <summary>Record every visited cell and resolved tile property.</summary>
-    private static void Consume(ref ConversionState state, int x, int y, DecodedTmxTileTransform transform)
+    /// <summary>Read synthetic raw IDs through a constrained, inlinable call.</summary>
+    private readonly struct UIntRawGidReader : ITmxRawGidReader<uint>
     {
-        if (!state.Index.TryResolve(transform.Gid, out ResolvedTmxTile<int, int[]> resolved))
-            throw new InvalidOperationException($"Synthetic gid {transform.Gid} wasn't indexed.");
-
-        state.Visited++;
-        state.Digest = ScenarioDigest.Add(state.Digest, (ulong)x);
-        state.Digest = ScenarioDigest.Add(state.Digest, (ulong)y);
-        state.Digest = ScenarioDigest.Add(state.Digest, transform.Gid);
-        state.Digest = ScenarioDigest.Add(state.Digest, unchecked((uint)transform.Rotation));
-        state.Digest = ScenarioDigest.Add(state.Digest, (uint)transform.Flip);
-        state.Digest = ScenarioDigest.Add(state.Digest, (ulong)resolved.TileSheet);
-        state.Digest = ScenarioDigest.Add(state.Digest, (ulong)resolved.TileIndex);
-        state.Digest = ScenarioDigest.Add(state.Digest, resolved.IsAnimated ? 1UL : 0UL);
-        if (resolved.Animation is not null)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public uint GetRawGid(uint rawGid)
         {
-            foreach (int frame in resolved.Animation)
-                state.Digest = ScenarioDigest.Add(state.Digest, (ulong)frame);
+            return rawGid;
+        }
+    }
+
+    /// <summary>Record every visited cell and resolved tile property through a constrained call.</summary>
+    private readonly struct ConversionConsumer : IDecodedTmxTileConsumer<ConversionState>
+    {
+        public void Consume(ref ConversionState state, int x, int y, DecodedTmxTileTransform transform)
+        {
+            if (!state.Index.TryResolve(transform.Gid, out ResolvedTmxTile<int, int[]> resolved))
+                throw new InvalidOperationException($"Synthetic gid {transform.Gid} wasn't indexed.");
+
+            state.Visited++;
+            state.Digest = ScenarioDigest.Add(state.Digest, (ulong)x);
+            state.Digest = ScenarioDigest.Add(state.Digest, (ulong)y);
+            state.Digest = ScenarioDigest.Add(state.Digest, transform.Gid);
+            state.Digest = ScenarioDigest.Add(state.Digest, unchecked((uint)transform.Rotation));
+            state.Digest = ScenarioDigest.Add(state.Digest, (uint)transform.Flip);
+            state.Digest = ScenarioDigest.Add(state.Digest, (ulong)resolved.TileSheet);
+            state.Digest = ScenarioDigest.Add(state.Digest, (ulong)resolved.TileIndex);
+            state.Digest = ScenarioDigest.Add(state.Digest, resolved.IsAnimated ? 1UL : 0UL);
+            if (resolved.Animation is not null)
+            {
+                foreach (int frame in resolved.Animation)
+                    state.Digest = ScenarioDigest.Add(state.Digest, (ulong)frame);
+            }
         }
     }
 

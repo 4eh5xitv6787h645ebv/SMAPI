@@ -28,6 +28,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using TMXTile;
 using xTile;
 using xTile.Dimensions;
@@ -140,12 +141,12 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                     LayerTileLoadState state = new(layer, index, tiles);
                     OptimizedTmxLayerConversion.ForEachPopulated(
                         chunk.Tiles,
-                        layer.LayerWidth,
+                        chunk.Width,
                         chunk.X,
                         chunk.Y,
-                        OptimizedTmxFormat.GetRawGid,
                         ref state,
-                        OptimizedTmxFormat.LoadLayerTile
+                        default(ParsedTileRawGidReader),
+                        default(LayerTileConsumer)
                     );
                 }
             }
@@ -157,9 +158,9 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                     layer.LayerWidth,
                     0,
                     0,
-                    OptimizedTmxFormat.GetRawGid,
                     ref state,
-                    OptimizedTmxFormat.LoadLayerTile
+                    default(ParsedTileRawGidReader),
+                    default(LayerTileConsumer)
                 );
             }
 
@@ -260,16 +261,24 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
         return result;
     }
 
-    /// <summary>Get a parsed tile's raw global ID.</summary>
-    private static uint GetRawGid(ParsedTile tile)
+    /// <summary>Read raw IDs from parsed tiles through a constrained, inlinable call.</summary>
+    private readonly struct ParsedTileRawGidReader : ITmxRawGidReader<ParsedTile>
     {
-        return tile.Gid;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public uint GetRawGid(ParsedTile tile)
+        {
+            return tile.Gid;
+        }
     }
 
-    /// <summary>Populate one decoded layer cell.</summary>
-    private static void LoadLayerTile(ref LayerTileLoadState state, int x, int y, DecodedTmxTileTransform transform)
+    /// <summary>Populate decoded cells through a constrained, inlinable call.</summary>
+    private readonly struct LayerTileConsumer : IDecodedTmxTileConsumer<LayerTileLoadState>
     {
-        state.Tiles[x, y] = OptimizedTmxFormat.LoadTile(state.Layer, state.Index, transform);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Consume(ref LayerTileLoadState state, int x, int y, DecodedTmxTileTransform transform)
+        {
+            state.Tiles[x, y] = OptimizedTmxFormat.LoadTile(state.Layer, state.Index, transform);
+        }
     }
 
     /// <summary>Order map properties using TMXTile's existing compatibility rules.</summary>

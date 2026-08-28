@@ -72,9 +72,9 @@
     "tmx.layer-conversion": {
       "operations": 128,
       "warmupOperations": 64,
-      "expectedDigest": "d66a31765a222d25",
+      "expectedDigest": "87e4afb972934c25",
       "maxAllocatedBytesPerOperation": 0,
-      "informationalMedianNanosecondsPerOperation": 158624.890625
+      "informationalMedianNanosecondsPerOperation": 116969.25
     },
     "tracking.inventory-chest-idle": {
       "operations": 10000,
