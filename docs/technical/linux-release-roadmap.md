@@ -30,55 +30,55 @@ Scope constraints apply throughout:
 - [x] Pass applicable roadmap PR checks (`git diff --check`; no repository checks configured for this documentation-only branch).
 - [x] Merge roadmap PR [#169](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/169) into `develop` and close it (`44ba3bda`).
 - [x] Verify `develop` equals `origin/develop` after the roadmap merge (`44ba3bda`).
-- [ ] Keep both checklists synchronized as evidence is verified.
+- [x] Keep both checklists synchronized as evidence is verified ([mirrored umbrella issue #168](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168)).
 
 ## Phase 1 — Current upstream comparison and reproducible benchmarks
 
 ### Inputs, isolation, and methodology
 
 - [x] Pin official SMAPI 4.5.2 commit `79f9bbbe3edbb7ca3369e7ad0d3dd45131b34fc0` as the A build ([verified preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
-- [ ] Record the exact fork commit used as the B build.
+- [x] Record exact fork commit [`3c98eadd2bddc24d43c889afb11b155e92469882`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/3c98eadd2bddc24d43c889afb11b155e92469882) as the B build.
 - [x] Retrieve the complete trusted PR #158 modpack release and Blossom save without committing, mirroring, republishing, or artifacting either fixture ([private-fixture preflight evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
 - [x] Audit the disposable fixture extraction paths before extraction ([containment-audited preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
 - [x] Build a disposable isolated Linux test environment that cannot modify the live game installation, live `Mods` directory, or live saves ([isolation preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
-- [ ] Verify the A and B builds use the same game build, mods, configurations, save state, resolution, session, launch wrapper, warm-up, and scenarios.
+- [x] Verify the A and B builds use the same game build, mods, configured controls, save state, resolution, session, launch wrapper, warm-up, and scenarios ([reviewed evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451115555)).
 - [x] Define repeatable startup, steady-state gameplay, and important load/warp transition scenarios ([verified preflight](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5449436971)).
 - [x] Automate alternating A/B sample order ([preregistered runner](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170)).
-- [ ] Run at least five A/B samples per build in the defined alternating order.
-- [ ] Measure at least 180 seconds of steady-state gameplay in every sample.
-- [ ] Record sanitized raw results, environment metadata, exact commits, scripts, and calculation methods in the repository.
+- [x] Run five A/B samples per build in the defined fixed A-before-B paired order ([20 accepted captures](https://github.com/4eh5xitv6787h645ebv/SMAPI/tree/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/raw)).
+- [x] Measure at least 180 seconds of steady-state gameplay in every sample ([machine-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.json)).
+- [x] Record sanitized raw results, environment metadata, exact commits, scripts, and calculation methods in the repository ([reviewed evidence bundle](https://github.com/4eh5xitv6787h645ebv/SMAPI/tree/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world)).
 
 ### Measurements and analysis
 
-- [ ] Measure startup phases.
-- [ ] Measure mean, p50, p95, p99, and maximum update time.
-- [ ] Measure SMAPI framework overhead.
-- [ ] Measure update-and-draw time.
-- [ ] Measure allocations per tick.
-- [ ] Measure GC collection counts.
-- [ ] Measure slow-tick counts.
-- [ ] Measure important load and warp transitions.
-- [ ] Measure diagnostics-disabled overhead.
-- [ ] Measure diagnostics-enabled overhead.
-- [ ] Report distributions and run-to-run variation.
+- [x] Measure startup phases ([machine-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.json)).
+- [x] Measure mean, p50, p95, p99, and maximum update elapsed duration ([summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.md)).
+- [x] Measure the SMAPI framework envelope with explicit elapsed-duration semantics and attribution limits ([machine-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.json)).
+- [x] Measure accumulated update-and-draw elapsed duration per draw interval with explicit non-frame semantics ([machine-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.json)).
+- [x] Measure allocations per update ([summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.md)).
+- [x] Measure process and coincident GC collection counts ([machine-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.json)).
+- [x] Measure slow-update counts and normalized percentages ([summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.md)).
+- [x] Measure important load and warp transitions ([summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.md)).
+- [x] Measure diagnostics-disabled control overhead ([summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.md)).
+- [x] Measure diagnostics-enabled overhead ([summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.md)).
+- [x] Report every per-run distribution, 56-field cross-run variation group, and 63 paired metric families ([machine-readable summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/9480e39737d201a9dbb7a9737f41c4b848bee5f3/benchmarks/linux-real-world/results/summary.json)).
 - [x] State clearly that one-machine results are not universal FPS claims ([benchmark methodology](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/3c98eadd2bddc24d43c889afb11b155e92469882/benchmarks/linux-real-world/README.md)).
-- [ ] Identify and fix every confirmed fork regression.
-- [ ] Rerun comparisons affected by fixes.
-- [ ] Obtain an independent performance-results review.
-- [ ] Obtain an independent methodology-and-conclusions review.
-- [ ] Address every actionable methodology or conclusion finding.
+- [x] Review all adverse signals and confirm that none establish a fork regression requiring a code fix; retain higher selected-core busy time, Gen1 counts, and noisy Farm timing as limitations ([independent review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451115555)).
+- [x] Rerun every comparison after affected harness/probe fixes; the final uninterrupted suite accepted all 20 captures ([reviewed evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451115555)).
+- [x] Obtain independent performance-results and failure-analysis reviews ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451115555)).
+- [x] Obtain independent methodology-and-conclusions reviews ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451115555)).
+- [x] Address every actionable methodology, security/privacy, failure-analysis, and conclusion finding ([25 passing tests and review summary](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451115555)).
 
 ### Phase 1 publication and integration
 
-- [ ] Update `README.md` with current 4.5.2-versus-fork evidence and limitations.
-- [ ] Update the GitHub Pages comparison with current evidence and limitations.
-- [ ] Update the performance audit with current evidence and limitations.
-- [ ] Update release notes with current evidence and limitations.
+- [x] Update `README.md` with current 4.5.2-versus-fork evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
+- [x] Update the GitHub Pages home and comparison with current evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
+- [x] Update the performance audit with current evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
+- [x] Update release notes with current evidence and limitations ([`bc5937c2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/bc5937c2)).
 - [x] Open a focused [Phase 1 fork pull request #170](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170).
-- [ ] Obtain an independent Phase 1 final-diff review.
-- [ ] Obtain an independent Phase 1 documentation review.
-- [ ] Pass required CI and repository checks.
-- [ ] Address every actionable Phase 1 review finding.
+- [x] Obtain independent Phase 1 final-diff, evidence, and security/privacy reviews ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451242326)).
+- [x] Obtain independent Phase 1 documentation, performance-claims, and privacy reviews ([PASS evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451183384)).
+- [x] Pass applicable repository checks; no GitHub PR status checks are configured ([25 tests, probe build, link validation, and diff-check evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451242326)).
+- [x] Address every actionable Phase 1 review finding and obtain re-review PASS ([final review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/170#issuecomment-5451242326)).
 - [ ] Merge the Phase 1 pull request into `develop` and close it.
 - [ ] Verify `develop` equals `origin/develop` after the merge.
 
