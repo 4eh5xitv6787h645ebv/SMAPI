@@ -46,6 +46,7 @@
   <Folder Name="/Internal/">
     <Project Path="../benchmarks/SMAPI.PerformanceBenchmarks/SMAPI.PerformanceBenchmarks.csproj" />
     <Project Path="SMAPI.Internal/SMAPI.Internal.shproj" />
+    <Project Path="SMAPI.Installer.Core.Tests/SMAPI.Installer.Core.Tests.csproj" />
     <Project Path="SMAPI.ModBuildConfig.Analyzer.Tests/SMAPI.ModBuildConfig.Analyzer.Tests.csproj" />
     <Project Path="SMAPI.RuntimeDispatcher.Tests/SMAPI.RuntimeDispatcher.Tests.csproj" />
     <Project Path="SMAPI.Tests.ModApiConsumer/SMAPI.Tests.ModApiConsumer.csproj" />
@@ -56,6 +57,7 @@
     <Project Path="SMAPI.Mods.ConsoleCommands/SMAPI.Mods.ConsoleCommands.csproj" />
     <Project Path="SMAPI.Mods.SaveBackup/SMAPI.Mods.SaveBackup.csproj" />
   </Folder>
+  <Project Path="SMAPI.Installer.Core/SMAPI.Installer.Core.csproj" />
   <Project Path="SMAPI.Installer/SMAPI.Installer.csproj">
     <BuildDependency Project="SMAPI.Mods.ConsoleCommands/SMAPI.Mods.ConsoleCommands.csproj" />
     <BuildDependency Project="SMAPI.Mods.SaveBackup/SMAPI.Mods.SaveBackup.csproj" />

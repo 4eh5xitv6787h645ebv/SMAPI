@@ -205,6 +205,18 @@ Scope constraints apply throughout:
 - [ ] Verify practical X11 behavior.
 - [ ] Verify practical Wayland behavior.
 
+### GUI screenshots and visual documentation
+
+- [ ] Capture current screenshots from the exact reviewed GUI build, without private fixture names, paths, or other personal data.
+- [ ] Document game-folder detection and manual selection with screenshots.
+- [ ] Document install, update, repair, and uninstall states with screenshots.
+- [ ] Document backup, recovery selection, and rollback states with screenshots.
+- [ ] Document download progress, checksum verification, and successful completion with screenshots.
+- [ ] Document understandable error, modified/unknown-file protection, and detailed-log views with screenshots.
+- [ ] Document keyboard focus, practical screen scaling, X11, and Wayland behavior with screenshots.
+- [ ] Add the current screenshot set to both repository user documentation and GitHub Pages.
+- [ ] Verify every published screenshot and its containing documentation page returns HTTP 200.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
@@ -214,15 +226,15 @@ Scope constraints apply throughout:
 - [ ] Add corrupted-package tests.
 - [ ] Add rollback tests.
 - [ ] Add accessibility-focused tests.
-- [ ] Obtain independent installer architecture review.
-- [ ] Obtain independent security/privacy review.
-- [ ] Obtain independent UX/accessibility review.
-- [ ] Obtain independent Phase 4 testing review.
+- [x] Obtain [independent installer architecture review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453931128).
+- [x] Obtain [independent security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890576).
+- [x] Obtain [independent UX/accessibility review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
+- [x] Obtain [independent Phase 4 testing review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
 - [ ] Obtain independent Phase 4 final-diff review.
 - [ ] Address every actionable Phase 4 review finding.
 - [ ] Package and document the GUI through the release workflow only after independent security/privacy and UX/accessibility findings are addressed.
 - [ ] Document GUI installation, update, repair, uninstall, backup, rollback, logs, errors, and troubleshooting.
-- [ ] Open a focused Phase 4 fork pull request.
+- [x] Open focused [Phase 4 fork pull request #175](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175).
 - [ ] Pass required CI and repository checks.
 - [ ] Merge the Phase 4 pull request into `develop` and close it.
 - [ ] Publish a publicly downloadable GUI package tied to an exact reviewed commit.
@@ -388,6 +400,7 @@ or pull request was performed.
 - [ ] Documentation covers diagnostics.
 - [ ] Documentation covers privacy.
 - [ ] Documentation covers screenshots.
+- [ ] Documentation screenshots cover every major GUI workflow and state listed in Phase 4.
 - [ ] Documentation covers troubleshooting.
 - [ ] GitHub Pages builds successfully.
 - [ ] Every important GitHub Pages page and asset returns HTTP 200.
