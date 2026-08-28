@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Globalization;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Ownership.Persistence;
@@ -677,12 +678,15 @@ internal enum RecoveryPruneBoundary
     BeforeRetentionPublish,
     AfterRetentionPublish,
     BeforeGenerationCleanup,
-    AfterGenerationCleanup
+    AfterGenerationCleanup,
+    BeforePendingRetentionIdentityCheck
 }
 
 internal interface IRecoveryPruneFaultInjector
 {
     void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null);
+    void AfterCleanupEntryUnlink(Guid generationId, string relativeEntryPath) { }
+    void BeforeCleanupDirectoryOpen(Guid generationId, string relativeDirectoryPath) { }
 }
 
 internal sealed class NullRecoveryPruneFaultInjector : IRecoveryPruneFaultInjector
@@ -880,7 +884,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             );
         }
         if (state.Retention is not null)
-            VerifyPendingRemovedGenerations(game, gameRoot, headDigest, state, physical, cancellationToken);
+            VerifyPendingRemovedGenerations(game, state, physical, cancellationToken);
         HashSet<Guid> visible = catalog.ToHashSet();
         HashSet<Guid> permittedRemoved = state.Retention?.RemovedGenerationIds.ToHashSet()
             ?? new HashSet<Guid>();
@@ -907,8 +911,6 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
 
     private static void VerifyPendingRemovedGenerations(
         LinuxAnchoredFileSystem game,
-        GameRootIdentity gameRoot,
-        Sha256Digest headDigest,
         RecoveryHistoryState state,
         IReadOnlySet<Guid> physical,
         CancellationToken cancellationToken
@@ -916,32 +918,19 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
     {
         RecoveryRetentionRecord retention = state.Retention
             ?? throw new ArgumentException("A retention record is required.", nameof(state));
-        CommittedRecoveryPointer pointer = ReadPreviousPointer(game, state.Chain[^1], cancellationToken);
+        bool encounteredMissing = false;
         for (int index = 0; index < retention.RemovedGenerationIds.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Guid expectedId = retention.RemovedGenerationIds[index];
-            if (pointer.GenerationId != expectedId)
-                throw new OwnershipDocumentException("The recovery-retention removed catalog doesn't match its authenticated pointer chain.");
             if (!physical.Contains(expectedId))
             {
-                if (retention.RemovedGenerationIds.Skip(index + 1).Any(physical.Contains))
-                    throw new OwnershipDocumentException("The recovery-retention physical cleanup has a non-contiguous gap.");
-                return;
+                encounteredMissing = true;
+                continue;
             }
-            using (CommittedRecoveryHandle verified = Open(
-                game,
-                gameRoot.CanonicalPath,
-                gameRoot,
-                pointer,
-                headDigest,
-                cancellationToken
-            ))
-            {
-                // Full verification must complete before authenticated installer state is destroyed.
-            }
-            if (index + 1 < retention.RemovedGenerationIds.Count)
-                pointer = ReadPreviousPointer(game, pointer, cancellationToken);
+            if (encounteredMissing)
+                throw new OwnershipDocumentException("The recovery-retention physical cleanup has a non-contiguous gap.");
+            AssertSafePartialCleanupGeneration(game, expectedId, cancellationToken);
         }
     }
 
@@ -1007,7 +996,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         foreach (Guid generationId in plan.CleanupGenerationIds.Reverse())
         {
             faultInjector.AtBoundary(RecoveryPruneBoundary.BeforeGenerationCleanup, generationId);
-            if (DeleteGenerationIfPresent(lease.Game, generationId))
+            if (DeleteGenerationIfPresent(lease.Game, generationId, faultInjector))
                 removed++;
             faultInjector.AtBoundary(RecoveryPruneBoundary.AfterGenerationCleanup, generationId);
         }
@@ -1143,8 +1132,17 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         using (LinuxAnchoredFile pending = game.CreateNewFile(PendingRetentionPath, PrivateFileMode))
         {
             game.AppendAndFsync(pending, PendingRetentionPath, bytes, 0, bytes.Length);
+            faultInjector.AtBoundary(RecoveryPruneBoundary.BeforePendingRetentionIdentityCheck);
             pendingIdentity = game.Stat(PendingRetentionPath)
                 ?? throw new OwnershipDocumentException("The pending recovery-retention publication disappeared.");
+            if (
+                !pendingIdentity.IsSameObject(pending.Identity)
+                || pendingIdentity.Kind != LinuxAnchoredEntryKind.RegularFile
+                || pendingIdentity.LinkCount != 1
+                || pendingIdentity.UnixMode != PrivateFileMode
+                || pendingIdentity.Size != bytes.LongLength
+            )
+                throw new OwnershipDocumentException("The pending recovery-retention publication path changed before publication.");
         }
         faultInjector.AtBoundary(RecoveryPruneBoundary.BeforeRetentionPublish);
         game.ReplaceFileAtomically(PendingRetentionPath, RetentionPath, pendingIdentity, expectedExisting);
@@ -1162,14 +1160,21 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         Sha256Digest? PendingRetentionSha256
     );
 
-    private static bool DeleteGenerationIfPresent(LinuxAnchoredFileSystem game, Guid generationId)
+    private static bool DeleteGenerationIfPresent(
+        LinuxAnchoredFileSystem game,
+        Guid generationId,
+        IRecoveryPruneFaultInjector faultInjector
+    )
     {
         string path = $".smapi-installer/recovery/generations/{generationId:N}";
         LinuxFileIdentity? generationIdentity = game.Stat(path);
         if (generationIdentity is null)
             return false;
+        faultInjector.BeforeCleanupDirectoryOpen(generationId, ".");
         using (LinuxAnchoredFileSystem generation = game.OpenSubdirectory(path))
         {
+            if (!generation.Identity.IsSameObject(generationIdentity) || generation.Identity.UnixMode != PrivateDirectoryMode)
+                throw new OwnershipDocumentException("The recovery-generation directory changed before cleanup.");
             IReadOnlyList<string> rootEntries = generation.EnumerateEntryNames(maximumEntries: 5);
             HashSet<string> allowed = new(StringComparer.Ordinal)
             {
@@ -1185,19 +1190,23 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             {
                 LinuxFileIdentity filesIdentity = generation.Stat("files")
                     ?? throw new OwnershipDocumentException("Recovery content disappeared during pruning.");
+                faultInjector.BeforeCleanupDirectoryOpen(generationId, "files");
                 using (LinuxAnchoredFileSystem files = generation.OpenSubdirectory("files"))
                 {
+                    if (!files.Identity.IsSameObject(filesIdentity) || files.Identity.UnixMode != PrivateDirectoryMode)
+                        throw new OwnershipDocumentException("The recovery-content directory changed before cleanup.");
                     IReadOnlyList<string> names = files.EnumerateEntryNames(maximumEntries: TransactionPlan.MaximumOperationCount);
                     for (int index = 0; index < names.Count; index++)
                     {
                         string name = names[index];
-                        if (name != index.ToString("D8"))
+                        if (!IsCanonicalContentIndex(name))
                             throw new OwnershipDocumentException("Recovery content indices aren't canonical during pruning.");
                         LinuxFileIdentity identity = files.Stat(name)
                             ?? throw new OwnershipDocumentException("Recovery content disappeared during pruning.");
                         if (identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1 || identity.UnixMode != PrivateFileMode)
                             throw new OwnershipDocumentException("Recovery content has unsafe metadata and wasn't pruned.");
                         files.UnlinkFile(name, identity);
+                        faultInjector.AfterCleanupEntryUnlink(generationId, $"files/{name}");
                     }
                 }
                 LinuxFileIdentity emptiedFiles = generation.Stat("files")
@@ -1213,6 +1222,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                 if (identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1 || identity.UnixMode != PrivateFileMode)
                     throw new OwnershipDocumentException("A recovery document has unsafe metadata and wasn't pruned.");
                 generation.UnlinkFile(name, identity);
+                faultInjector.AfterCleanupEntryUnlink(generationId, name);
             }
         }
         LinuxFileIdentity emptiedGeneration = game.Stat(path)
@@ -1222,6 +1232,60 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         game.RemoveEmptyDirectory(path, emptiedGeneration);
         return true;
     }
+
+    private static void AssertSafePartialCleanupGeneration(
+        LinuxAnchoredFileSystem game,
+        Guid generationId,
+        CancellationToken cancellationToken
+    )
+    {
+        string path = $".smapi-installer/recovery/generations/{generationId:N}";
+        using LinuxAnchoredFileSystem generation = game.OpenSubdirectory(path);
+        if (generation.Identity.UnixMode != PrivateDirectoryMode)
+            throw new OwnershipDocumentException("A partially cleaned recovery-generation directory isn't private.");
+        IReadOnlyList<string> rootEntries = generation.EnumerateEntryNames(maximumEntries: 5);
+        HashSet<string> allowed = new(StringComparer.Ordinal)
+        {
+            "snapshot.json",
+            "previous-receipt.json",
+            "previous-manifest.json",
+            "previous-pointer.json",
+            "files"
+        };
+        if (rootEntries.Any(name => !allowed.Contains(name)))
+            throw new OwnershipDocumentException("A partially cleaned recovery generation contains unknown state.");
+        foreach (string name in rootEntries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LinuxFileIdentity identity = generation.Stat(name)
+                ?? throw new OwnershipDocumentException("A partially cleaned recovery entry disappeared during inspection.");
+            if (name == "files")
+            {
+                if (identity.Kind != LinuxAnchoredEntryKind.Directory || identity.UnixMode != PrivateDirectoryMode)
+                    throw new OwnershipDocumentException("A partially cleaned recovery-content directory is unsafe.");
+                using LinuxAnchoredFileSystem files = generation.OpenSubdirectory(name);
+                foreach (string contentName in files.EnumerateEntryNames(maximumEntries: TransactionPlan.MaximumOperationCount))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!IsCanonicalContentIndex(contentName))
+                        throw new OwnershipDocumentException("A partially cleaned recovery content index isn't canonical.");
+                    LinuxFileIdentity content = files.Stat(contentName)
+                        ?? throw new OwnershipDocumentException("Partially cleaned recovery content disappeared during inspection.");
+                    if (content.Kind != LinuxAnchoredEntryKind.RegularFile || content.LinkCount != 1 || content.UnixMode != PrivateFileMode)
+                        throw new OwnershipDocumentException("Partially cleaned recovery content has unsafe metadata.");
+                }
+            }
+            else if (identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1 || identity.UnixMode != PrivateFileMode)
+                throw new OwnershipDocumentException("A partially cleaned recovery document has unsafe metadata.");
+        }
+    }
+
+    private static bool IsCanonicalContentIndex(string name)
+        => name.Length == 8
+            && int.TryParse(name, NumberStyles.None, CultureInfo.InvariantCulture, out int index)
+            && index >= 0
+            && index < TransactionPlan.MaximumOperationCount
+            && name == index.ToString("D8", CultureInfo.InvariantCulture);
 
     private static CommittedRecoveryHandle Open(
         LinuxAnchoredFileSystem game,
