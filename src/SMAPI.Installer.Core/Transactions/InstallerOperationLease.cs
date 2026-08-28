@@ -154,13 +154,30 @@ internal sealed class InstallerOperationLease : IDisposable
     public void AssertRootAndGeneration(GameRootIdentity expectedRoot, ulong expectedGeneration)
     {
         this.AssertUsable();
-        using LinuxAnchoredFileSystem currentlyNamedRoot = new(this.CanonicalGameRoot);
-        if (
-            expectedRoot != this.RootIdentity
-            || !expectedRoot.Matches(this.Game.GetCurrentRootIdentity())
-            || !expectedRoot.Matches(currentlyNamedRoot.Identity)
-        )
-            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The selected game-root identity changed after confirmation.");
+        LinuxAnchoredFileSystem currentlyNamedRoot;
+        try
+        {
+            currentlyNamedRoot = new LinuxAnchoredFileSystem(this.CanonicalGameRoot);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InstallerTransactionException(
+                TransactionErrorCode.PathChanged,
+                "The selected game-root path disappeared or became inaccessible after the operation lock was acquired.",
+                exception
+            );
+        }
+        using (currentlyNamedRoot)
+        {
+            if (
+                expectedRoot != this.RootIdentity
+                || !expectedRoot.Matches(this.Game.GetCurrentRootIdentity())
+                || !expectedRoot.Matches(currentlyNamedRoot.Identity)
+            )
+            {
+                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The selected game-root identity changed after confirmation.");
+            }
+        }
         (LinuxFileIdentity identity, ulong generation) = ReadGeneration(this.Workspace);
         if (identity != this.GenerationIdentity || generation != this.Generation || generation != expectedGeneration)
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The installer operation generation changed after confirmation.");

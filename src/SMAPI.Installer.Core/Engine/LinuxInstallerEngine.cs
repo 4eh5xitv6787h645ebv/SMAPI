@@ -145,6 +145,50 @@ public sealed class LinuxInstallerEngine
             cancellationToken
         );
 
+    /// <summary>
+    /// Explicitly recover any interrupted installer transaction under one anchored exclusive lease, then invalidate
+    /// every prior inspection by publishing a newer operation generation.
+    /// </summary>
+    /// <remarks>
+    /// Cancellation is honored before recovery begins. Once recovery starts it runs to a safe durable conclusion.
+    /// The caller must discard every prior inspection and inspect again after this method succeeds.
+    /// </remarks>
+    public Task<InterruptedOperationRecoveryResult> RecoverInterruptedOperationAsync(
+        string gameRoot,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(() => this.RecoverInterruptedOperation(gameRoot, cancellationToken), cancellationToken);
+
+    private InterruptedOperationRecoveryResult RecoverInterruptedOperation(
+        string gameRoot,
+        CancellationToken cancellationToken
+    )
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        this.Progress.Report(new(TransactionStage.AcquiringLock, 0, null));
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(gameRoot);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        GameRootIdentity gameRootIdentity = lease.RootIdentity;
+        ulong previousGeneration = lease.Generation;
+        this.Progress.Report(new(TransactionStage.Recovering, 0, null));
+        IReadOnlyList<TransactionResult> recovered = this.Executor.RecoverLocked(lease);
+        if (lease.Generation == previousGeneration)
+            lease.ReserveNextGeneration(previousGeneration);
+        else if (recovered.Count == 0 || lease.Generation <= previousGeneration)
+            throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "Interrupted-operation recovery published an inconsistent operation generation.");
+
+        lease.AssertRootAndGeneration(gameRootIdentity, lease.Generation);
+        InterruptedOperationRecoveryResult result = new(
+            gameRootIdentity,
+            previousGeneration,
+            lease.Generation,
+            recovered
+        );
+        this.Progress.Report(new(TransactionStage.Completed, recovered.Count, recovered.Count));
+        return result;
+    }
+
     private InspectedInstallationState Inspect(
         string gameRoot,
         InstallationAction action,

@@ -13,7 +13,7 @@ internal sealed class InstallerTransactionExecutor
     internal const string WorkspaceMarkerName = "state-version";
     internal const string WorkspaceMarkerContents = "smapi-installer-state-v2\n";
     private const int MaximumRetainedFinalTransactions = 16;
-    private const int MaximumTransactionStoreEntries = 32;
+    internal const int MaximumTransactionStoreEntries = 32;
     private readonly ITransactionProgressSink Progress;
     private readonly ITransactionFaultInjector FaultInjector;
 
