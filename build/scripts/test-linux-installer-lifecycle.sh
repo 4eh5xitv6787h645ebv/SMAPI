@@ -200,6 +200,25 @@ expect_exit 1 --no-prompt --uninstall --game-path "$linked_parent_game"
 test "$(sha256sum "$linked_parent_target/ErrorHandler/sentinel.txt" | cut -d ' ' -f 1)" = "$linked_delete_sha"
 test -L "$linked_parent_game/Mods"
 
+# Legacy app-data migration must not move an external .smapi directory through a linked Saves
+# parent. Both the source and destination must remain unchanged when confinement rejects it.
+legacy_game="$test_root/legacy-migration-game"
+external_saves="$test_root/external-saves"
+mkdir -p "$legacy_game" "$external_saves/.smapi"
+cp "$reference_path/Stardew Valley.dll" "$legacy_game/Stardew Valley.dll"
+printf '{}\n' > "$legacy_game/Stardew Valley.deps.json"
+printf '#!/usr/bin/env bash\n' > "$legacy_game/StardewValley"
+chmod 755 "$legacy_game/StardewValley"
+printf 'external legacy sentinel\n' > "$external_saves/.smapi/sentinel.txt"
+legacy_sha="$(sha256sum "$external_saves/.smapi/sentinel.txt" | cut -d ' ' -f 1)"
+test ! -e "$isolated_config/StardewValley/.smapi"
+ln -s "$external_saves" "$isolated_config/StardewValley/Saves"
+expect_exit 1 --no-prompt --install --game-path "$legacy_game"
+test -L "$isolated_config/StardewValley/Saves"
+test -d "$external_saves/.smapi"
+test "$(sha256sum "$external_saves/.smapi/sentinel.txt" | cut -d ' ' -f 1)" = "$legacy_sha"
+test ! -e "$isolated_config/StardewValley/.smapi"
+
 # A non-interactive filesystem failure must return promptly and nonzero instead of retrying forever.
 failure_game="$test_root/read-only-game"
 mkdir -p "$failure_game"

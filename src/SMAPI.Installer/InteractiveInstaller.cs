@@ -385,6 +385,8 @@ internal class InteractiveInstaller
 
                 if (oldDir.Exists)
                 {
+                    this.AssertPathIsConfined(oldDir.FullName, dataPath, allowFinalLink: false);
+                    this.AssertPathIsConfined(newDir.FullName, dataPath, allowFinalLink: false);
                     if (newDir.Exists)
                         this.InteractivelyDelete(oldDir.FullName, allowUserInput, dataPath);
                     else
