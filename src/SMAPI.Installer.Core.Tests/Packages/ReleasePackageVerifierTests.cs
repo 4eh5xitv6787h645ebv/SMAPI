@@ -52,6 +52,12 @@ public sealed class ReleasePackageVerifierTests
         result.SizeBytes.Should().Be(bytes.Length);
         result.SourceCommit.Should().Be(ReleasePackageVerifierTests.Commit);
         result.SourceTree.Should().Be(ReleasePackageVerifierTests.Tree);
+        result.InstallationIdentity.Tag.Should().Be(this.Identity.Tag);
+        result.InstallationIdentity.EmbeddedVersion.Should().Be(this.Identity.EmbeddedVersion);
+        result.InstallationIdentity.PackageAssetName.Should().Be(this.Identity.PackageAssetName);
+        result.InstallationIdentity.SourceCommit.Should().Be(ReleasePackageVerifierTests.Commit);
+        result.InstallationIdentity.SourceTree.Should().Be(ReleasePackageVerifierTests.Tree);
+        result.InstallationIdentity.PackageSha256.Value.Should().Be(hash);
     }
 
     [Test]

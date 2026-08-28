@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
@@ -69,6 +70,9 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
     /// <summary>The exact reviewed source tree.</summary>
     public string SourceTree { get; }
 
+    /// <summary>The authoritative ownership identity derived from the cross-verified release artifacts.</summary>
+    public InstallationReleaseIdentity InstallationIdentity { get; }
+
     internal VerifiedReleasePackage(
         ForkReleaseIdentity identity,
         string sha256,
@@ -85,6 +89,15 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         this.SizeBytes = sizeBytes;
         this.SourceCommit = sourceCommit;
         this.SourceTree = sourceTree;
+        this.InstallationIdentity = new InstallationReleaseIdentity(
+            ForkReleaseIdentity.RepositoryUrl,
+            identity.Tag,
+            identity.EmbeddedVersion,
+            identity.PackageAssetName,
+            sourceCommit,
+            sourceTree,
+            Sha256Digest.Parse(sha256)
+        );
         this.StagingDirectory = stagingDirectory;
         this.StagingPath = stagingPath;
         this.Stream = stream;
