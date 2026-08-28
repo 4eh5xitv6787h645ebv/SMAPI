@@ -215,7 +215,7 @@ public sealed class ReleaseAssetSetTests
     }
 
     [Test]
-    public async Task VerifyReleaseAsync_DoesNotAuthenticateInformativeRunnerInputs()
+    public async Task VerifyReleaseAsync_DoesNotAuthenticateInformativeBuildInputs()
     {
         string package = this.CreatePackage();
         string output = Path.Combine(this.TempRoot, "informative");
@@ -223,8 +223,10 @@ public sealed class ReleaseAssetSetTests
         await tool.CreateAsync(package, output, this.Inputs);
         string metadataPath = Path.Combine(output, "build-metadata.json");
         string metadata = await File.ReadAllTextAsync(metadataPath);
+        metadata = metadata.Replace("/runs/12/attempts/1", "/runs/34/attempts/2", StringComparison.Ordinal);
         metadata = metadata.Replace("ubuntu24-20260824.1", "ubuntu24-downloaded", StringComparison.Ordinal);
         metadata = metadata.Replace(new string('3', 40), new string('4', 40), StringComparison.Ordinal);
+        metadata = metadata.Replace("2026-08-29T01:02:03Z", "2026-08-30T04:05:06Z", StringComparison.Ordinal);
         await File.WriteAllTextAsync(metadataPath, metadata);
 
         await tool.VerifyReleaseAsync(output, this.GetVerificationInputs());

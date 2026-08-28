@@ -10,8 +10,8 @@ using StardewModdingAPI.Installer.Core.Security;
 namespace StardewModdingAPI.Installer.PackageTool;
 
 /// <summary>
-/// The explicit inputs recorded in one release artifact set. Runner, timestamp, reference-build, and .NET fields
-/// are informational and aren't authenticated by clean-machine quartet verification.
+/// The explicit inputs recorded in one release artifact set. Workflow-run, runner, timestamp, reference-build,
+/// and .NET fields are informational and aren't authenticated by clean-machine quartet verification.
 /// </summary>
 internal sealed record ReleaseAssetSetInputs(
     ForkReleaseIdentity Identity,

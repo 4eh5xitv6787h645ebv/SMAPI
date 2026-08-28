@@ -24,8 +24,11 @@ official stable release:
 Later alphas increment the final number. A published tag is never reused or moved. The public
 release assets are built from the exact tag commit by GitHub Actions; the build records its source
 commit, tree, pinned game-reference commit, runner, SDKs, package size, and SHA-256. Recorded inputs
-and provenance establish identity and integrity, but byte-for-byte reproducible ZIP output is not
-claimed.
+describe how the artifact was built, but only the package/manifest hashes and independently verified
+GitHub attestations establish published identity, integrity, and provenance. The workflow-run URL,
+runner, pinned reference-build commit, timestamp, and .NET details are bounded informational fields;
+clean-machine quartet verification does not authenticate them. Byte-for-byte reproducible ZIP
+output is not claimed.
 
 ## Requirements and safety boundary
 
