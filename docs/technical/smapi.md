@@ -1,4 +1,9 @@
-&larr; [README](../README.md)
+---
+layout: default
+title: SMAPI technical documentation
+---
+
+&larr; [Documentation home](../index.md)
 
 This file provides more technical documentation about SMAPI. If you only want to use or create
 mods, this section isn't relevant to you; see the main README to use or create mods.

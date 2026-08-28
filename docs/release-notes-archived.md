@@ -1,4 +1,9 @@
-← [README](README.md)
+---
+layout: default
+title: Archived release notes
+---
+
+← [Documentation home](index.md)
 
 # Release notes
 ## 4.0.0 and later

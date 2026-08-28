@@ -1,4 +1,9 @@
-← [README](README.md)
+---
+layout: default
+title: Release notes
+---
+
+← [Documentation home](index.md)
 
 # Release notes
 ## Upcoming release

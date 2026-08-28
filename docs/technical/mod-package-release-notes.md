@@ -1,4 +1,9 @@
-&larr; [mod build config](./mod-build-config.md)
+---
+layout: default
+title: Mod build package release notes
+---
+
+&larr; [Mod build configuration](mod-package.md)
 
 ## Release notes
 ## 4.4.0

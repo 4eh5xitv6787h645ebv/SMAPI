@@ -1,3 +1,8 @@
+---
+layout: default
+title: Mod Health Report implementation plan
+---
+
 # Mod Health Report implementation plan
 
 ## Status and scope

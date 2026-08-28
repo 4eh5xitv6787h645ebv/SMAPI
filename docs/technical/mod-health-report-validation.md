@@ -1,3 +1,8 @@
+---
+layout: default
+title: Linux Mod Health Report validation record
+---
+
 # Linux Mod Health Report validation record
 
 This record captures reproducible evidence for the Linux desktop Mod Health Report. It complements the contract in `mod-health-report-plan.md`; it does not extend support to Android/mobile or address the unrelated .NET 10 menu-click issue.

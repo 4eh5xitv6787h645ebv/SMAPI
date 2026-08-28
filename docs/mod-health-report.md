@@ -1,3 +1,9 @@
+---
+layout: default
+title: Mod Health Report guide
+description: Capture, view, and understand a private local Mod Health Report on Linux desktop SMAPI.
+---
+
 # Mod Health Report guide
 
 The Mod Health Report is a private, local diagnostic for Linux desktop SMAPI. It summarizes mod

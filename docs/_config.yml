@@ -1,0 +1,17 @@
+title: SMAPI Linux Desktop Documentation
+description: Guides and technical documentation for the Linux desktop version of SMAPI.
+url: https://4eh5xitv6787h645ebv.github.io
+baseurl: /SMAPI
+repository: 4eh5xitv6787h645ebv/SMAPI
+theme: jekyll-theme-cayman
+show_downloads: false
+
+plugins:
+  - jekyll-relative-links
+
+relative_links:
+  enabled: true
+  collections: true
+
+exclude:
+  - technical/tools/__pycache__
