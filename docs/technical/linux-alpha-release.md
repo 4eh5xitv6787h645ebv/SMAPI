@@ -120,8 +120,9 @@ backup rules. If terminal automation cannot run it, `internal/linux/install.dat`
 3. Copy the staged payload into the game directory without deleting unrelated files.
 4. Copy `Stardew Valley.deps.json` to `StardewModdingAPI-net6.deps.json`.
 5. Rename staged `unix-launcher.sh` to `StardewValley`.
-6. Mark `StardewValley`, `StardewModdingAPI`, both `StardewModdingAPI-net*` hosts, the private
-   `smapi-internal/dotnet/dotnet`, and every private-runtime `createdump` executable as mode 755.
+6. Mark `StardewValley`, `StardewModdingAPI`, both `StardewModdingAPI-net*` hosts, and every
+   private-runtime `createdump` executable as mode 755. The private app-relative runtime contains
+   `host/fxr` and `shared/Microsoft.NETCore.App`; it intentionally does not bundle the `dotnet` CLI.
 
 Manual removal must follow the exact file manifest in the installer source. Do not recursively
 delete the game folder, `Mods`, saves, `ErrorLogs`, or `HealthReports`.

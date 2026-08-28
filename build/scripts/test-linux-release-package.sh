@@ -55,8 +55,7 @@ for required_path in \
     StardewModdingAPI-net6.dll \
     StardewModdingAPI-net10.dll \
     StardewModdingAPI-net6.runtimeconfig.json \
-    StardewModdingAPI-net10.runtimeconfig.json \
-    smapi-internal/dotnet/dotnet; do
+    StardewModdingAPI-net10.runtimeconfig.json; do
     if [[ ! -e "$temp_root/bundle/$required_path" ]]; then
         echo "Linux install payload is missing '$required_path'." >&2
         exit 1
@@ -66,8 +65,17 @@ done
 test -x "$temp_root/bundle/StardewModdingAPI"
 test -x "$temp_root/bundle/StardewModdingAPI-net6"
 test -x "$temp_root/bundle/StardewModdingAPI-net10"
-test -x "$temp_root/bundle/smapi-internal/dotnet/dotnet"
-if ! find "$temp_root/bundle/smapi-internal/dotnet" -type f -name createdump -executable -print -quit | grep -q .; then
+private_runtime="$temp_root/bundle/smapi-internal/dotnet"
+mapfile -t private_hostfxr < <(find "$private_runtime/host/fxr" -mindepth 2 -maxdepth 2 -type f -name libhostfxr.so -print 2>/dev/null)
+if [[ ${#private_hostfxr[@]} -ne 1 ]]; then
+    echo "Packaged private runtime must contain exactly one host/fxr/<version>/libhostfxr.so." >&2
+    exit 1
+fi
+private_runtime_version="$(basename "$(dirname "${private_hostfxr[0]}")")"
+test -f "$private_runtime/shared/Microsoft.NETCore.App/$private_runtime_version/Microsoft.NETCore.App.runtimeconfig.json"
+test -f "$private_runtime/shared/Microsoft.NETCore.App/$private_runtime_version/libhostpolicy.so"
+test -f "$private_runtime/shared/Microsoft.NETCore.App/$private_runtime_version/libcoreclr.so"
+if ! find "$private_runtime" -type f -name createdump -executable -print -quit | grep -q .; then
     echo "Packaged private runtime has no executable createdump." >&2
     exit 1
 fi
