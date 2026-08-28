@@ -367,23 +367,39 @@ internal sealed class InstallerTransactionExecutor
     internal static TransactionErrorCode GetErrorCode(Exception exception)
         => exception switch
         {
-            InstallerTransactionException transaction => transaction.Code,
+            InstallerTransactionException transaction => GetActionableIoErrorCode(transaction.InnerException) ?? transaction.Code,
             TransactionRecoveryAttemptException recovery when recovery.InnerException is not null => GetErrorCode(recovery.InnerException),
-            AggregateException aggregate when aggregate.InnerExceptions.Count > 0 => GetErrorCode(aggregate.InnerExceptions[^1]),
+            AggregateException aggregate when aggregate.InnerExceptions.Count > 0 => GetActionableIoErrorCode(aggregate) ?? GetErrorCode(aggregate.InnerExceptions[^1]),
             UnauthorizedAccessException => TransactionErrorCode.PermissionDenied,
             IOException io => GetIoErrorCode(io),
             _ => TransactionErrorCode.IoFailure
         };
 
     private static TransactionErrorCode GetIoErrorCode(IOException exception)
-        => (exception.HResult & 0xffff) switch
+        => GetDirectIoErrorCode(exception)
+            ?? GetActionableIoErrorCode(exception.InnerException)
+            ?? TransactionErrorCode.IoFailure;
+
+    private static TransactionErrorCode? GetDirectIoErrorCode(IOException exception)
+        => (exception is LinuxNativeIOException native ? native.ErrorNumber : exception.HResult & 0xffff) switch
         {
-            28 => TransactionErrorCode.DiskFull, // ENOSPC
+            28 or 122 => TransactionErrorCode.DiskFull, // ENOSPC or EDQUOT
             30 => TransactionErrorCode.ReadOnlyFileSystem, // EROFS
             13 or 1 => TransactionErrorCode.PermissionDenied, // EACCES or EPERM
             18 => TransactionErrorCode.CrossDeviceBoundary, // EXDEV
-            _ when exception.InnerException is not null => GetErrorCode(exception.InnerException),
-            _ => TransactionErrorCode.IoFailure
+            _ => null
+        };
+
+    private static TransactionErrorCode? GetActionableIoErrorCode(Exception? exception)
+        => exception switch
+        {
+            null => null,
+            UnauthorizedAccessException => TransactionErrorCode.PermissionDenied,
+            IOException io => GetDirectIoErrorCode(io) ?? GetActionableIoErrorCode(io.InnerException),
+            AggregateException aggregate => aggregate.InnerExceptions
+                .Select(GetActionableIoErrorCode)
+                .FirstOrDefault(code => code is not null),
+            _ => GetActionableIoErrorCode(exception.InnerException)
         };
 
     internal static string? SafeMessage(TransactionErrorCode? code)
@@ -397,9 +413,9 @@ internal sealed class InstallerTransactionExecutor
             TransactionErrorCode.ConcurrentOperation => "Another installer operation is active.",
             TransactionErrorCode.WorkspaceConflict => "The installer workspace needs attention before continuing.",
             TransactionErrorCode.RecoveryFailed => "Automatic recovery could not safely finish.",
-            TransactionErrorCode.DiskFull => "The selected filesystem does not have enough free space to finish safely.",
+            TransactionErrorCode.DiskFull => "The selected filesystem does not have enough free space or quota to finish safely.",
             TransactionErrorCode.ReadOnlyFileSystem => "The selected filesystem is read-only.",
-            TransactionErrorCode.PermissionDenied => "The current user does not have permission to change an installer-owned path.",
+            TransactionErrorCode.PermissionDenied => "The current user does not have the required permission for the selected game folder or installer files.",
             TransactionErrorCode.CrossDeviceBoundary => "The operation crossed a filesystem boundary which cannot preserve the required atomic transaction.",
             _ => "The installer operation failed because of an input/output error."
         };

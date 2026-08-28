@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Transactions;
 
@@ -110,7 +111,7 @@ internal static class TransactionPath
                 int error = Marshal.GetLastWin32Error();
                 if (error == 2)
                     return PathEntry.Missing;
-                throw new IOException($"Couldn't inspect a transaction path (errno {error}).");
+                throw new LinuxNativeIOException("Couldn't inspect a transaction path", error);
             }
 
             PathEntryKind kind = (data.Mode & FileTypeMask) switch

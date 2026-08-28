@@ -17,6 +17,7 @@ public sealed class TransactionOutcomeTests
     private readonly List<string> TemporaryDirectories = new();
 
     [TestCase(28, TransactionErrorCode.DiskFull)]
+    [TestCase(122, TransactionErrorCode.DiskFull)]
     [TestCase(30, TransactionErrorCode.ReadOnlyFileSystem)]
     [TestCase(13, TransactionErrorCode.PermissionDenied)]
     [TestCase(1, TransactionErrorCode.PermissionDenied)]
@@ -36,6 +37,41 @@ public sealed class TransactionOutcomeTests
         InstallerTransactionExecutor.GetErrorCode(new UnauthorizedAccessException("private path"))
             .Should().Be(TransactionErrorCode.PermissionDenied);
         InstallerTransactionExecutor.SafeMessage(TransactionErrorCode.PermissionDenied).Should().NotContain("private path");
+    }
+
+    [TestCase(28, TransactionErrorCode.DiskFull)]
+    [TestCase(122, TransactionErrorCode.DiskFull)]
+    [TestCase(30, TransactionErrorCode.ReadOnlyFileSystem)]
+    [TestCase(13, TransactionErrorCode.PermissionDenied)]
+    [TestCase(18, TransactionErrorCode.CrossDeviceBoundary)]
+    public void ErrorClassification_ActionableInnerIoFailureOverridesSemanticWrapper(int errorNumber, TransactionErrorCode expected)
+    {
+        IOException failure = new("synthetic", unchecked((int)0x80070000) | errorNumber);
+        InstallerTransactionException wrapper = new(TransactionErrorCode.WorkspaceConflict, "semantic wrapper", failure);
+
+        InstallerTransactionExecutor.GetErrorCode(wrapper).Should().Be(expected);
+    }
+
+    [TestCase(28, TransactionErrorCode.DiskFull)]
+    [TestCase(122, TransactionErrorCode.DiskFull)]
+    [TestCase(30, TransactionErrorCode.ReadOnlyFileSystem)]
+    [TestCase(13, TransactionErrorCode.PermissionDenied)]
+    [TestCase(18, TransactionErrorCode.CrossDeviceBoundary)]
+    public void ErrorClassification_PreservesTypedNativeErrnoThroughSemanticWrapper(int errorNumber, TransactionErrorCode expected)
+    {
+        LinuxNativeIOException failure = new("synthetic syscall failure", errorNumber);
+        InstallerTransactionException wrapper = new(TransactionErrorCode.WorkspaceConflict, "semantic wrapper", failure);
+
+        InstallerTransactionExecutor.GetErrorCode(wrapper).Should().Be(expected);
+    }
+
+    [Test]
+    public void ErrorClassification_UnknownLockFailurePreservesConcurrentOperation()
+    {
+        IOException failure = new("synthetic", unchecked((int)0x80070000) | 11); // EAGAIN/EWOULDBLOCK
+        InstallerTransactionException wrapper = new(TransactionErrorCode.ConcurrentOperation, "lock contention", failure);
+
+        InstallerTransactionExecutor.GetErrorCode(wrapper).Should().Be(TransactionErrorCode.ConcurrentOperation);
     }
 
     [TearDown]

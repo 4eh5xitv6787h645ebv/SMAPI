@@ -656,7 +656,7 @@ internal static class PrivatePackageStaging
                     int error = Marshal.GetLastWin32Error();
                     if (error == PrivatePackageStaging.ErrorExists)
                         continue;
-                    throw new IOException($"Couldn't create private verified-package staging (errno {error}).");
+                    throw new LinuxNativeIOException("Couldn't create private verified-package staging", error);
                 }
             }
             else
