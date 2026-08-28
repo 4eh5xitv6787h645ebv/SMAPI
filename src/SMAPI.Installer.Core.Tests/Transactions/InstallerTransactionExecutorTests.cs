@@ -141,7 +141,30 @@ public sealed class InstallerTransactionExecutorTests
 
         IReadOnlyList<TransactionResult> recovered = new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
 
-        recovered.Should().ContainSingle().Which.Status.Should().Be(TransactionStatus.Recovered);
+        recovered.Should().ContainSingle().Which.Should().Be(new TransactionResult(plan.TransactionId, TransactionStatus.Recovered, 0));
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
+    }
+
+    [Test]
+    public void Recover_WhenProcessStopsAfterMutationBeforeAppliedEvent_ObservesAndCountsExactChangedPath()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
+        });
+        InstallerTransactionExecutor crashing = new(faultInjector: new BeforeAppliedEventTermination());
+
+        Action interrupted = () => crashing.Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+
+        IReadOnlyList<TransactionResult> recovered = new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recovered.Should().ContainSingle().Which.Should().Be(new TransactionResult(plan.TransactionId, TransactionStatus.Recovered, 1));
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
     }
 
@@ -164,7 +187,7 @@ public sealed class InstallerTransactionExecutorTests
 
         IReadOnlyList<TransactionResult> recovered = new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
 
-        recovered.Should().ContainSingle().Which.Status.Should().Be(TransactionStatus.Recovered);
+        recovered.Should().ContainSingle().Which.Should().Be(new TransactionResult(plan.TransactionId, TransactionStatus.Recovered, 1));
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old bytes");
         new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().BeEmpty();
     }
@@ -258,6 +281,41 @@ public sealed class InstallerTransactionExecutorTests
 
         recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+    }
+
+    [Test]
+    public void Recover_PreflightsEveryOrderedTransactionBeforeRestoringAnyEarlierGamePath()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "first old");
+        Write(game, "StardewModdingAPI.xml", "second old");
+        Write(payload, "first", "first new");
+        Write(payload, "second", "second new");
+        TransactionPlan first = new(Guid.ParseExact("11111111111111111111111111111111", "N"), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("first old"), "first", Hash("first new"))
+        });
+        TransactionPlan second = new(Guid.ParseExact("ffffffffffffffffffffffffffffffff", "N"), new[]
+        {
+            WriteOperation("StardewModdingAPI.xml", Hash("second old"), "second", Hash("second new"))
+        });
+        InstallerTransactionExecutor crashing = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true));
+        Action firstCrash = () => crashing.Apply(game, payload, first);
+        firstCrash.Should().Throw<SimulatedProcessTerminationException>();
+        string transactions = Path.Combine(game, ".smapi-installer", "transactions");
+        string held = Path.Combine(game, "held-first-transaction");
+        Directory.Move(Path.Combine(transactions, first.TransactionId.ToString("N")), held);
+        Action secondCrash = () => crashing.Apply(game, payload, second);
+        secondCrash.Should().Throw<SimulatedProcessTerminationException>();
+        Directory.Move(held, Path.Combine(transactions, first.TransactionId.ToString("N")));
+        File.WriteAllText(Path.Combine(transactions, second.TransactionId.ToString("N"), "backups", "00000000"), "unsafe backup");
+
+        Action recover = () => new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("first new");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second new");
     }
 
     [Test]
@@ -1035,6 +1093,14 @@ public sealed class InstallerTransactionExecutorTests
         public void BeforeMutation(Guid transactionId, int operationIndex) { }
 
         public void AfterMutation(Guid transactionId, int operationIndex) { }
+    }
+
+    private sealed class BeforeAppliedEventTermination : ITransactionFaultInjector
+    {
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex)
+            => throw new SimulatedProcessTerminationException("Injected termination before the applied event.");
     }
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]

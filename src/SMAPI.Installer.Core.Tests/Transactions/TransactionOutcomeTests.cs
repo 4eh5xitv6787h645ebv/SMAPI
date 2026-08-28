@@ -2,6 +2,9 @@ using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using FluentAssertions;
 using NUnit.Framework;
+using StardewModdingAPI.Installer.Core.Engine;
+using StardewModdingAPI.Installer.Core.Planning;
+using StardewModdingAPI.Installer.Core.Recovery;
 using StardewModdingAPI.Installer.Core.Security;
 using StardewModdingAPI.Installer.Core.Transactions;
 
@@ -86,6 +89,23 @@ public sealed class TransactionOutcomeTests
     }
 
     [Test]
+    public void DetailedOutcome_ObservesMutationBeforeAppliedJournalEvent()
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "new", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[] { Write("StardewModdingAPI.dll", Hash("old"), "new", "new") });
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, new InstallerTransactionExecutor(faultInjector: new BeforeAppliedTermination()));
+
+        outcome.Status.Should().Be(TransactionOutcomeStatus.InterruptedRecoveryRequired);
+        outcome.ChangedPaths.Should().ContainSingle().Which.RelativePath.Should().Be("StardewModdingAPI.dll");
+        new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().ContainSingle()
+            .Which.ChangedPathCount.Should().Be(1);
+    }
+
+    [Test]
     public void DetailedAndLegacyOutcomes_TreatDurableCommitAsSuccessWhenCleanupWarns()
     {
         foreach (bool detailed in new[] { true, false })
@@ -124,6 +144,62 @@ public sealed class TransactionOutcomeTests
         outcome.ChangedPaths.Should().ContainSingle();
         outcome.RolledBackPaths.Should().BeEmpty();
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("tampered");
+    }
+
+    [Test]
+    public void DetailedOutcome_RollbackFailureReportsOnlyPathsActuallyRestoredBeforeFailure()
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        Write(game, "StardewModdingAPI.dll", "first old");
+        Write(game, "StardewModdingAPI.xml", "second old");
+        Write(payload, "first", "first new");
+        Write(payload, "second", "second new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            Write("StardewModdingAPI.dll", Hash("first old"), "first", "first new"),
+            Write("StardewModdingAPI.xml", Hash("second old"), "second", "second new")
+        });
+        InstallerTransactionExecutor executor = new(faultInjector: new FirstPathTamperingFailure(game));
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, executor);
+
+        outcome.Status.Should().Be(TransactionOutcomeStatus.RollbackFailedRecoveryRequired);
+        outcome.ChangedPaths.Select(change => change.RelativePath).Should().Equal("StardewModdingAPI.dll", "StardewModdingAPI.xml");
+        outcome.RolledBackPaths.Should().ContainSingle().Which.RelativePath.Should().Be("StardewModdingAPI.xml");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("tampered");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second old");
+    }
+
+    [Test]
+    public void PublicOutcomeCollectionsAreSnapshotsAndReadOnly()
+    {
+        TransactionPathChange[] changed = [new("managed", TransactionOperationKind.WriteFile)];
+        TransactionPathChange[] rolledBack = [new("managed", TransactionOperationKind.WriteFile)];
+        TransactionExecutionOutcome transaction = new(Guid.NewGuid(), TransactionOutcomeStatus.FailedAndRolledBack, TransactionStatus.RolledBack, changed, rolledBack, TransactionCancellationDisposition.None, TransactionErrorCode.IoFailure, "safe");
+        TransactionResult[] recovered = [new(Guid.NewGuid(), TransactionStatus.Recovered, 1)];
+        InstallationExecutionOutcome installation = new(InstallationAction.Repair, InstallationExecutionStatus.FailedAndRolledBack, transaction, recovered, TransactionErrorCode.IoFailure, "safe");
+        Guid[] logical = [Guid.NewGuid()];
+        Guid[] physical = [Guid.NewGuid()];
+        Guid[] pending = [Guid.NewGuid()];
+        RecoveryPruneOutcome prune = new(RecoveryPruneOutcomeStatus.Interrupted, logical, physical, pending, false, TransactionErrorCode.IoFailure, "safe");
+
+        changed[0] = new("changed-after-construction", TransactionOperationKind.RemoveFile);
+        rolledBack[0] = changed[0];
+        recovered[0] = new(Guid.NewGuid(), TransactionStatus.Recovered, 99);
+        logical[0] = Guid.Empty;
+        physical[0] = Guid.Empty;
+        pending[0] = Guid.Empty;
+
+        transaction.ChangedPaths.Single().RelativePath.Should().Be("managed");
+        transaction.RolledBackPaths.Single().RelativePath.Should().Be("managed");
+        installation.ChangedPaths.Single().RelativePath.Should().Be("managed");
+        installation.RecoveredTransactions.Single().ChangedPathCount.Should().Be(1);
+        prune.LogicallyRemovedGenerationIds.Should().NotContain(Guid.Empty);
+        prune.PhysicallyCleanedGenerationIds.Should().NotContain(Guid.Empty);
+        prune.PendingCleanupGenerationIds.Should().NotContain(Guid.Empty);
+        ((IList<TransactionPathChange>)transaction.ChangedPaths).Invoking(list => list.Add(new("x", TransactionOperationKind.WriteFile))).Should().Throw<NotSupportedException>();
+        ((IList<Guid>)prune.PendingCleanupGenerationIds).Invoking(list => list.Add(Guid.NewGuid())).Should().Throw<NotSupportedException>();
     }
 
     [Test]
@@ -237,5 +313,27 @@ public sealed class TransactionOutcomeTests
             File.WriteAllText(Path.Combine(this.GameRoot, "StardewModdingAPI.dll"), "tampered");
             throw new IOException("rollback fault");
         }
+    }
+
+    private sealed class FirstPathTamperingFailure : ITransactionFaultInjector
+    {
+        private readonly string GameRoot;
+        public FirstPathTamperingFailure(string gameRoot) => this.GameRoot = gameRoot;
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex)
+        {
+            if (operationIndex != 1)
+                return;
+            File.WriteAllText(Path.Combine(this.GameRoot, "StardewModdingAPI.dll"), "tampered");
+            throw new IOException("rollback fault");
+        }
+    }
+
+    private sealed class BeforeAppliedTermination : ITransactionFaultInjector
+    {
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex)
+            => throw new SimulatedProcessTerminationException("before applied event");
     }
 }

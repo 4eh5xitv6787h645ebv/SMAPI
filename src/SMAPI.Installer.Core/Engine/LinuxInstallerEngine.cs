@@ -749,14 +749,21 @@ public sealed class LinuxInstallerEngine
         }
         catch (OperationCanceledException)
         {
-            return new(RecoveryPruneOutcomeStatus.CancelledBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, null, "Recovery pruning was cancelled before publication.");
+            return new(RecoveryPruneOutcomeStatus.CancelledBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), GetPreexistingPendingCleanup(plan), false, null, "Recovery pruning was cancelled before publication.");
         }
         catch (Exception exception)
         {
             TransactionErrorCode code = InstallerTransactionExecutor.GetErrorCode(exception);
-            return new(RecoveryPruneOutcomeStatus.FailedBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, code, InstallerTransactionExecutor.SafeMessage(code));
+            Guid[] pending = GetPreexistingPendingCleanup(plan);
+            RecoveryPruneOutcomeStatus status = pending.Length > 0
+                ? RecoveryPruneOutcomeStatus.FailedWithCleanupPending
+                : RecoveryPruneOutcomeStatus.FailedBeforePublication;
+            return new(status, Array.Empty<Guid>(), Array.Empty<Guid>(), pending, false, code, InstallerTransactionExecutor.SafeMessage(code));
         }
     }
+
+    private static Guid[] GetPreexistingPendingCleanup(RecoveryPrunePlan plan)
+        => plan.CleanupGenerationIds.Except(plan.RemovedGenerationIds).ToArray();
 
     internal InspectedInstallationState InspectLocked(
         InstallerOperationLease lease,

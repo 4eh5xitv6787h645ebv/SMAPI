@@ -1253,15 +1253,19 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         catch (Exception exception)
         {
             Guid[] logical = logicalStatePublished ? plan.RemovedGenerationIds.ToArray() : Array.Empty<Guid>();
-            Guid[] pending = (logicalStatePublished || physicallyCleaned.Count > 0)
-                ? plan.CleanupGenerationIds.Except(physicallyCleaned).ToArray()
-                : Array.Empty<Guid>();
+            HashSet<Guid> newlyRemoved = plan.RemovedGenerationIds.ToHashSet();
+            Guid[] pending = plan.CleanupGenerationIds
+                .Where(generationId =>
+                    !physicallyCleaned.Contains(generationId)
+                    && (logicalStatePublished || !newlyRemoved.Contains(generationId))
+                )
+                .ToArray();
             RecoveryPruneOutcomeStatus status = exception switch
             {
                 OperationCanceledException when logicalStatePublished || physicallyCleaned.Count > 0 => RecoveryPruneOutcomeStatus.CancelledWithCleanupPending,
                 OperationCanceledException => RecoveryPruneOutcomeStatus.CancelledBeforePublication,
                 SimulatedProcessTerminationException => RecoveryPruneOutcomeStatus.Interrupted,
-                _ when logicalStatePublished || physicallyCleaned.Count > 0 => RecoveryPruneOutcomeStatus.FailedWithCleanupPending,
+                _ when logicalStatePublished || physicallyCleaned.Count > 0 || pending.Length > 0 || auxiliaryCleanupPending => RecoveryPruneOutcomeStatus.FailedWithCleanupPending,
                 _ => RecoveryPruneOutcomeStatus.FailedBeforePublication
             };
             TransactionErrorCode? code = exception is OperationCanceledException

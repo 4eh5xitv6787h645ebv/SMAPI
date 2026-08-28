@@ -334,6 +334,9 @@ public interface ITransactionFaultInjector
     /// <summary>Called after an operation mutation is durable.</summary>
     void AfterMutation(Guid transactionId, int operationIndex);
 
+    /// <summary>Called after filesystem mutation but before its applied journal event is appended.</summary>
+    void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex) { }
+
     /// <summary>Called after the committed event is durable but before best-effort final-store cleanup.</summary>
     void AfterDurableCommit(Guid transactionId) { }
 }
@@ -367,6 +370,9 @@ public sealed class NullTransactionInstrumentation : ITransactionProgressSink, I
 
     /// <inheritdoc />
     public void AfterMutation(Guid transactionId, int operationIndex) { }
+
+    /// <inheritdoc />
+    public void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex) { }
 }
 
 /// <summary>A test-only signal which represents abrupt process termination and intentionally bypasses in-process rollback.</summary>
