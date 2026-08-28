@@ -364,7 +364,7 @@ print_dependency_repair_guidance() {
 }
 
 # The game-runtime host needs an exact installer-owned copy of the game's deps file before CoreCLR
-# starts. Only the transactional installer may create or repair that copy.
+# starts. Only the installer may create or repair that copy.
 if [ "$runtime" = "net6" ]; then
     source_deps="$script_dir/Stardew Valley.deps.json"
     target_deps="$script_dir/StardewModdingAPI-net6.deps.json"
