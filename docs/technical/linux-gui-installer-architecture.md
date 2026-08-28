@@ -76,7 +76,7 @@ For every mutating operation, the executor:
 
 Linux operations are anchored to the canonical game directory and use no-follow relative operations where the runtime permits. Any managed fallback revalidates parent identity immediately before mutation and rejects inode/device changes. Leaf symbolic links are unlinked without traversing their targets. Hard links and special files are conflicts, not install destinations.
 
-A recovery backup contains only entries the installer will change, their content/mode/identity, launcher state, configuration, and receipt. It excludes custom mods, saves, logs, and health reports. Backups live in private user state with a bounded retention policy and are never uploaded. Destructive pruning requires explicit confirmation.
+A recovery backup contains only entries the installer will change, their content/mode/identity, launcher state, configuration, and receipt. Its canonical snapshot binds both sides of the receipt transition: the receipt expected after the completed operation and the exact prior receipt to restore (either may be absent). This makes install, update/repair, and uninstall rollback restore ownership state in the same transaction as game files instead of inferring or discarding it. It excludes custom mods, saves, logs, and health reports. Backups live in private user state with a bounded retention policy and are never uploaded. Destructive pruning requires explicit confirmation.
 
 Cancellation is accepted during download, verification, inventory, planning, and staging. Once the short commit begins, the frontend reports “Finishing safely” and waits for commit or recovery rather than promising immediate cancellation.
 

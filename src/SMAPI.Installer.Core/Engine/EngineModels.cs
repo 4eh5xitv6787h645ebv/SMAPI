@@ -1,0 +1,297 @@
+using System.Collections.ObjectModel;
+using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Planning;
+
+namespace StardewModdingAPI.Installer.Core.Engine;
+
+/// <summary>Stable reasons why a plan can't cross the execution-preparation trust boundary.</summary>
+public enum ExecutionCompilationError
+{
+    NonExecutablePlan,
+    PlanDoesNotMatchRequest,
+    StalePlan,
+    StaleManifest,
+    StaleInstalledReceipt,
+    StaleRollbackSnapshot,
+    InvalidOperationMapping,
+    DuplicateDestination,
+    UnsafeDestination
+}
+
+/// <summary>A rejected plan-to-execution compilation.</summary>
+public sealed class ExecutionCompilationException : Exception
+{
+    public ExecutionCompilationError Error { get; }
+
+    public ExecutionCompilationException(ExecutionCompilationError error, string message)
+        : base(message)
+    {
+        this.Error = error;
+    }
+}
+
+/// <summary>An immutable plan identity captured together with every state object which influenced it.</summary>
+public sealed class BoundInstallationPlan
+{
+    public InstallationAction Action { get; }
+    public Sha256Digest PlanSha256 { get; }
+    public Sha256Digest? ManifestSha256 { get; }
+    public Sha256Digest? InstalledReceiptSha256 { get; }
+    public Sha256Digest? RollbackSnapshotSha256 { get; }
+
+    internal BoundInstallationPlan(
+        InstallationAction action,
+        Sha256Digest planSha256,
+        Sha256Digest? manifestSha256,
+        Sha256Digest? installedReceiptSha256,
+        Sha256Digest? rollbackSnapshotSha256
+    )
+    {
+        this.Action = action;
+        this.PlanSha256 = planSha256;
+        this.ManifestSha256 = manifestSha256;
+        this.InstalledReceiptSha256 = installedReceiptSha256;
+        this.RollbackSnapshotSha256 = rollbackSnapshotSha256;
+    }
+
+    /// <summary>Serialize every execution-relevant plan and observed-state identity deterministically.</summary>
+    public string ToCanonicalJson()
+    {
+        using MemoryStream stream = new();
+        using (Utf8JsonWriter writer = new(
+            stream,
+            new JsonWriterOptions { Encoder = JavaScriptEncoder.Default, Indented = false, SkipValidation = false }
+        ))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("action", this.Action.ToString().ToLowerInvariant());
+            writer.WriteString("plan_sha256", this.PlanSha256.Value);
+            WriteNullableDigest(writer, "manifest_sha256", this.ManifestSha256);
+            WriteNullableDigest(writer, "installed_receipt_sha256", this.InstalledReceiptSha256);
+            WriteNullableDigest(writer, "rollback_snapshot_sha256", this.RollbackSnapshotSha256);
+            writer.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    /// <summary>Get the confirmation digest for the canonical plan plus all state which influenced it.</summary>
+    public Sha256Digest GetCanonicalDigest()
+    {
+        return Sha256Digest.Hash(Encoding.UTF8.GetBytes(this.ToCanonicalJson()));
+    }
+
+    private static void WriteNullableDigest(Utf8JsonWriter writer, string name, Sha256Digest? digest)
+    {
+        if (digest is null)
+            writer.WriteNull(name);
+        else
+            writer.WriteString(name, digest.Value);
+    }
+}
+
+/// <summary>The later preparation step to perform for one losslessly retained planner operation.</summary>
+public enum PreparationInstructionKind
+{
+    WriteTransactionDestination,
+    RemoveTransactionDestination,
+    CaptureRecoveryFile,
+    VerifyUnchanged
+}
+
+/// <summary>A closed, core-owned source description. Frontends can inspect these but can't construct them.</summary>
+public abstract class PreparationSource
+{
+    internal PreparationSource() { }
+}
+
+/// <summary>An exact file in the already verified release package.</summary>
+public sealed class VerifiedPackageFileSource : PreparationSource
+{
+    public NormalizedRelativePath PackagePath { get; }
+    public Sha256Digest Sha256 { get; }
+    public long SizeBytes { get; }
+    public int UnixMode { get; }
+
+    internal VerifiedPackageFileSource(PackageManifestEntry entry)
+    {
+        this.PackagePath = entry.Path;
+        this.Sha256 = entry.Sha256;
+        this.SizeBytes = entry.SizeBytes;
+        this.UnixMode = entry.UnixMode;
+    }
+}
+
+/// <summary>The only two current-game launcher sources installation rules may consume.</summary>
+public enum CurrentGameLauncherRole
+{
+    CurrentLauncher,
+    OriginalLauncherBackup
+}
+
+/// <summary>A hash-bound current launcher selected by core launcher rules.</summary>
+public sealed class CurrentGameLauncherSource : PreparationSource
+{
+    public CurrentGameLauncherRole Role { get; }
+    public NormalizedRelativePath SourcePath { get; }
+    public Sha256Digest Sha256 { get; }
+
+    internal CurrentGameLauncherSource(CurrentGameLauncherRole role, NormalizedRelativePath sourcePath, Sha256Digest sha256)
+    {
+        this.Role = role;
+        this.SourcePath = sourcePath;
+        this.Sha256 = sha256;
+    }
+}
+
+/// <summary>A hash-bound ordinary game file captured by the explicit user-backup action.</summary>
+public sealed class CurrentGameFileSource : PreparationSource
+{
+    public NormalizedRelativePath SourcePath { get; }
+    public Sha256Digest Sha256 { get; }
+
+    internal CurrentGameFileSource(NormalizedRelativePath sourcePath, Sha256Digest sha256)
+    {
+        this.SourcePath = sourcePath;
+        this.Sha256 = sha256;
+    }
+}
+
+/// <summary>The logical object selected from an identity-bound recovery snapshot.</summary>
+public enum RecoverySnapshotContent
+{
+    GameFile,
+    InstalledReceipt
+}
+
+/// <summary>A source which may only be resolved from the exact canonical recovery snapshot.</summary>
+public sealed class RecoverySnapshotSource : PreparationSource
+{
+    public Sha256Digest SnapshotSha256 { get; }
+    public RecoverySnapshotContent Content { get; }
+    public NormalizedRelativePath? EntryPath { get; }
+    public Sha256Digest? ExpectedContentSha256 { get; }
+
+    internal RecoverySnapshotSource(
+        Sha256Digest snapshotSha256,
+        RecoverySnapshotContent content,
+        NormalizedRelativePath? entryPath,
+        Sha256Digest? expectedContentSha256
+    )
+    {
+        this.SnapshotSha256 = snapshotSha256;
+        this.Content = content;
+        this.EntryPath = entryPath;
+        this.ExpectedContentSha256 = expectedContentSha256;
+    }
+}
+
+/// <summary>A new canonical receipt generated exclusively from the selected manifest and transaction identity.</summary>
+public sealed class GeneratedCanonicalReceiptSource : PreparationSource
+{
+    public InstallationReceipt Receipt { get; }
+    public Sha256Digest Sha256 { get; }
+    private readonly byte[] Bytes;
+
+    internal GeneratedCanonicalReceiptSource(InstallationReceipt receipt, byte[] bytes)
+    {
+        this.Receipt = receipt;
+        this.Bytes = bytes.ToArray();
+        this.Sha256 = receipt.GetCanonicalDigest();
+    }
+
+    public byte[] GetCanonicalBytes()
+    {
+        return this.Bytes.ToArray();
+    }
+}
+
+/// <summary>One typed preparation instruction corresponding one-to-one with a planner operation.</summary>
+public sealed class FilePreparationInstruction
+{
+    public PlanOperationKind PlanKind { get; }
+    public PreparationInstructionKind Kind { get; }
+    public NormalizedRelativePath Path { get; }
+    public Sha256Digest? ExpectedCurrentSha256 { get; }
+    public Sha256Digest? ExpectedResultSha256 { get; }
+    public int? ResultUnixMode { get; }
+    public PreparationSource? Source { get; }
+
+    /// <summary>Whether this instruction becomes the sole transaction mutation for its path.</summary>
+    public bool IsTransactionDestination => this.Kind is PreparationInstructionKind.WriteTransactionDestination
+        or PreparationInstructionKind.RemoveTransactionDestination;
+
+    internal FilePreparationInstruction(
+        PlannedOperation operation,
+        PreparationInstructionKind kind,
+        PreparationSource? source,
+        int? resultUnixMode
+    )
+    {
+        this.PlanKind = operation.Kind;
+        this.Kind = kind;
+        this.Path = operation.Path;
+        this.ExpectedCurrentSha256 = operation.ExpectedCurrentSha256;
+        this.ExpectedResultSha256 = operation.ResultSha256;
+        this.Source = source;
+        this.ResultUnixMode = resultUnixMode;
+    }
+}
+
+/// <summary>The atomic installed-receipt state change which accompanies the game-file transaction.</summary>
+public enum ReceiptPreparationKind
+{
+    None,
+    WriteAtomically,
+    RemoveAtomically
+}
+
+/// <summary>A core-owned receipt commit instruction. Receipt state is never represented as an arbitrary game destination.</summary>
+public sealed class ReceiptPreparationInstruction
+{
+    public ReceiptPreparationKind Kind { get; }
+    public Sha256Digest? ExpectedExistingReceiptSha256 { get; }
+    public PreparationSource? Source { get; }
+
+    internal ReceiptPreparationInstruction(
+        ReceiptPreparationKind kind,
+        Sha256Digest? expectedExistingReceiptSha256,
+        PreparationSource? source
+    )
+    {
+        this.Kind = kind;
+        this.ExpectedExistingReceiptSha256 = expectedExistingReceiptSha256;
+        this.Source = source;
+    }
+}
+
+/// <summary>A complete side-effect-free preparation recipe for one exact plan and state identity.</summary>
+public sealed class InstallationExecutionPreparation
+{
+    public Guid TransactionId { get; }
+    public InstallationAction Action { get; }
+    public BoundInstallationPlan Binding { get; }
+    public IReadOnlyList<FilePreparationInstruction> Instructions { get; }
+    public IReadOnlyList<FilePreparationInstruction> TransactionDestinations { get; }
+    public ReceiptPreparationInstruction Receipt { get; }
+
+    internal InstallationExecutionPreparation(
+        Guid transactionId,
+        BoundInstallationPlan binding,
+        IEnumerable<FilePreparationInstruction> instructions,
+        ReceiptPreparationInstruction receipt
+    )
+    {
+        FilePreparationInstruction[] all = instructions.ToArray();
+        this.TransactionId = transactionId;
+        this.Action = binding.Action;
+        this.Binding = binding;
+        this.Instructions = new ReadOnlyCollection<FilePreparationInstruction>(all);
+        this.TransactionDestinations = new ReadOnlyCollection<FilePreparationInstruction>(
+            all.Where(instruction => instruction.IsTransactionDestination).ToArray()
+        );
+        this.Receipt = receipt;
+    }
+}

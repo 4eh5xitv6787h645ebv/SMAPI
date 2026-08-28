@@ -147,21 +147,20 @@ public sealed class OwnershipDocumentStore
         this.Write(absolutePath, CanonicalOwnershipDocuments.SerializeReceipt(receipt));
     }
 
-    public StardewModdingAPI.Installer.Core.Planning.RollbackSnapshot ReadRollbackSnapshot(string absolutePath, InstallationReceipt installedReceipt)
+    public StardewModdingAPI.Installer.Core.Planning.RollbackSnapshot ReadRollbackSnapshot(string absolutePath, InstallationReceipt? currentReceipt)
     {
-        return CanonicalOwnershipDocuments.ParseRollbackSnapshot(this.Read(absolutePath), installedReceipt, this.Limits);
+        return CanonicalOwnershipDocuments.ParseRollbackSnapshot(this.Read(absolutePath), currentReceipt, this.Limits);
     }
 
     public void WriteRollbackSnapshot(
         string absolutePath,
         StardewModdingAPI.Installer.Core.Planning.RollbackSnapshot snapshot,
-        InstallationReceipt installedReceipt
+        InstallationReceipt? currentReceipt
     )
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        ArgumentNullException.ThrowIfNull(installedReceipt);
-        if (snapshot.ExpectedInstalledReceiptSha256 != installedReceipt.GetCanonicalDigest())
-            throw new OwnershipDocumentException("The rollback snapshot doesn't target the supplied installed receipt.");
+        if (snapshot.ExpectedCurrentReceiptSha256 != currentReceipt?.GetCanonicalDigest())
+            throw new OwnershipDocumentException("The rollback snapshot doesn't target the supplied current receipt state.");
         this.Write(absolutePath, CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot));
     }
 

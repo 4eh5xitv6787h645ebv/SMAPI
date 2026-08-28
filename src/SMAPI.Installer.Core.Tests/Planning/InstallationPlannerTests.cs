@@ -229,7 +229,7 @@ public class InstallationPlannerTests
     }
 
     [Test]
-    public void Backup_IsNonDestructiveEvenForModifiedOrPreservedFiles()
+    public void Backup_CapturesReceiptOwnedFilesButExcludesPreservedPrivateModData()
     {
         PackageManifest manifest = OwnershipTestData.Manifest(
             otherEntries: [OwnershipTestData.Entry("StardewModdingAPI", '2', OwnedEntryKind.RuntimeFile)]
@@ -258,12 +258,12 @@ public class InstallationPlannerTests
 
         plan.CanExecute.Should().BeTrue();
         plan.Operations.Should().OnlyContain(operation => operation.Kind == PlanOperationKind.Backup);
-        plan.Operations.Select(operation => operation.Path.Value).Should().Contain(
+        plan.Operations.Select(operation => operation.Path.Value).Should().BeEquivalentTo(
             "StardewModdingAPI",
             "StardewValley",
-            "StardewValley-original",
-            "Mods/PrivateMod/config.json"
+            "StardewValley-original"
         );
+        plan.Operations.Should().NotContain(operation => operation.Path.Equals(preservedPath));
     }
 
     [Test]
@@ -286,6 +286,7 @@ public class InstallationPlannerTests
         );
         RollbackSnapshot snapshot = new(
             receipt.GetCanonicalDigest(),
+            OwnershipTestData.Digest('7'),
             [
                 new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, runtime.Sha256, OwnershipTestData.Digest('8')),
                 new RollbackSnapshotEntry(created.Path, created.Kind, RollbackEntryKind.Remove, created.Sha256, null)

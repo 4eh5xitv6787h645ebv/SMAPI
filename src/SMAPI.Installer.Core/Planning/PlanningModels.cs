@@ -295,16 +295,26 @@ public sealed class RollbackSnapshotEntry
     }
 }
 
-/// <summary>A bounded immutable rollback snapshot tied to the receipt state it reverses.</summary>
+/// <summary>A bounded immutable rollback snapshot tied to the receipt transition it reverses.</summary>
 public sealed class RollbackSnapshot
 {
-    public Sha256Digest ExpectedInstalledReceiptSha256 { get; }
+    /// <summary>The receipt expected after the completed operation, or <c>null</c> when that operation removed it.</summary>
+    public Sha256Digest? ExpectedCurrentReceiptSha256 { get; }
+
+    /// <summary>The prior receipt to restore, or <c>null</c> when the prior state had no receipt.</summary>
+    public Sha256Digest? PreviousReceiptSha256 { get; }
+
     public IReadOnlyList<RollbackSnapshotEntry> Entries { get; }
 
-    public RollbackSnapshot(Sha256Digest expectedInstalledReceiptSha256, IEnumerable<RollbackSnapshotEntry> entries)
+    public RollbackSnapshot(
+        Sha256Digest? expectedCurrentReceiptSha256,
+        Sha256Digest? previousReceiptSha256,
+        IEnumerable<RollbackSnapshotEntry> entries
+    )
     {
-        ArgumentNullException.ThrowIfNull(expectedInstalledReceiptSha256);
         ArgumentNullException.ThrowIfNull(entries);
+        if (expectedCurrentReceiptSha256 is null && previousReceiptSha256 is null)
+            throw new ArgumentException("A rollback snapshot must bind at least one side of its receipt transition.");
         RollbackSnapshotEntry[] ordered = entries.OrderBy(entry => entry.Path.Value, StringComparer.Ordinal).ToArray();
         if (ordered.Length == 0)
             throw new ArgumentException("A rollback snapshot must contain at least one entry.", nameof(entries));
@@ -312,7 +322,8 @@ public sealed class RollbackSnapshot
         if (ordered.Any(entry => !paths.Add(entry.Path.Value)))
             throw new ArgumentException("Rollback paths must be unique even on case-insensitive filesystems.", nameof(entries));
 
-        this.ExpectedInstalledReceiptSha256 = expectedInstalledReceiptSha256;
+        this.ExpectedCurrentReceiptSha256 = expectedCurrentReceiptSha256;
+        this.PreviousReceiptSha256 = previousReceiptSha256;
         this.Entries = new ReadOnlyCollection<RollbackSnapshotEntry>(ordered);
     }
 }

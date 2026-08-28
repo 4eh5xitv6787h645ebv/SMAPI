@@ -179,7 +179,7 @@ public sealed class InstallationPlanner
     private void PlanBackup(InstallationPlanningRequest request, List<PlannedOperation> operations)
     {
         HashSet<string> planned = new(StringComparer.Ordinal);
-        foreach (InventoryEntry entry in request.Inventory.Entries)
+        foreach (InventoryEntry entry in request.Inventory.Entries.Where(entry => entry.Installed is not null))
         {
             if (entry.Current != null && planned.Add(entry.Path.Value))
                 operations.Add(new PlannedOperation(PlanOperationKind.Backup, entry.Path, entry.Current.Sha256, entry.Current.Sha256));
@@ -212,10 +212,8 @@ public sealed class InstallationPlanner
             conflicts.Add(new PlanConflict(PlanConflictCode.RollbackSnapshotRequired));
             return;
         }
-        if (
-            request.InstalledReceipt == null
-            || request.InstalledReceipt.GetCanonicalDigest() != request.RollbackSnapshot.ExpectedInstalledReceiptSha256
-        )
+        Sha256Digest? observedReceiptSha256 = request.InstalledReceipt?.GetCanonicalDigest();
+        if (observedReceiptSha256 != request.RollbackSnapshot.ExpectedCurrentReceiptSha256)
         {
             conflicts.Add(new PlanConflict(PlanConflictCode.RollbackReceiptMismatch));
             return;

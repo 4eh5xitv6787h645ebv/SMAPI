@@ -202,6 +202,36 @@ public class CanonicalOwnershipDocumentsTests
         invalidEntry.Should().Throw<OwnershipDocumentException>();
     }
 
+    [Test]
+    public void RollbackSnapshot_UninstallTransitionRoundTripsWithoutCurrentReceipt()
+    {
+        InstallationReceipt priorReceipt = OwnershipTestData.Receipt(CreateManifest());
+        RollbackSnapshot snapshot = new(
+            expectedCurrentReceiptSha256: null,
+            previousReceiptSha256: priorReceipt.GetCanonicalDigest(),
+            [
+                new RollbackSnapshotEntry(
+                    OwnershipTestData.Path("StardewModdingAPI"),
+                    OwnedEntryKind.RuntimeFile,
+                    RollbackEntryKind.Restore,
+                    expectedCurrentSha256: null,
+                    backupSha256: OwnershipTestData.Digest('8')
+                )
+            ]
+        );
+
+        RollbackSnapshot parsed = CanonicalOwnershipDocuments.ParseRollbackSnapshot(
+            CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot),
+            currentReceipt: null
+        );
+
+        parsed.ExpectedCurrentReceiptSha256.Should().BeNull();
+        parsed.PreviousReceiptSha256.Should().Be(priorReceipt.GetCanonicalDigest());
+        CanonicalOwnershipDocuments.SerializeRollbackSnapshot(parsed).Should().Equal(
+            CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot)
+        );
+    }
+
     private static PackageManifest CreateManifest()
     {
         return OwnershipTestData.Manifest(
@@ -219,6 +249,7 @@ public class CanonicalOwnershipDocumentsTests
         InstallationReceiptEntry internalFile = receipt.Entries.Single(entry => entry.Path.Value == "smapi-internal/core.dll");
         return new RollbackSnapshot(
             receipt.GetCanonicalDigest(),
+            OwnershipTestData.Digest('7'),
             [
                 new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, runtime.InstalledSha256, OwnershipTestData.Digest('8')),
                 new RollbackSnapshotEntry(internalFile.Path, internalFile.Kind, RollbackEntryKind.Remove, internalFile.InstalledSha256, null)

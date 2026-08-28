@@ -73,7 +73,14 @@ public static class CanonicalOwnershipDocuments
         {
             writer.WriteStartObject();
             writer.WriteNumber("schema_version", RollbackSchemaVersion);
-            writer.WriteString("expected_installed_receipt_sha256", snapshot.ExpectedInstalledReceiptSha256.Value);
+            if (snapshot.ExpectedCurrentReceiptSha256 is null)
+                writer.WriteNull("expected_current_receipt_sha256");
+            else
+                writer.WriteString("expected_current_receipt_sha256", snapshot.ExpectedCurrentReceiptSha256.Value);
+            if (snapshot.PreviousReceiptSha256 is null)
+                writer.WriteNull("previous_receipt_sha256");
+            else
+                writer.WriteString("previous_receipt_sha256", snapshot.PreviousReceiptSha256.Value);
             writer.WriteStartArray("entries");
             foreach (RollbackSnapshotEntry entry in snapshot.Entries)
             {
@@ -102,29 +109,39 @@ public static class CanonicalOwnershipDocuments
         return stream.ToArray();
     }
 
-    /// <summary>Parse a rollback snapshot only for the exact installed receipt state it reverses.</summary>
+    /// <summary>Parse a rollback snapshot only for the exact current receipt state it reverses.</summary>
     public static RollbackSnapshot ParseRollbackSnapshot(
         ReadOnlyMemory<byte> bytes,
-        InstallationReceipt installedReceipt,
+        InstallationReceipt? currentReceipt,
         OwnershipPersistenceLimits? limits = null
     )
     {
-        ArgumentNullException.ThrowIfNull(installedReceipt);
         limits ??= OwnershipPersistenceLimits.Default;
         RollbackSnapshot snapshot = ParseCanonical(bytes, limits, root =>
         {
-            AssertExactObject(root, "rollback snapshot", "schema_version", "expected_installed_receipt_sha256", "entries");
+            AssertExactObject(
+                root,
+                "rollback snapshot",
+                "schema_version",
+                "expected_current_receipt_sha256",
+                "previous_receipt_sha256",
+                "entries"
+            );
             AssertSchema(root, RollbackSchemaVersion);
-            Sha256Digest receiptSha256 = ParseDigest(
-                root.GetProperty("expected_installed_receipt_sha256"),
-                "expected_installed_receipt_sha256"
+            Sha256Digest? currentReceiptSha256 = ParseNullableDigest(
+                root.GetProperty("expected_current_receipt_sha256"),
+                "expected_current_receipt_sha256"
+            );
+            Sha256Digest? previousReceiptSha256 = ParseNullableDigest(
+                root.GetProperty("previous_receipt_sha256"),
+                "previous_receipt_sha256"
             );
             RollbackSnapshotEntry[] entries = ParseArray(root.GetProperty("entries"), limits, "rollback entries", ParseRollbackEntry);
-            return new RollbackSnapshot(receiptSha256, entries);
+            return new RollbackSnapshot(currentReceiptSha256, previousReceiptSha256, entries);
         }, SerializeRollbackSnapshot, "rollback snapshot");
 
-        if (snapshot.ExpectedInstalledReceiptSha256 != installedReceipt.GetCanonicalDigest())
-            throw new OwnershipDocumentException("The rollback snapshot doesn't target the supplied installed receipt.");
+        if (snapshot.ExpectedCurrentReceiptSha256 != currentReceipt?.GetCanonicalDigest())
+            throw new OwnershipDocumentException("The rollback snapshot doesn't target the supplied current receipt state.");
         return snapshot;
     }
 
