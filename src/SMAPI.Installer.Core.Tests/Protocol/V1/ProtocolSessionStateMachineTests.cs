@@ -55,6 +55,46 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void PlanPages_PullEveryMaximumBoundOperationUnderTheWireLimitAndRejectInvalidOffsetsOrStates()
+    {
+        ProtocolSessionStateMachine machine = Ready();
+        PlannedOperation[] operations = Enumerable.Range(0, TransactionPlan.MaximumOperationCount)
+            .Select(index => new PlannedOperation(PlanOperationKind.Create, NormalizedRelativePath.Parse($"smapi-internal/generated/{index:D5}.dll"), null, Sha256Digest.Parse(HashA)))
+            .ToArray();
+        PlanEvent plan = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall, operations: operations));
+
+        plan.OperationCount.Should().Be(TransactionPlan.MaximumOperationCount);
+        System.Text.Encoding.UTF8.GetByteCount(ProtocolJsonSerializer.SerializeLine(plan)).Should().BeLessThan(ProtocolJsonSerializer.MaxLineBytes);
+        List<ProtocolPlanOperation> pulled = [];
+        int offset = 0;
+        while (offset < plan.OperationCount)
+        {
+            GetPlanPageRequest request = new(machine.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Operations, offset);
+            PlanPageEvent page = machine.GetPlanPage(request);
+            page.CommandId.Should().Be(request.CommandId);
+            page.Offset.Should().Be(offset);
+            System.Text.Encoding.UTF8.GetByteCount(ProtocolJsonSerializer.SerializeLine(page)).Should().BeLessThan(ProtocolJsonSerializer.MaxLineBytes);
+            pulled.AddRange(page.Operations);
+            offset = page.NextOffset ?? plan.OperationCount;
+        }
+        pulled.Should().HaveCount(TransactionPlan.MaximumOperationCount);
+        pulled.Select(item => item.Path).Should().Equal(operations.Select(item => item.Path.Value));
+
+        FluentActions.Invoking(() => machine.GetPlanPage(new(machine.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Operations, -1))).Should().Throw<ProtocolException>();
+        FluentActions.Invoking(() => machine.GetPlanPage(new(machine.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Operations, plan.OperationCount))).Should().Throw<ProtocolException>().WithMessage("*offset*");
+        machine.RequestCancellation(new(machine.SessionId, plan.PlanId, plan.PlanDigest));
+        FluentActions.Invoking(() => machine.GetPlanPage(new(machine.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Operations, 0))).Should().Throw<ProtocolException>().WithMessage("*Completed*");
+    }
+
+    [Test]
+    public void PlanPages_RejectOneOversizedItemBeforeItCanBecomeAnOversizedLine()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolPlanId plan = ProtocolPlanId.CreateRandom();
+        PlanPageEvent oversized = new(session, plan, ProtocolPlanDigest.Parse(HashA), ProtocolPlanPageKind.Warnings, 0, 1, null, [], [], [], [new string('x', ProtocolJsonSerializer.MaxLineBytes)]);
+        oversized.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*too long*");
+    }
+
+    [Test]
     public void IssuePlan_RejectsCallerActionPathAndAuthorityMismatch()
     {
         ProtocolSessionStateMachine machine = Ready(); InspectedInstallationState inspection = Inspection(InstallationAction.Uninstall);
@@ -150,11 +190,11 @@ internal sealed class ProtocolSessionStateMachineTests
 
         machine.BeginInterruptedRecovery(request);
         machine.State.Should().Be(ProtocolSessionState.Recovering); handle.DisposeCount.Should().Be(1);
-        FluentActions.Invoking(() => machine.RecordRecoveryProgress(new(machine.SessionId, 0, TransactionStage.Recovering, 2, 1, "Invalid."))).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
+        FluentActions.Invoking(() => machine.RecordRecoveryProgress(new RecoveryProgressEvent(machine.SessionId, 0, TransactionStage.Recovering, 2, 1, "Invalid.") { CommandId = request.CommandId })).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
         machine.LastProgressSequence.Should().Be(-1);
-        machine.RecordRecoveryProgress(new(machine.SessionId, 0, TransactionStage.Recovering, 0, null, "Recovering."));
-        FluentActions.Invoking(() => machine.RecordRecoveryProgress(new(machine.SessionId, 0, TransactionStage.Completed, 1, 1, "Duplicate."))).Should().Throw<ProtocolException>().WithMessage("*increase monotonically*");
-        RecoveryCompletedEvent completed = new(machine.SessionId, new("/game", 1, 2, 3, 8), true, 7, 8, 1, 2, "Recovered.", "Inspect again.", null);
+        machine.RecordRecoveryProgress(new RecoveryProgressEvent(machine.SessionId, 0, TransactionStage.Recovering, 0, null, "Recovering.") { CommandId = request.CommandId });
+        FluentActions.Invoking(() => machine.RecordRecoveryProgress(new RecoveryProgressEvent(machine.SessionId, 0, TransactionStage.Completed, 1, 1, "Duplicate.") { CommandId = request.CommandId })).Should().Throw<ProtocolException>().WithMessage("*increase monotonically*");
+        RecoveryCompletedEvent completed = new(machine.SessionId, new("/game", 1, 2, 3, 8), true, 7, 8, 1, 2, "Recovered.", "Inspect again.", null) { CommandId = request.CommandId };
         machine.CompleteInterruptedRecovery(request, completed);
 
         machine.State.Should().Be(ProtocolSessionState.Ready); machine.LastProgressSequence.Should().Be(-1);
@@ -167,13 +207,13 @@ internal sealed class ProtocolSessionStateMachineTests
     {
         ProtocolSessionStateMachine machine = Ready(); RecoverInterruptedRequest request = new(machine.SessionId, "/game");
         machine.BeginInterruptedRecovery(request);
-        machine.FailInterruptedRecovery(new(machine.SessionId, "RecoveryFailed", "Recovery failed.", ProtocolRecoveryResult.Pending, "Retry.", null));
+        machine.FailInterruptedRecovery(new RecoveryFailureEvent(machine.SessionId, "RecoveryFailed", "Recovery failed.", ProtocolRecoveryResult.Pending, "Retry.", null) { CommandId = request.CommandId });
         machine.State.Should().Be(ProtocolSessionState.RecoveryRequired);
         FluentActions.Invoking(() => machine.ValidateReadyRequest(machine.SessionId)).Should().Throw<ProtocolException>();
-        FluentActions.Invoking(() => machine.RecordPrePlanError(new(machine.SessionId, "unsafe", "Unsafe.", "Retry.", false, null))).Should().Throw<ProtocolException>();
+        FluentActions.Invoking(() => machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.PackageRejected, "Unsafe.", ProtocolNextAction.ReopenVerifiedPackage, false, null))).Should().Throw<ProtocolException>();
 
         machine.BeginInterruptedRecovery(request);
-        machine.FailInterruptedRecovery(new(machine.SessionId, "RecoveryCancelled", "Cancelled before recovery.", ProtocolRecoveryResult.NotNeeded, "Retry.", null));
+        machine.FailInterruptedRecovery(new RecoveryFailureEvent(machine.SessionId, "RecoveryCancelled", "Cancelled before recovery.", ProtocolRecoveryResult.NotNeeded, "Retry.", null) { CommandId = request.CommandId });
         machine.State.Should().Be(ProtocolSessionState.Ready);
     }
 
@@ -183,13 +223,13 @@ internal sealed class ProtocolSessionStateMachineTests
         ProtocolSessionStateMachine machine = Ready(); PlanEvent plan = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall));
         FluentActions.Invoking(() => machine.RecordProgress(new(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 0, null, "Wait."))).Should().Throw<ProtocolException>().WithMessage("*Progress can't be recorded*");
         FluentActions.Invoking(() => machine.BeginExecution(new(machine.SessionId, plan.PlanId, plan.PlanDigest))).Should().Throw<ProtocolException>().WithMessage("*confirmed*");
-        machine.ConfirmPlan(new(machine.SessionId, plan.PlanId, plan.PlanDigest)); machine.BeginExecution(new(machine.SessionId, plan.PlanId, plan.PlanDigest));
-        FluentActions.Invoking(() => machine.RecordProgress(new(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 2, 1, "Invalid."))).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
+        machine.ConfirmPlan(new(machine.SessionId, plan.PlanId, plan.PlanDigest)); ExecutePlanRequest execute = new(machine.SessionId, plan.PlanId, plan.PlanDigest); machine.BeginExecution(execute);
+        FluentActions.Invoking(() => machine.RecordProgress(new ProgressEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 2, 1, "Invalid.") { CommandId = execute.CommandId })).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
         machine.LastProgressSequence.Should().Be(-1);
-        machine.RecordProgress(new(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 0, null, "Wait."));
-        FluentActions.Invoking(() => machine.RecordProgress(new(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.Completed, 1, 1, "Again."))).Should().Throw<ProtocolException>().WithMessage("*increase monotonically*");
+        machine.RecordProgress(new ProgressEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 0, null, "Wait.") { CommandId = execute.CommandId });
+        FluentActions.Invoking(() => machine.RecordProgress(new ProgressEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.Completed, 1, 1, "Again.") { CommandId = execute.CommandId })).Should().Throw<ProtocolException>().WithMessage("*increase monotonically*");
         machine.RequestCancellation(new(machine.SessionId, plan.PlanId, plan.PlanDigest));
-        machine.Complete(new SuccessEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, InstallerOperation.Uninstall, "Done.", 1, ProtocolRecoveryResult.NotNeeded, "Close.", null));
+        machine.Complete(new SuccessEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, InstallerOperation.Uninstall, "Done.", 1, ProtocolRecoveryResult.NotNeeded, "Close.", null) { CommandId = execute.CommandId });
         machine.State.Should().Be(ProtocolSessionState.Completed, "a late cancellation request can't erase a truthful durable commit");
     }
 
@@ -214,10 +254,10 @@ internal sealed class ProtocolSessionStateMachineTests
     public void PreExecutionCancellation_CannotMasqueradeAsFailureOrMutation()
     {
         ProtocolSessionStateMachine machine = Ready(); PlanEvent plan = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall));
-        machine.RequestCancellation(new(machine.SessionId, plan.PlanId, plan.PlanDigest));
+        CommandAcknowledgedEvent acknowledgement = machine.RequestCancellation(new(machine.SessionId, plan.PlanId, plan.PlanDigest));
+        acknowledgement.Acknowledgement.Should().Be(ProtocolAcknowledgementKind.PlanCancelledBeforeExecution);
+        machine.State.Should().Be(ProtocolSessionState.Completed);
         FluentActions.Invoking(() => machine.Complete(new RolledBackFailureEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, "failed", "Failed.", "Restored.", 0, ProtocolRecoveryResult.Succeeded, "Retry.", null))).Should().Throw<ProtocolException>().WithMessage("*terminal event can't be recorded*");
-        FluentActions.Invoking(() => machine.Complete(new CancelledEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, "Cancelled.", "Safe.", 1, ProtocolRecoveryResult.Succeeded, "Close.", null))).Should().Throw<ProtocolException>().WithMessage("*pre-execution cancellation*");
-        machine.Complete(new CancelledEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, "Cancelled.", "Safe.", 0, ProtocolRecoveryResult.NotNeeded, "Close.", null));
     }
 
     [Test]
@@ -240,9 +280,9 @@ internal sealed class ProtocolSessionStateMachineTests
         RecoveryPrunePlan core = Prune([first.GenerationId, second.GenerationId], 2, [first.GenerationId, second.GenerationId], [], [pending]);
         PrunePlanEvent plan = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 2), core);
         plan.RemovedSelectionIds.Should().BeEmpty(); plan.CleanupGenerationIds.Should().Equal(pending.ToString("N")); plan.Summary.Should().Contain("Logically remove 0").And.Contain("clean up 1");
-        machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest)); machine.BeginPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest));
-        FluentActions.Invoking(() => machine.Complete(new PruneSuccessEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, 0, "Wrong.", "Inspect.", null))).Should().Throw<ProtocolException>().WithMessage("*physical-cleanup count*");
-        machine.Complete(new PruneSuccessEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, 1, "Cleaned.", "Close.", null));
+        machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest)); ExecutePruneRequest execute = new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest); machine.BeginPrune(execute);
+        FluentActions.Invoking(() => machine.Complete(new PruneSuccessEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, 0, "Wrong.", "Inspect.", null) { CommandId = execute.CommandId })).Should().Throw<ProtocolException>().WithMessage("*physical-cleanup count*");
+        machine.Complete(new PruneSuccessEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, 1, "Cleaned.", "Close.", null) { CommandId = execute.CommandId });
     }
 
     [Test]
@@ -251,13 +291,13 @@ internal sealed class ProtocolSessionStateMachineTests
         ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority first = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root); FakeRecoveryAuthority second = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, Root); RecoveryCatalogEvent catalog = Catalog(machine, [first, second]);
         PrunePlanEvent plan = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 1), Prune([first.GenerationId, second.GenerationId], 1, [first.GenerationId], [second.GenerationId]));
         FluentActions.Invoking(() => machine.RecordPruneProgress(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, TransactionStage.Revalidating, 0, null, "Wait."))).Should().Throw<ProtocolException>().WithMessage("*Prune progress can't be recorded*");
-        machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest)); machine.BeginPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest));
-        FluentActions.Invoking(() => machine.RecordPruneProgress(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, TransactionStage.Revalidating, 2, 1, "Invalid."))).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
+        machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest)); ExecutePruneRequest execute = new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest); machine.BeginPrune(execute);
+        FluentActions.Invoking(() => machine.RecordPruneProgress(new PruneProgressEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, TransactionStage.Revalidating, 2, 1, "Invalid.") { CommandId = execute.CommandId })).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
         machine.LastProgressSequence.Should().Be(-1);
-        machine.RecordPruneProgress(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, TransactionStage.Revalidating, 0, null, "Wait."));
+        machine.RecordPruneProgress(new PruneProgressEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 0, TransactionStage.Revalidating, 0, null, "Wait.") { CommandId = execute.CommandId });
         machine.RequestPruneCancellation(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest));
-        machine.RecordPruneProgress(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 1, TransactionStage.Completed, 1, 1, "Stopping."));
-        machine.Complete(new PruneCancelledEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, "Cancelled.", "Safe.", 0, 0, ProtocolRecoveryResult.Succeeded, "Inspect.", null)); machine.State.Should().Be(ProtocolSessionState.Completed);
+        machine.RecordPruneProgress(new PruneProgressEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, 1, TransactionStage.Completed, 1, 1, "Stopping.") { CommandId = execute.CommandId });
+        machine.Complete(new PruneCancelledEvent(machine.SessionId, plan.PrunePlanId, plan.PruneDigest, "Cancelled.", "Safe.", 0, 0, ProtocolRecoveryResult.Succeeded, "Inspect.", null) { CommandId = execute.CommandId }); machine.State.Should().Be(ProtocolSessionState.Completed);
     }
 
     [Test]
@@ -281,9 +321,9 @@ internal sealed class ProtocolSessionStateMachineTests
     [Test]
     public void PrePlanErrorAndDisposal_EnforceTerminalLifecycle()
     {
-        ProtocolSessionStateMachine machine = Ready(); machine.RecordPrePlanError(new(machine.SessionId, "bad", "Bad package.", "Retry.", false, null)); machine.State.Should().Be(ProtocolSessionState.Ready);
-        machine.RecordPrePlanError(new(machine.SessionId, "fatal", "No game.", "Close.", true, null)); machine.State.Should().Be(ProtocolSessionState.Completed);
-        machine.Dispose(); FluentActions.Invoking(() => machine.RecordPrePlanError(new(machine.SessionId, "again", "Again.", "Close.", false, null))).Should().Throw<ObjectDisposedException>();
+        ProtocolSessionStateMachine machine = Ready(); machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.PackageRejected, "Bad package.", ProtocolNextAction.ReopenVerifiedPackage, false, null)); machine.State.Should().Be(ProtocolSessionState.Ready);
+        machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.UnexpectedFailure, "No game.", ProtocolNextAction.ViewPrivateLog, true, null)); machine.State.Should().Be(ProtocolSessionState.Completed);
+        machine.Dispose(); FluentActions.Invoking(() => machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.UnexpectedFailure, "Again.", ProtocolNextAction.ViewPrivateLog, false, null))).Should().Throw<ObjectDisposedException>();
     }
 
     [Test]
@@ -318,7 +358,8 @@ internal sealed class ProtocolSessionStateMachineTests
         ModifiedFileReplacementCandidate[]? candidates = null,
         ModifiedFileReplacementApproval[]? approvals = null,
         PlanConflict[]? conflicts = null,
-        object? repairAuthority = null
+        object? repairAuthority = null,
+        PlannedOperation[]? operations = null
     )
     {
         PlannedOperation operation = action switch
@@ -327,7 +368,7 @@ internal sealed class ProtocolSessionStateMachineTests
             InstallationAction.Backup => new(PlanOperationKind.Retain, NormalizedRelativePath.Parse("StardewModdingAPI.dll"), Sha256Digest.Parse(HashA), Sha256Digest.Parse(HashA)),
             _ => new(PlanOperationKind.Create, NormalizedRelativePath.Parse("StardewModdingAPI.dll"), null, Sha256Digest.Parse(HashB))
         };
-        InstallationPlan plan = new(action, [operation], conflicts ?? [], ObservedInstallationState.KnownModified, new RecoveryCapacityState(0, 64));
+        InstallationPlan plan = new(action, operations ?? [operation], conflicts ?? [], ObservedInstallationState.KnownModified, new RecoveryCapacityState(0, 64));
         Sha256Digest planSha = Sha256Digest.Hash(System.Text.Encoding.UTF8.GetBytes(plan.ToCanonicalJson()));
         BoundInstallationPlan binding = new(action, Root, 7, planSha, package?.ManifestSha256, null, null, recovery?.SnapshotSha256, null, recovery?.GenerationId, recovery?.AuthorizedHeadPointerSha256, package, recovery);
         return new(plan, binding, package, recovery, repairAuthority ?? new object(), action == InstallationAction.Install ? null : CreateRelease(), action is InstallationAction.Uninstall or InstallationAction.Backup ? null : CreateRelease(), ObservedInstallationState.KnownModified, new RecoveryCapacityState(0, 64), candidates, approvals);

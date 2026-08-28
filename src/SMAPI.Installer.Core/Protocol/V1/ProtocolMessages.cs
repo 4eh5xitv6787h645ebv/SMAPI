@@ -15,6 +15,7 @@ public enum ProtocolMessageKind
     ListRecoveriesRequest,
     InspectPlanRequest,
     SelectPlanCandidatesRequest,
+    GetPlanPageRequest,
     ConfirmPlanRequest,
     ExecutePlanRequest,
     CancelPlanRequest,
@@ -22,6 +23,7 @@ public enum ProtocolMessageKind
     ConfirmPruneRequest,
     ExecutePruneRequest,
     CancelPruneRequest,
+    CommandAcknowledgedEvent,
     HandshakeEvent,
     GameDiscoveryEvent,
     RecoveryProgressEvent,
@@ -30,6 +32,7 @@ public enum ProtocolMessageKind
     PackageOpenedEvent,
     RecoveryCatalogEvent,
     PlanEvent,
+    PlanPageEvent,
     PrunePlanEvent,
     ProgressEvent,
     PruneProgressEvent,
@@ -41,7 +44,7 @@ public enum ProtocolMessageKind
     PruneFailureEvent,
     PruneInterruptionEvent,
     PruneCancelledEvent,
-    PrePlanErrorEvent
+    PrePlanRejectedEvent
 }
 
 public enum InstallerOperation
@@ -79,8 +82,72 @@ public enum InstallerRecoveryAction
     InspectAgain
 }
 
+/// <summary>A closed user action which is safe after a rejected pre-plan command.</summary>
+public enum ProtocolNextAction
+{
+    RetryRequest,
+    SelectGameFolder,
+    ReopenVerifiedPackage,
+    InspectAgain,
+    ListRecoveries,
+    RecoverInterrupted,
+    StartNewSession,
+    ReviewFilesystem,
+    ViewPrivateLog
+}
+
+/// <summary>A stable class of failure before a mutating operation began.</summary>
+public enum ProtocolPrePlanErrorCode
+{
+    RequestCancelled,
+    InvalidGameFolder,
+    PackageRejected,
+    RecoveryUnavailable,
+    InspectionFailed,
+    CandidateApprovalFailed,
+    PermissionDenied,
+    InputOutputFailure,
+    UnexpectedFailure
+}
+
+public enum ProtocolAcknowledgementKind
+{
+    PlanConfirmed,
+    PlanCancellationRequested,
+    PlanCancelledBeforeExecution,
+    PrunePlanConfirmed,
+    PruneCancellationRequested,
+    PruneCancelledBeforeExecution
+}
+
+public enum ProtocolPlanPageKind
+{
+    Operations,
+    Conflicts,
+    Candidates,
+    Warnings
+}
+
+public enum ProtocolPlanRisk
+{
+    Uninstall,
+    Rollback,
+    Downgrade,
+    ModifiedOrUnknownFileApproval,
+    RecoveryPrune
+}
+
+public enum ProtocolRecommendedDefault
+{
+    Cancel
+}
+
 public abstract record ProtocolMessage
 {
+    /// <summary>The canonical command which owns this request, sole response, progress, or terminal.</summary>
+    [JsonPropertyOrder(-100)]
+    public ProtocolCommandId CommandId { get; init; } = ProtocolCommandId.CreateRandom();
+
     [JsonIgnore]
     public abstract ProtocolMessageKind Kind { get; }
 }
@@ -153,6 +220,18 @@ public sealed record SelectPlanCandidatesRequest(
     public override ProtocolMessageKind Kind => ProtocolMessageKind.SelectPlanCandidatesRequest;
 }
 
+public sealed record GetPlanPageRequest(
+    ProtocolSessionId SessionId,
+    ProtocolPlanId PlanId,
+    ProtocolPlanDigest PlanDigest,
+    ProtocolPlanPageKind PageKind,
+    int Offset
+) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.GetPlanPageRequest;
+}
+
 public sealed record ConfirmPlanRequest(ProtocolSessionId SessionId, ProtocolPlanId PlanId, ProtocolPlanDigest PlanDigest) : ProtocolRequest
 {
     [JsonIgnore]
@@ -193,6 +272,17 @@ public sealed record CancelPruneRequest(ProtocolSessionId SessionId, ProtocolPru
 {
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.CancelPruneRequest;
+}
+
+public sealed record CommandAcknowledgedEvent(
+    ProtocolSessionId SessionId,
+    ProtocolAcknowledgementKind Acknowledgement,
+    ProtocolPlanId? PlanId,
+    ProtocolPrunePlanId? PrunePlanId
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.CommandAcknowledgedEvent;
 }
 
 public sealed record HandshakeEvent : ProtocolEvent
@@ -351,15 +441,23 @@ public sealed record ProtocolRecoveryGeneration(
     string GenerationId,
     InstallerOperation OriginOperation,
     bool IsCurrent,
-    bool IsUserCheckpoint
-);
+    bool IsUserCheckpoint,
+    ProtocolReleaseIdentity? RestoreRelease,
+    bool RestoresUninstalledState
+)
+{
+    internal ProtocolRecoveryGeneration(ProtocolRecoverySelectionId selectionId, string generationId, InstallerOperation originOperation, bool isCurrent, bool isUserCheckpoint)
+        : this(selectionId, generationId, originOperation, isCurrent, isUserCheckpoint, null, true) { }
+}
 
 /// <summary>Host-side source metadata used to mint opaque recovery selections.</summary>
 public sealed record ProtocolRecoveryGenerationSource(
     string GenerationId,
     InstallerOperation OriginOperation,
     bool IsCurrent,
-    bool IsUserCheckpoint
+    bool IsUserCheckpoint,
+    ProtocolReleaseIdentity? RestoreRelease,
+    bool RestoresUninstalledState
 );
 
 /// <summary>The exact authenticated catalog, game root, head, and generation selected for rollback.</summary>
@@ -434,10 +532,11 @@ public sealed record ProtocolPlanCandidateSource(
 
 public sealed record PlanEvent : ProtocolEvent
 {
-    private readonly ProtocolPlanOperation[] OperationValues;
-    private readonly ProtocolPlanConflict[] ConflictValues;
-    private readonly ProtocolPlanCandidate[] CandidateValues;
-    private readonly string[] WarningValues;
+    private readonly ProtocolPlanRisk[] RiskValues;
+    private ProtocolPlanOperation[] LegacyOperationValues = [];
+    private ProtocolPlanConflict[] LegacyConflictValues = [];
+    private ProtocolPlanCandidate[] LegacyCandidateValues = [];
+    private string[] LegacyWarningValues = [];
 
     public ProtocolSessionId SessionId { get; }
     public ProtocolPlanId PlanId { get; }
@@ -450,12 +549,19 @@ public sealed record PlanEvent : ProtocolEvent
     public ProtocolReleaseIdentity? CurrentRelease { get; }
     public ProtocolReleaseIdentity? TargetRelease { get; }
     public ObservedInstallState ObservedState { get; }
-    public ProtocolPlanOperation[] Operations => this.OperationValues.ToArray();
-    public ProtocolPlanConflict[] Conflicts => this.ConflictValues.ToArray();
-    public ProtocolPlanCandidate[] Candidates => this.CandidateValues.ToArray();
+    public int OperationCount { get; }
+    public int ConflictCount { get; }
+    public int CandidateCount { get; }
+    public int WarningCount { get; }
+    public bool CanExecute { get; }
+    public ProtocolPlanRisk[] Risks => this.RiskValues.ToArray();
+    public ProtocolRecommendedDefault RecommendedDefault { get; }
     public string Summary { get; }
-    public string[] Warnings => this.WarningValues.ToArray();
     public bool RequiresConfirmation { get; }
+    [JsonIgnore] internal ProtocolPlanOperation[] Operations => this.LegacyOperationValues.ToArray();
+    [JsonIgnore] internal ProtocolPlanConflict[] Conflicts => this.LegacyConflictValues.ToArray();
+    [JsonIgnore] internal ProtocolPlanCandidate[] Candidates => this.LegacyCandidateValues.ToArray();
+    [JsonIgnore] internal string[] Warnings => this.LegacyWarningValues.ToArray();
 
     [JsonConstructor]
     public PlanEvent(
@@ -470,11 +576,14 @@ public sealed record PlanEvent : ProtocolEvent
         ProtocolReleaseIdentity? currentRelease,
         ProtocolReleaseIdentity? targetRelease,
         ObservedInstallState observedState,
-        ProtocolPlanOperation[] operations,
-        ProtocolPlanConflict[] conflicts,
-        ProtocolPlanCandidate[] candidates,
+        int operationCount,
+        int conflictCount,
+        int candidateCount,
+        int warningCount,
+        bool canExecute,
+        ProtocolPlanRisk[] risks,
+        ProtocolRecommendedDefault recommendedDefault,
         string summary,
-        string[] warnings,
         bool requiresConfirmation
     )
     {
@@ -489,16 +598,82 @@ public sealed record PlanEvent : ProtocolEvent
         this.CurrentRelease = currentRelease;
         this.TargetRelease = targetRelease;
         this.ObservedState = observedState;
-        this.OperationValues = operations?.ToArray() ?? throw new ProtocolException("The protocol 'operations' collection can't be null.");
-        this.ConflictValues = conflicts?.ToArray() ?? throw new ProtocolException("The protocol 'conflicts' collection can't be null.");
-        this.CandidateValues = candidates?.ToArray() ?? throw new ProtocolException("The protocol 'candidates' collection can't be null.");
+        this.OperationCount = operationCount;
+        this.ConflictCount = conflictCount;
+        this.CandidateCount = candidateCount;
+        this.WarningCount = warningCount;
+        this.CanExecute = canExecute;
+        this.RiskValues = risks?.ToArray() ?? throw new ProtocolException("The protocol 'risks' collection can't be null.");
+        this.RecommendedDefault = recommendedDefault;
         this.Summary = summary;
-        this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
         this.RequiresConfirmation = requiresConfirmation;
+    }
+
+    internal PlanEvent(ProtocolSessionId sessionId, ProtocolPlanId planId, ProtocolPlanDigest planDigest, ProtocolPlanDigest executionBindingDigest, InstallerOperation operation, ProtocolPackageId? packageId, ProtocolRecoveryAuthority? recoveryAuthority, ProtocolGameRootIdentity gameRoot, ProtocolReleaseIdentity? currentRelease, ProtocolReleaseIdentity? targetRelease, ObservedInstallState observedState, ProtocolPlanOperation[] operations, ProtocolPlanConflict[] conflicts, ProtocolPlanCandidate[] candidates, string summary, string[] warnings, bool requiresConfirmation)
+        : this(sessionId, planId, planDigest, executionBindingDigest, operation, packageId, recoveryAuthority, gameRoot, currentRelease, targetRelease, observedState, operations.Length, conflicts.Length, candidates.Length, warnings.Length, conflicts.Length == 0, GetCompatibilityRisks(operation, candidates), ProtocolRecommendedDefault.Cancel, summary, requiresConfirmation)
+    {
+        this.LegacyOperationValues = operations.ToArray();
+        this.LegacyConflictValues = conflicts.ToArray();
+        this.LegacyCandidateValues = candidates.ToArray();
+        this.LegacyWarningValues = warnings.ToArray();
+    }
+
+    private static ProtocolPlanRisk[] GetCompatibilityRisks(InstallerOperation operation, ProtocolPlanCandidate[] candidates)
+    {
+        List<ProtocolPlanRisk> risks = [];
+        if (operation == InstallerOperation.Uninstall) risks.Add(ProtocolPlanRisk.Uninstall);
+        if (operation == InstallerOperation.Rollback) risks.Add(ProtocolPlanRisk.Rollback);
+        if (candidates.Length > 0) risks.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
+        return risks.ToArray();
+    }
+
+    internal PlanEvent AttachPageData(ProtocolPlanOperation[] operations, ProtocolPlanConflict[] conflicts, ProtocolPlanCandidate[] candidates, string[] warnings)
+    {
+        this.LegacyOperationValues = operations.ToArray(); this.LegacyConflictValues = conflicts.ToArray(); this.LegacyCandidateValues = candidates.ToArray(); this.LegacyWarningValues = warnings.ToArray(); return this;
     }
 
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.PlanEvent;
+}
+
+/// <summary>One bounded deterministic page of an exact digest-bound plan presentation.</summary>
+public sealed record PlanPageEvent : ProtocolEvent
+{
+    private readonly ProtocolPlanOperation[] OperationValues;
+    private readonly ProtocolPlanConflict[] ConflictValues;
+    private readonly ProtocolPlanCandidate[] CandidateValues;
+    private readonly string[] WarningValues;
+
+    public ProtocolSessionId SessionId { get; }
+    public ProtocolPlanId PlanId { get; }
+    public ProtocolPlanDigest PlanDigest { get; }
+    public ProtocolPlanPageKind PageKind { get; }
+    public int Offset { get; }
+    public int TotalCount { get; }
+    public int? NextOffset { get; }
+    public ProtocolPlanOperation[] Operations => this.OperationValues.ToArray();
+    public ProtocolPlanConflict[] Conflicts => this.ConflictValues.ToArray();
+    public ProtocolPlanCandidate[] Candidates => this.CandidateValues.ToArray();
+    public string[] Warnings => this.WarningValues.ToArray();
+
+    [JsonConstructor]
+    public PlanPageEvent(ProtocolSessionId sessionId, ProtocolPlanId planId, ProtocolPlanDigest planDigest, ProtocolPlanPageKind pageKind, int offset, int totalCount, int? nextOffset, ProtocolPlanOperation[] operations, ProtocolPlanConflict[] conflicts, ProtocolPlanCandidate[] candidates, string[] warnings)
+    {
+        this.SessionId = sessionId;
+        this.PlanId = planId;
+        this.PlanDigest = planDigest;
+        this.PageKind = pageKind;
+        this.Offset = offset;
+        this.TotalCount = totalCount;
+        this.NextOffset = nextOffset;
+        this.OperationValues = operations?.ToArray() ?? throw new ProtocolException("The protocol 'operations' page can't be null.");
+        this.ConflictValues = conflicts?.ToArray() ?? throw new ProtocolException("The protocol 'conflicts' page can't be null.");
+        this.CandidateValues = candidates?.ToArray() ?? throw new ProtocolException("The protocol 'candidates' page can't be null.");
+        this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' page can't be null.");
+    }
+
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PlanPageEvent;
 }
 
 public sealed record PrunePlanEvent : ProtocolEvent
@@ -507,6 +682,7 @@ public sealed record PrunePlanEvent : ProtocolEvent
     private readonly ProtocolRecoverySelectionId[] RemovedValues;
     private readonly string[] CleanupGenerationValues;
     private readonly string[] WarningValues;
+    private readonly ProtocolPlanRisk[] RiskValues;
 
     public ProtocolSessionId SessionId { get; }
     public ProtocolPrunePlanId PrunePlanId { get; }
@@ -521,6 +697,8 @@ public sealed record PrunePlanEvent : ProtocolEvent
     public string[] CleanupGenerationIds => this.CleanupGenerationValues.ToArray();
     public string Summary { get; }
     public string[] Warnings => this.WarningValues.ToArray();
+    public ProtocolPlanRisk[] Risks => this.RiskValues.ToArray();
+    public ProtocolRecommendedDefault RecommendedDefault { get; }
     public bool RequiresConfirmation { get; }
 
     [JsonConstructor]
@@ -538,6 +716,8 @@ public sealed record PrunePlanEvent : ProtocolEvent
         string[] cleanupGenerationIds,
         string summary,
         string[] warnings,
+        ProtocolPlanRisk[] risks,
+        ProtocolRecommendedDefault recommendedDefault,
         bool requiresConfirmation
     )
     {
@@ -557,8 +737,13 @@ public sealed record PrunePlanEvent : ProtocolEvent
             ?? throw new ProtocolException("The protocol 'cleanupGenerationIds' collection can't be null.");
         this.Summary = summary;
         this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
+        this.RiskValues = risks?.ToArray() ?? throw new ProtocolException("The protocol 'risks' collection can't be null.");
+        this.RecommendedDefault = recommendedDefault;
         this.RequiresConfirmation = requiresConfirmation;
     }
+
+    internal PrunePlanEvent(ProtocolSessionId sessionId, ProtocolPrunePlanId prunePlanId, ProtocolPlanDigest pruneDigest, ProtocolPlanDigest executionBindingDigest, ProtocolRecoveryCatalogId catalogId, ProtocolGameRootIdentity gameRoot, string headSha256, int retainNewest, ProtocolRecoverySelectionId[] retainedSelectionIds, ProtocolRecoverySelectionId[] removedSelectionIds, string[] cleanupGenerationIds, string summary, string[] warnings, bool requiresConfirmation)
+        : this(sessionId, prunePlanId, pruneDigest, executionBindingDigest, catalogId, gameRoot, headSha256, retainNewest, retainedSelectionIds, removedSelectionIds, cleanupGenerationIds, summary, warnings, [ProtocolPlanRisk.RecoveryPrune], ProtocolRecommendedDefault.Cancel, requiresConfirmation) { }
 
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.PrunePlanEvent;
@@ -728,15 +913,15 @@ public sealed record PruneCancelledEvent(
     public override ProtocolMessageKind Kind => ProtocolMessageKind.PruneCancelledEvent;
 }
 
-public sealed record PrePlanErrorEvent(
+public sealed record PrePlanRejectedEvent(
     ProtocolSessionId SessionId,
-    string ErrorCode,
+    ProtocolPrePlanErrorCode ErrorCode,
     string Message,
-    string SafeNextStep,
+    ProtocolNextAction NextAction,
     bool IsTerminal,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
     [JsonIgnore]
-    public override ProtocolMessageKind Kind => ProtocolMessageKind.PrePlanErrorEvent;
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PrePlanRejectedEvent;
 }

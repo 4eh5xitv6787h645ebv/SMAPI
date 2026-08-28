@@ -19,6 +19,68 @@ internal sealed class LinuxInstallerProtocolServiceTests
     private static readonly GameRootIdentity Root = new("/game", 1, 2, 3);
 
     [Test]
+    public async Task EveryAcceptedCommandIsUniqueAndEveryResponseProgressAndTerminalIsExactlyCorrelated()
+    {
+        List<ProtocolEvent> emitted = [];
+        FakeEngine engine = new() { BlockExecutionUntilCancellation = true };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener(), emitted.Add);
+
+        HandshakeRequest handshakeRequest = new("gui", "1");
+        HandshakeEvent handshake = (HandshakeEvent)await service.HandleAsync(handshakeRequest);
+        handshake.CommandId.Should().Be(handshakeRequest.CommandId);
+        Func<Task> reusedHandshake = async () => await service.HandleAsync(new DiscoverGamesRequest(handshake.SessionId) { CommandId = handshakeRequest.CommandId });
+        await reusedHandshake.Should().ThrowAsync<ProtocolException>().WithMessage("*can't be reused*");
+
+        DiscoverGamesRequest discoverRequest = new(handshake.SessionId);
+        GameDiscoveryEvent discovery = (GameDiscoveryEvent)await service.HandleAsync(discoverRequest);
+        discovery.CommandId.Should().Be(discoverRequest.CommandId);
+        Func<Task> duplicateShort = async () => await service.HandleAsync(discoverRequest);
+        await duplicateShort.Should().ThrowAsync<ProtocolException>().WithMessage("*can't be reused*");
+
+        InspectPlanRequest inspectRequest = new(service.SessionId, "/game", InstallerOperation.Uninstall, null, null);
+        PlanEvent plan = (PlanEvent)await service.HandleAsync(inspectRequest);
+        plan.CommandId.Should().Be(inspectRequest.CommandId);
+        ConfirmPlanRequest confirmRequest = new(service.SessionId, plan.PlanId, plan.PlanDigest);
+        CommandAcknowledgedEvent confirmed = (CommandAcknowledgedEvent)await service.HandleAsync(confirmRequest);
+        confirmed.CommandId.Should().Be(confirmRequest.CommandId);
+        confirmed.Acknowledgement.Should().Be(ProtocolAcknowledgementKind.PlanConfirmed);
+
+        ExecutePlanRequest executeRequest = new(service.SessionId, plan.PlanId, plan.PlanDigest);
+        Task<ProtocolEvent> execution = service.HandleAsync(executeRequest);
+        await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        CancelPlanRequest cancelRequest = new(service.SessionId, plan.PlanId, plan.PlanDigest);
+        CommandAcknowledgedEvent cancellation = (CommandAcknowledgedEvent)await service.HandleAsync(cancelRequest);
+        cancellation.CommandId.Should().Be(cancelRequest.CommandId);
+        cancellation.Acknowledgement.Should().Be(ProtocolAcknowledgementKind.PlanCancellationRequested);
+        Func<Task> duplicateCancel = async () => await service.HandleAsync(cancelRequest);
+        await duplicateCancel.Should().ThrowAsync<ProtocolException>().WithMessage("*can't be reused*");
+
+        ProtocolEvent terminal = await execution;
+        terminal.CommandId.Should().Be(executeRequest.CommandId);
+        emitted.OfType<ProgressEvent>().Should().NotBeEmpty().And.OnlyContain(item => item.CommandId == executeRequest.CommandId);
+        Func<Task> duplicateLong = async () => await service.HandleAsync(executeRequest);
+        await duplicateLong.Should().ThrowAsync<ProtocolException>().WithMessage("*can't be reused*");
+    }
+
+    [TestCase(null, ProtocolNextAction.StartNewSession)]
+    [TestCase("/tmp/sanitized-installer.log", ProtocolNextAction.ViewPrivateLog)]
+    public async Task UnexpectedPrePlanFailureOffersOnlyAnActuallyAvailableRecoveryAction(string? sanitizedLogPath, ProtocolNextAction expectedAction)
+    {
+        FakePackageOpener opener = new() { ThrowUnexpected = true };
+        using LinuxInstallerProtocolService service = Create(new FakeEngine(), opener, sanitizedLogPath: sanitizedLogPath);
+        await Handshake(service);
+        OpenPackageRequest request = new(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest");
+
+        PrePlanRejectedEvent rejected = (PrePlanRejectedEvent)await service.HandleAsync(request);
+
+        rejected.CommandId.Should().Be(request.CommandId);
+        rejected.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.UnexpectedFailure);
+        rejected.NextAction.Should().Be(expectedAction);
+        rejected.SanitizedLogPath.Should().Be(sanitizedLogPath);
+        rejected.IsTerminal.Should().BeTrue();
+    }
+
+    [Test]
     public async Task DiscoveryUsesExactCoreStatesAndEveryEventIsSerializable()
     {
         List<ProtocolEvent> emitted = [];
@@ -94,7 +156,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
         await Handshake(service);
         using CancellationTokenSource outer = new();
-        Task<ProtocolEvent?> recovery = service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game"), outer.Token);
+        Task<ProtocolEvent> recovery = service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game"), outer.Token);
         await engine.UnrequestedRecoveryCancellationReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         outer.Cancel(); engine.ReleaseUnrequestedRecoveryCancellation.TrySetResult();
@@ -128,7 +190,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         FakeEngine engine = new() { BlockRecoveryUntilCancellation = true };
         LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
         await Handshake(service);
-        Task<ProtocolEvent?> recovery = service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game"));
+        Task<ProtocolEvent> recovery = service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game"));
         await engine.RecoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Task first = service.DisposeAsync().AsTask(); Task second = service.DisposeAsync().AsTask();
@@ -217,7 +279,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service); PackageOpenedEvent package = await Open(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Repair, package.PackageId, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Task disposal = Task.Run(service.Dispose);
@@ -292,9 +354,9 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeNull();
+        (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeOfType<CommandAcknowledgedEvent>();
         CancelledEvent terminal = (CancelledEvent)(await execution)!;
         terminal.FilesChanged.Should().Be(expectedChanged); terminal.RecoveryResult.Should().Be(expectedRecovery);
     }
@@ -308,7 +370,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         using CancellationTokenSource cancellation = new();
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest), cancellation.Token);
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest), cancellation.Token);
         await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
         (await execution).Should().BeOfType<CancelledEvent>();
         int before = emitted.Count; engine.Progress.Report(new(TransactionStage.Completed, 1, 1)); emitted.Should().HaveCount(before);
@@ -324,10 +386,10 @@ internal sealed class LinuxInstallerProtocolServiceTests
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         using CancellationTokenSource cancellation = new();
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest), outer ? cancellation.Token : default);
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest), outer ? cancellation.Token : default);
         await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         if (outer) cancellation.Cancel();
-        else (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeNull();
+        else (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeOfType<CommandAcknowledgedEvent>();
 
         (await execution).Should().BeOfType<SuccessEvent>();
         service.State.Should().Be(ProtocolSessionState.Completed);
@@ -347,10 +409,10 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
-        Task<ProtocolEvent?> execution = Task.Run(async () => await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)));
+        Task<ProtocolEvent> execution = Task.Run(async () => await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)));
         await terminalStarting.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeNull();
+        (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeOfType<CommandAcknowledgedEvent>();
         releaseTerminal.TrySetResult();
         (await execution).Should().BeOfType<SuccessEvent>();
         service.State.Should().Be(ProtocolSessionState.Completed);
@@ -373,7 +435,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         if (boundary == "during-cancel")
         {
             await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -423,7 +485,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         await progressEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         engine.ReturnWhileProgressIsBlocked.TrySetResult();
         await terminalStarting.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -458,7 +520,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service); RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)(await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game")))!;
         PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 2)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         await engine.PruneStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); await service.HandleAsync(new CancelPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         PruneCancelledEvent terminal = (PruneCancelledEvent)(await execution)!;
         terminal.LogicalRemovedGenerationCount.Should().Be(0); terminal.PhysicalCleanupGenerationCount.Should().Be(0);
@@ -478,10 +540,10 @@ internal sealed class LinuxInstallerProtocolServiceTests
         PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         using CancellationTokenSource cancellation = new();
-        Task<ProtocolEvent?> pruning = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest), outer ? cancellation.Token : default);
+        Task<ProtocolEvent> pruning = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest), outer ? cancellation.Token : default);
         await engine.PruneStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         if (outer) cancellation.Cancel();
-        else (await service.HandleAsync(new CancelPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest))).Should().BeNull();
+        else (await service.HandleAsync(new CancelPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest))).Should().BeOfType<CommandAcknowledgedEvent>();
 
         (await pruning).Should().BeOfType<PruneSuccessEvent>();
         service.State.Should().Be(ProtocolSessionState.Completed);
@@ -504,7 +566,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service); RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)(await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game")))!;
         PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
-        Task<ProtocolEvent?> pruning = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        Task<ProtocolEvent> pruning = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         if (boundary == "during-cancel")
         {
             await engine.PruneStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -583,7 +645,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service); PackageOpenedEvent package = await Open(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Repair, package.PackageId, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
-        Task<ProtocolEvent?> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Task first = service.DisposeAsync().AsTask(); Task second = service.DisposeAsync().AsTask(); service.Dispose();
@@ -600,7 +662,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service); PackageOpenedEvent package = await Open(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Repair, package.PackageId, null)))!;
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
-        Task<ProtocolEvent?> execution = Task.Run(async () => await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)));
+        Task<ProtocolEvent> execution = Task.Run(async () => await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)));
         await engine.ExecutionInitiationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Task disposal = service.DisposeAsync().AsTask(); disposal.IsCompleted.Should().BeFalse(); opener.Owners.Single().DisposeCount.Should().Be(0);
@@ -617,7 +679,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await Handshake(service); RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)(await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game")))!;
         PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
-        Task<ProtocolEvent?> pruning = Task.Run(async () => await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)));
+        Task<ProtocolEvent> pruning = Task.Run(async () => await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)));
         await engine.PruneInitiationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Task disposal = service.DisposeAsync().AsTask(); disposal.IsCompleted.Should().BeFalse(); engine.OpenedRecoveries.Should().OnlyContain(handle => handle.DisposeCount == 0);
@@ -632,7 +694,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         FakeEngine engine = new() { BlockRecoveryInitiation = true, BlockRecoveryUntilCancellation = true };
         LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
         await Handshake(service);
-        Task<ProtocolEvent?> recovery = Task.Run(async () => await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")));
+        Task<ProtocolEvent> recovery = Task.Run(async () => await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")));
         await engine.RecoveryInitiationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Task disposal = service.DisposeAsync().AsTask(); disposal.IsCompleted.Should().BeFalse();
@@ -654,9 +716,9 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await stale.Should().ThrowAsync<ProtocolException>().WithMessage("*stale*");
     }
 
-    private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null, Action? terminalCompletionStarting = null, Action? disposalPublished = null) =>
-        new("test", progress => { engine.Progress = progress; return engine; }, new FakeDiscovery(), opener, sink, terminalCompletionStarting: terminalCompletionStarting, disposalPublished: disposalPublished);
-    private static Task<ProtocolEvent?> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
+    private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null, Action? terminalCompletionStarting = null, Action? disposalPublished = null, string? sanitizedLogPath = null) =>
+        new("test", progress => { engine.Progress = progress; return engine; }, new FakeDiscovery(), opener, sink, sanitizedLogPath, terminalCompletionStarting, disposalPublished);
+    private static Task<ProtocolEvent> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
     private static async Task<PackageOpenedEvent> Open(LinuxInstallerProtocolService service) => (PackageOpenedEvent)(await service.HandleAsync(new OpenPackageRequest(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest")))!;
 
     private static InstallationExecutionOutcome CreateOutcome(InstallationExecutionStatus status)
@@ -725,11 +787,13 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public List<FakePackageAuthority> Authorities { get; } = [];
         public List<FakeOwner> Owners { get; } = [];
         public bool ReturnMismatchedRelease { get; set; }
+        public bool ThrowUnexpected { get; set; }
         public bool BlockOpen { get; set; }
         public TaskCompletionSource OpenStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ContinueOpen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
         {
+            if (this.ThrowUnexpected) throw new InvalidOperationException("private-package-opener-detail");
             FakePackageAuthority authority = new(); FakeOwner owner = new(); this.Authorities.Add(authority); this.Owners.Add(owner);
             this.OpenStarted.TrySetResult(); if (this.BlockOpen) await this.ContinueOpen.Task.WaitAsync(cancellationToken);
             InstallationReleaseIdentity release = this.ReturnMismatchedRelease

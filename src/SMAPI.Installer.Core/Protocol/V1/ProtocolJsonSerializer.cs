@@ -100,6 +100,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.ListRecoveriesRequest] = C("list-recoveries.request", typeof(ListRecoveriesRequest), true, "sessionId", "gamePath"),
         [ProtocolMessageKind.InspectPlanRequest] = C("inspect-plan.request", typeof(InspectPlanRequest), true, "sessionId", "gamePath", "operation", "packageId", "recoverySelectionId"),
         [ProtocolMessageKind.SelectPlanCandidatesRequest] = C("select-plan-candidates.request", typeof(SelectPlanCandidatesRequest), true, "sessionId", "planId", "planDigest", "selectedCandidateIds"),
+        [ProtocolMessageKind.GetPlanPageRequest] = C("get-plan-page.request", typeof(GetPlanPageRequest), true, "sessionId", "planId", "planDigest", "pageKind", "offset"),
         [ProtocolMessageKind.ConfirmPlanRequest] = C("confirm-plan.request", typeof(ConfirmPlanRequest), true, "sessionId", "planId", "planDigest"),
         [ProtocolMessageKind.ExecutePlanRequest] = C("execute-plan.request", typeof(ExecutePlanRequest), true, "sessionId", "planId", "planDigest"),
         [ProtocolMessageKind.CancelPlanRequest] = C("cancel-plan.request", typeof(CancelPlanRequest), true, "sessionId", "planId", "planDigest"),
@@ -107,6 +108,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.ConfirmPruneRequest] = C("confirm-prune.request", typeof(ConfirmPruneRequest), true, "sessionId", "prunePlanId", "pruneDigest"),
         [ProtocolMessageKind.ExecutePruneRequest] = C("execute-prune.request", typeof(ExecutePruneRequest), true, "sessionId", "prunePlanId", "pruneDigest"),
         [ProtocolMessageKind.CancelPruneRequest] = C("cancel-prune.request", typeof(CancelPruneRequest), true, "sessionId", "prunePlanId", "pruneDigest"),
+        [ProtocolMessageKind.CommandAcknowledgedEvent] = C("command-acknowledged.event", typeof(CommandAcknowledgedEvent), false, "sessionId", "acknowledgement", "planId", "prunePlanId"),
         [ProtocolMessageKind.HandshakeEvent] = C("handshake.event", typeof(HandshakeEvent), false, "sessionId", "serverVersion", "capabilities"),
         [ProtocolMessageKind.GameDiscoveryEvent] = C("game-discovery.event", typeof(GameDiscoveryEvent), false, "sessionId", "candidates"),
         [ProtocolMessageKind.RecoveryProgressEvent] = C("recovery-progress.event", typeof(RecoveryProgressEvent), false, "sessionId", "sequence", "stage", "completedUnits", "totalUnits", "message"),
@@ -114,8 +116,9 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.RecoveryFailureEvent] = C("recovery-failure.event", typeof(RecoveryFailureEvent), false, "sessionId", "errorCode", "message", "recoveryResult", "safeNextStep", "sanitizedLogPath", "details"),
         [ProtocolMessageKind.PackageOpenedEvent] = C("package-opened.event", typeof(PackageOpenedEvent), false, "sessionId", "packageId", "release"),
         [ProtocolMessageKind.RecoveryCatalogEvent] = C("recovery-catalog.event", typeof(RecoveryCatalogEvent), false, "sessionId", "catalogId", "gameRoot", "headSha256", "generations"),
-        [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operations", "conflicts", "candidates", "summary", "warnings", "requiresConfirmation"),
-        [ProtocolMessageKind.PrunePlanEvent] = C("prune-plan.event", typeof(PrunePlanEvent), false, "sessionId", "prunePlanId", "pruneDigest", "executionBindingDigest", "catalogId", "gameRoot", "headSha256", "retainNewest", "retainedSelectionIds", "removedSelectionIds", "cleanupGenerationIds", "summary", "warnings", "requiresConfirmation"),
+        [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operationCount", "conflictCount", "candidateCount", "warningCount", "canExecute", "risks", "recommendedDefault", "summary", "requiresConfirmation"),
+        [ProtocolMessageKind.PlanPageEvent] = C("plan-page.event", typeof(PlanPageEvent), false, "sessionId", "planId", "planDigest", "pageKind", "offset", "totalCount", "nextOffset", "operations", "conflicts", "candidates", "warnings"),
+        [ProtocolMessageKind.PrunePlanEvent] = C("prune-plan.event", typeof(PrunePlanEvent), false, "sessionId", "prunePlanId", "pruneDigest", "executionBindingDigest", "catalogId", "gameRoot", "headSha256", "retainNewest", "retainedSelectionIds", "removedSelectionIds", "cleanupGenerationIds", "summary", "warnings", "risks", "recommendedDefault", "requiresConfirmation"),
         [ProtocolMessageKind.ProgressEvent] = C("progress.event", typeof(ProgressEvent), false, "sessionId", "planId", "planDigest", "sequence", "stage", "completedUnits", "totalUnits", "message"),
         [ProtocolMessageKind.PruneProgressEvent] = C("prune-progress.event", typeof(PruneProgressEvent), false, "sessionId", "prunePlanId", "pruneDigest", "sequence", "stage", "completedUnits", "totalUnits", "message"),
         [ProtocolMessageKind.SuccessEvent] = C("success.event", typeof(SuccessEvent), false, "sessionId", "planId", "planDigest", "operation", "summary", "filesChanged", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
@@ -126,10 +129,10 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.PruneFailureEvent] = C("prune-failure.event", typeof(PruneFailureEvent), false, "sessionId", "prunePlanId", "pruneDigest", "errorCode", "message", "logicalRemovedGenerationCount", "physicalCleanupGenerationCount", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.PruneInterruptionEvent] = C("prune-interruption.event", typeof(PruneInterruptionEvent), false, "sessionId", "prunePlanId", "pruneDigest", "errorCode", "message", "recoveryAction", "logicalRemovedGenerationCount", "physicalCleanupGenerationCount", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.PruneCancelledEvent] = C("prune-cancelled.event", typeof(PruneCancelledEvent), false, "sessionId", "prunePlanId", "pruneDigest", "summary", "safeStateSummary", "logicalRemovedGenerationCount", "physicalCleanupGenerationCount", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
-        [ProtocolMessageKind.PrePlanErrorEvent] = C("pre-plan-error.event", typeof(PrePlanErrorEvent), false, "sessionId", "errorCode", "message", "safeNextStep", "isTerminal", "sanitizedLogPath")
+        [ProtocolMessageKind.PrePlanRejectedEvent] = C("pre-plan-rejected.event", typeof(PrePlanRejectedEvent), false, "sessionId", "errorCode", "message", "nextAction", "isTerminal", "sanitizedLogPath")
     };
 
-    private static MessageContract C(string name, Type type, bool request, params string[] properties) => new(name, type, request, properties);
+    private static MessageContract C(string name, Type type, bool request, params string[] properties) => new(name, type, request, ["commandId", .. properties]);
 
     private static void AssertNestedContracts(ProtocolMessageKind kind, JsonElement payload)
     {
@@ -141,7 +144,9 @@ public static class ProtocolJsonSerializer
                 AssertReleaseObject(payload.GetProperty("release"), "release identity"); break;
             case ProtocolMessageKind.RecoveryCatalogEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot"));
-                AssertObjectArray(payload.GetProperty("generations"), ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint"], "recovery generation", MaxRecoveryGenerations); break;
+                AssertObjectArray(payload.GetProperty("generations"), ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint", "restoreRelease", "restoresUninstalledState"], "recovery generation", MaxRecoveryGenerations);
+                foreach (JsonElement generation in payload.GetProperty("generations").EnumerateArray()) AssertOptionalReleaseObject(generation.GetProperty("restoreRelease"), "recovery restore release");
+                break;
             case ProtocolMessageKind.RecoveryCompletedEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot")); break;
             case ProtocolMessageKind.RecoveryFailureEvent:
@@ -153,7 +158,8 @@ public static class ProtocolJsonSerializer
                 AssertGameRoot(payload.GetProperty("gameRoot"));
                 AssertOptionalRecoveryAuthority(payload.GetProperty("recoveryAuthority"));
                 AssertOptionalReleaseObject(payload.GetProperty("currentRelease"), "current release identity");
-                AssertOptionalReleaseObject(payload.GetProperty("targetRelease"), "target release identity");
+                AssertOptionalReleaseObject(payload.GetProperty("targetRelease"), "target release identity"); break;
+            case ProtocolMessageKind.PlanPageEvent:
                 AssertObjectArray(payload.GetProperty("operations"), ["kind", "path", "expectedCurrentSha256", "resultSha256"], "plan operation", 2048);
                 AssertObjectArray(payload.GetProperty("conflicts"), ["code", "path"], "plan conflict", 256);
                 AssertObjectArray(payload.GetProperty("candidates"), ["candidateId", "reason", "disposition", "path", "observedSha256", "observedSizeBytes", "observedUnixMode", "proposedResultSha256", "selected", "evidence"], "plan candidate", MaxPlanCandidates); break;
@@ -165,6 +171,7 @@ public static class ProtocolJsonSerializer
 
     private static void ValidateMessage(ProtocolMessage message)
     {
+        ProtocolIdentifier.AssertCanonical(message.CommandId.Value, "command");
         switch (message)
         {
             case HandshakeRequest v: Text(v.ClientName, "clientName"); Text(v.ClientVersion, "clientVersion"); break;
@@ -176,6 +183,7 @@ public static class ProtocolJsonSerializer
             case ListRecoveriesRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); break;
             case InspectPlanRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); Defined(v.Operation, "operation"); ValidateInspectAuthorities(v); break;
             case SelectPlanCandidatesRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); IdArray(v.SelectedCandidateIds, "selectedCandidateIds", MaxPlanCandidates); break;
+            case GetPlanPageRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Defined(v.PageKind, "pageKind"); if (v.Offset < 0 || v.Offset >= TransactionPlan.MaximumOperationCount) throw new ProtocolException("The plan page offset is outside its bound."); break;
             case ConfirmPlanRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); break;
             case ExecutePlanRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); break;
             case CancelPlanRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); break;
@@ -183,6 +191,7 @@ public static class ProtocolJsonSerializer
             case ConfirmPruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
             case ExecutePruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
             case CancelPruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
+            case CommandAcknowledgedEvent v: ValidateAcknowledgement(v); break;
             case HandshakeEvent v: Session(v.SessionId); Text(v.ServerVersion, "serverVersion"); Strings(v.Capabilities, "capabilities", 256); break;
             case GameDiscoveryEvent v: Session(v.SessionId); Objects(v.Candidates, "candidates", MaxGameCandidates); foreach (ProtocolGameCandidate c in v.Candidates) { AbsolutePath(c.CanonicalPath, "candidate.canonicalPath"); Defined(c.State, "candidate.state"); Text(c.DisplayName, "candidate.displayName"); } NoDuplicates(v.Candidates.Select(c => c.CanonicalPath), "game candidate path"); break;
             case RecoveryProgressEvent v: Session(v.SessionId); Progress(v.Sequence, v.Stage, v.CompletedUnits, v.TotalUnits, v.Message); break;
@@ -191,6 +200,7 @@ public static class ProtocolJsonSerializer
             case PackageOpenedEvent v: Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.PackageId.Value, "package"); ValidateRelease(v.Release, "release"); break;
             case RecoveryCatalogEvent v: ValidateCatalog(v); break;
             case PlanEvent v: ValidatePlan(v); break;
+            case PlanPageEvent v: ValidatePlanPage(v); break;
             case PrunePlanEvent v: ValidatePrune(v); break;
             case ProgressEvent v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Defined(v.Stage, "stage"); Text(v.Message, "message"); if (v.Sequence < 0 || v.CompletedUnits < 0 || v.TotalUnits < 0 || v.CompletedUnits > v.TotalUnits) throw new ProtocolException("The protocol progress counters are inconsistent."); break;
             case PruneProgressEvent v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); Defined(v.Stage, "stage"); Text(v.Message, "message"); if (v.Sequence < 0 || v.CompletedUnits < 0 || v.TotalUnits < 0 || v.CompletedUnits > v.TotalUnits) throw new ProtocolException("The protocol prune progress counters are inconsistent."); break;
@@ -202,7 +212,7 @@ public static class ProtocolJsonSerializer
             case PruneFailureEvent v: PruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.ErrorCode, v.Message, v.LogicalRemovedGenerationCount, v.PhysicalCleanupGenerationCount, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); break;
             case PruneInterruptionEvent v: PruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.ErrorCode, v.Message, v.LogicalRemovedGenerationCount, v.PhysicalCleanupGenerationCount, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); Defined(v.RecoveryAction, "recoveryAction"); break;
             case PruneCancelledEvent v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); Text(v.Summary, "summary"); Text(v.SafeStateSummary, "safeStateSummary"); ValidatePruneTerminalDetails(v.LogicalRemovedGenerationCount, v.PhysicalCleanupGenerationCount, v.SafeNextStep, v.SanitizedLogPath); Defined(v.RecoveryResult, "recoveryResult"); break;
-            case PrePlanErrorEvent v: Session(v.SessionId); Text(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); break;
+            case PrePlanRejectedEvent v: Session(v.SessionId); Defined(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Defined(v.NextAction, "nextAction"); OptionalLog(v.SanitizedLogPath); break;
             default: throw new ProtocolException("The message isn't part of the version 1 protocol.");
         }
     }
@@ -224,6 +234,9 @@ public static class ProtocolJsonSerializer
                 throw new ProtocolException("The recovery catalog must mark exactly its first generation as current.");
             if (item.IsUserCheckpoint != (item.OriginOperation == InstallerOperation.Backup))
                 throw new ProtocolException("The recovery generation checkpoint flag doesn't match its core-derived origin operation.");
+            ValidateRelease(item.RestoreRelease, "recovery restore release", optional: true);
+            if ((item.RestoreRelease is null) != item.RestoresUninstalledState)
+                throw new ProtocolException("A recovery generation must identify either one exact restore release or an uninstalled result.");
         }
     }
 
@@ -236,10 +249,37 @@ public static class ProtocolJsonSerializer
             throw new ProtocolException("The recovery authority game root doesn't match the outer plan game root.");
         ValidatePlanAuthorities(v.Operation, v.PackageId, v.RecoveryAuthority?.SelectionId);
         GameRoot(v.GameRoot); ValidateRelease(v.CurrentRelease, "currentRelease", true); ValidateRelease(v.TargetRelease, "targetRelease", true); ValidateReleaseSemantics(v.Operation, v.CurrentRelease, v.TargetRelease);
-        Defined(v.ObservedState, "observedState"); ValidatePlanCollections(v.Operations, v.Conflicts, v.Candidates); Text(v.Summary, "summary"); Strings(v.Warnings, "warnings", 256);
+        Defined(v.ObservedState, "observedState");
+        if (v.OperationCount is < 0 or > TransactionPlan.MaximumOperationCount || v.ConflictCount is < 0 or > 256 || v.CandidateCount is < 0 or > MaxPlanCandidates || v.WarningCount is < 0 or > 256)
+            throw new ProtocolException("The plan summary counts are outside their bounds.");
+        if (v.CanExecute != (v.ConflictCount == 0)) throw new ProtocolException("The plan executability doesn't match its conflict count.");
+        Objects(v.Risks, "risks", 8); foreach (ProtocolPlanRisk risk in v.Risks) Defined(risk, "risk"); if (v.Risks.Distinct().Count() != v.Risks.Length) throw new ProtocolException("The plan risks contain duplicates.");
+        Defined(v.RecommendedDefault, "recommendedDefault"); Text(v.Summary, "summary");
         if (!v.RequiresConfirmation) throw new ProtocolException("Every version 1 operation plan must require explicit confirmation.");
-        ProtocolPlanDigest expected = ProtocolPlanDigest.Compute(v.ExecutionBindingDigest, v.Operation, v.PackageId, v.RecoveryAuthority, v.GameRoot, v.CurrentRelease, v.TargetRelease, v.ObservedState, v.Operations, v.Conflicts, v.Candidates, v.Summary, v.Warnings, true);
-        if (v.PlanDigest != expected) throw new ProtocolException("The protocol plan digest doesn't match the canonical structured execution plan and display data.");
+    }
+
+    private static void ValidatePlanPage(PlanPageEvent v)
+    {
+        PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Defined(v.PageKind, "pageKind");
+        if (v.Offset < 0 || v.TotalCount <= 0 || v.TotalCount > TransactionPlan.MaximumOperationCount || v.Offset >= v.TotalCount)
+            throw new ProtocolException("The plan page bounds are inconsistent.");
+        int populated = v.Operations.Length + v.Conflicts.Length + v.Candidates.Length + v.Warnings.Length;
+        if (populated <= 0 || v.Offset + populated > v.TotalCount || v.NextOffset != (v.Offset + populated < v.TotalCount ? v.Offset + populated : null))
+            throw new ProtocolException("The plan page continuation is inconsistent.");
+        if ((v.PageKind == ProtocolPlanPageKind.Operations) != (v.Operations.Length > 0) || (v.PageKind == ProtocolPlanPageKind.Conflicts) != (v.Conflicts.Length > 0) || (v.PageKind == ProtocolPlanPageKind.Candidates) != (v.Candidates.Length > 0) || (v.PageKind == ProtocolPlanPageKind.Warnings) != (v.Warnings.Length > 0))
+            throw new ProtocolException("A plan page must populate only its selected collection.");
+        ValidatePlanCollections(v.Operations, v.Conflicts, v.Candidates);
+        Strings(v.Warnings, "warnings", 256);
+    }
+
+    private static void ValidateAcknowledgement(CommandAcknowledgedEvent v)
+    {
+        Session(v.SessionId); Defined(v.Acknowledgement, "acknowledgement");
+        bool plan = v.Acknowledgement is ProtocolAcknowledgementKind.PlanConfirmed or ProtocolAcknowledgementKind.PlanCancellationRequested or ProtocolAcknowledgementKind.PlanCancelledBeforeExecution;
+        if (plan != v.PlanId.HasValue || plan == v.PrunePlanId.HasValue)
+            throw new ProtocolException("The command acknowledgement doesn't carry its exact plan binding.");
+        if (v.PlanId is { } planId) ProtocolIdentifier.AssertCanonical(planId.Value, "plan");
+        if (v.PrunePlanId is { } pruneId) ProtocolIdentifier.AssertCanonical(pruneId.Value, "prune plan");
     }
 
     private static void ValidatePrune(PrunePlanEvent v)
@@ -253,7 +293,7 @@ public static class ProtocolJsonSerializer
         int catalogCount = v.RetainedSelectionIds.Length + v.RemovedSelectionIds.Length;
         if (catalogCount is <= 0 or > MaxRecoveryGenerations || v.RetainedSelectionIds.Length != Math.Min(v.RetainNewest, catalogCount) || v.CleanupGenerationIds.Length < v.RemovedSelectionIds.Length || v.CleanupGenerationIds.Length == 0)
             throw new ProtocolException("The prune plan is a no-op or isn't a sensible bounded exact catalog partition and cleanup set.");
-        Text(v.Summary, "summary"); Strings(v.Warnings, "warnings", 256); if (!v.RequiresConfirmation) throw new ProtocolException("Every prune plan must require explicit confirmation.");
+        Text(v.Summary, "summary"); Strings(v.Warnings, "warnings", 256); Objects(v.Risks, "risks", 8); foreach (ProtocolPlanRisk risk in v.Risks) Defined(risk, "risk"); if (!v.Risks.Contains(ProtocolPlanRisk.RecoveryPrune) || v.Risks.Distinct().Count() != v.Risks.Length) throw new ProtocolException("A destructive prune plan must carry its unique typed risk."); Defined(v.RecommendedDefault, "recommendedDefault"); if (!v.RequiresConfirmation) throw new ProtocolException("Every prune plan must require explicit confirmation.");
         ProtocolPlanDigest expected = ProtocolPlanDigest.ComputePrune(v.ExecutionBindingDigest, v.CatalogId, v.GameRoot, v.HeadSha256, v.RetainNewest, v.RetainedSelectionIds, v.RemovedSelectionIds, v.CleanupGenerationIds, v.Summary, v.Warnings, true);
         if (v.PruneDigest != expected) throw new ProtocolException("The protocol prune digest doesn't match the exact catalog selection and display data.");
     }
@@ -315,6 +355,9 @@ public static class ProtocolJsonSerializer
         Defined(authority.Generation.OriginOperation, "recoveryAuthority.generation.originOperation");
         if (authority.Generation.IsUserCheckpoint != (authority.Generation.OriginOperation == InstallerOperation.Backup))
             throw new ProtocolException("The recovery authority checkpoint flag doesn't match its origin operation.");
+        ValidateRelease(authority.Generation.RestoreRelease, "recovery authority restore release", optional: true);
+        if ((authority.Generation.RestoreRelease is null) != authority.Generation.RestoresUninstalledState)
+            throw new ProtocolException("A recovery authority must identify either one exact restore release or an uninstalled result.");
     }
     private static void ValidatePlanAuthorities(InstallerOperation operation, ProtocolPackageId? packageId, ProtocolRecoverySelectionId? recoveryId)
     {
@@ -409,7 +452,9 @@ public static class ProtocolJsonSerializer
             return;
         AssertExactObject(element, ["catalogId", "selectionId", "gameRoot", "headSha256", "generation"], "recovery authority");
         AssertGameRoot(element.GetProperty("gameRoot"));
-        AssertExactObject(element.GetProperty("generation"), ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint"], "recovery authority generation");
+        JsonElement generation = element.GetProperty("generation");
+        AssertExactObject(generation, ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint", "restoreRelease", "restoresUninstalledState"], "recovery authority generation");
+        AssertOptionalReleaseObject(generation.GetProperty("restoreRelease"), "recovery authority restore release");
     }
 
     private static void AssertCanonicalEnums(ProtocolMessageKind kind, JsonElement payload)
@@ -417,6 +462,8 @@ public static class ProtocolJsonSerializer
         switch (kind)
         {
             case ProtocolMessageKind.InspectPlanRequest: AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation"); break;
+            case ProtocolMessageKind.GetPlanPageRequest: AssertCanonicalEnum<ProtocolPlanPageKind>(payload.GetProperty("pageKind"), "pageKind"); break;
+            case ProtocolMessageKind.CommandAcknowledgedEvent: AssertCanonicalEnum<ProtocolAcknowledgementKind>(payload.GetProperty("acknowledgement"), "acknowledgement"); break;
             case ProtocolMessageKind.GameDiscoveryEvent:
                 foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray()) AssertCanonicalEnum<LinuxGameFolderStatus>(item.GetProperty("state"), "candidate.state");
                 break;
@@ -428,14 +475,19 @@ public static class ProtocolJsonSerializer
             case ProtocolMessageKind.PlanEvent:
                 AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation");
                 AssertCanonicalEnum<ObservedInstallState>(payload.GetProperty("observedState"), "observedState");
+                if (payload.GetProperty("recoveryAuthority").ValueKind != JsonValueKind.Null) AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("recoveryAuthority").GetProperty("generation").GetProperty("originOperation"), "recoveryAuthority.generation.originOperation");
+                foreach (JsonElement risk in payload.GetProperty("risks").EnumerateArray()) AssertCanonicalEnum<ProtocolPlanRisk>(risk, "risk");
+                AssertCanonicalEnum<ProtocolRecommendedDefault>(payload.GetProperty("recommendedDefault"), "recommendedDefault");
+                break;
+            case ProtocolMessageKind.PlanPageEvent:
+                AssertCanonicalEnum<ProtocolPlanPageKind>(payload.GetProperty("pageKind"), "pageKind");
                 foreach (JsonElement item in payload.GetProperty("operations").EnumerateArray()) AssertCanonicalEnum<PlanOperationKind>(item.GetProperty("kind"), "operation.kind");
                 foreach (JsonElement item in payload.GetProperty("conflicts").EnumerateArray()) AssertCanonicalEnum<PlanConflictCode>(item.GetProperty("code"), "conflict.code");
-                foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray())
-                {
-                    AssertCanonicalEnum<FileReplacementCandidateReason>(item.GetProperty("reason"), "candidate.reason");
-                    AssertCanonicalEnum<FileReplacementCandidateDisposition>(item.GetProperty("disposition"), "candidate.disposition");
-                }
-                if (payload.GetProperty("recoveryAuthority").ValueKind != JsonValueKind.Null) AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("recoveryAuthority").GetProperty("generation").GetProperty("originOperation"), "recoveryAuthority.generation.originOperation");
+                foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray()) { AssertCanonicalEnum<FileReplacementCandidateReason>(item.GetProperty("reason"), "candidate.reason"); AssertCanonicalEnum<FileReplacementCandidateDisposition>(item.GetProperty("disposition"), "candidate.disposition"); }
+                break;
+            case ProtocolMessageKind.PrunePlanEvent:
+                foreach (JsonElement risk in payload.GetProperty("risks").EnumerateArray()) AssertCanonicalEnum<ProtocolPlanRisk>(risk, "risk");
+                AssertCanonicalEnum<ProtocolRecommendedDefault>(payload.GetProperty("recommendedDefault"), "recommendedDefault");
                 break;
             case ProtocolMessageKind.ProgressEvent or ProtocolMessageKind.PruneProgressEvent: AssertCanonicalEnum<TransactionStage>(payload.GetProperty("stage"), "stage"); break;
             case ProtocolMessageKind.SuccessEvent: AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation"); AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
@@ -445,6 +497,8 @@ public static class ProtocolJsonSerializer
                 AssertCanonicalEnum<InstallerRecoveryAction>(payload.GetProperty("recoveryAction"), "recoveryAction"); AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
             case ProtocolMessageKind.PruneInterruptionEvent:
                 AssertCanonicalEnum<InstallerRecoveryAction>(payload.GetProperty("recoveryAction"), "recoveryAction"); AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
+            case ProtocolMessageKind.PrePlanRejectedEvent:
+                AssertCanonicalEnum<ProtocolPrePlanErrorCode>(payload.GetProperty("errorCode"), "errorCode"); AssertCanonicalEnum<ProtocolNextAction>(payload.GetProperty("nextAction"), "nextAction"); break;
         }
     }
 

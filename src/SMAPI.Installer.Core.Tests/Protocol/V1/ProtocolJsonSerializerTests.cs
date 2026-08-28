@@ -39,7 +39,7 @@ internal sealed class ProtocolJsonSerializerTests
             new HandshakeRequest("gui", "1"), new DiscoverGamesRequest(session), new RecoverInterruptedRequest(session, "/game"),
             new OpenPackageRequest(session, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json"),
             new ListRecoveriesRequest(session, "/game"), new InspectPlanRequest(session, "/game", InstallerOperation.Repair, package, null),
-            new SelectPlanCandidatesRequest(session, plan, digest, [candidate]), new ConfirmPlanRequest(session, plan, digest), new ExecutePlanRequest(session, plan, digest), new CancelPlanRequest(session, plan, digest),
+            new SelectPlanCandidatesRequest(session, plan, digest, [candidate]), new GetPlanPageRequest(session, plan, digest, ProtocolPlanPageKind.Candidates, 0), new ConfirmPlanRequest(session, plan, digest), new ExecutePlanRequest(session, plan, digest), new CancelPlanRequest(session, plan, digest),
             new InspectPruneRequest(session, catalog, 1), new ConfirmPruneRequest(session, prune, pruneDigest), new ExecutePruneRequest(session, prune, pruneDigest), new CancelPruneRequest(session, prune, pruneDigest)
         ];
         ProtocolEvent[] events =
@@ -50,6 +50,8 @@ internal sealed class ProtocolJsonSerializerTests
             new RecoveryFailureEvent(session, "RecoveryFailed", "Recovery failed.", ProtocolRecoveryResult.Pending, "Retry recovery.", null, new("/game", 1, 2, 3, 7, null, null, null, null, true, true, [new("11111111111111111111111111111111", 2)], 1, 2)),
             new PackageOpenedEvent(session, package, CreateRelease()), new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(retainedRecovery, "11111111111111111111111111111111", InstallerOperation.Backup, true, true), new(recovery, "22222222222222222222222222222222", InstallerOperation.Update, false, false)]),
             new PlanEvent(session, plan, digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true),
+            new CommandAcknowledgedEvent(session, ProtocolAcknowledgementKind.PlanConfirmed, plan, null),
+            new PlanPageEvent(session, plan, digest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], candidates, []),
             new PrunePlanEvent(session, prune, pruneDigest, ExecutionDigest, catalog, GameRoot, HashA, 1, [retainedRecovery], [recovery], cleanup, "Prune.", [], true),
             new ProgressEvent(session, plan, digest, 0, TransactionStage.PreparingRecovery, 0, null, "Hashing."),
             new PruneProgressEvent(session, prune, pruneDigest, 0, TransactionStage.Revalidating, 0, null, "Revalidating."),
@@ -61,14 +63,26 @@ internal sealed class ProtocolJsonSerializerTests
             new PruneFailureEvent(session, prune, pruneDigest, "failed", "Failed.", 0, 0, ProtocolRecoveryResult.Succeeded, "Retry.", null),
             new PruneInterruptionEvent(session, prune, pruneDigest, "interrupted", "Interrupted.", InstallerRecoveryAction.InspectAgain, 0, 0, ProtocolRecoveryResult.Pending, "Inspect.", null),
             new PruneCancelledEvent(session, prune, pruneDigest, "Cancelled.", "Safe.", 0, 0, ProtocolRecoveryResult.NotNeeded, "Close.", null),
-            new PrePlanErrorEvent(session, "invalid-package", "Invalid.", "Choose another.", false, null)
+            new PrePlanRejectedEvent(session, ProtocolPrePlanErrorCode.PackageRejected, "Invalid.", ProtocolNextAction.ReopenVerifiedPackage, false, null)
         ];
 
         requests.Cast<ProtocolMessage>().Concat(events).Select(message => message.Kind).Should().BeEquivalentTo(Enum.GetValues<ProtocolMessageKind>());
         foreach (ProtocolRequest request in requests)
-            ProtocolJsonSerializer.DeserializeRequestLine(ProtocolJsonSerializer.SerializeLine(request)).Should().BeEquivalentTo(request);
+        {
+            string line = ProtocolJsonSerializer.SerializeLine(request);
+            ProtocolJsonSerializer.DeserializeRequestLine(line).Should().BeEquivalentTo(request);
+            FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(RemoveCommandId(line, request.CommandId))).Should().Throw<ProtocolException>().WithMessage("*missing the required 'commandId'*");
+            ProtocolRequest defaultId = request with { CommandId = default };
+            defaultId.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*command ID*");
+        }
         foreach (ProtocolEvent item in events)
-            ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(item)).Should().BeEquivalentTo(item);
+        {
+            string line = ProtocolJsonSerializer.SerializeLine(item);
+            ProtocolJsonSerializer.DeserializeEventLine(line).Should().BeEquivalentTo(item);
+            FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(RemoveCommandId(line, item.CommandId))).Should().Throw<ProtocolException>().WithMessage("*missing the required 'commandId'*");
+            ProtocolEvent defaultId = item with { CommandId = default };
+            defaultId.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*command ID*");
+        }
     }
 
     [Test]
@@ -88,7 +102,7 @@ internal sealed class ProtocolJsonSerializerTests
         string valid = ProtocolJsonSerializer.SerializeLine(new HandshakeRequest("gui", "1"));
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(valid.Replace("\"protocolVersion\":1", "\"protocolVersion\":2", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*Unsupported protocol version*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(valid.Replace("handshake.request", "unknown.request", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*Unknown version 1 protocol message type*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(valid.Replace(",\"payload\":{\"clientName\":\"gui\",\"clientVersion\":\"1\"}", "", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*missing the required 'payload'*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine("{\"protocolVersion\":1,\"messageType\":\"handshake.request\"}")).Should().Throw<ProtocolException>().WithMessage("*missing the required 'payload'*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(valid + "\n")).Should().Throw<ProtocolException>().WithMessage("*line terminator*");
         ProtocolSessionId session = ProtocolSessionId.CreateRandom(); string inspect = ProtocolJsonSerializer.SerializeLine(new InspectPlanRequest(session, "/game", InstallerOperation.Uninstall, null, null));
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(inspect.Replace("\"operation\":\"uninstall\"", "\"operation\":3", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*canonical camel case*");
@@ -97,8 +111,9 @@ internal sealed class ProtocolJsonSerializerTests
     [Test]
     public void Serialize_UsesExactDeterministicWirePropertyOrder()
     {
-        string line = ProtocolJsonSerializer.SerializeLine(new HandshakeRequest("gui", "1"));
-        line.Should().Be("{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"clientName\":\"gui\",\"clientVersion\":\"1\"}}");
+        HandshakeRequest request = new("gui", "1") { CommandId = ProtocolCommandId.Parse("11111111111111111111111111111111") };
+        string line = ProtocolJsonSerializer.SerializeLine(request);
+        line.Should().Be("{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"commandId\":\"11111111111111111111111111111111\",\"clientName\":\"gui\",\"clientVersion\":\"1\"}}");
     }
 
     [Test]
@@ -118,26 +133,25 @@ internal sealed class ProtocolJsonSerializerTests
     [Test]
     public void Deserialize_RejectsUnknownNestedCandidateFieldAndDuplicateSelection()
     {
-        string line = ProtocolJsonSerializer.SerializeLine(CreatePlan());
+        PlanEvent plan = CreatePlan();
+        string line = ProtocolJsonSerializer.SerializeLine(new PlanPageEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], plan.Candidates, []));
         string unknown = line.Replace("\"evidence\":", "\"unknown\":0,\"evidence\":", StringComparison.Ordinal);
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(unknown)).Should().Throw<ProtocolException>().WithMessage("*unknown 'unknown'*");
 
-        PlanEvent plan = CreatePlan(); ProtocolCandidateId id = plan.Candidates[0].CandidateId;
+        ProtocolCandidateId id = plan.Candidates[0].CandidateId;
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new SelectPlanCandidatesRequest(plan.SessionId, plan.PlanId, plan.PlanDigest, [id, id])))
             .Should().Throw<ProtocolException>().WithMessage("*duplicate IDs*");
     }
 
     [Test]
-    public void PlanDigest_BindsCandidatesRecoveryAndDisplayData()
+    public void PlanSummaryAndPages_ValidateStructuredDataIndependentlyOfPagedDigestAuthority()
     {
         PlanEvent plan = CreatePlan();
-        AlterPlan(plan, summary: "Altered.").Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
-        ProtocolPlanCandidate changed = plan.Candidates[0] with { Selected = !plan.Candidates[0].Selected };
-        AlterPlan(plan, candidates: [changed]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
-        AlterPlan(plan, candidates: [plan.Candidates[0] with { Reason = FileReplacementCandidateReason.UnknownCollision }]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
-        AlterPlan(plan, candidates: [plan.Candidates[0] with { Disposition = FileReplacementCandidateDisposition.Restore }]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*core-defined pair*");
-        AlterPlan(plan, candidates: [plan.Candidates[0] with { ProposedResultSha256 = HashA }]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
-        AlterPlan(plan, packageId: ProtocolPackageId.CreateRandom()).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
+        new PlanEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, 1, 1, 1, 0, true, plan.Risks, ProtocolRecommendedDefault.Cancel, plan.Summary, true)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*executability*");
+        ProtocolPlanCandidate invalid = plan.Candidates[0] with { ProposedResultSha256 = null };
+        new PlanPageEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [invalid], [])
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*Only removal candidates*");
     }
 
     [Test]
@@ -150,9 +164,9 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, authority, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
         PlanEvent plan = new(session, ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Rollback, null, authority, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
         ProtocolJsonSerializer.SerializeLine(plan).Should().NotBeEmpty();
-        ProtocolRecoveryAuthority changed = authority with { HeadSha256 = HashB };
-        new PlanEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, null, changed, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, plan.Candidates, plan.Summary, plan.Warnings, true)
-            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
+        ProtocolRecoveryAuthority missingRestoreOutcome = authority with { Generation = generation with { RestoreRelease = null, RestoresUninstalledState = false } };
+        new PlanEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, null, missingRestoreOutcome, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, plan.Candidates, plan.Summary, plan.Warnings, true)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*either one exact restore release or an uninstalled result*");
 
         ProtocolRecoveryAuthority wrongRoot = authority with { GameRoot = GameRoot with { Inode = 99 } };
         ProtocolPlanDigest wrongRootDigest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, wrongRoot, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
@@ -183,7 +197,7 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolSessionId session = ProtocolSessionId.CreateRandom();
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new GameDiscoveryEvent(session, Enumerable.Range(0, ProtocolJsonSerializer.MaxGameCandidates + 1).Select(i => new ProtocolGameCandidate($"/game/{i}", LinuxGameFolderStatus.Valid, "Game")).ToArray())))
             .Should().Throw<ProtocolException>().WithMessage("*too large*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrePlanErrorEvent(session, "bad", new string('x', 4097), "Retry.", false, null))).Should().Throw<ProtocolException>();
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrePlanRejectedEvent(session, ProtocolPrePlanErrorCode.UnexpectedFailure, new string('x', 4097), ProtocolNextAction.ViewPrivateLog, false, null))).Should().Throw<ProtocolException>();
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new DiscoverGamesRequest(new ProtocolSessionId(new string('0', 32))))).Should().Throw<ProtocolException>().WithMessage("*session ID*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 0))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 65))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
@@ -206,7 +220,8 @@ internal sealed class ProtocolJsonSerializerTests
         string deep = "{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":" + string.Concat(Enumerable.Repeat("{\"x\":", ProtocolJsonSerializer.MaxDepth + 1)) + "0" + new string('}', ProtocolJsonSerializer.MaxDepth + 1) + "}";
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(deep)).Should().Throw<ProtocolException>().WithMessage("*strict version 1 JSON*");
 
-        string plan = ProtocolJsonSerializer.SerializeLine(CreatePlan());
+        PlanEvent planSummary = CreatePlan();
+        string plan = ProtocolJsonSerializer.SerializeLine(new PlanPageEvent(planSummary.SessionId, planSummary.PlanId, planSummary.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], planSummary.Candidates, []));
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(plan.Replace("\"evidence\":\"Observed.\"", "\"evidence\":\"Observed.\",\"evidence\":\"Again.\"", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*duplicate 'evidence'*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(plan.Replace(",\"evidence\":\"Observed.\"", "", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*missing the required 'evidence'*");
         ProtocolSessionId session = ProtocolSessionId.CreateRandom();
@@ -225,21 +240,14 @@ internal sealed class ProtocolJsonSerializerTests
     }
 
     [Test]
-    public void PlanDigest_RejectsFieldByFieldStructuredMutations()
+    public void PlanPages_RejectFieldByFieldStructuredMutations()
     {
         PlanEvent plan = CreatePlan();
-        PlanEvent[] altered =
-        [
-            CopyPlan(plan, gameRoot: plan.GameRoot with { Inode = plan.GameRoot.Inode + 1 }),
-            CopyPlan(plan, currentRelease: plan.CurrentRelease! with { PackageSha256 = HashB }),
-            CopyPlan(plan, targetRelease: plan.TargetRelease! with { PackageSha256 = HashB }),
-            CopyPlan(plan, observedState: ObservedInstallState.Unknown),
-            CopyPlan(plan, operations: [plan.Operations[0] with { ResultSha256 = HashB }]),
-            CopyPlan(plan, conflicts: [new(PlanConflictCode.ModifiedOwnedFile, "a")]),
-            CopyPlan(plan, warnings: ["Changed warning."])
-        ];
-        foreach (PlanEvent value in altered)
-            value.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*digest*");
+        ProtocolPlanOperation badOperation = plan.Operations[0] with { ResultSha256 = null };
+        new PlanPageEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Operations, 0, 1, null, [badOperation], [], [], [])
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*hashes are inconsistent*");
+        new PlanPageEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Warnings, 1, 1, null, [], [], [], ["out of bounds"])
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*page bounds*");
     }
 
     [Test]
@@ -249,13 +257,14 @@ internal sealed class ProtocolJsonSerializerTests
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new ListRecoveriesRequest(session, "/game/../other"))).Should().Throw<ProtocolException>().WithMessage("*canonical absolute Linux path*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new GameDiscoveryEvent(session, [new("/game", (LinuxGameFolderStatus)999, "Game")]))).Should().Throw<ProtocolException>().WithMessage("*isn't defined*");
         PlanEvent plan = CreatePlan();
-        AlterPlan(plan, candidates: [plan.Candidates[0] with { ProposedResultSha256 = null }]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*Only removal candidates*");
-        AlterPlan(plan, candidates: [plan.Candidates[0] with { Reason = FileReplacementCandidateReason.ModifiedReceiptOwned, Disposition = FileReplacementCandidateDisposition.Remove }]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*Only removal candidates*");
-        AlterPlan(plan, candidates: [plan.Candidates[0] with { Reason = (FileReplacementCandidateReason)999 }]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*isn't defined*");
+        Func<ProtocolPlanCandidate, PlanPageEvent> candidatePage = candidate => new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+        candidatePage(plan.Candidates[0] with { ProposedResultSha256 = null }).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*Only removal candidates*");
+        candidatePage(plan.Candidates[0] with { Reason = FileReplacementCandidateReason.ModifiedReceiptOwned, Disposition = FileReplacementCandidateDisposition.Remove }).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*Only removal candidates*");
+        candidatePage(plan.Candidates[0] with { Reason = (FileReplacementCandidateReason)999 }).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*isn't defined*");
         ProtocolPlanCandidate impossible = plan.Candidates[0] with { Reason = FileReplacementCandidateReason.OfficialLauncherBackup };
-        RecomputePlanWithCandidates(plan, [impossible]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*core-defined pair*");
+        candidatePage(impossible).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*core-defined pair*");
         ProtocolPlanCandidate misleadingRetain = plan.Candidates[0] with { Reason = FileReplacementCandidateReason.OfficialLauncherBackup, Disposition = FileReplacementCandidateDisposition.TrustRetained };
-        RecomputePlanWithCandidates(plan, [misleadingRetain]).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact observed digest*");
+        candidatePage(misleadingRetain).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact observed digest*");
         ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId only = ProtocolRecoverySelectionId.CreateRandom(); ProtocolPrunePlanId id = ProtocolPrunePlanId.CreateRandom();
         ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [only], [], [], "No-op.", [], true);
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrunePlanEvent(session, id, digest, ExecutionDigest, catalog, GameRoot, HashA, 1, [only], [], [], "No-op.", [], true))).Should().Throw<ProtocolException>().WithMessage("*no-op*");
@@ -326,4 +335,7 @@ internal sealed class ProtocolJsonSerializerTests
         "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", HashA, 123456,
         "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "Release", "linux-x64"
     );
+
+    private static string RemoveCommandId(string line, ProtocolCommandId commandId) =>
+        line.Replace($"\"commandId\":\"{commandId.Value}\",", "", StringComparison.Ordinal);
 }

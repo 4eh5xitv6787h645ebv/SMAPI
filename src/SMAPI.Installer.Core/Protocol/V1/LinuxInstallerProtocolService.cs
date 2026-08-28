@@ -115,23 +115,24 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
     /// <param name="request">The strictly validated request for this service's session.</param>
     /// <param name="cancellationToken">Cancellation for command admission and the bounded core operation.</param>
     /// <returns>
-    /// The command's only response event, or <see langword="null"/> when the command only changed protocol state.
-    /// This response is never also sent to the progress callback.
+    /// The command's sole correlated response or terminal event. This response is never also sent to the progress callback.
     /// </returns>
     /// <remarks>
     /// Unsolicited progress is delivered only through the callback described by the constructor. Do not synchronously
     /// call or wait on this method from that callback; queue follow-up commands after the callback returns.
     /// </remarks>
-    public async Task<ProtocolEvent?> HandleAsync(ProtocolRequest request, CancellationToken cancellationToken = default)
+    public async Task<ProtocolEvent> HandleAsync(ProtocolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         this.AssertAcceptingRequests();
         await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         bool releaseGate = true;
+        bool longOperationStarted = false;
         try
         {
             this.AssertAcceptingRequests();
             ProtocolJsonSerializer.SerializeLine(request);
+            this.WithSession(() => this.Session.AcceptCommand(request));
             switch (request)
             {
                 case HandshakeRequest value:
@@ -140,6 +141,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                     return await this.DiscoverAsync(value, cancellationToken).ConfigureAwait(false);
                 case RecoverInterruptedRequest value:
                     Task<ProtocolEvent> recovery = this.StartRecovery(value, cancellationToken);
+                    longOperationStarted = true;
                     releaseGate = false; this.CommandGate.Release();
                     return await recovery.ConfigureAwait(false);
                 case OpenPackageRequest value:
@@ -150,10 +152,13 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                     return await this.InspectAsync(value, cancellationToken).ConfigureAwait(false);
                 case SelectPlanCandidatesRequest value:
                     return await this.ApproveCandidatesAsync(value, cancellationToken).ConfigureAwait(false);
+                case GetPlanPageRequest value:
+                    return this.Emit(this.WithSession(() => this.Session.GetPlanPage(value)));
                 case ConfirmPlanRequest value:
-                    this.WithSession(() => this.Session.ConfirmPlan(value)); return null;
+                    return this.Emit(this.WithSession(() => this.Session.ConfirmPlan(value)));
                 case ExecutePlanRequest value:
                     Task<ProtocolEvent> execution = this.StartExecution(value, cancellationToken);
+                    longOperationStarted = true;
                     releaseGate = false; this.CommandGate.Release();
                     return await execution.ConfigureAwait(false);
                 case CancelPlanRequest value:
@@ -161,9 +166,10 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 case InspectPruneRequest value:
                     return await this.InspectPruneAsync(value, cancellationToken).ConfigureAwait(false);
                 case ConfirmPruneRequest value:
-                    this.WithSession(() => this.Session.ConfirmPrune(value)); return null;
+                    return this.Emit(this.WithSession(() => this.Session.ConfirmPrune(value)));
                 case ExecutePruneRequest value:
                     Task<ProtocolEvent> pruning = this.StartPrune(value, cancellationToken);
+                    longOperationStarted = true;
                     releaseGate = false; this.CommandGate.Release();
                     return await pruning.ConfigureAwait(false);
                 case CancelPruneRequest value:
@@ -171,6 +177,10 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 default:
                     throw new ProtocolException("The request isn't supported by this protocol service.");
             }
+        }
+        catch (Exception exception) when (!longOperationStarted && exception is not ProtocolException and not ObjectDisposedException)
+        {
+            return this.CreatePrePlanRejection(request, exception);
         }
         finally
         {
@@ -273,7 +283,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         try
         {
             InterruptedOperationRecoveryResult result = await this.Engine.RecoverInterruptedOperationAsync(request.GamePath, active.Token).ConfigureAwait(false);
-            RecoveryCompletedEvent terminal = new(this.SessionId, new(result.GameRoot.CanonicalPath, result.GameRoot.DeviceMajor, result.GameRoot.DeviceMinor, result.GameRoot.Inode, result.CurrentOperationGeneration), result.NamedRootStillSelected, result.PreviousOperationGeneration, result.CurrentOperationGeneration, result.RecoveredTransactions.Count, result.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount), result.RecoveredAny ? "Interrupted installer work was recovered to a durable safe state." : "No interrupted transaction required rollback; the operation generation was refreshed.", "Discard every prior plan and inspect again.", this.SanitizedLogPath);
+            RecoveryCompletedEvent terminal = new(this.SessionId, new(result.GameRoot.CanonicalPath, result.GameRoot.DeviceMajor, result.GameRoot.DeviceMinor, result.GameRoot.Inode, result.CurrentOperationGeneration), result.NamedRootStillSelected, result.PreviousOperationGeneration, result.CurrentOperationGeneration, result.RecoveredTransactions.Count, result.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount), result.RecoveredAny ? "Interrupted installer work was recovered to a durable safe state." : "No interrupted transaction required rollback; the operation generation was refreshed.", "Discard every prior plan and inspect again.", this.SanitizedLogPath) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.CompleteInterruptedRecovery(request, terminal));
             return this.Emit(terminal);
         }
@@ -301,7 +311,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 partial.RecoveredTransactions.Count,
                 partial.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount)
             );
-            RecoveryFailureEvent terminal = new(this.SessionId, code, message, cancelled ? ProtocolRecoveryResult.NotNeeded : ProtocolRecoveryResult.Pending, "Retry interrupted-operation recovery before inspecting or changing the installation.", this.SanitizedLogPath, details);
+            RecoveryFailureEvent terminal = new(this.SessionId, code, message, cancelled ? ProtocolRecoveryResult.NotNeeded : ProtocolRecoveryResult.Pending, "Retry interrupted-operation recovery before inspecting or changing the installation.", this.SanitizedLogPath, details) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.FailInterruptedRecovery(terminal));
             return this.Emit(terminal);
         }
@@ -382,7 +392,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
         catch (Exception)
         {
-            RecoverableInterruptionEvent terminal = new(request.SessionId, request.PlanId, request.PlanDigest, "UnexpectedCoreFailure", "The installer core stopped without returning a typed terminal outcome.", InstallerRecoveryAction.Resume, "Treat the installation as requiring conservative interrupted-operation recovery.", 0, ProtocolRecoveryResult.Pending, "Run interrupted-operation recovery, then inspect again.", this.SanitizedLogPath);
+            RecoverableInterruptionEvent terminal = new(request.SessionId, request.PlanId, request.PlanDigest, "UnexpectedCoreFailure", "The installer core stopped without returning a typed terminal outcome.", InstallerRecoveryAction.Resume, "Treat the installation as requiring conservative interrupted-operation recovery.", 0, ProtocolRecoveryResult.Pending, "Run interrupted-operation recovery, then inspect again.", this.SanitizedLogPath) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.Complete(terminal));
             return this.Emit(terminal);
         }
@@ -404,7 +414,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
         catch (Exception)
         {
-            PruneInterruptionEvent terminal = new(request.SessionId, request.PrunePlanId, request.PruneDigest, "UnexpectedCoreFailure", "Recovery pruning stopped without returning a typed terminal outcome.", InstallerRecoveryAction.Retry, 0, 0, ProtocolRecoveryResult.Pending, "List recoveries to observe durable state, then inspect pruning again.", null);
+            PruneInterruptionEvent terminal = new(request.SessionId, request.PrunePlanId, request.PruneDigest, "UnexpectedCoreFailure", "Recovery pruning stopped without returning a typed terminal outcome.", InstallerRecoveryAction.Retry, 0, 0, ProtocolRecoveryResult.Pending, "List recoveries to observe durable state, then inspect pruning again.", null) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.Complete(terminal));
             return this.Emit(terminal);
         }
@@ -415,22 +425,18 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
     }
 
-    private ProtocolEvent? CancelPlan(CancelPlanRequest request)
+    private ProtocolEvent CancelPlan(CancelPlanRequest request)
     {
-        ProtocolSessionState before;
-        lock (this.SessionLock) { this.AssertUsable(); before = this.Session.State; this.Session.RequestCancellation(request); this.ActiveCancellation?.Cancel(); }
-        if (before == ProtocolSessionState.Executing) return null;
-        CancelledEvent terminal = new(request.SessionId, request.PlanId, request.PlanDigest, "The confirmed plan was cancelled before execution began.", "No files were changed.", 0, ProtocolRecoveryResult.NotNeeded, "Inspect again when ready.", null);
-        this.WithSession(() => this.Session.Complete(terminal)); return this.Emit(terminal);
+        CommandAcknowledgedEvent acknowledgement;
+        lock (this.SessionLock) { this.AssertUsable(); acknowledgement = this.Session.RequestCancellation(request); this.ActiveCancellation?.Cancel(); }
+        return this.Emit(acknowledgement);
     }
 
-    private ProtocolEvent? CancelPrune(CancelPruneRequest request)
+    private ProtocolEvent CancelPrune(CancelPruneRequest request)
     {
-        ProtocolSessionState before;
-        lock (this.SessionLock) { this.AssertUsable(); before = this.Session.State; this.Session.RequestPruneCancellation(request); this.ActiveCancellation?.Cancel(); }
-        if (before == ProtocolSessionState.Pruning) return null;
-        PruneCancelledEvent terminal = new(request.SessionId, request.PrunePlanId, request.PruneDigest, "The prune plan was cancelled before execution began.", "No recovery state was changed.", 0, 0, ProtocolRecoveryResult.NotNeeded, "List recoveries again when ready.", null);
-        this.WithSession(() => this.Session.Complete(terminal)); return this.Emit(terminal);
+        CommandAcknowledgedEvent acknowledgement;
+        lock (this.SessionLock) { this.AssertUsable(); acknowledgement = this.Session.RequestPruneCancellation(request); this.ActiveCancellation?.Cancel(); }
+        return this.Emit(acknowledgement);
     }
 
     private ProtocolEvent CreateExecutionTerminal(ExecutePlanRequest request, InstallationExecutionOutcome outcome)
@@ -441,7 +447,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         int recoveredPaths = outcome.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount);
         string code = outcome.ErrorCode?.ToString() ?? outcome.Status.ToString();
         string message = outcome.SafeMessage ?? "The installer core returned a bounded terminal outcome.";
-        return outcome.Status switch
+        return ((ProtocolEvent)(outcome.Status switch
         {
             InstallationExecutionStatus.Succeeded => new SuccessEvent(request.SessionId, request.PlanId, request.PlanDigest, (InstallerOperation)(int)outcome.Action, message, changed, ProtocolRecoveryResult.NotNeeded, "Close the installer or inspect again.", outcome.SanitizedLogPath),
             InstallationExecutionStatus.SucceededWithCleanupWarning => new SuccessEvent(request.SessionId, request.PlanId, request.PlanDigest, (InstallerOperation)(int)outcome.Action, message, changed, ProtocolRecoveryResult.Pending, "The installation committed; retry recovery cleanup from a fresh inspection.", outcome.SanitizedLogPath),
@@ -452,7 +458,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
             InstallationExecutionStatus.InterruptedRecoveryRequired => new RecoverableInterruptionEvent(request.SessionId, request.PlanId, request.PlanDigest, code, message, InstallerRecoveryAction.Resume, $"Core restored {rolledBack} of {changed} observed managed-file change(s); interrupted-operation recovery is still required.", changed, ProtocolRecoveryResult.Pending, "Run interrupted-operation recovery, then inspect again.", outcome.SanitizedLogPath),
             InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired => new RolledBackFailureEvent(request.SessionId, request.PlanId, request.PlanDigest, code, message, $"Core recovered {recoveredTransactions} prior interrupted transaction(s) covering {recoveredPaths} installer-owned path operation(s) before this operation began.", 0, ProtocolRecoveryResult.Succeeded, "Inspect and confirm again against the recovered state.", outcome.SanitizedLogPath),
             _ => throw new ProtocolException("The core returned an unknown installation execution status.")
-        };
+        })) with { CommandId = request.CommandId };
     }
 
     private ProtocolEvent CreatePruneTerminal(ExecutePruneRequest request, RecoveryPruneOutcome outcome)
@@ -465,7 +471,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         string pending = $"{outcome.PendingCleanupGenerationIds.Count} physical generation cleanup operation(s) remain"
             + (outcome.AuxiliaryCleanupPending ? ", and authenticated auxiliary recovery metadata cleanup remains" : "")
             + ".";
-        return outcome.Status switch
+        return ((ProtocolEvent)(outcome.Status switch
         {
             RecoveryPruneOutcomeStatus.Succeeded => new PruneSuccessEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, logical, cleaned, message, "Close the installer or list recoveries again.", null),
             RecoveryPruneOutcomeStatus.FailedBeforePublication => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, code, recovery == ProtocolRecoveryResult.Pending ? $"{message} {pending}" : message, logical, cleaned, recovery, "List recoveries and inspect pruning again.", null),
@@ -474,7 +480,26 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
             RecoveryPruneOutcomeStatus.CancelledWithCleanupPending => new PruneCancelledEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, message, logical > 0 ? $"Logical retention was published; {pending}" : $"No logical generations were removed; {pending}", logical, cleaned, ProtocolRecoveryResult.Pending, "List recoveries, then retry cleanup.", null),
             RecoveryPruneOutcomeStatus.FailedWithCleanupPending => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, code, $"{message} {pending}", logical, cleaned, ProtocolRecoveryResult.Pending, "List recoveries, then retry cleanup.", null),
             _ => throw new ProtocolException("The core returned an unknown recovery-prune status.")
+        })) with { CommandId = request.CommandId };
+    }
+
+    private PrePlanRejectedEvent CreatePrePlanRejection(ProtocolRequest request, Exception exception)
+    {
+        (ProtocolPrePlanErrorCode code, ProtocolNextAction action, string message, bool terminal) = exception switch
+        {
+            OperationCanceledException => (ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest, "The requested read-only installer operation was cancelled.", false),
+            LinuxGameFolderException => (ProtocolPrePlanErrorCode.InvalidGameFolder, ProtocolNextAction.SelectGameFolder, "The selected game folder isn't a safe supported installation.", false),
+            PackageSecurityException => (ProtocolPrePlanErrorCode.PackageRejected, ProtocolNextAction.ReopenVerifiedPackage, "The selected release asset set failed strict package verification.", false),
+            UnauthorizedAccessException => (ProtocolPrePlanErrorCode.PermissionDenied, ProtocolNextAction.ReviewFilesystem, "The installer couldn't read a required path with the current user's permissions.", false),
+            IOException when request is ListRecoveriesRequest => (ProtocolPrePlanErrorCode.RecoveryUnavailable, ProtocolNextAction.ListRecoveries, "The authenticated recovery catalog couldn't be read safely.", false),
+            IOException when request is InspectPlanRequest or InspectPruneRequest => (ProtocolPrePlanErrorCode.InspectionFailed, ProtocolNextAction.InspectAgain, "The selected installation couldn't be inspected safely.", false),
+            IOException when request is SelectPlanCandidatesRequest => (ProtocolPrePlanErrorCode.CandidateApprovalFailed, ProtocolNextAction.InspectAgain, "The exact file candidates changed or couldn't be revalidated.", false),
+            IOException => (ProtocolPrePlanErrorCode.InputOutputFailure, ProtocolNextAction.RetryRequest, "The requested read-only installer operation failed because of an input/output error.", false),
+            _ => (ProtocolPrePlanErrorCode.UnexpectedFailure, this.SanitizedLogPath is null ? ProtocolNextAction.StartNewSession : ProtocolNextAction.ViewPrivateLog, "The installer backend stopped the requested operation without exposing private exception details.", true)
         };
+        PrePlanRejectedEvent result = new(this.SessionId, code, message, action, terminal, this.SanitizedLogPath) { CommandId = request.CommandId };
+        this.WithSession(() => this.Session.RecordPrePlanRejection(result));
+        return this.Emit(result);
     }
 
     private void CompleteExecutionTerminal(ProtocolEvent terminal)
@@ -521,17 +546,20 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 string message = $"Core transaction stage: {progress.Stage}.";
                 if (this.Session.State == ProtocolSessionState.Recovering)
                 {
-                    RecoveryProgressEvent value = new(this.SessionId, sequence, progress.Stage, progress.CompletedOperations, progress.TotalOperations, message);
+                    ProtocolCommandId commandId = this.Session.ActiveCommand ?? throw new ProtocolException("Progress has no active command binding.");
+                    RecoveryProgressEvent value = new(this.SessionId, sequence, progress.Stage, progress.CompletedOperations, progress.TotalOperations, message) { CommandId = commandId };
                     this.Session.RecordRecoveryProgress(value); result = value;
                 }
                 else if (this.Session.State is ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested && this.Session.CurrentPlanId is { } plan && this.Session.CurrentPlanDigest is { } digest)
                 {
-                    ProgressEvent value = new(this.SessionId, plan, digest, sequence, progress.Stage, progress.CompletedOperations, progress.TotalOperations, message);
+                    ProtocolCommandId commandId = this.Session.ActiveCommand ?? throw new ProtocolException("Progress has no active command binding.");
+                    ProgressEvent value = new(this.SessionId, plan, digest, sequence, progress.Stage, progress.CompletedOperations, progress.TotalOperations, message) { CommandId = commandId };
                     this.Session.RecordProgress(value); result = value;
                 }
                 else if (this.Session.State is ProtocolSessionState.Pruning or ProtocolSessionState.PruneCancellationRequested && this.Session.CurrentPrunePlanId is { } prune && this.Session.CurrentPruneDigest is { } pruneDigest)
                 {
-                    PruneProgressEvent value = new(this.SessionId, prune, pruneDigest, sequence, progress.Stage, progress.CompletedOperations, progress.TotalOperations, message);
+                    ProtocolCommandId commandId = this.Session.ActiveCommand ?? throw new ProtocolException("Progress has no active command binding.");
+                    PruneProgressEvent value = new(this.SessionId, prune, pruneDigest, sequence, progress.Stage, progress.CompletedOperations, progress.TotalOperations, message) { CommandId = commandId };
                     this.Session.RecordPruneProgress(value); result = value;
                 }
             }
