@@ -94,13 +94,6 @@ public enum ProtocolGameCandidateState
     Invalid
 }
 
-public enum ProtocolCandidateKind
-{
-    ModifiedReceiptOwnedFile,
-    LegacyInstallerFile,
-    UnknownCollision
-}
-
 public enum ProtocolPruneProgressStage
 {
     Revalidating,
@@ -219,16 +212,40 @@ public sealed record CancelPruneRequest(ProtocolSessionId SessionId, ProtocolPru
     public override ProtocolMessageKind Kind => ProtocolMessageKind.CancelPruneRequest;
 }
 
-public sealed record HandshakeEvent(ProtocolSessionId SessionId, string ServerVersion, string[] Capabilities) : ProtocolEvent
+public sealed record HandshakeEvent : ProtocolEvent
 {
+    private readonly string[] CapabilityValues;
+    public ProtocolSessionId SessionId { get; }
+    public string ServerVersion { get; }
+    public string[] Capabilities => this.CapabilityValues.ToArray();
+
+    [JsonConstructor]
+    public HandshakeEvent(ProtocolSessionId sessionId, string serverVersion, string[] capabilities)
+    {
+        this.SessionId = sessionId;
+        this.ServerVersion = serverVersion;
+        this.CapabilityValues = capabilities?.ToArray() ?? throw new ProtocolException("The protocol 'capabilities' collection can't be null.");
+    }
+
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.HandshakeEvent;
 }
 
 public sealed record ProtocolGameCandidate(string CanonicalPath, ProtocolGameCandidateState State, string DisplayName);
 
-public sealed record GameDiscoveryEvent(ProtocolSessionId SessionId, ProtocolGameCandidate[] Candidates) : ProtocolEvent
+public sealed record GameDiscoveryEvent : ProtocolEvent
 {
+    private readonly ProtocolGameCandidate[] CandidateValues;
+    public ProtocolSessionId SessionId { get; }
+    public ProtocolGameCandidate[] Candidates => this.CandidateValues.ToArray();
+
+    [JsonConstructor]
+    public GameDiscoveryEvent(ProtocolSessionId sessionId, ProtocolGameCandidate[] candidates)
+    {
+        this.SessionId = sessionId;
+        this.CandidateValues = candidates?.ToArray() ?? throw new ProtocolException("The protocol 'candidates' collection can't be null.");
+    }
+
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.GameDiscoveryEvent;
 }
@@ -323,24 +340,26 @@ public sealed record ProtocolPlanConflict(PlanConflictCode Code, string? Path);
 
 public sealed record ProtocolPlanCandidate(
     ProtocolCandidateId CandidateId,
-    ProtocolCandidateKind Kind,
+    FileReplacementCandidateReason Reason,
+    FileReplacementCandidateDisposition Disposition,
     string Path,
     string ObservedSha256,
     long ObservedSizeBytes,
     int ObservedUnixMode,
-    string ProposedResultSha256,
+    string? ProposedResultSha256,
     bool Selected,
     string Evidence
 );
 
 /// <summary>Core-observed candidate data from which the protocol mints an opaque selection ID.</summary>
 public sealed record ProtocolPlanCandidateSource(
-    ProtocolCandidateKind Kind,
+    FileReplacementCandidateReason Reason,
+    FileReplacementCandidateDisposition Disposition,
     string Path,
     string ObservedSha256,
     long ObservedSizeBytes,
     int ObservedUnixMode,
-    string ProposedResultSha256,
+    string? ProposedResultSha256,
     bool Selected,
     string Evidence
 );
@@ -418,6 +437,7 @@ public sealed record PrunePlanEvent : ProtocolEvent
 {
     private readonly ProtocolRecoverySelectionId[] RetainedValues;
     private readonly ProtocolRecoverySelectionId[] RemovedValues;
+    private readonly string[] CleanupGenerationValues;
     private readonly string[] WarningValues;
 
     public ProtocolSessionId SessionId { get; }
@@ -430,6 +450,7 @@ public sealed record PrunePlanEvent : ProtocolEvent
     public int RetainNewest { get; }
     public ProtocolRecoverySelectionId[] RetainedSelectionIds => this.RetainedValues.ToArray();
     public ProtocolRecoverySelectionId[] RemovedSelectionIds => this.RemovedValues.ToArray();
+    public string[] CleanupGenerationIds => this.CleanupGenerationValues.ToArray();
     public string Summary { get; }
     public string[] Warnings => this.WarningValues.ToArray();
     public bool RequiresConfirmation { get; }
@@ -446,6 +467,7 @@ public sealed record PrunePlanEvent : ProtocolEvent
         int retainNewest,
         ProtocolRecoverySelectionId[] retainedSelectionIds,
         ProtocolRecoverySelectionId[] removedSelectionIds,
+        string[] cleanupGenerationIds,
         string summary,
         string[] warnings,
         bool requiresConfirmation
@@ -463,6 +485,8 @@ public sealed record PrunePlanEvent : ProtocolEvent
             ?? throw new ProtocolException("The protocol 'retainedSelectionIds' collection can't be null.");
         this.RemovedValues = removedSelectionIds?.ToArray()
             ?? throw new ProtocolException("The protocol 'removedSelectionIds' collection can't be null.");
+        this.CleanupGenerationValues = cleanupGenerationIds?.ToArray()
+            ?? throw new ProtocolException("The protocol 'cleanupGenerationIds' collection can't be null.");
         this.Summary = summary;
         this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
         this.RequiresConfirmation = requiresConfirmation;
@@ -573,7 +597,8 @@ public sealed record PruneSuccessEvent(
     ProtocolSessionId SessionId,
     ProtocolPrunePlanId PrunePlanId,
     ProtocolPlanDigest PruneDigest,
-    int RemovedGenerationCount,
+    int LogicalRemovedGenerationCount,
+    int PhysicalCleanupGenerationCount,
     string Summary,
     string SafeNextStep,
     string? SanitizedLogPath
@@ -589,7 +614,8 @@ public sealed record PruneFailureEvent(
     ProtocolPlanDigest PruneDigest,
     string ErrorCode,
     string Message,
-    int RemovedGenerationCount,
+    int LogicalRemovedGenerationCount,
+    int PhysicalCleanupGenerationCount,
     ProtocolRecoveryResult RecoveryResult,
     string SafeNextStep,
     string? SanitizedLogPath
@@ -606,7 +632,8 @@ public sealed record PruneInterruptionEvent(
     string ErrorCode,
     string Message,
     InstallerRecoveryAction RecoveryAction,
-    int RemovedGenerationCount,
+    int LogicalRemovedGenerationCount,
+    int PhysicalCleanupGenerationCount,
     ProtocolRecoveryResult RecoveryResult,
     string SafeNextStep,
     string? SanitizedLogPath
@@ -622,7 +649,8 @@ public sealed record PruneCancelledEvent(
     ProtocolPlanDigest PruneDigest,
     string Summary,
     string SafeStateSummary,
-    int RemovedGenerationCount,
+    int LogicalRemovedGenerationCount,
+    int PhysicalCleanupGenerationCount,
     ProtocolRecoveryResult RecoveryResult,
     string SafeNextStep,
     string? SanitizedLogPath

@@ -128,12 +128,13 @@ public sealed record ProtocolPlanDigest
         {
             writer.WriteStartObject();
             writer.WriteString("candidate_id", item.CandidateId.Value);
-            writer.WriteString("kind", JsonNamingPolicy.CamelCase.ConvertName(item.Kind.ToString()));
+            writer.WriteString("reason", JsonNamingPolicy.CamelCase.ConvertName(item.Reason.ToString()));
+            writer.WriteString("disposition", JsonNamingPolicy.CamelCase.ConvertName(item.Disposition.ToString()));
             writer.WriteString("path", item.Path);
             writer.WriteString("observed_sha256", item.ObservedSha256);
             writer.WriteNumber("observed_size_bytes", item.ObservedSizeBytes);
             writer.WriteNumber("observed_unix_mode", item.ObservedUnixMode);
-            writer.WriteString("proposed_result_sha256", item.ProposedResultSha256);
+            WriteOptional(writer, "proposed_result_sha256", item.ProposedResultSha256);
             writer.WriteBoolean("selected", item.Selected);
             writer.WriteString("evidence", item.Evidence);
             writer.WriteEndObject();
@@ -152,6 +153,7 @@ public sealed record ProtocolPlanDigest
         int retainNewest,
         IReadOnlyList<ProtocolRecoverySelectionId> retained,
         IReadOnlyList<ProtocolRecoverySelectionId> removed,
+        IReadOnlyList<string> cleanupGenerationIds,
         string summary,
         IReadOnlyList<string> warnings,
         bool requiresConfirmation
@@ -164,6 +166,7 @@ public sealed record ProtocolPlanDigest
         writer.WriteNumber("retain_newest", retainNewest);
         WriteIds(writer, "retained_selection_ids", retained.Select(p => p.Value));
         WriteIds(writer, "removed_selection_ids", removed.Select(p => p.Value));
+        WriteStrings(writer, "cleanup_generation_ids", cleanupGenerationIds);
         writer.WriteString("summary", summary);
         WriteStrings(writer, "warnings", warnings);
         writer.WriteBoolean("requires_confirmation", requiresConfirmation);
