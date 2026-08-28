@@ -236,7 +236,7 @@ Scope constraints apply throughout:
 - [x] Pass 49/49 focused tests, Release warnings-as-errors, shell syntax, formatting, diff checks, package qualification, and deterministic performance gates ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33214697603); [performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33214697600)).
 - [x] Address every actionable runtime-dispatcher security, portability, testing, UX, and documentation finding and obtain clean exact-head re-reviews ([review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177#issuecomment-5458180796)).
 - [x] Merge and close focused [PR #177](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177) into `develop` ([`42eb00ff`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/42eb00ffcaff75d4d583655677d10a2e80f54b7d)).
-- [x] Delete the merged dispatcher feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`42eb00ffcaff75d4d583655677d10a2e80f54b7d`).
+- [x] Delete the merged dispatcher feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` ([branch/ref evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/178#issuecomment-5458223201); `42eb00ffcaff75d4d583655677d10a2e80f54b7d`).
 
 ### Phase 4 tests, reviews, packaging, and integration
 
