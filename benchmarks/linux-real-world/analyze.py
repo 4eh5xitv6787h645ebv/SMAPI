@@ -306,6 +306,8 @@ def main() -> int:
         "modpackArchiveSha256": prepared["modpackArchiveSha256"],
         "saveArchiveSha256": prepared["saveArchiveSha256"],
         "probeAssemblySha256": prepared["probeAssemblySha256"],
+        "commonLauncherSha256": prepared["commonLauncherSha256"],
+        "commonDepsSha256": prepared["commonDepsSha256"],
         "harnessCommit": prepared["harnessCommit"],
         "calculationMethod": "nearest-rank tick percentiles; per-run metrics aggregated descriptively across independent processes",
         "environment": environment,

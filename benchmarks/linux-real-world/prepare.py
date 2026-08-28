@@ -190,10 +190,13 @@ def main() -> int:
         common_launcher = gold / "game-a" / "StardewModdingAPI"
         common_launcher_hash = sha256(common_launcher)
         shutil.copy2(common_launcher, gold / "game-b" / "StardewModdingAPI")
-        for suffix in (".deps.json", ".runtimeconfig.json"):
-            fork_specific = gold / "game-b" / f"StardewModdingAPI{suffix}"
-            if fork_specific.exists():
-                fork_specific.unlink()
+        common_deps = gold / "game-a" / "Stardew Valley.deps.json"
+        common_deps_hash = sha256(common_deps)
+        for product in ("a", "b"):
+            shutil.copy2(common_deps, gold / f"game-{product}" / "StardewModdingAPI.deps.json")
+        fork_runtime_config = gold / "game-b" / "StardewModdingAPI.runtimeconfig.json"
+        if fork_runtime_config.exists():
+            fork_runtime_config.unlink()
 
         config_paths = {
             product: gold / f"game-{product}" / "smapi-internal" / "config.json"
@@ -272,6 +275,7 @@ def main() -> int:
             "analyzerScriptSha256": sha256(repo / "benchmarks" / "linux-real-world" / "analyze.py"),
             "commonScriptSha256": sha256(repo / "benchmarks" / "linux-real-world" / "harness_common.py"),
             "commonLauncherSha256": common_launcher_hash,
+            "commonDepsSha256": common_deps_hash,
             "expectedLoadedCodeMods": 132,
             "expectedLoadedContentPacks": 176,
             "modsTree": tree_manifest(mods),

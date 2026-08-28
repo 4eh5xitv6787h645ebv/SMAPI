@@ -442,6 +442,8 @@ def validate_saved_sample(
         raise ValueError("saved sample probe configuration or manifest differs from prepared metadata")
     if sha256(game / "StardewModdingAPI") != metadata["commonLauncherSha256"]:
         raise ValueError("saved sample common launcher hash mismatch")
+    if sha256(game / "StardewModdingAPI.deps.json") != metadata["commonDepsSha256"]:
+        raise ValueError("saved sample common runtime deps hash mismatch")
     summary = probe_summary(run_root / "probe.jsonl")
     if saved.get("probe") != summary:
         raise ValueError("saved sample probe acceptance summary mismatch")
@@ -508,6 +510,8 @@ def run_sample(
         raise ValueError("sample SMAPI assembly hash mismatch")
     if sha256(run_root / "game" / "StardewModdingAPI") != metadata["commonLauncherSha256"]:
         raise ValueError("sample common launcher hash mismatch")
+    if sha256(run_root / "game" / "StardewModdingAPI.deps.json") != metadata["commonDepsSha256"]:
+        raise ValueError("sample common runtime deps hash mismatch")
     if sha256(run_root / "game" / "Stardew Valley.dll") != metadata["gameAssemblySha256"]:
         raise ValueError("sample game assembly hash mismatch")
     probe_root = run_root / "mods" / "SMAPI.BenchmarkProbe"
