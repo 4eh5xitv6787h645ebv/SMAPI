@@ -6,13 +6,15 @@ title: Release notes
 ← [Documentation home](index.md)
 
 # Release notes
-## Linux fork 4.5.3 alpha 1 release candidate
+## Linux fork 4.5.3 alpha 1
 
 This is an **unofficial experimental Linux x86_64 fork** based on official SMAPI 4.5.2. Its
-embedded version is `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1`; its reserved tag is
-`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1`. Publication remains pending until the exact merged
-commit passes automated qualification, independent reviews, an isolated trusted-workload smoke,
-and post-publication clean-room verification.
+embedded version is `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1`. It was published on
+28 August 2026 under the immutable tag
+[`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1`](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)
+after exact-commit qualification, independent reviews, an isolated trusted-workload smoke, and
+post-publication clean-room verification. See the
+[sanitized validation record](technical/linux-alpha-release-validation.md).
 
 * Added exact-commit Linux-only release automation with pinned source inputs, SHA-256 checksums,
   machine-readable build metadata, GitHub provenance, and tag-only prerelease publication.

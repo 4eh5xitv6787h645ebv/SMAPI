@@ -29,7 +29,7 @@ the exact B build used for the current benchmark. Both identify as SMAPI 4.5.2.
 | Project role | Official mod loader and API | Unofficial performance/diagnostics development fork |
 | Supported audience | General players and mod authors | Linux desktop testers, especially large modpacks |
 | Platforms | Windows, macOS, Linux | Linux desktop focus; no Android/mobile work |
-| Release delivery | Tagged 4.5.2 player release | No tagged fork release at this snapshot |
+| Release delivery | Tagged 4.5.2 player release | [Unofficial experimental Linux alpha](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1) |
 | Existing mods | Canonical compatibility target | Derived from 4.5.2 and intended to retain compatibility, but not an upstream guarantee |
 | Performance approach | General-purpose upstream behavior | 95-item Linux large-pack audit plus targeted fixes |
 | Mod diagnosis | Console and normal SMAPI log | Same foundation plus private `health` report/viewer |
