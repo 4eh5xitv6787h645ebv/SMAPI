@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
+using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Planning;
+using StardewModdingAPI.Installer.Core.Transactions;
 
 namespace StardewModdingAPI.Installer.Core.Protocol.V1;
 
@@ -8,6 +10,7 @@ public enum ProtocolMessageKind
 {
     HandshakeRequest,
     DiscoverGamesRequest,
+    RecoverInterruptedRequest,
     OpenPackageRequest,
     ListRecoveriesRequest,
     InspectPlanRequest,
@@ -21,6 +24,9 @@ public enum ProtocolMessageKind
     CancelPruneRequest,
     HandshakeEvent,
     GameDiscoveryEvent,
+    RecoveryProgressEvent,
+    RecoveryCompletedEvent,
+    RecoveryFailureEvent,
     PackageOpenedEvent,
     RecoveryCatalogEvent,
     PlanEvent,
@@ -65,42 +71,12 @@ public enum ProtocolRecoveryResult
     Failed
 }
 
-public enum InstallerProgressStage
-{
-    Revalidating,
-    BackingUp,
-    RemovingManagedFiles,
-    CopyingManagedFiles,
-    UpdatingLauncher,
-    VerifyingInstallation,
-    RollingBack,
-    Finalizing
-}
-
 public enum InstallerRecoveryAction
 {
     Resume,
     Retry,
     Rollback,
     InspectAgain
-}
-
-public enum ProtocolGameCandidateState
-{
-    Valid,
-    Missing,
-    LegacyVersion,
-    LegacyCompatibilityBranch,
-    Invalid
-}
-
-public enum ProtocolPruneProgressStage
-{
-    Revalidating,
-    PublishingRetention,
-    RemovingGenerations,
-    VerifyingRecovery,
-    Finalizing
 }
 
 public abstract record ProtocolMessage
@@ -123,6 +99,13 @@ public sealed record DiscoverGamesRequest(ProtocolSessionId SessionId) : Protoco
 {
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.DiscoverGamesRequest;
+}
+
+/// <summary>Recover bounded interrupted installer work before creating any fresh inspection.</summary>
+public sealed record RecoverInterruptedRequest(ProtocolSessionId SessionId, string GamePath) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoverInterruptedRequest;
 }
 
 /// <summary>Ask the backend to independently verify one complete local release asset set.</summary>
@@ -231,7 +214,7 @@ public sealed record HandshakeEvent : ProtocolEvent
     public override ProtocolMessageKind Kind => ProtocolMessageKind.HandshakeEvent;
 }
 
-public sealed record ProtocolGameCandidate(string CanonicalPath, ProtocolGameCandidateState State, string DisplayName);
+public sealed record ProtocolGameCandidate(string CanonicalPath, LinuxGameFolderStatus State, string DisplayName);
 
 public sealed record GameDiscoveryEvent : ProtocolEvent
 {
@@ -248,6 +231,49 @@ public sealed record GameDiscoveryEvent : ProtocolEvent
 
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.GameDiscoveryEvent;
+}
+
+public sealed record RecoveryProgressEvent(
+    ProtocolSessionId SessionId,
+    long Sequence,
+    TransactionStage Stage,
+    int CompletedUnits,
+    int? TotalUnits,
+    string Message
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryProgressEvent;
+}
+
+public sealed record RecoveryCompletedEvent(
+    ProtocolSessionId SessionId,
+    ProtocolGameRootIdentity GameRoot,
+    bool NamedRootStillSelected,
+    ulong PreviousOperationGeneration,
+    ulong CurrentOperationGeneration,
+    int RecoveredTransactionCount,
+    int RecoveredPathCount,
+    string Summary,
+    string SafeNextStep,
+    string? SanitizedLogPath
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryCompletedEvent;
+}
+
+public sealed record RecoveryFailureEvent(
+    ProtocolSessionId SessionId,
+    string ErrorCode,
+    string Message,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryFailureEvent;
 }
 
 public sealed record ProtocolReleaseIdentity(
@@ -501,7 +527,7 @@ public sealed record ProgressEvent(
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
     long Sequence,
-    InstallerProgressStage Stage,
+    TransactionStage Stage,
     long CompletedUnits,
     long? TotalUnits,
     string Message
@@ -516,7 +542,7 @@ public sealed record PruneProgressEvent(
     ProtocolPrunePlanId PrunePlanId,
     ProtocolPlanDigest PruneDigest,
     long Sequence,
-    ProtocolPruneProgressStage Stage,
+    TransactionStage Stage,
     long CompletedUnits,
     long? TotalUnits,
     string Message

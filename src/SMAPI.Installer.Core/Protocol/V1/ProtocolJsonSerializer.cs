@@ -2,8 +2,10 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Planning;
+using StardewModdingAPI.Installer.Core.Transactions;
 
 namespace StardewModdingAPI.Installer.Core.Protocol.V1;
 
@@ -93,6 +95,7 @@ public static class ProtocolJsonSerializer
     {
         [ProtocolMessageKind.HandshakeRequest] = C("handshake.request", typeof(HandshakeRequest), true, "clientName", "clientVersion"),
         [ProtocolMessageKind.DiscoverGamesRequest] = C("discover-games.request", typeof(DiscoverGamesRequest), true, "sessionId"),
+        [ProtocolMessageKind.RecoverInterruptedRequest] = C("recover-interrupted.request", typeof(RecoverInterruptedRequest), true, "sessionId", "gamePath"),
         [ProtocolMessageKind.OpenPackageRequest] = C("open-package.request", typeof(OpenPackageRequest), true, "sessionId", "releaseTag", "expectedSourceCommit", "packagePath", "checksumsPath", "buildMetadataPath", "installManifestPath"),
         [ProtocolMessageKind.ListRecoveriesRequest] = C("list-recoveries.request", typeof(ListRecoveriesRequest), true, "sessionId", "gamePath"),
         [ProtocolMessageKind.InspectPlanRequest] = C("inspect-plan.request", typeof(InspectPlanRequest), true, "sessionId", "gamePath", "operation", "packageId", "recoverySelectionId"),
@@ -106,6 +109,9 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.CancelPruneRequest] = C("cancel-prune.request", typeof(CancelPruneRequest), true, "sessionId", "prunePlanId", "pruneDigest"),
         [ProtocolMessageKind.HandshakeEvent] = C("handshake.event", typeof(HandshakeEvent), false, "sessionId", "serverVersion", "capabilities"),
         [ProtocolMessageKind.GameDiscoveryEvent] = C("game-discovery.event", typeof(GameDiscoveryEvent), false, "sessionId", "candidates"),
+        [ProtocolMessageKind.RecoveryProgressEvent] = C("recovery-progress.event", typeof(RecoveryProgressEvent), false, "sessionId", "sequence", "stage", "completedUnits", "totalUnits", "message"),
+        [ProtocolMessageKind.RecoveryCompletedEvent] = C("recovery-completed.event", typeof(RecoveryCompletedEvent), false, "sessionId", "gameRoot", "namedRootStillSelected", "previousOperationGeneration", "currentOperationGeneration", "recoveredTransactionCount", "recoveredPathCount", "summary", "safeNextStep", "sanitizedLogPath"),
+        [ProtocolMessageKind.RecoveryFailureEvent] = C("recovery-failure.event", typeof(RecoveryFailureEvent), false, "sessionId", "errorCode", "message", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.PackageOpenedEvent] = C("package-opened.event", typeof(PackageOpenedEvent), false, "sessionId", "packageId", "release"),
         [ProtocolMessageKind.RecoveryCatalogEvent] = C("recovery-catalog.event", typeof(RecoveryCatalogEvent), false, "sessionId", "catalogId", "gameRoot", "headSha256", "generations"),
         [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operations", "conflicts", "candidates", "summary", "warnings", "requiresConfirmation"),
@@ -136,6 +142,8 @@ public static class ProtocolJsonSerializer
             case ProtocolMessageKind.RecoveryCatalogEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot"));
                 AssertObjectArray(payload.GetProperty("generations"), ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint"], "recovery generation", MaxRecoveryGenerations); break;
+            case ProtocolMessageKind.RecoveryCompletedEvent:
+                AssertGameRoot(payload.GetProperty("gameRoot")); break;
             case ProtocolMessageKind.PlanEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot"));
                 AssertOptionalRecoveryAuthority(payload.GetProperty("recoveryAuthority"));
@@ -156,6 +164,7 @@ public static class ProtocolJsonSerializer
         {
             case HandshakeRequest v: Text(v.ClientName, "clientName"); Text(v.ClientVersion, "clientVersion"); break;
             case DiscoverGamesRequest v: Session(v.SessionId); break;
+            case RecoverInterruptedRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); break;
             case OpenPackageRequest v:
                 Session(v.SessionId); Text(v.ReleaseTag, "releaseTag"); Hex(v.ExpectedSourceCommit, 40, "expectedSourceCommit");
                 AbsolutePath(v.PackagePath, "packagePath"); AbsolutePath(v.ChecksumsPath, "checksumsPath"); AbsolutePath(v.BuildMetadataPath, "buildMetadataPath"); AbsolutePath(v.InstallManifestPath, "installManifestPath"); break;
@@ -171,6 +180,9 @@ public static class ProtocolJsonSerializer
             case CancelPruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
             case HandshakeEvent v: Session(v.SessionId); Text(v.ServerVersion, "serverVersion"); Strings(v.Capabilities, "capabilities", 256); break;
             case GameDiscoveryEvent v: Session(v.SessionId); Objects(v.Candidates, "candidates", MaxGameCandidates); foreach (ProtocolGameCandidate c in v.Candidates) { AbsolutePath(c.CanonicalPath, "candidate.canonicalPath"); Defined(c.State, "candidate.state"); Text(c.DisplayName, "candidate.displayName"); } NoDuplicates(v.Candidates.Select(c => c.CanonicalPath), "game candidate path"); break;
+            case RecoveryProgressEvent v: Session(v.SessionId); Progress(v.Sequence, v.Stage, v.CompletedUnits, v.TotalUnits, v.Message); break;
+            case RecoveryCompletedEvent v: Session(v.SessionId); GameRoot(v.GameRoot); if (v.CurrentOperationGeneration <= v.PreviousOperationGeneration || v.GameRoot.OperationGeneration != v.CurrentOperationGeneration || v.RecoveredTransactionCount < 0 || v.RecoveredTransactionCount > InstallerTransactionExecutor.MaximumTransactionStoreEntries || v.RecoveredPathCount < 0 || v.RecoveredPathCount > InstallerTransactionExecutor.MaximumTransactionStoreEntries * TransactionPlan.MaximumOperationCount) throw new ProtocolException("The interrupted-recovery result has invalid generation or bounded count data."); Text(v.Summary, "summary"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); break;
+            case RecoveryFailureEvent v: Session(v.SessionId); Text(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Defined(v.RecoveryResult, "recoveryResult"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); break;
             case PackageOpenedEvent v: Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.PackageId.Value, "package"); ValidateRelease(v.Release, "release"); break;
             case RecoveryCatalogEvent v: ValidateCatalog(v); break;
             case PlanEvent v: ValidatePlan(v); break;
@@ -332,6 +344,7 @@ public static class ProtocolJsonSerializer
     }
 
     private static void Terminal(string summary, int changed, ProtocolRecoveryResult recovery, string next, string? log) { Text(summary, "summary"); if (changed < 0) throw new ProtocolException("The files-changed count can't be negative."); Defined(recovery, "recoveryResult"); Text(next, "safeNextStep"); OptionalLog(log); }
+    private static void Progress(long sequence, TransactionStage stage, int completed, int? total, string message) { Defined(stage, "stage"); Text(message, "message"); if (sequence < 0 || completed < 0 || total < 0 || total is { } known && completed > known) throw new ProtocolException("The protocol progress counters are inconsistent."); }
     private static void PruneTerminal(ProtocolSessionId session, ProtocolPrunePlanId plan, ProtocolPlanDigest digest, string code, string message, int logicalRemoved, int physicalCleanup, ProtocolRecoveryResult recovery, string next, string? log) { PruneBinding(session, plan, digest); Text(code, "errorCode"); Text(message, "message"); ValidatePruneTerminalDetails(logicalRemoved, physicalCleanup, next, log); Defined(recovery, "recoveryResult"); }
     private static void ValidatePruneTerminalDetails(int logicalRemoved, int physicalCleanup, string next, string? log) { if (logicalRemoved < 0 || logicalRemoved > MaxRecoveryGenerations || physicalCleanup < 0 || physicalCleanup > MaxRecoveryGenerations) throw new ProtocolException("The logical-removal or physical-cleanup count is outside its bound."); Text(next, "safeNextStep"); OptionalLog(log); }
     private static void OptionalLog(string? value) { if (value is not null) AbsolutePath(value, "sanitizedLogPath"); }
@@ -375,8 +388,10 @@ public static class ProtocolJsonSerializer
         {
             case ProtocolMessageKind.InspectPlanRequest: AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation"); break;
             case ProtocolMessageKind.GameDiscoveryEvent:
-                foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray()) AssertCanonicalEnum<ProtocolGameCandidateState>(item.GetProperty("state"), "candidate.state");
+                foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray()) AssertCanonicalEnum<LinuxGameFolderStatus>(item.GetProperty("state"), "candidate.state");
                 break;
+            case ProtocolMessageKind.RecoveryProgressEvent: AssertCanonicalEnum<TransactionStage>(payload.GetProperty("stage"), "stage"); break;
+            case ProtocolMessageKind.RecoveryFailureEvent: AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
             case ProtocolMessageKind.RecoveryCatalogEvent:
                 foreach (JsonElement item in payload.GetProperty("generations").EnumerateArray()) AssertCanonicalEnum<InstallerOperation>(item.GetProperty("originOperation"), "generation.originOperation");
                 break;
@@ -392,8 +407,7 @@ public static class ProtocolJsonSerializer
                 }
                 if (payload.GetProperty("recoveryAuthority").ValueKind != JsonValueKind.Null) AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("recoveryAuthority").GetProperty("generation").GetProperty("originOperation"), "recoveryAuthority.generation.originOperation");
                 break;
-            case ProtocolMessageKind.ProgressEvent: AssertCanonicalEnum<InstallerProgressStage>(payload.GetProperty("stage"), "stage"); break;
-            case ProtocolMessageKind.PruneProgressEvent: AssertCanonicalEnum<ProtocolPruneProgressStage>(payload.GetProperty("stage"), "stage"); break;
+            case ProtocolMessageKind.ProgressEvent or ProtocolMessageKind.PruneProgressEvent: AssertCanonicalEnum<TransactionStage>(payload.GetProperty("stage"), "stage"); break;
             case ProtocolMessageKind.SuccessEvent: AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation"); AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
             case ProtocolMessageKind.RolledBackFailureEvent or ProtocolMessageKind.CancelledEvent or ProtocolMessageKind.PruneFailureEvent or ProtocolMessageKind.PruneCancelledEvent:
                 AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
