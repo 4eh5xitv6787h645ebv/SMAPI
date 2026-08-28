@@ -20,7 +20,7 @@ Scope constraints apply throughout:
 - [x] Create this repository roadmap with a checkbox for every phase, requirement, test, review, pull request, release, and definition-of-done item.
 - [x] Create [umbrella GitHub issue #168](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168) with the mirrored checklist.
 - [x] Link the umbrella issue from this roadmap.
-- [ ] Commit and push the initial roadmap immediately.
+- [x] Commit and push the initial roadmap immediately (`cb0830b1`).
 - [ ] Keep both checklists synchronized as evidence is verified.
 
 ## Phase 1 — Current upstream comparison and reproducible benchmarks
