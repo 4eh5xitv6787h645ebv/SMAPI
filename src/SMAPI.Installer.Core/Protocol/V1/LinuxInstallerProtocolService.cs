@@ -12,6 +12,24 @@ namespace StardewModdingAPI.Installer.Core.Protocol.V1;
 /// Owns one protocol session and atomically translates opaque protocol requests into Linux installer core calls.
 /// Frontends never receive or maintain package, recovery, inspection, candidate, or prune authorities.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Each value returned by <see cref="HandleAsync"/> is the sole response to that command. The optional progress
+/// callback receives only unsolicited <see cref="ProgressEvent"/>, <see cref="PruneProgressEvent"/>, or
+/// <see cref="RecoveryProgressEvent"/> values; command responses and terminal events are never duplicated through it.
+/// </para>
+/// <para>
+/// Progress callbacks run synchronously on the core worker which reported progress. Calls are serialized and never
+/// overlap, but callers must not assume a UI thread or synchronization context. The callback must return promptly and
+/// should post an immutable event to the frontend's own queue. Callback exceptions are swallowed so frontend
+/// observation failures can't alter an installer transaction.
+/// </para>
+/// <para>
+/// The callback isn't a reentrant command surface. It must not synchronously call or synchronously wait on
+/// <see cref="HandleAsync"/>, <see cref="Dispose"/>, or <see cref="DisposeAsync"/>. Queue those operations to run
+/// after the callback returns.
+/// </para>
+/// </remarks>
 public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposable
 {
     private static readonly string[] Capabilities =
@@ -45,6 +63,13 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
     private bool Disposed;
 
     /// <summary>Create a production service using the bounded Linux discovery, package verification, and installer engine.</summary>
+    /// <param name="serverVersion">The bounded backend version displayed during the handshake.</param>
+    /// <param name="sanitizedLogPath">An optional absolute path to a sanitized local log which terminal responses may present.</param>
+    /// <param name="eventSink">
+    /// An optional synchronous, serialized sink for unsolicited progress events only. It runs on a core worker thread,
+    /// its exceptions are swallowed, and it must not synchronously reenter this service. Command and terminal responses
+    /// are returned only by <see cref="HandleAsync"/>.
+    /// </param>
     public LinuxInstallerProtocolService(string serverVersion, string? sanitizedLogPath = null, Action<ProtocolEvent>? eventSink = null)
         : this(
             serverVersion,
@@ -86,7 +111,17 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
     /// <summary>The current strictly ordered protocol lifecycle state.</summary>
     public ProtocolSessionState State => this.Session.State;
 
-    /// <summary>Handle one already-deserialized request. A null result means the request only changed protocol state.</summary>
+    /// <summary>Handle one already-deserialized request and return its sole command response.</summary>
+    /// <param name="request">The strictly validated request for this service's session.</param>
+    /// <param name="cancellationToken">Cancellation for command admission and the bounded core operation.</param>
+    /// <returns>
+    /// The command's only response event, or <see langword="null"/> when the command only changed protocol state.
+    /// This response is never also sent to the progress callback.
+    /// </returns>
+    /// <remarks>
+    /// Unsolicited progress is delivered only through the callback described by the constructor. Do not synchronously
+    /// call or wait on this method from that callback; queue follow-up commands after the callback returns.
+    /// </remarks>
     public async Task<ProtocolEvent?> HandleAsync(ProtocolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
