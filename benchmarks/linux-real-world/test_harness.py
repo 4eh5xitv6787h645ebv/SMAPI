@@ -27,6 +27,7 @@ prepare = load_module("linux_benchmark_prepare", "prepare.py")
 runner = load_module("linux_benchmark_runner", "run_ab.py")
 analyzer = load_module("linux_benchmark_analyzer", "analyze.py")
 common = load_module("linux_benchmark_common", "harness_common.py")
+publisher = load_module("linux_benchmark_publisher", "publish_results.py")
 
 
 def valid_probe_records(steady_draws: int = 300, transition_draws: int = 10) -> list[dict]:
@@ -88,6 +89,57 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_publication_rejects_private_content_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "public.json"
+            with self.assertRaisesRegex(ValueError, "privacy scan"):
+                publisher.atomic_write_texts({target: '{"path":"/home/private"}\n'})
+            self.assertFalse(target.exists())
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_publication_rejects_unknown_schema_keys(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unexpected test schema"):
+            publisher.require_keys({"expected": 1, "privateName": "value"}, {"expected"}, "test")
+
+    def test_publication_rejects_summary_metric_not_supported_by_raw(self) -> None:
+        raw = [{"series": "main", "label": "01-a1", "updateMilliseconds": {"mean": 1.0}}]
+        source = json.loads(json.dumps(raw))
+        source[0]["updateMilliseconds"]["mean"] = 2.0
+        with self.assertRaisesRegex(ValueError, "differ from retained raw"):
+            publisher.require_samples_match(source, raw)
+
+    def test_publication_rejects_unaccepted_probe_controls(self) -> None:
+        for key, value in (("bufferOverflow", True), ("expectedSaveLoaded", False), ("recordedUpdates", 0)):
+            with self.subTest(key=key):
+                records = [{"type": "sample"}] + valid_probe_records()
+                records[1][key] = value
+                with self.assertRaisesRegex(ValueError, "controls were not accepted|record counts"):
+                    publisher.validate_raw_probe_semantics(records, "mutated.jsonl")
+
+    def test_publication_adds_p50_gc_and_normalized_slow_tick_variation(self) -> None:
+        samples = []
+        for index in (1, 2):
+            distribution = {"count": 100, "mean": float(index), "p50": float(index), "p95": float(index), "p99": float(index), "max": float(index)}
+            samples.append({
+                "updateMilliseconds": distribution,
+                "baseGameMilliseconds": distribution,
+                "frameworkEnvelopeMilliseconds": distribution,
+                "drawMilliseconds": distribution,
+                "updateAndDrawMilliseconds": distribution,
+                "mainThreadAllocatedBytesPerUpdate": distribution,
+                "processAllocatedBytesPerUpdate": float(index),
+                "processGcCollections": {"gc0": index, "gc1": index + 1, "gc2": 0},
+                "coincidentGcCollections": {"gc0": index, "gc1": index, "gc2": 0},
+                "slowUpdateCounts": {"16.667": index, "33.333": index + 1, "50": 0},
+                "steadyDrawsPerMeasuredSecond": float(index),
+                "preRunChosenCpuBusyPercent": {"mean": float(index), "max": float(index)},
+                "duringRunChosenCpuBusyPercent": {"mean": float(index), "max": float(index)},
+            })
+        result = publisher.additional_variation(samples)
+        self.assertEqual(result["p50UpdateMilliseconds"]["median"], 1.5)
+        self.assertEqual(result["processGc0Collections"]["min"], 1.0)
+        self.assertEqual(result["slowUpdatePercentOver16_667Milliseconds"]["max"], 2.0)
+
     def test_jsonc_reader_preserves_comment_tokens_inside_strings(self) -> None:
         text = '''{
           // line comment

@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "officialCommit": "79f9bbbe3edbb7ca3369e7ad0d3dd45131b34fc0",
+  "forkCommit": "3c98eadd2bddc24d43c889afb11b155e92469882",
+  "gameAssemblySha256": "f3e97f01d3fd2b1e6094fc8d2b59950aa6cb9d6cd1bf1b39d72d58edda8aad12",
+  "probeAssemblySha256": "34e3a3b36a9456931437a96fdf7be79bd12aed3d8580a89bbb312302fee82663",
+  "commonLauncherSha256": "9503f14b6fe1a7ab2a999eeb3cfa9f95a80bdd204c6243b085b73af6dc0b1d06",
+  "commonDepsSha256": "6a781382a8268d92780da0b3593efd692f28489a69ce6ca7ae0b51eb4dc42792",
+  "expectedLoadedCodeMods": 132,
+  "expectedLoadedContentPacks": 176,
+  "expectedSkippedMods": 1,
+  "harnessCommit": "3c98eadd2bddc24d43c889afb11b155e92469882",
+  "calculationMethod": "nearest-rank per-run percentiles; descriptive median and variation across five separate processes; paired differences match preregistered sample numbers; slow-update percentages normalize counts by accepted update count",
+  "environment": {
+    "schema": 1,
+    "system": "Linux",
+    "kernel": "6.18.33-1-MANJARO",
+    "machine": "x86_64",
+    "cpuList": "12,13,14,15,16,17",
+    "cpuModel": "AMD Ryzen Threadripper 2920X 12-Core Processor",
+    "logicalCpuCount": 24,
+    "governors": [
+      "performance"
+    ],
+    "memory": {
+      "MemTotalKiB": 65800732,
+      "MemAvailableKiB": 44916508,
+      "SwapTotalKiB": 16777212,
+      "SwapFreeKiB": 940944
+    },
+    "bwrap": "bubblewrap 0.11.2",
+    "xvfb": {
+      "binarySha256": "5bfd315a8c7bc626d0b183d176e130c34f910a4a1279d9d53ea45769f62a3351",
+      "helpSignature": "use: X [:<display>] [option]"
+    },
+    "locale": "C.UTF-8",
+    "renderer": "llvmpipe (LLVM 22.1.5, 256 bits)",
+    "runtimeSettings": {
+      "DOTNET_TieredCompilation": "0",
+      "ALSOFT_DRIVERS": "null"
+    },
+    "buildDotnetSdk": "10.0.108",
+    "verifiedGameRuntime": {
+      "framework": "Microsoft.NETCore.App",
+      "version": "6.0.32",
+      "coreclrSha256": "0e7f0c6a491855480a079d3a0686973c9fe7410189c01b4f2b4debe2c55e4951",
+      "hostfxrSha256": "9bd58782f42fbba459fa4ce384475cd56bb18062a87386cefed0246946a2ea6b",
+      "tieredCompilationFromRuntimeConfig": false,
+      "suiteEnvironmentSha256": "81e8efe0227354ee638a07a64cf7a3cc93283edeb9c0e6ec863290f9a976f965",
+      "verificationScriptSha256": "fc01573a3f2a9f8dd281db97d897c64420f9eb170b05dc1eaefd32d67e8bfe99",
+      "verificationMethod": "SHA-256 and runtime-config fields independently matched across the post-suite official and fork gold game trees; the suite environment digest matches all 20 public raw samples."
+    }
+  },
+  "publicSummary": {
+    "scriptSha256": "3f62aeaeb59d835c6995bce98a0f5da91ecc3e4921ae4b949ffe03ea376ab5db",
+    "calculationMethod": "nearest-rank per-run percentiles; descriptive median and variation across five separate processes; paired differences match preregistered sample numbers; slow-update percentages normalize counts by accepted update count"
+  }
+}
