@@ -148,13 +148,21 @@ jobs:
                     --filter FullyQualifiedName~SMAPI.Tests.Core.LinuxRuntimeDispatcherTests
 
             -   name: Run full test suite
-                run: >-
-                    dotnet test src/SMAPI.slnx
-                    --configuration Release
-                    --no-build
-                    -p:GamePath="$RUNNER_TEMP/StardewValley"
-                    -p:CopyToGameFolder=false
-                    -p:AllowMissingPrunePackageData=true
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    dotnet test src/SMAPI.Tests/SMAPI.Tests.csproj \
+                        --configuration Release \
+                        --no-build \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
+                    dotnet test src/SMAPI.ModBuildConfig.Analyzer.Tests/SMAPI.ModBuildConfig.Analyzer.Tests.csproj \
+                        --configuration Release \
+                        --no-build \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
 
             -   name: Build Linux-only installer package
                 shell: pwsh
