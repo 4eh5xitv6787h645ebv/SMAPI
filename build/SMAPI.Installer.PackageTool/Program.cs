@@ -8,8 +8,16 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        return await Program.RunAsync(args, Environment.GetEnvironmentVariable).ConfigureAwait(false);
+    }
+
+    /// <summary>Run the command with an explicit environment reader so the GitHub context boundary is testable.</summary>
+    internal static async Task<int> RunAsync(string[] args, Func<string, string?> getEnvironmentVariable)
+    {
         try
         {
+            ArgumentNullException.ThrowIfNull(args);
+            ArgumentNullException.ThrowIfNull(getEnvironmentVariable);
             if (args.Length == 0 || args[0] is "--help" or "-h")
             {
                 Program.WriteUsage();
@@ -39,7 +47,16 @@ internal static class Program
                         Program.ReadDotNetInfo(Program.Take(options, "dotnet-info-file"))
                     );
                     Program.AssertNoUnknownOptions(options);
+                    Program.AssertAuthoritativeTagPushContext(
+                        identity,
+                        sourceCommit,
+                        createInputs.Workflow,
+                        getEnvironmentVariable
+                    );
                     await tool.CreateAsync(package, directory, createInputs).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"create: created and self-verified {identity.Tag}; the GitHub tag-push context guard isn't cryptographic provenance"
+                    );
                     break;
                 case "verify-release":
                     Program.AssertNoUnknownOptions(options);
@@ -47,17 +64,48 @@ internal static class Program
                         directory,
                         new ReleaseVerificationInputs(identity, sourceCommit, sourceTree)
                     ).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"verify-release: verified package authority for {identity.Tag}; runner metadata is informational and unauthenticated"
+                    );
                     break;
                 default:
                     throw new ArgumentException($"Unknown command '{command}'.");
             }
-            Console.WriteLine($"{command}: verified {identity.Tag}");
             return 0;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Package tool failed: {ex.Message}");
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// Refuse to mint release authority outside the exact GitHub tag-push context. This is a workflow misuse guard,
+    /// not cryptographic proof; downloaded artifacts still require GitHub attestation verification.
+    /// </summary>
+    private static void AssertAuthoritativeTagPushContext(
+        ForkReleaseIdentity identity,
+        string sourceCommit,
+        string workflow,
+        Func<string, string?> getEnvironmentVariable
+    )
+    {
+        string expectedRef = $"refs/tags/{identity.Tag}";
+        string expectedWorkflow = $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@{expectedRef}";
+        bool valid = string.Equals(getEnvironmentVariable("GITHUB_EVENT_NAME"), "push", StringComparison.Ordinal)
+            && string.Equals(getEnvironmentVariable("GITHUB_REF_TYPE"), "tag", StringComparison.Ordinal)
+            && string.Equals(getEnvironmentVariable("GITHUB_REF"), expectedRef, StringComparison.Ordinal)
+            && string.Equals(getEnvironmentVariable("GITHUB_WORKFLOW_REF"), expectedWorkflow, StringComparison.Ordinal)
+            && string.Equals(getEnvironmentVariable("GITHUB_REPOSITORY"), ForkReleaseIdentity.Repository, StringComparison.Ordinal)
+            && string.Equals(getEnvironmentVariable("GITHUB_SHA"), sourceCommit, StringComparison.Ordinal)
+            && string.Equals(workflow, expectedWorkflow, StringComparison.Ordinal);
+        if (!valid)
+        {
+            throw new InvalidOperationException(
+                "Authoritative release assets may only be created by the exact reviewed GitHub tag-push context. "
+                + "Candidate validation must not mint a release manifest or quartet."
+            );
         }
     }
 

@@ -1,13 +1,19 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Security;
 
+[assembly: InternalsVisibleTo("SMAPI.Installer.PackageTool.Tests")]
+
 namespace StardewModdingAPI.Installer.PackageTool;
 
-/// <summary>The explicit, deterministic inputs recorded in one authoritative release artifact set.</summary>
-public sealed record ReleaseAssetSetInputs(
+/// <summary>
+/// The explicit inputs recorded in one release artifact set. Runner, timestamp, reference-build, and .NET fields
+/// are informational and aren't authenticated by clean-machine quartet verification.
+/// </summary>
+internal sealed record ReleaseAssetSetInputs(
     ForkReleaseIdentity Identity,
     string SourceCommit,
     string SourceTree,
@@ -20,15 +26,18 @@ public sealed record ReleaseAssetSetInputs(
     string DotNetInfo
 );
 
-/// <summary>The independently known immutable inputs required to verify a downloaded release quartet.</summary>
-public sealed record ReleaseVerificationInputs(
+/// <summary>The independently known immutable authority inputs required to verify a downloaded release quartet.</summary>
+internal sealed record ReleaseVerificationInputs(
     ForkReleaseIdentity Identity,
     string SourceCommit,
     string SourceTree
 );
 
-/// <summary>Creates and verifies the exact Linux installer release-asset quartet.</summary>
-public sealed class ReleaseAssetSet
+/// <summary>
+/// Internal pure construction and verification core for the exact Linux installer release-asset quartet.
+/// The production command applies the GitHub tag-push context guard before calling creation.
+/// </summary>
+internal sealed class ReleaseAssetSet
 {
     private const string ChecksumsName = "SHA256SUMS";
     private const string MetadataName = "build-metadata.json";
@@ -40,7 +49,10 @@ public sealed class ReleaseAssetSet
         RegexOptions.CultureInvariant
     );
 
-    /// <summary>Create a new output directory containing exactly the release quartet.</summary>
+    /// <summary>
+    /// Create a new output directory containing exactly the release quartet. This pure internal operation doesn't
+    /// prove GitHub provenance; production callers must apply the tag-push context guard first.
+    /// </summary>
     public async Task CreateAsync(
         string finalizedPackagePath,
         string outputDirectory,
@@ -112,7 +124,10 @@ public sealed class ReleaseAssetSet
         }
     }
 
-    /// <summary>Verify an authoritative tag-built set through the complete Core authority chain.</summary>
+    /// <summary>
+    /// Verify the package and manifest authority through the complete Core chain. Informational runner metadata is
+    /// checked only for a strict bounded profile because a clean machine has no independent value to compare it to.
+    /// </summary>
     public async Task VerifyReleaseAsync(
         string assetDirectory,
         ReleaseVerificationInputs inputs,

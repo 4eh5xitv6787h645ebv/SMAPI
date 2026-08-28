@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Packages;
@@ -108,6 +109,45 @@ public sealed class ReleaseAssetSetTests
     }
 
     [Test]
+    public async Task CliCreate_ExactTagPushContext_CreatesQuartet()
+    {
+        string package = this.CreatePackage();
+        string output = Path.Combine(this.TempRoot, "cli-tag");
+
+        int result = await Program.RunAsync(
+            this.GetCreateArguments(package, output),
+            this.GetTagPushContext().GetValueOrDefault
+        );
+
+        result.Should().Be(0);
+        Directory.GetFiles(output).Should().HaveCount(4);
+        await new ReleaseAssetSet().VerifyReleaseAsync(output, this.GetVerificationInputs());
+    }
+
+    [TestCase("GITHUB_EVENT_NAME", "pull_request")]
+    [TestCase("GITHUB_EVENT_NAME", "workflow_dispatch")]
+    [TestCase("GITHUB_REF_TYPE", "branch")]
+    [TestCase("GITHUB_REF", "refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3")]
+    [TestCase("GITHUB_WORKFLOW_REF", "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/heads/develop")]
+    [TestCase("GITHUB_REPOSITORY", "attacker/SMAPI")]
+    [TestCase("GITHUB_SHA", "9999999999999999999999999999999999999999")]
+    public async Task CliCreate_NonTagOrMismatchedGitHubContext_RefusesWithoutQuartet(string variable, string value)
+    {
+        string package = this.CreatePackage();
+        string output = Path.Combine(this.TempRoot, $"cli-refusal-{variable}-{value.GetHashCode():x}");
+        Dictionary<string, string> context = this.GetTagPushContext();
+        context[variable] = value;
+
+        int result = await Program.RunAsync(
+            this.GetCreateArguments(package, output),
+            context.GetValueOrDefault
+        );
+
+        result.Should().Be(1);
+        Directory.Exists(output).Should().BeFalse();
+    }
+
+    [Test]
     public async Task VerifyReleaseAsync_RejectsPackageTamperingBeforeAuthority()
     {
         string package = this.CreatePackage();
@@ -121,8 +161,61 @@ public sealed class ReleaseAssetSetTests
         await action.Should().ThrowAsync<PackageSecurityException>();
     }
 
+    [TestCase("manifest")]
+    [TestCase("checksums")]
+    [TestCase("metadata-profile")]
+    [TestCase("metadata-artifact-order")]
+    [TestCase("extra-asset")]
+    public async Task VerifyReleaseAsync_RejectsQuartetTamperProfileOrderAndExtraAsset(string tamper)
+    {
+        string package = this.CreatePackage();
+        string output = Path.Combine(this.TempRoot, $"quartet-{tamper}");
+        ReleaseAssetSet tool = new();
+        await tool.CreateAsync(package, output, this.Inputs);
+        string manifestName = VerifiedInstallerPackageFactory.GetManifestAssetName(this.Identity);
+
+        switch (tamper)
+        {
+            case "manifest":
+                await File.AppendAllTextAsync(Path.Combine(output, manifestName), " ", Encoding.UTF8);
+                break;
+            case "checksums":
+                string[] checksumLines = await File.ReadAllLinesAsync(Path.Combine(output, "SHA256SUMS"));
+                await File.WriteAllLinesAsync(Path.Combine(output, "SHA256SUMS"), checksumLines.Reverse());
+                break;
+            case "metadata-profile":
+                string metadataPath = Path.Combine(output, "build-metadata.json");
+                string metadata = await File.ReadAllTextAsync(metadataPath);
+                await File.WriteAllTextAsync(
+                    metadataPath,
+                    metadata.Replace(this.Inputs.SourceTree, new string('8', 40), StringComparison.Ordinal)
+                );
+                break;
+            case "metadata-artifact-order":
+                string orderedMetadataPath = Path.Combine(output, "build-metadata.json");
+                JsonNode root = JsonNode.Parse(await File.ReadAllTextAsync(orderedMetadataPath))!;
+                JsonArray artifacts = root["artifacts"]!.AsArray();
+                JsonNode first = artifacts[0]!.DeepClone();
+                JsonNode second = artifacts[1]!.DeepClone();
+                artifacts.Clear();
+                artifacts.Add(second);
+                artifacts.Add(first);
+                await File.WriteAllTextAsync(orderedMetadataPath, root.ToJsonString());
+                break;
+            case "extra-asset":
+                await File.WriteAllTextAsync(Path.Combine(output, "unexpected.txt"), "unexpected");
+                break;
+            default:
+                throw new AssertionException($"Unknown tamper case '{tamper}'.");
+        }
+
+        Func<Task> action = () => tool.VerifyReleaseAsync(output, this.GetVerificationInputs());
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
+    }
+
     [Test]
-    public async Task VerifyReleaseAsync_DoesNotRequireOriginalInformativeRunnerInputs()
+    public async Task VerifyReleaseAsync_DoesNotAuthenticateInformativeRunnerInputs()
     {
         string package = this.CreatePackage();
         string output = Path.Combine(this.TempRoot, "informative");
@@ -130,7 +223,9 @@ public sealed class ReleaseAssetSetTests
         await tool.CreateAsync(package, output, this.Inputs);
         string metadataPath = Path.Combine(output, "build-metadata.json");
         string metadata = await File.ReadAllTextAsync(metadataPath);
-        await File.WriteAllTextAsync(metadataPath, metadata.Replace("ubuntu24-20260824.1", "ubuntu24-downloaded", StringComparison.Ordinal));
+        metadata = metadata.Replace("ubuntu24-20260824.1", "ubuntu24-downloaded", StringComparison.Ordinal);
+        metadata = metadata.Replace(new string('3', 40), new string('4', 40), StringComparison.Ordinal);
+        await File.WriteAllTextAsync(metadataPath, metadata);
 
         await tool.VerifyReleaseAsync(output, this.GetVerificationInputs());
     }
@@ -189,6 +284,41 @@ public sealed class ReleaseAssetSetTests
     private ReleaseVerificationInputs GetVerificationInputs()
     {
         return new ReleaseVerificationInputs(this.Identity, this.Inputs.SourceCommit, this.Inputs.SourceTree);
+    }
+
+    private string[] GetCreateArguments(string package, string output)
+    {
+        string dotnetInfo = Path.Combine(this.TempRoot, "dotnet-info.txt");
+        File.WriteAllText(dotnetInfo, this.Inputs.DotNetInfo);
+        return
+        [
+            "create",
+            "--asset-directory", output,
+            "--tag", this.Identity.Tag,
+            "--source-commit", this.Inputs.SourceCommit,
+            "--source-tree", this.Inputs.SourceTree,
+            "--package", package,
+            "--workflow-ref", this.Inputs.Workflow,
+            "--workflow-run", this.Inputs.WorkflowRun,
+            "--runner-image", this.Inputs.RunnerImage,
+            "--runner-arch", this.Inputs.RunnerArchitecture,
+            "--reference-assemblies-commit", this.Inputs.ReferenceAssembliesCommit,
+            "--timestamp-utc", this.Inputs.TimestampUtc,
+            "--dotnet-info-file", dotnetInfo
+        ];
+    }
+
+    private Dictionary<string, string> GetTagPushContext()
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["GITHUB_EVENT_NAME"] = "push",
+            ["GITHUB_REF_TYPE"] = "tag",
+            ["GITHUB_REF"] = $"refs/tags/{this.Identity.Tag}",
+            ["GITHUB_WORKFLOW_REF"] = this.Inputs.Workflow,
+            ["GITHUB_REPOSITORY"] = ForkReleaseIdentity.Repository,
+            ["GITHUB_SHA"] = this.Inputs.SourceCommit
+        };
     }
 
     private static byte[] CreateNestedArchive()
