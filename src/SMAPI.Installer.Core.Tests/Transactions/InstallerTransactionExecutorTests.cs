@@ -638,6 +638,40 @@ public sealed class InstallerTransactionExecutorTests
     }
 
     [Test]
+    public void Recover_HashValidForwardIntentAfterRecoveryObservedApplied_IsRejected()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "first old");
+        Write(game, "StardewModdingAPI.xml", "second old");
+        Write(payload, "first", "first new");
+        Write(payload, "second", "second new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("first old"), "first", Hash("first new")),
+            WriteOperation("StardewModdingAPI.xml", Hash("second old"), "second", Hash("second new"))
+        });
+        Action interrupted = () => new InstallerTransactionExecutor(
+            faultInjector: new BeforeAppliedEventTermination()
+        ).Apply(game, payload, plan);
+        interrupted.Should().Throw<SimulatedProcessTerminationException>();
+        string events = Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "events.jsonl");
+        AppendHashValidEvents(
+            events,
+            ("RecoveryObservedApplied", 0),
+            ("Intent", 1),
+            ("Applied", 1),
+            ("RollingBack", null)
+        );
+
+        Action recover = () => new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
+
+        recover.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("first new");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second old");
+    }
+
+    [Test]
     public void Apply_PayloadHardlink_RejectsWithoutCreatingDestination()
     {
         Assume.That(OperatingSystem.IsLinux(), Is.True);
@@ -1037,6 +1071,38 @@ public sealed class InstallerTransactionExecutorTests
             previous = eventSha256;
         }
         File.WriteAllText(eventsPath, string.Join('\n', rewritten) + "\n");
+    }
+
+    private static void AppendHashValidEvents(
+        string eventsPath,
+        params (string Kind, int? OperationIndex)[] additions
+    )
+    {
+        string[] existing = File.ReadAllLines(eventsPath).Where(line => line.Length > 0).ToArray();
+        JsonObject last = JsonNode.Parse(existing[^1])!.AsObject();
+        string planSha256 = last["planSha256"]!.GetValue<string>();
+        string? previous = last["eventSha256"]!.GetValue<string>();
+        List<string> appended = new();
+        for (int offset = 0; offset < additions.Length; offset++)
+        {
+            (string kind, int? operationIndex) = additions[offset];
+            JsonObject unsigned = new()
+            {
+                ["schemaVersion"] = 1,
+                ["sequence"] = existing.Length + offset,
+                ["kind"] = kind,
+                ["operationIndex"] = operationIndex,
+                ["planSha256"] = planSha256,
+                ["previousEventSha256"] = previous
+            };
+            string eventSha256 = Convert.ToHexString(
+                SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(unsigned.ToJsonString()))
+            ).ToLowerInvariant();
+            unsigned["eventSha256"] = eventSha256;
+            appended.Add(unsigned.ToJsonString());
+            previous = eventSha256;
+        }
+        File.AppendAllText(eventsPath, string.Join('\n', appended) + "\n");
     }
 
     private static TransactionFileOperation WriteOperation(string destination, string? existingHash, string source, string resultHash, int? mode = null)

@@ -517,7 +517,7 @@ internal static class TransactionJournalStore
                 TransactionJournalEventKind.Created => sequence == 0 && item.OperationIndex is null,
                 TransactionJournalEventKind.Prepared => sequence > 0 && !prepared && !applying && !rollingBack && item.OperationIndex is null,
                 TransactionJournalEventKind.Applying => prepared && !applying && !rollingBack && item.OperationIndex is null,
-                TransactionJournalEventKind.Intent => applying && !rollingBack && pendingIntent is null && item.OperationIndex == nextIntent,
+                TransactionJournalEventKind.Intent => applying && !rollingBack && !recoveryObservedApplied && pendingIntent is null && item.OperationIndex == nextIntent,
                 TransactionJournalEventKind.Applied => applying && !rollingBack && item.OperationIndex == pendingIntent,
                 TransactionJournalEventKind.RecoveryObservedApplied => applying && !rollingBack && !recoveryObservedApplied && item.OperationIndex == pendingIntent,
                 TransactionJournalEventKind.RollingBack => sequence > 0 && !rollingBack && item.OperationIndex is null,
