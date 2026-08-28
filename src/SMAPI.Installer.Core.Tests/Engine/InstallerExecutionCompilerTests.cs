@@ -47,6 +47,25 @@ public class InstallerExecutionCompilerTests
         generated.Receipt.ManifestSha256.Should().Be(manifest.GetCanonicalDigest());
         generated.Receipt.Launcher.OriginalLauncherSha256.Should().Be(vanilla.Sha256);
         generated.GetCanonicalBytes().Should().Equal(System.Text.Encoding.UTF8.GetBytes(generated.Receipt.ToCanonicalJson()));
+
+        preparation.RecoverySnapshot.Should().NotBeNull();
+        RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot!;
+        recovery.SnapshotSha256.Should().Be(Sha256Digest.Hash(recovery.GetCanonicalSnapshotBytes()));
+        recovery.Snapshot.PreviousReceiptSha256.Should().BeNull();
+        recovery.Snapshot.ExpectedCurrentReceiptSha256.Should().Be(generated.Sha256);
+        recovery.PathBindings.Select(binding => binding.Path.Value).Should().BeEquivalentTo(
+            "StardewValley",
+            "StardewValley-original",
+            "StardewModdingAPI"
+        );
+        recovery.PathBindings.Single(binding => binding.Path.Value == "StardewValley-original").OwnedKind
+            .Should().Be(OwnedEntryKind.RecoveryLauncherBackup);
+        RollbackSnapshotEntry launcherRoundTrip = recovery.Snapshot.Entries.Single(entry => entry.Path.Value == "StardewValley");
+        launcherRoundTrip.Kind.Should().Be(RollbackEntryKind.Restore);
+        launcherRoundTrip.Backup.Should().Be(Identity('f', mode: 493));
+        RollbackSnapshotEntry backupRoundTrip = recovery.Snapshot.Entries.Single(entry => entry.Path.Value == "StardewValley-original");
+        backupRoundTrip.Kind.Should().Be(RollbackEntryKind.Remove);
+        backupRoundTrip.ExpectedCurrent.Should().Be(Identity('f', mode: 493));
     }
 
     [Test]
@@ -89,6 +108,16 @@ public class InstallerExecutionCompilerTests
         preparation.Receipt.Kind.Should().Be(ReceiptPreparationKind.WriteAtomically);
         preparation.Receipt.ExpectedExistingReceiptSha256.Should().Be(installedReceipt.GetCanonicalDigest());
         preparation.Receipt.Source.As<GeneratedCanonicalReceiptSource>().Receipt.Release.Should().Be(target.Release);
+        preparation.RecoverySnapshot.Should().NotBeNull();
+        RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot!;
+        recovery.Snapshot.Entries.Select(entry => entry.Path.Value).Should().BeEquivalentTo(
+            "StardewValley",
+            "StardewModdingAPI",
+            "smapi-internal/old.dll",
+            "smapi-internal/new.dll"
+        );
+        recovery.PathBindings.Should().ContainSingle(binding => binding.Path.Value == "StardewValley-original" && !binding.RequiresContentCapture);
+        recovery.GetPreviousReceiptBytes().Should().Equal(System.Text.Encoding.UTF8.GetBytes(installedReceipt.ToCanonicalJson()));
     }
 
     [Test]
@@ -117,6 +146,8 @@ public class InstallerExecutionCompilerTests
         preparation.Receipt.Kind.Should().Be(ReceiptPreparationKind.WriteAtomically);
         preparation.Receipt.ExpectedExistingReceiptSha256.Should().Be(receipt.GetCanonicalDigest());
         preparation.Receipt.Source.As<GeneratedCanonicalReceiptSource>().Receipt.ManifestSha256.Should().Be(manifest.GetCanonicalDigest());
+        preparation.RecoverySnapshot.Should().NotBeNull();
+        preparation.RecoverySnapshot!.Snapshot.Entries.Should().ContainSingle(entry => entry.Path.Value == "StardewModdingAPI");
     }
 
     [Test]
@@ -150,6 +181,19 @@ public class InstallerExecutionCompilerTests
         preparation.Receipt.Kind.Should().Be(ReceiptPreparationKind.RemoveAtomically);
         preparation.Receipt.ExpectedExistingReceiptSha256.Should().Be(receipt.GetCanonicalDigest());
         preparation.Receipt.Source.Should().BeNull();
+        preparation.RecoverySnapshot.Should().NotBeNull();
+        RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot!;
+        recovery.Snapshot.ExpectedCurrentReceiptSha256.Should().BeNull();
+        recovery.Snapshot.PreviousReceiptSha256.Should().Be(receipt.GetCanonicalDigest());
+        recovery.Snapshot.Entries.Should().ContainSingle(entry =>
+            entry.Path.Value == "StardewValley-original"
+            && entry.OwnedKind == OwnedEntryKind.RecoveryLauncherBackup
+            && entry.Kind == RollbackEntryKind.Restore
+            && entry.ExpectedCurrent == null
+            && entry.Backup!.UnixMode == 493
+        );
+        recovery.Snapshot.Entries.Single(entry => entry.Path.Value == "StardewValley").Backup!.Sha256
+            .Should().Be(receipt.Launcher.InstalledLauncherSha256);
     }
 
     [Test]
@@ -186,6 +230,7 @@ public class InstallerExecutionCompilerTests
         preparation.Instructions.Single(item => item.Path.Value == "StardewValley").Source.As<CurrentGameLauncherSource>().Role.Should().Be(CurrentGameLauncherRole.CurrentLauncher);
         preparation.Instructions.Single(item => item.Path.Value == "StardewValley-original").Source.As<CurrentGameLauncherSource>().Role.Should().Be(CurrentGameLauncherRole.OriginalLauncherBackup);
         preparation.Receipt.Kind.Should().Be(ReceiptPreparationKind.None);
+        preparation.RecoverySnapshot.Should().BeNull();
     }
 
     [Test]
@@ -205,8 +250,8 @@ public class InstallerExecutionCompilerTests
             receipt.GetCanonicalDigest(),
             OwnershipTestData.Digest('7'),
             [
-                new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, runtime.InstalledSha256, OwnershipTestData.Digest('8')),
-                new RollbackSnapshotEntry(created.Path, created.Kind, RollbackEntryKind.Remove, created.InstalledSha256, null)
+                new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, Identity(runtime.InstalledSha256, mode: runtime.UnixMode), Identity('8', mode: runtime.UnixMode)),
+                new RollbackSnapshotEntry(created.Path, created.Kind, RollbackEntryKind.Remove, Identity(created.InstalledSha256, mode: created.UnixMode), null)
             ]
         );
         InstallationPlanningRequest request = new(
@@ -217,7 +262,12 @@ public class InstallerExecutionCompilerTests
             ]),
             LauncherState.Assess(receipt.Launcher.InstalledLauncherSha256, receipt.Launcher.OriginalLauncherSha256, receipt.Launcher),
             installedReceipt: receipt,
-            rollbackSnapshot: snapshot
+            rollbackSnapshot: snapshot,
+            recoveryObservations:
+            [
+                new RecoveryFileObservation(runtime.Path, Identity(runtime.InstalledSha256, mode: runtime.UnixMode)),
+                new RecoveryFileObservation(created.Path, Identity(created.InstalledSha256, mode: created.UnixMode))
+            ]
         );
 
         (InstallationPlan plan, InstallationExecutionPreparation preparation) = this.Compile(request);
@@ -230,6 +280,9 @@ public class InstallerExecutionCompilerTests
         restore.Content.Should().Be(RecoverySnapshotContent.GameFile);
         restore.SnapshotSha256.Should().Be(snapshotIdentity);
         restore.EntryPath.Should().Be(runtime.Path);
+        restore.ExpectedSizeBytes.Should().Be(10);
+        restore.ExpectedUnixMode.Should().Be(runtime.UnixMode);
+        preparation.Instructions.Single(item => item.PlanKind == PlanOperationKind.Restore).ResultUnixMode.Should().Be(runtime.UnixMode);
         preparation.Instructions.Single(item => item.PlanKind == PlanOperationKind.Remove).Source.Should().BeNull();
 
         preparation.Receipt.Kind.Should().Be(ReceiptPreparationKind.WriteAtomically);
@@ -254,8 +307,8 @@ public class InstallerExecutionCompilerTests
                     runtimePath,
                     OwnedEntryKind.RuntimeFile,
                     RollbackEntryKind.Restore,
-                    expectedCurrentSha256: null,
-                    backupSha256: OwnershipTestData.Digest('8')
+                    expectedCurrent: null,
+                    backup: Identity('8')
                 )
             ]
         );
@@ -263,7 +316,8 @@ public class InstallerExecutionCompilerTests
             InstallationAction.Rollback,
             InstallationInventory.Create(null, null, []),
             LauncherState.Assess(OwnershipTestData.Digest('f'), null, null),
-            rollbackSnapshot: snapshot
+            rollbackSnapshot: snapshot,
+            recoveryObservations: [new RecoveryFileObservation(runtimePath, null)]
         );
 
         (InstallationPlan plan, InstallationExecutionPreparation preparation) = this.Compile(request);
@@ -274,18 +328,80 @@ public class InstallerExecutionCompilerTests
         RecoverySnapshotSource receiptSource = preparation.Receipt.Source.Should().BeOfType<RecoverySnapshotSource>().Subject;
         receiptSource.Content.Should().Be(RecoverySnapshotContent.InstalledReceipt);
         receiptSource.ExpectedContentSha256.Should().Be(priorReceiptSha256);
+        preparation.RecoverySnapshot.Should().BeNull();
+    }
+
+    [Test]
+    public void Repair_WithNoFileChangesProducesReceiptOnlyDurableRecoverySnapshot()
+    {
+        PackageManifest manifest = OwnershipTestData.Manifest(
+            otherEntries: [OwnershipTestData.Entry("StardewModdingAPI", '2', OwnedEntryKind.RuntimeFile)]
+        );
+        InstallationReceipt receipt = OwnershipTestData.Receipt(manifest);
+        InstallationPlanningRequest request = new(
+            InstallationAction.Repair,
+            InstallationInventory.Create(manifest, receipt, manifest.Entries.Select(entry => OwnershipTestData.Current(entry))),
+            LauncherState.Assess(receipt.Launcher.InstalledLauncherSha256, receipt.Launcher.OriginalLauncherSha256, receipt.Launcher),
+            targetManifest: manifest,
+            installedReceipt: receipt
+        );
+
+        (_, InstallationExecutionPreparation preparation) = this.Compile(request);
+
+        preparation.RecoverySnapshot.Should().NotBeNull();
+        RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot!;
+        recovery.Snapshot.Entries.Should().BeEmpty();
+        recovery.Snapshot.PreviousReceiptSha256.Should().Be(receipt.GetCanonicalDigest());
+        recovery.Snapshot.ExpectedCurrentReceiptSha256.Should().Be(
+            preparation.Receipt.Source.As<GeneratedCanonicalReceiptSource>().Sha256
+        );
+        recovery.PathBindings.Select(binding => binding.Path.Value).Should().BeEquivalentTo("StardewValley", "StardewValley-original");
+        recovery.PathBindings.Should().OnlyContain(binding => !binding.RequiresContentCapture);
+    }
+
+    [Test]
+    public void BoundPlan_RejectsRecoveryMetadataTamperingEvenWhenPlanHashesAreUnchanged()
+    {
+        (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
+        BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request);
+        RecoveryFileObservation[] tampered = request.RecoveryObservations
+            .Select(observation => observation.Path.Value == "StardewValley"
+                ? new RecoveryFileObservation(
+                    observation.Path,
+                    new RecoveryFileIdentity(
+                        observation.Identity!.Sha256,
+                        observation.Identity.SizeBytes + 1,
+                        observation.Identity.UnixMode,
+                        observation.Identity.FileType
+                    )
+                )
+                : observation)
+            .ToArray();
+        InstallationPlanningRequest changed = new(
+            request.Action,
+            request.Inventory,
+            request.Launcher,
+            request.TargetManifest,
+            request.InstalledReceipt,
+            request.RollbackSnapshot,
+            tampered
+        );
+
+        Action prepare = () => this.Compiler.Prepare(binding, plan, changed, TransactionId);
+
+        prepare.Should().Throw<ExecutionCompilationException>().Which.Error.Should().Be(ExecutionCompilationError.StalePlan);
     }
 
     [Test]
     public void BindAndPrepare_RejectNonExecutableStaleAndMismatchedState()
     {
-        (InstallationPlanningRequest firstRequest, InstallationPlan firstPlan) = CreateFreshInstallRequest('2', size: 10);
+        (InstallationPlanningRequest firstRequest, InstallationPlan firstPlan) = this.CreateFreshInstallRequest('2', size: 10);
         BoundInstallationPlan binding = this.Compiler.BindPlan(firstPlan, firstRequest);
 
-        (InstallationPlanningRequest changedPlanRequest, InstallationPlan changedPlan) = CreateFreshInstallRequest('3', size: 10);
+        (InstallationPlanningRequest changedPlanRequest, InstallationPlan changedPlan) = this.CreateFreshInstallRequest('3', size: 10);
         Action stalePlan = () => this.Compiler.Prepare(binding, changedPlan, changedPlanRequest, TransactionId);
 
-        (InstallationPlanningRequest changedManifestRequest, InstallationPlan samePlan) = CreateFreshInstallRequest('2', size: 11);
+        (InstallationPlanningRequest changedManifestRequest, InstallationPlan samePlan) = this.CreateFreshInstallRequest('2', size: 11);
         samePlan.GetCanonicalDigest().Should().Be(firstPlan.GetCanonicalDigest(), "manifest sizes aren't represented as file-operation digests");
         BoundInstallationPlan changedManifestBinding = this.Compiler.BindPlan(samePlan, changedManifestRequest);
         Action staleManifest = () => this.Compiler.Prepare(binding, firstPlan, changedManifestRequest, TransactionId);
@@ -339,7 +455,7 @@ public class InstallerExecutionCompilerTests
     [Test]
     public void TransactionDestinations_AreUniqueAllowedAndFrontendCannotConstructRules()
     {
-        (InstallationPlanningRequest request, InstallationPlan plan) = CreateFreshInstallRequest('2', size: 10);
+        (InstallationPlanningRequest request, InstallationPlan plan) = this.CreateFreshInstallRequest('2', size: 10);
         InstallationExecutionPreparation preparation = this.Compiler.Prepare(
             this.Compiler.BindPlan(plan, request),
             plan,
@@ -358,6 +474,7 @@ public class InstallerExecutionCompilerTests
 
     private (InstallationPlan Plan, InstallationExecutionPreparation Preparation) Compile(InstallationPlanningRequest request)
     {
+        request = AddRequiredRecoveryObservations(request);
         InstallationPlan plan = this.Planner.Plan(request);
         BoundInstallationPlan binding = this.Compiler.BindPlan(plan, request);
         return (plan, this.Compiler.Prepare(binding, plan, request, TransactionId));
@@ -381,7 +498,13 @@ public class InstallerExecutionCompilerTests
             InstallationAction.Install,
             InstallationInventory.Create(manifest, null, [vanilla]),
             LauncherState.Assess(vanilla.Sha256, null, null),
-            targetManifest: manifest
+            targetManifest: manifest,
+            recoveryObservations:
+            [
+                new RecoveryFileObservation(OwnershipTestData.Path("StardewValley"), Identity('f', mode: 493)),
+                new RecoveryFileObservation(OwnershipTestData.Path("StardewValley-original"), null),
+                new RecoveryFileObservation(OwnershipTestData.Path("StardewModdingAPI"), null)
+            ]
         );
         return (request, this.Planner.Plan(request));
     }
@@ -389,11 +512,64 @@ public class InstallerExecutionCompilerTests
     private static InstallationPlanningRequest CreateUninstallRequest(InstallationReceipt receipt)
     {
         InstallationReceiptEntry runtime = receipt.Entries.Single(entry => entry.Kind == OwnedEntryKind.RuntimeFile);
-        return new InstallationPlanningRequest(
+        InstallationPlanningRequest request = new(
             InstallationAction.Uninstall,
             InstallationInventory.Create(null, receipt, [new CurrentFile(runtime.Path, runtime.InstalledSha256, runtime.UnixMode)]),
             LauncherState.Assess(receipt.Launcher.InstalledLauncherSha256, receipt.Launcher.OriginalLauncherSha256, receipt.Launcher),
             installedReceipt: receipt
         );
+        return AddRequiredRecoveryObservations(request);
     }
+
+    private static InstallationPlanningRequest AddRequiredRecoveryObservations(InstallationPlanningRequest request)
+    {
+        if (request.RecoveryObservations.Count > 0 || request.Action == InstallationAction.Rollback)
+            return request;
+
+        InstallationPlan plan = new InstallationPlanner().Plan(request);
+        IEnumerable<NormalizedRelativePath> required = request.Action == InstallationAction.Backup
+            ? plan.Operations.Select(operation => operation.Path)
+            : plan.Operations
+                .Where(operation => operation.Kind is PlanOperationKind.Create or PlanOperationKind.Replace or PlanOperationKind.Remove or PlanOperationKind.Restore)
+                .Select(operation => operation.Path)
+                .Append(OwnershipTestData.Path("StardewValley"))
+                .Append(OwnershipTestData.Path("StardewValley-original"));
+        Dictionary<string, CurrentFile> current = request.Inventory.Entries
+            .Where(entry => entry.Current is not null)
+            .ToDictionary(entry => entry.Path.Value, entry => entry.Current!, StringComparer.Ordinal);
+        RecoveryFileObservation[] observations = required
+            .DistinctBy(path => path.Value)
+            .Select(path => new RecoveryFileObservation(path, GetTestIdentity(path, current, request.Launcher)))
+            .ToArray();
+        return new InstallationPlanningRequest(
+            request.Action,
+            request.Inventory,
+            request.Launcher,
+            request.TargetManifest,
+            request.InstalledReceipt,
+            request.RollbackSnapshot,
+            observations
+        );
+    }
+
+    private static RecoveryFileIdentity? GetTestIdentity(
+        NormalizedRelativePath path,
+        IReadOnlyDictionary<string, CurrentFile> current,
+        LauncherState launcher
+    )
+    {
+        if (current.TryGetValue(path.Value, out CurrentFile? file))
+            return Identity(file.Sha256, mode: file.UnixMode);
+        if (path.Value == "StardewValley" && launcher.CurrentLauncherSha256 is not null)
+            return Identity(launcher.CurrentLauncherSha256, mode: 493);
+        if (path.Value == "StardewValley-original" && launcher.BackupLauncherSha256 is not null)
+            return Identity(launcher.BackupLauncherSha256, mode: 493);
+        return null;
+    }
+
+    private static RecoveryFileIdentity Identity(char digest, long size = 10, int mode = 420)
+        => Identity(OwnershipTestData.Digest(digest), size, mode);
+
+    private static RecoveryFileIdentity Identity(Sha256Digest digest, long size = 10, int mode = 420)
+        => new(digest, size, mode);
 }

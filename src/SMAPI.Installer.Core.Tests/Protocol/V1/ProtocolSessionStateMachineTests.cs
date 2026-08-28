@@ -320,7 +320,11 @@ internal sealed class ProtocolSessionStateMachineTests
             "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip",
             "1111111111111111111111111111111111111111",
             "2222222222222222222222222222222222222222",
-            HashA
+            HashA,
+            123456,
+            "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2",
+            "Release",
+            "linux-x64"
         );
     }
 }

@@ -41,13 +41,15 @@ public sealed class BoundInstallationPlan
     public Sha256Digest? ManifestSha256 { get; }
     public Sha256Digest? InstalledReceiptSha256 { get; }
     public Sha256Digest? RollbackSnapshotSha256 { get; }
+    public Sha256Digest? RecoveryObservationsSha256 { get; }
 
     internal BoundInstallationPlan(
         InstallationAction action,
         Sha256Digest planSha256,
         Sha256Digest? manifestSha256,
         Sha256Digest? installedReceiptSha256,
-        Sha256Digest? rollbackSnapshotSha256
+        Sha256Digest? rollbackSnapshotSha256,
+        Sha256Digest? recoveryObservationsSha256
     )
     {
         this.Action = action;
@@ -55,6 +57,7 @@ public sealed class BoundInstallationPlan
         this.ManifestSha256 = manifestSha256;
         this.InstalledReceiptSha256 = installedReceiptSha256;
         this.RollbackSnapshotSha256 = rollbackSnapshotSha256;
+        this.RecoveryObservationsSha256 = recoveryObservationsSha256;
     }
 
     /// <summary>Serialize every execution-relevant plan and observed-state identity deterministically.</summary>
@@ -72,6 +75,7 @@ public sealed class BoundInstallationPlan
             WriteNullableDigest(writer, "manifest_sha256", this.ManifestSha256);
             WriteNullableDigest(writer, "installed_receipt_sha256", this.InstalledReceiptSha256);
             WriteNullableDigest(writer, "rollback_snapshot_sha256", this.RollbackSnapshotSha256);
+            WriteNullableDigest(writer, "recovery_observations_sha256", this.RecoveryObservationsSha256);
             writer.WriteEndObject();
         }
         return Encoding.UTF8.GetString(stream.ToArray());
@@ -137,12 +141,18 @@ public sealed class CurrentGameLauncherSource : PreparationSource
     public CurrentGameLauncherRole Role { get; }
     public NormalizedRelativePath SourcePath { get; }
     public Sha256Digest Sha256 { get; }
+    public long SizeBytes { get; }
+    public int UnixMode { get; }
+    public RecoveryFileType FileType { get; }
 
-    internal CurrentGameLauncherSource(CurrentGameLauncherRole role, NormalizedRelativePath sourcePath, Sha256Digest sha256)
+    internal CurrentGameLauncherSource(CurrentGameLauncherRole role, NormalizedRelativePath sourcePath, RecoveryFileIdentity identity)
     {
         this.Role = role;
         this.SourcePath = sourcePath;
-        this.Sha256 = sha256;
+        this.Sha256 = identity.Sha256;
+        this.SizeBytes = identity.SizeBytes;
+        this.UnixMode = identity.UnixMode;
+        this.FileType = identity.FileType;
     }
 }
 
@@ -151,11 +161,17 @@ public sealed class CurrentGameFileSource : PreparationSource
 {
     public NormalizedRelativePath SourcePath { get; }
     public Sha256Digest Sha256 { get; }
+    public long SizeBytes { get; }
+    public int UnixMode { get; }
+    public RecoveryFileType FileType { get; }
 
-    internal CurrentGameFileSource(NormalizedRelativePath sourcePath, Sha256Digest sha256)
+    internal CurrentGameFileSource(NormalizedRelativePath sourcePath, RecoveryFileIdentity identity)
     {
         this.SourcePath = sourcePath;
-        this.Sha256 = sha256;
+        this.Sha256 = identity.Sha256;
+        this.SizeBytes = identity.SizeBytes;
+        this.UnixMode = identity.UnixMode;
+        this.FileType = identity.FileType;
     }
 }
 
@@ -173,18 +189,25 @@ public sealed class RecoverySnapshotSource : PreparationSource
     public RecoverySnapshotContent Content { get; }
     public NormalizedRelativePath? EntryPath { get; }
     public Sha256Digest? ExpectedContentSha256 { get; }
+    public long? ExpectedSizeBytes { get; }
+    public int? ExpectedUnixMode { get; }
+    public RecoveryFileType? ExpectedFileType { get; }
 
     internal RecoverySnapshotSource(
         Sha256Digest snapshotSha256,
         RecoverySnapshotContent content,
         NormalizedRelativePath? entryPath,
-        Sha256Digest? expectedContentSha256
+        RecoveryFileIdentity? expectedIdentity,
+        Sha256Digest? expectedReceiptSha256 = null
     )
     {
         this.SnapshotSha256 = snapshotSha256;
         this.Content = content;
         this.EntryPath = entryPath;
-        this.ExpectedContentSha256 = expectedContentSha256;
+        this.ExpectedContentSha256 = expectedIdentity?.Sha256 ?? expectedReceiptSha256;
+        this.ExpectedSizeBytes = expectedIdentity?.SizeBytes;
+        this.ExpectedUnixMode = expectedIdentity?.UnixMode;
+        this.ExpectedFileType = expectedIdentity?.FileType;
     }
 }
 
@@ -217,6 +240,8 @@ public sealed class FilePreparationInstruction
     public Sha256Digest? ExpectedCurrentSha256 { get; }
     public Sha256Digest? ExpectedResultSha256 { get; }
     public int? ResultUnixMode { get; }
+    public long? ResultSizeBytes { get; }
+    public RecoveryFileType? ResultFileType { get; }
     public PreparationSource? Source { get; }
 
     /// <summary>Whether this instruction becomes the sole transaction mutation for its path.</summary>
@@ -227,7 +252,9 @@ public sealed class FilePreparationInstruction
         PlannedOperation operation,
         PreparationInstructionKind kind,
         PreparationSource? source,
-        int? resultUnixMode
+        int? resultUnixMode,
+        long? resultSizeBytes = null,
+        RecoveryFileType? resultFileType = null
     )
     {
         this.PlanKind = operation.Kind;
@@ -237,6 +264,8 @@ public sealed class FilePreparationInstruction
         this.ExpectedResultSha256 = operation.ResultSha256;
         this.Source = source;
         this.ResultUnixMode = resultUnixMode;
+        this.ResultSizeBytes = resultSizeBytes;
+        this.ResultFileType = resultFileType;
     }
 }
 
@@ -267,6 +296,65 @@ public sealed class ReceiptPreparationInstruction
     }
 }
 
+/// <summary>One exact pre-execution path state durably bound into recovery preparation.</summary>
+public sealed class RecoveryPathBinding
+{
+    public NormalizedRelativePath Path { get; }
+    public OwnedEntryKind OwnedKind { get; }
+    public RecoveryFileIdentity? PriorIdentity { get; }
+    public bool RequiresContentCapture { get; }
+
+    internal RecoveryPathBinding(
+        NormalizedRelativePath path,
+        OwnedEntryKind ownedKind,
+        RecoveryFileIdentity? priorIdentity,
+        bool requiresContentCapture
+    )
+    {
+        OwnedNamespacePolicy.AssertRecoveryAllowed(path, ownedKind);
+        this.Path = path;
+        this.OwnedKind = ownedKind;
+        this.PriorIdentity = priorIdentity;
+        this.RequiresContentCapture = requiresContentCapture;
+    }
+}
+
+/// <summary>
+/// Canonical recovery state which must be persisted and fsynced before the associated game-file transaction begins.
+/// </summary>
+public sealed class RecoverySnapshotPreparation
+{
+    private readonly byte[] SnapshotBytes;
+    private readonly byte[]? PreviousReceiptBytes;
+
+    public RollbackSnapshot Snapshot { get; }
+    public Sha256Digest SnapshotSha256 { get; }
+    public IReadOnlyList<RecoveryPathBinding> PathBindings { get; }
+    public Sha256Digest? PreviousReceiptSha256 { get; }
+
+    internal RecoverySnapshotPreparation(
+        RollbackSnapshot snapshot,
+        byte[] snapshotBytes,
+        IEnumerable<RecoveryPathBinding> pathBindings,
+        byte[]? previousReceiptBytes
+    )
+    {
+        RecoveryPathBinding[] bindings = pathBindings.OrderBy(binding => binding.Path.Value, StringComparer.Ordinal).ToArray();
+        OwnershipCollectionValidation.AssertDistinctFilePaths(bindings.Select(binding => binding.Path), nameof(pathBindings));
+        this.Snapshot = snapshot;
+        this.SnapshotBytes = snapshotBytes.ToArray();
+        this.SnapshotSha256 = Sha256Digest.Hash(this.SnapshotBytes);
+        this.PathBindings = new ReadOnlyCollection<RecoveryPathBinding>(bindings);
+        this.PreviousReceiptBytes = previousReceiptBytes?.ToArray();
+        this.PreviousReceiptSha256 = this.PreviousReceiptBytes is null ? null : Sha256Digest.Hash(this.PreviousReceiptBytes);
+        if (this.PreviousReceiptSha256 != snapshot.PreviousReceiptSha256)
+            throw new ArgumentException("The captured previous receipt doesn't match the rollback transition.", nameof(previousReceiptBytes));
+    }
+
+    public byte[] GetCanonicalSnapshotBytes() => this.SnapshotBytes.ToArray();
+    public byte[]? GetPreviousReceiptBytes() => this.PreviousReceiptBytes?.ToArray();
+}
+
 /// <summary>A complete side-effect-free preparation recipe for one exact plan and state identity.</summary>
 public sealed class InstallationExecutionPreparation
 {
@@ -276,12 +364,14 @@ public sealed class InstallationExecutionPreparation
     public IReadOnlyList<FilePreparationInstruction> Instructions { get; }
     public IReadOnlyList<FilePreparationInstruction> TransactionDestinations { get; }
     public ReceiptPreparationInstruction Receipt { get; }
+    public RecoverySnapshotPreparation? RecoverySnapshot { get; }
 
     internal InstallationExecutionPreparation(
         Guid transactionId,
         BoundInstallationPlan binding,
         IEnumerable<FilePreparationInstruction> instructions,
-        ReceiptPreparationInstruction receipt
+        ReceiptPreparationInstruction receipt,
+        RecoverySnapshotPreparation? recoverySnapshot
     )
     {
         FilePreparationInstruction[] all = instructions.ToArray();
@@ -293,5 +383,6 @@ public sealed class InstallationExecutionPreparation
             all.Where(instruction => instruction.IsTransactionDestination).ToArray()
         );
         this.Receipt = receipt;
+        this.RecoverySnapshot = recoverySnapshot;
     }
 }

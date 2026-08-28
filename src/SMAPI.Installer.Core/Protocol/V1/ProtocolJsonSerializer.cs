@@ -192,7 +192,19 @@ public static class ProtocolJsonSerializer
             return;
         ProtocolJsonSerializer.AssertExactObject(
             element,
-            ["repository", "tag", "embeddedVersion", "packageAssetName", "sourceCommit", "sourceTree", "packageSha256"],
+            [
+                "repository",
+                "tag",
+                "embeddedVersion",
+                "packageAssetName",
+                "sourceCommit",
+                "sourceTree",
+                "packageSha256",
+                "packageSizeBytes",
+                "buildWorkflow",
+                "buildConfiguration",
+                "runtimeIdentifier"
+            ],
             description
         );
     }
@@ -357,6 +369,11 @@ public static class ProtocolJsonSerializer
         ProtocolJsonSerializer.RequireLowerHex(release.SourceCommit, 40, "release.sourceCommit");
         ProtocolJsonSerializer.RequireLowerHex(release.SourceTree, 40, "release.sourceTree");
         ProtocolJsonSerializer.RequireLowerHex(release.PackageSha256, 64, "release.packageSha256");
+        if (release.PackageSizeBytes <= 0)
+            throw new ProtocolException("The protocol release package size must be positive.");
+        ProtocolJsonSerializer.RequireBoundedText(release.BuildWorkflow, "release.buildWorkflow");
+        ProtocolJsonSerializer.RequireBoundedText(release.BuildConfiguration, "release.buildConfiguration");
+        ProtocolJsonSerializer.RequireBoundedText(release.RuntimeIdentifier, "release.runtimeIdentifier");
 
         if (
             !Uri.TryCreate(release.Repository, UriKind.Absolute, out Uri? repository)
@@ -388,7 +405,11 @@ public static class ProtocolJsonSerializer
                 release.PackageAssetName,
                 release.SourceCommit,
                 release.SourceTree,
-                Sha256Digest.Parse(release.PackageSha256)
+                Sha256Digest.Parse(release.PackageSha256),
+                release.PackageSizeBytes,
+                release.BuildWorkflow,
+                release.BuildConfiguration,
+                release.RuntimeIdentifier
             );
         }
         catch (ArgumentException ex)

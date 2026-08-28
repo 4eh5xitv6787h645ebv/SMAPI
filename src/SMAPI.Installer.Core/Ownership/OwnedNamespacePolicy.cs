@@ -15,6 +15,9 @@ public enum OwnedEntryKind
     /// <summary>The installed Linux launcher at <c>StardewValley</c>.</summary>
     Launcher,
 
+    /// <summary>The original Linux launcher at <c>StardewValley-original</c>, usable only by recovery state.</summary>
+    RecoveryLauncherBackup,
+
     /// <summary>A generated SMAPI file derived from a game-owned source.</summary>
     GeneratedFile
 }
@@ -70,6 +73,7 @@ public static class OwnedNamespacePolicy
             OwnedEntryKind.RuntimeFile => OwnedNamespacePolicy.RuntimeFiles.Contains(value),
             OwnedEntryKind.GeneratedFile => OwnedNamespacePolicy.GeneratedFiles.Contains(value),
             OwnedEntryKind.Launcher => value == "StardewValley",
+            OwnedEntryKind.RecoveryLauncherBackup => false,
             OwnedEntryKind.InternalFile => value.StartsWith("smapi-internal/", StringComparison.Ordinal)
                 && value != "smapi-internal/config.user.json",
             OwnedEntryKind.BundledModFile => value.StartsWith("Mods/ConsoleCommands/", StringComparison.Ordinal)
@@ -79,5 +83,19 @@ public static class OwnedNamespacePolicy
 
         if (!allowed)
             throw new ArgumentException($"Path '{value}' isn't in the compiled installer-owned namespace for {kind}.", nameof(path));
+    }
+
+    /// <summary>Validate a path for a recovery snapshot, including the one recovery-only launcher backup rule.</summary>
+    public static void AssertRecoveryAllowed(NormalizedRelativePath path, OwnedEntryKind kind)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        if (kind == OwnedEntryKind.RecoveryLauncherBackup)
+        {
+            if (path.Value != "StardewValley-original")
+                throw new ArgumentException($"Path '{path}' isn't the recovery-only original-launcher path.", nameof(path));
+            return;
+        }
+
+        AssertAllowed(path, kind);
     }
 }

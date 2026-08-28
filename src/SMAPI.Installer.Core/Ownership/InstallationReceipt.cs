@@ -20,7 +20,7 @@ public sealed class InstallationReceiptEntry
     public OwnedEntryKind Kind { get; }
 
     /// <summary>Construct an immutable receipt entry.</summary>
-    public InstallationReceiptEntry(NormalizedRelativePath path, Sha256Digest installedSha256, int unixMode, OwnedEntryKind kind)
+    internal InstallationReceiptEntry(NormalizedRelativePath path, Sha256Digest installedSha256, int unixMode, OwnedEntryKind kind)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(installedSha256);
@@ -45,7 +45,7 @@ public sealed record LauncherReceipt
     public Sha256Digest OriginalLauncherSha256 { get; }
 
     /// <summary>Construct an immutable launcher receipt.</summary>
-    public LauncherReceipt(Sha256Digest installedLauncherSha256, Sha256Digest originalLauncherSha256)
+    internal LauncherReceipt(Sha256Digest installedLauncherSha256, Sha256Digest originalLauncherSha256)
     {
         ArgumentNullException.ThrowIfNull(installedLauncherSha256);
         ArgumentNullException.ThrowIfNull(originalLauncherSha256);
@@ -58,7 +58,7 @@ public sealed record LauncherReceipt
 public sealed class InstallationReceipt
 {
     /// <summary>The only currently supported receipt schema.</summary>
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     /// <summary>The receipt schema.</summary>
     public int SchemaVersion => InstallationReceipt.CurrentSchemaVersion;
@@ -79,7 +79,7 @@ public sealed class InstallationReceipt
     public LauncherReceipt Launcher { get; }
 
     /// <summary>Construct and validate an immutable installation receipt.</summary>
-    public InstallationReceipt(
+    internal InstallationReceipt(
         InstallationReleaseIdentity release,
         Sha256Digest manifestSha256,
         string transactionId,

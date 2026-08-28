@@ -7,7 +7,8 @@ namespace StardewModdingAPI.Installer.Core.Ownership.Persistence;
 /// <summary>Strict canonical codecs and trust-boundary validation for persisted ownership state.</summary>
 public static class CanonicalOwnershipDocuments
 {
-    private const int RollbackSchemaVersion = 1;
+    /// <summary>The rollback schema which first binds content length, mode, and file type.</summary>
+    public const int RollbackSchemaVersion = 2;
 
     public static byte[] SerializeManifest(PackageManifest manifest)
     {
@@ -86,21 +87,15 @@ public static class CanonicalOwnershipDocuments
             {
                 writer.WriteStartObject();
                 writer.WriteString("path", entry.Path.Value);
-                writer.WriteString("owned_kind", CanonicalOwnershipJson.GetKindName(entry.OwnedKind));
+                writer.WriteString("owned_kind", GetRollbackOwnedKindName(entry.OwnedKind));
                 writer.WriteString("kind", entry.Kind switch
                 {
                     RollbackEntryKind.Restore => "restore",
                     RollbackEntryKind.Remove => "remove",
                     _ => throw new ArgumentOutOfRangeException(nameof(entry.Kind))
                 });
-                if (entry.ExpectedCurrentSha256 is null)
-                    writer.WriteNull("expected_current_sha256");
-                else
-                    writer.WriteString("expected_current_sha256", entry.ExpectedCurrentSha256.Value);
-                if (entry.BackupSha256 is null)
-                    writer.WriteNull("backup_sha256");
-                else
-                    writer.WriteString("backup_sha256", entry.BackupSha256.Value);
+                WriteRecoveryFileIdentity(writer, "expected_current", entry.ExpectedCurrent);
+                WriteRecoveryFileIdentity(writer, "backup", entry.Backup);
                 writer.WriteEndObject();
             }
             writer.WriteEndArray();
@@ -127,7 +122,7 @@ public static class CanonicalOwnershipDocuments
                 "previous_receipt_sha256",
                 "entries"
             );
-            AssertSchema(root, RollbackSchemaVersion);
+            AssertRollbackSchema(root);
             Sha256Digest? currentReceiptSha256 = ParseNullableDigest(
                 root.GetProperty("expected_current_receipt_sha256"),
                 "expected_current_receipt_sha256"
@@ -228,7 +223,11 @@ public static class CanonicalOwnershipDocuments
             "package_asset_name",
             "source_commit",
             "source_tree",
-            "package_sha256"
+            "package_sha256",
+            "package_size_bytes",
+            "build_workflow",
+            "build_configuration",
+            "runtime_identifier"
         );
         return new InstallationReleaseIdentity(
             GetString(element.GetProperty("repository"), "release.repository"),
@@ -237,7 +236,11 @@ public static class CanonicalOwnershipDocuments
             GetString(element.GetProperty("package_asset_name"), "release.package_asset_name"),
             GetString(element.GetProperty("source_commit"), "release.source_commit"),
             GetString(element.GetProperty("source_tree"), "release.source_tree"),
-            ParseDigest(element.GetProperty("package_sha256"), "release.package_sha256")
+            ParseDigest(element.GetProperty("package_sha256"), "release.package_sha256"),
+            GetInt64(element.GetProperty("package_size_bytes"), "release.package_size_bytes"),
+            GetString(element.GetProperty("build_workflow"), "release.build_workflow"),
+            GetString(element.GetProperty("build_configuration"), "release.build_configuration"),
+            GetString(element.GetProperty("runtime_identifier"), "release.runtime_identifier")
         );
     }
 
@@ -272,8 +275,8 @@ public static class CanonicalOwnershipDocuments
             "path",
             "owned_kind",
             "kind",
-            "expected_current_sha256",
-            "backup_sha256"
+            "expected_current",
+            "backup"
         );
         string kind = GetString(element.GetProperty("kind"), "entry.kind");
         RollbackEntryKind rollbackKind = kind switch
@@ -284,10 +287,49 @@ public static class CanonicalOwnershipDocuments
         };
         return new RollbackSnapshotEntry(
             ParsePath(element.GetProperty("path"), "entry.path"),
-            ParseOwnedKind(element.GetProperty("owned_kind"), "entry.owned_kind"),
+            ParseRollbackOwnedKind(element.GetProperty("owned_kind"), "entry.owned_kind"),
             rollbackKind,
-            ParseNullableDigest(element.GetProperty("expected_current_sha256"), "entry.expected_current_sha256"),
-            ParseNullableDigest(element.GetProperty("backup_sha256"), "entry.backup_sha256")
+            ParseRecoveryFileIdentity(element.GetProperty("expected_current"), "entry.expected_current"),
+            ParseRecoveryFileIdentity(element.GetProperty("backup"), "entry.backup")
+        );
+    }
+
+    private static void WriteRecoveryFileIdentity(Utf8JsonWriter writer, string name, RecoveryFileIdentity? identity)
+    {
+        if (identity is null)
+        {
+            writer.WriteNull(name);
+            return;
+        }
+
+        writer.WriteStartObject(name);
+        writer.WriteString("sha256", identity.Sha256.Value);
+        writer.WriteNumber("size_bytes", identity.SizeBytes);
+        writer.WriteNumber("unix_mode", identity.UnixMode);
+        writer.WriteString("file_type", identity.FileType switch
+        {
+            RecoveryFileType.RegularFile => "regular_file",
+            _ => throw new ArgumentOutOfRangeException(nameof(identity))
+        });
+        writer.WriteEndObject();
+    }
+
+    private static RecoveryFileIdentity? ParseRecoveryFileIdentity(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Null)
+            return null;
+
+        AssertExactObject(element, name, "sha256", "size_bytes", "unix_mode", "file_type");
+        string fileType = GetString(element.GetProperty("file_type"), $"{name}.file_type");
+        return new RecoveryFileIdentity(
+            ParseDigest(element.GetProperty("sha256"), $"{name}.sha256"),
+            GetInt64(element.GetProperty("size_bytes"), $"{name}.size_bytes"),
+            GetInt32(element.GetProperty("unix_mode"), $"{name}.unix_mode"),
+            fileType switch
+            {
+                "regular_file" => RecoveryFileType.RegularFile,
+                _ => throw new OwnershipDocumentException($"Unknown recovery file type '{fileType}'.")
+            }
         );
     }
 
@@ -314,6 +356,19 @@ public static class CanonicalOwnershipDocuments
     {
         int actual = GetInt32(root.GetProperty("schema_version"), "schema_version");
         if (actual != expected)
+            throw new OwnershipDocumentException($"Unsupported ownership document schema version {actual}.");
+    }
+
+    private static void AssertRollbackSchema(JsonElement root)
+    {
+        int actual = GetInt32(root.GetProperty("schema_version"), "schema_version");
+        if (actual == 1)
+        {
+            throw new OwnershipDocumentException(
+                "Rollback snapshot schema version 1 is retired and can't be migrated safely because it didn't record file size, Unix mode, or file type; create a new snapshot."
+            );
+        }
+        if (actual != RollbackSchemaVersion)
             throw new OwnershipDocumentException($"Unsupported ownership document schema version {actual}.");
     }
 
@@ -387,5 +442,20 @@ public static class CanonicalOwnershipDocuments
             "generated_file" => OwnedEntryKind.GeneratedFile,
             _ => throw new OwnershipDocumentException($"Unknown owned entry kind '{value}'.")
         };
+    }
+
+    private static OwnedEntryKind ParseRollbackOwnedKind(JsonElement element, string name)
+    {
+        string value = GetString(element, name);
+        return value == "recovery_launcher_backup"
+            ? OwnedEntryKind.RecoveryLauncherBackup
+            : ParseOwnedKind(element, name);
+    }
+
+    private static string GetRollbackOwnedKindName(OwnedEntryKind kind)
+    {
+        return kind == OwnedEntryKind.RecoveryLauncherBackup
+            ? "recovery_launcher_backup"
+            : CanonicalOwnershipJson.GetKindName(kind);
     }
 }

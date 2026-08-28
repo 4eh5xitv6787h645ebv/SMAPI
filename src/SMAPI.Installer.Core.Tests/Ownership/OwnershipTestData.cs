@@ -18,7 +18,11 @@ internal static class OwnershipTestData
             $"SMAPI-{version}-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}-linux-x64-installer.zip",
             new string('b', 40),
             new string('c', 40),
-            Digest(packageHash)
+            Digest(packageHash),
+            123456,
+            $"4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v{version}-alpha.{alpha}",
+            "Release",
+            "linux-x64"
         );
     }
 

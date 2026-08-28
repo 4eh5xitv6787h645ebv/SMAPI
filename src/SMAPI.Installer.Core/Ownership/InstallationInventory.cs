@@ -37,7 +37,7 @@ public sealed record CurrentFile
     public int UnixMode { get; }
 
     /// <summary>Construct an immutable current-file observation.</summary>
-    public CurrentFile(NormalizedRelativePath path, Sha256Digest sha256, int unixMode)
+    internal CurrentFile(NormalizedRelativePath path, Sha256Digest sha256, int unixMode)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(sha256);
@@ -100,7 +100,7 @@ public sealed class InstallationInventory
     /// <param name="currentFiles">Scoped current-file observations. This must not be an unbounded game-folder scan.</param>
     /// <param name="preservedPaths">Explicitly user-owned paths in the scoped inventory.</param>
     /// <param name="legacyPaths">Recognized legacy SMAPI candidates which lack a receipt.</param>
-    public static InstallationInventory Create(
+    internal static InstallationInventory Create(
         PackageManifest? manifest,
         InstallationReceipt? receipt,
         IEnumerable<CurrentFile> currentFiles,

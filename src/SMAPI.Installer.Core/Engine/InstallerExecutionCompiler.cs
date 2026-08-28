@@ -1,3 +1,6 @@
+using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Ownership.Persistence;
 using StardewModdingAPI.Installer.Core.Planning;
@@ -28,12 +31,15 @@ public sealed class InstallerExecutionCompiler
         if (!expected.CanExecute || expected.GetCanonicalDigest() != plan.GetCanonicalDigest())
             throw Error(ExecutionCompilationError.PlanDoesNotMatchRequest, "The plan isn't the canonical plan for the supplied request.");
 
+        ValidateRecoveryObservations(plan, request);
+
         return new BoundInstallationPlan(
             plan.Action,
             plan.GetCanonicalDigest(),
             request.TargetManifest?.GetCanonicalDigest(),
             request.InstalledReceipt?.GetCanonicalDigest(),
-            GetRollbackSnapshotDigest(request.RollbackSnapshot)
+            GetRollbackSnapshotDigest(request.RollbackSnapshot),
+            GetRecoveryObservationsDigest(request.RecoveryObservations)
         );
     }
 
@@ -75,40 +81,53 @@ public sealed class InstallerExecutionCompiler
             ExecutionCompilationError.StaleRollbackSnapshot,
             "The rollback snapshot changed after planning."
         );
+        AssertSameDigest(
+            binding.RecoveryObservationsSha256,
+            GetRecoveryObservationsDigest(currentRequest.RecoveryObservations),
+            ExecutionCompilationError.StalePlan,
+            "The recovery observations changed after planning."
+        );
 
         InstallationPlan expected = this.Planner.Plan(currentRequest);
         if (!expected.CanExecute || expected.GetCanonicalDigest() != binding.PlanSha256)
             throw Error(ExecutionCompilationError.StalePlan, "The current state no longer produces the bound executable plan.");
 
+        ValidateRecoveryObservations(plan, currentRequest);
+        Dictionary<string, RecoveryFileObservation> observations = currentRequest.RecoveryObservations
+            .ToDictionary(observation => observation.Path.Value, StringComparer.Ordinal);
         FilePreparationInstruction[] instructions = plan.Operations
-            .Select(operation => this.CompileOperation(operation, currentRequest, binding))
+            .Select(operation => this.CompileOperation(operation, currentRequest, binding, observations))
             .ToArray();
         AssertUniqueSafeDestinations(instructions);
         ReceiptPreparationInstruction receipt = CreateReceiptInstruction(binding, currentRequest, plan, transactionId);
-        return new InstallationExecutionPreparation(transactionId, binding, instructions, receipt);
+        RecoverySnapshotPreparation? recovery = RequiresNewRecoverySnapshot(plan.Action)
+            ? CreateRecoverySnapshotPreparation(currentRequest, instructions, receipt, observations)
+            : null;
+        return new InstallationExecutionPreparation(transactionId, binding, instructions, receipt, recovery);
     }
 
     private FilePreparationInstruction CompileOperation(
         PlannedOperation operation,
         InstallationPlanningRequest request,
-        BoundInstallationPlan binding
+        BoundInstallationPlan binding,
+        IReadOnlyDictionary<string, RecoveryFileObservation> observations
     )
     {
         switch (operation.Kind)
         {
             case PlanOperationKind.Create:
             case PlanOperationKind.Replace:
-                return this.CompileWrite(operation, request);
+                return this.CompileWrite(operation, request, observations);
 
             case PlanOperationKind.Restore:
-                return this.CompileRestore(operation, request, binding);
+                return this.CompileRestore(operation, request, binding, observations);
 
             case PlanOperationKind.Remove:
                 ValidateRemove(operation, request);
                 return new FilePreparationInstruction(operation, PreparationInstructionKind.RemoveTransactionDestination, null, null);
 
             case PlanOperationKind.Backup:
-                return CompileBackup(operation);
+                return CompileBackup(operation, observations);
 
             case PlanOperationKind.Retain:
             case PlanOperationKind.Preserve:
@@ -121,7 +140,11 @@ public sealed class InstallerExecutionCompiler
         }
     }
 
-    private FilePreparationInstruction CompileWrite(PlannedOperation operation, InstallationPlanningRequest request)
+    private FilePreparationInstruction CompileWrite(
+        PlannedOperation operation,
+        InstallationPlanningRequest request,
+        IReadOnlyDictionary<string, RecoveryFileObservation> observations
+    )
     {
         if (operation.ResultSha256 is null)
             throw Error(ExecutionCompilationError.InvalidOperationMapping, "A write operation has no result digest.");
@@ -132,15 +155,16 @@ public sealed class InstallerExecutionCompiler
             && operation.Path.Equals(LauncherBackupPath)
         )
         {
-            Sha256Digest launcher = request.Launcher.CurrentLauncherSha256
-                ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "The fresh-install launcher backup has no current launcher source.");
-            if (operation.ExpectedCurrentSha256 is not null || operation.ResultSha256 != launcher)
+            RecoveryFileIdentity launcher = GetRequiredPresentObservation(observations, LauncherPath);
+            if (operation.ExpectedCurrentSha256 is not null || operation.ResultSha256 != launcher.Sha256)
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, "The fresh-install launcher backup doesn't exactly copy the observed launcher.");
             return new FilePreparationInstruction(
                 operation,
                 PreparationInstructionKind.WriteTransactionDestination,
                 new CurrentGameLauncherSource(CurrentGameLauncherRole.CurrentLauncher, LauncherPath, launcher),
-                null
+                launcher.UnixMode,
+                launcher.SizeBytes,
+                launcher.FileType
             );
         }
 
@@ -152,14 +176,17 @@ public sealed class InstallerExecutionCompiler
             operation,
             PreparationInstructionKind.WriteTransactionDestination,
             new VerifiedPackageFileSource(target),
-            target.UnixMode
+            target.UnixMode,
+            target.SizeBytes,
+            RecoveryFileType.RegularFile
         );
     }
 
     private FilePreparationInstruction CompileRestore(
         PlannedOperation operation,
         InstallationPlanningRequest request,
-        BoundInstallationPlan binding
+        BoundInstallationPlan binding,
+        IReadOnlyDictionary<string, RecoveryFileObservation> observations
     )
     {
         if (operation.ResultSha256 is null)
@@ -167,15 +194,16 @@ public sealed class InstallerExecutionCompiler
 
         if (request.Action == InstallationAction.Uninstall && operation.Path.Equals(LauncherPath))
         {
-            Sha256Digest original = request.Launcher.BackupLauncherSha256
-                ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "The uninstall restore has no verified original-launcher backup.");
-            if (operation.ResultSha256 != original)
+            RecoveryFileIdentity original = GetRequiredPresentObservation(observations, LauncherBackupPath);
+            if (operation.ResultSha256 != original.Sha256 || request.Launcher.BackupLauncherSha256 != original.Sha256)
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, "The uninstall restore doesn't match the verified original-launcher backup.");
             return new FilePreparationInstruction(
                 operation,
                 PreparationInstructionKind.WriteTransactionDestination,
                 new CurrentGameLauncherSource(CurrentGameLauncherRole.OriginalLauncherBackup, LauncherBackupPath, original),
-                null
+                original.UnixMode,
+                original.SizeBytes,
+                original.FileType
             );
         }
 
@@ -192,33 +220,41 @@ public sealed class InstallerExecutionCompiler
                     binding.RollbackSnapshotSha256,
                     RecoverySnapshotContent.GameFile,
                     operation.Path,
-                    operation.ResultSha256
+                    snapshotEntry.Backup
                 ),
-                null
+                snapshotEntry.Backup!.UnixMode,
+                snapshotEntry.Backup.SizeBytes,
+                snapshotEntry.Backup.FileType
             );
         }
 
         throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Restore destination '{operation.Path}' has no core-owned restore rule.");
     }
 
-    private static FilePreparationInstruction CompileBackup(PlannedOperation operation)
+    private static FilePreparationInstruction CompileBackup(
+        PlannedOperation operation,
+        IReadOnlyDictionary<string, RecoveryFileObservation> observations
+    )
     {
         if (operation.ExpectedCurrentSha256 is null || operation.ExpectedCurrentSha256 != operation.ResultSha256)
             throw Error(ExecutionCompilationError.InvalidOperationMapping, "A backup operation doesn't copy its exact observed digest.");
 
+        RecoveryFileIdentity identity = GetRequiredPresentObservation(observations, operation.Path);
+        if (identity.Sha256 != operation.ExpectedCurrentSha256)
+            throw Error(ExecutionCompilationError.InvalidOperationMapping, "A backup observation doesn't match its planned digest.");
         PreparationSource source = operation.Path.Value switch
         {
             "StardewValley" => new CurrentGameLauncherSource(
                 CurrentGameLauncherRole.CurrentLauncher,
                 LauncherPath,
-                operation.ExpectedCurrentSha256
+                identity
             ),
             "StardewValley-original" => new CurrentGameLauncherSource(
                 CurrentGameLauncherRole.OriginalLauncherBackup,
                 LauncherBackupPath,
-                operation.ExpectedCurrentSha256
+                identity
             ),
-            _ => new CurrentGameFileSource(operation.Path, operation.ExpectedCurrentSha256)
+            _ => new CurrentGameFileSource(operation.Path, identity)
         };
         return new FilePreparationInstruction(operation, PreparationInstructionKind.CaptureRecoveryFile, source, null);
     }
@@ -262,31 +298,31 @@ public sealed class InstallerExecutionCompiler
             case InstallationAction.Install:
             case InstallationAction.Update:
             case InstallationAction.Repair:
-            {
-                PackageManifest manifest = request.TargetManifest
-                    ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt-writing action has no target manifest.");
-                Sha256Digest originalLauncher = request.Action == InstallationAction.Install
-                    ? plan.Operations.Single(operation => operation.Kind == PlanOperationKind.Create && operation.Path.Equals(LauncherBackupPath)).ResultSha256!
-                    : request.InstalledReceipt?.Launcher.OriginalLauncherSha256
-                        ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt update has no original-launcher identity.");
-                PackageManifestEntry launcher = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
-                InstallationReceipt generated = new(
-                    manifest.Release,
-                    manifest.GetCanonicalDigest(),
-                    transactionId.ToString("N"),
-                    manifest.Entries.Select(entry => new InstallationReceiptEntry(entry.Path, entry.Sha256, entry.UnixMode, entry.Kind)),
-                    new LauncherReceipt(launcher.Sha256, originalLauncher)
-                );
-                GeneratedCanonicalReceiptSource source = new(
-                    generated,
-                    CanonicalOwnershipDocuments.SerializeReceipt(generated)
-                );
-                return new ReceiptPreparationInstruction(
-                    ReceiptPreparationKind.WriteAtomically,
-                    binding.InstalledReceiptSha256,
-                    source
-                );
-            }
+                {
+                    PackageManifest manifest = request.TargetManifest
+                        ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt-writing action has no target manifest.");
+                    Sha256Digest originalLauncher = request.Action == InstallationAction.Install
+                        ? plan.Operations.Single(operation => operation.Kind == PlanOperationKind.Create && operation.Path.Equals(LauncherBackupPath)).ResultSha256!
+                        : request.InstalledReceipt?.Launcher.OriginalLauncherSha256
+                            ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt update has no original-launcher identity.");
+                    PackageManifestEntry launcher = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
+                    InstallationReceipt generated = new(
+                        manifest.Release,
+                        manifest.GetCanonicalDigest(),
+                        transactionId.ToString("N"),
+                        manifest.Entries.Select(entry => new InstallationReceiptEntry(entry.Path, entry.Sha256, entry.UnixMode, entry.Kind)),
+                        new LauncherReceipt(launcher.Sha256, originalLauncher)
+                    );
+                    GeneratedCanonicalReceiptSource source = new(
+                        generated,
+                        CanonicalOwnershipDocuments.SerializeReceipt(generated)
+                    );
+                    return new ReceiptPreparationInstruction(
+                        ReceiptPreparationKind.WriteAtomically,
+                        binding.InstalledReceiptSha256,
+                        source
+                    );
+                }
 
             case InstallationAction.Uninstall:
                 if (binding.InstalledReceiptSha256 is null)
@@ -301,33 +337,34 @@ public sealed class InstallerExecutionCompiler
                 return new ReceiptPreparationInstruction(ReceiptPreparationKind.None, null, null);
 
             case InstallationAction.Rollback:
-            {
-                RollbackSnapshot snapshot = request.RollbackSnapshot
-                    ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A rollback has no recovery snapshot.");
-                Sha256Digest snapshotSha256 = binding.RollbackSnapshotSha256
-                    ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A rollback has no exact recovery-snapshot identity.");
-                if (snapshot.PreviousReceiptSha256 is null)
                 {
-                    if (binding.InstalledReceiptSha256 is null)
-                        throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt-removing rollback has no current receipt identity.");
+                    RollbackSnapshot snapshot = request.RollbackSnapshot
+                        ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A rollback has no recovery snapshot.");
+                    Sha256Digest snapshotSha256 = binding.RollbackSnapshotSha256
+                        ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A rollback has no exact recovery-snapshot identity.");
+                    if (snapshot.PreviousReceiptSha256 is null)
+                    {
+                        if (binding.InstalledReceiptSha256 is null)
+                            throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt-removing rollback has no current receipt identity.");
+                        return new ReceiptPreparationInstruction(
+                            ReceiptPreparationKind.RemoveAtomically,
+                            binding.InstalledReceiptSha256,
+                            null
+                        );
+                    }
+
                     return new ReceiptPreparationInstruction(
-                        ReceiptPreparationKind.RemoveAtomically,
+                        ReceiptPreparationKind.WriteAtomically,
                         binding.InstalledReceiptSha256,
-                        null
+                        new RecoverySnapshotSource(
+                            snapshotSha256,
+                            RecoverySnapshotContent.InstalledReceipt,
+                            null,
+                            null,
+                            snapshot.PreviousReceiptSha256
+                        )
                     );
                 }
-
-                return new ReceiptPreparationInstruction(
-                    ReceiptPreparationKind.WriteAtomically,
-                    binding.InstalledReceiptSha256,
-                    new RecoverySnapshotSource(
-                        snapshotSha256,
-                        RecoverySnapshotContent.InstalledReceipt,
-                        null,
-                        snapshot.PreviousReceiptSha256
-                    )
-                );
-            }
 
             default:
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, "The action has no receipt-state rule.");
@@ -345,6 +382,171 @@ public sealed class InstallerExecutionCompiler
             if (!exact.Add(instruction.Path.Value) || !insensitive.Add(instruction.Path.Value))
                 throw Error(ExecutionCompilationError.DuplicateDestination, $"Transaction destination '{instruction.Path}' isn't unique.");
         }
+    }
+
+    private static RecoverySnapshotPreparation CreateRecoverySnapshotPreparation(
+        InstallationPlanningRequest request,
+        IReadOnlyList<FilePreparationInstruction> instructions,
+        ReceiptPreparationInstruction receipt,
+        IReadOnlyDictionary<string, RecoveryFileObservation> observations
+    )
+    {
+        Sha256Digest? expectedReceipt = receipt.Kind switch
+        {
+            ReceiptPreparationKind.WriteAtomically => receipt.Source switch
+            {
+                GeneratedCanonicalReceiptSource generated => generated.Sha256,
+                _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A new recovery snapshot requires a generated receipt source.")
+            },
+            ReceiptPreparationKind.RemoveAtomically => null,
+            _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A mutating action must have an atomic receipt transition.")
+        };
+        Sha256Digest? previousReceipt = request.InstalledReceipt?.GetCanonicalDigest();
+
+        List<RollbackSnapshotEntry> entries = new();
+        foreach (FilePreparationInstruction instruction in instructions.Where(item => item.IsTransactionDestination))
+        {
+            RecoveryFileIdentity? prior = observations[instruction.Path.Value].Identity;
+            RecoveryFileIdentity? result = instruction.Kind switch
+            {
+                PreparationInstructionKind.WriteTransactionDestination => GetInstructionResultIdentity(instruction),
+                PreparationInstructionKind.RemoveTransactionDestination => null,
+                _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A transaction destination has no recovery result rule.")
+            };
+            if (prior == result)
+                throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Changed path '{instruction.Path}' doesn't describe a state transition.");
+
+            OwnedEntryKind ownedKind = GetRecoveryOwnedKind(instruction.Path, request);
+            entries.Add(prior is null
+                ? new RollbackSnapshotEntry(instruction.Path, ownedKind, RollbackEntryKind.Remove, result, null)
+                : new RollbackSnapshotEntry(instruction.Path, ownedKind, RollbackEntryKind.Restore, result, prior));
+        }
+
+        RollbackSnapshot snapshot = new(expectedReceipt, previousReceipt, entries);
+        byte[] snapshotBytes = CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot);
+        HashSet<string> changed = instructions.Where(item => item.IsTransactionDestination)
+            .Select(item => item.Path.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        RecoveryPathBinding[] bindings = observations.Values
+            .Select(observation => new RecoveryPathBinding(
+                observation.Path,
+                GetRecoveryOwnedKind(observation.Path, request),
+                observation.Identity,
+                changed.Contains(observation.Path.Value) && observation.Identity is not null
+            ))
+            .ToArray();
+        byte[]? previousReceiptBytes = request.InstalledReceipt is null
+            ? null
+            : CanonicalOwnershipDocuments.SerializeReceipt(request.InstalledReceipt);
+        return new RecoverySnapshotPreparation(snapshot, snapshotBytes, bindings, previousReceiptBytes);
+    }
+
+    private static RecoveryFileIdentity GetInstructionResultIdentity(FilePreparationInstruction instruction)
+    {
+        if (
+            instruction.ExpectedResultSha256 is null
+            || instruction.ResultSizeBytes is null
+            || instruction.ResultUnixMode is null
+            || instruction.ResultFileType is null
+        )
+        {
+            throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Write destination '{instruction.Path}' lacks complete result metadata.");
+        }
+        return new RecoveryFileIdentity(
+            instruction.ExpectedResultSha256,
+            instruction.ResultSizeBytes.Value,
+            instruction.ResultUnixMode.Value,
+            instruction.ResultFileType.Value
+        );
+    }
+
+    private static OwnedEntryKind GetRecoveryOwnedKind(NormalizedRelativePath path, InstallationPlanningRequest request)
+    {
+        if (path.Equals(LauncherBackupPath))
+            return OwnedEntryKind.RecoveryLauncherBackup;
+        if (path.Equals(LauncherPath))
+            return OwnedEntryKind.Launcher;
+        return request.TargetManifest?.Entries.SingleOrDefault(entry => entry.Path.Equals(path))?.Kind
+            ?? request.InstalledReceipt?.Entries.SingleOrDefault(entry => entry.Path.Equals(path))?.Kind
+            ?? request.RollbackSnapshot?.Entries.SingleOrDefault(entry => entry.Path.Equals(path))?.OwnedKind
+            ?? throw Error(ExecutionCompilationError.UnsafeDestination, $"Recovery path '{path}' has no exact core ownership rule.");
+    }
+
+    private static void ValidateRecoveryObservations(InstallationPlan plan, InstallationPlanningRequest request)
+    {
+        HashSet<string> required = plan.Action switch
+        {
+            InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair or InstallationAction.Uninstall => plan.Operations
+                .Where(operation => operation.Kind is PlanOperationKind.Create or PlanOperationKind.Replace or PlanOperationKind.Remove or PlanOperationKind.Restore)
+                .Select(operation => operation.Path.Value)
+                .Append(LauncherPath.Value)
+                .Append(LauncherBackupPath.Value)
+                .ToHashSet(StringComparer.Ordinal),
+            InstallationAction.Backup => plan.Operations.Select(operation => operation.Path.Value).ToHashSet(StringComparer.Ordinal),
+            InstallationAction.Rollback => request.RollbackSnapshot?.Entries.Select(entry => entry.Path.Value).ToHashSet(StringComparer.Ordinal)
+                ?? new HashSet<string>(StringComparer.Ordinal),
+            _ => throw new ArgumentOutOfRangeException(nameof(plan))
+        };
+        HashSet<string> actual = request.RecoveryObservations.Select(observation => observation.Path.Value).ToHashSet(StringComparer.Ordinal);
+        if (!actual.SetEquals(required))
+        {
+            throw Error(
+                ExecutionCompilationError.InvalidOperationMapping,
+                "Recovery observations must contain exactly both launcher paths and every changed file (or the exact backup/rollback inputs for those actions)."
+            );
+        }
+
+        foreach (RecoveryFileObservation observation in request.RecoveryObservations)
+            GetRecoveryOwnedKind(observation.Path, request);
+    }
+
+    private static RecoveryFileIdentity GetRequiredPresentObservation(
+        IReadOnlyDictionary<string, RecoveryFileObservation> observations,
+        NormalizedRelativePath path
+    )
+    {
+        if (!observations.TryGetValue(path.Value, out RecoveryFileObservation? observation) || observation.Identity is null)
+            throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Required recovery source '{path}' isn't a present regular file.");
+        return observation.Identity;
+    }
+
+    private static bool RequiresNewRecoverySnapshot(InstallationAction action)
+    {
+        return action is InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair or InstallationAction.Uninstall;
+    }
+
+    private static Sha256Digest? GetRecoveryObservationsDigest(IReadOnlyList<RecoveryFileObservation> observations)
+    {
+        if (observations.Count == 0)
+            return null;
+
+        using MemoryStream stream = new();
+        using (Utf8JsonWriter writer = new(
+            stream,
+            new JsonWriterOptions { Encoder = JavaScriptEncoder.Default, Indented = false, SkipValidation = false }
+        ))
+        {
+            writer.WriteStartArray();
+            foreach (RecoveryFileObservation observation in observations)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("path", observation.Path.Value);
+                if (observation.Identity is null)
+                    writer.WriteNull("identity");
+                else
+                {
+                    writer.WriteStartObject("identity");
+                    writer.WriteString("sha256", observation.Identity.Sha256.Value);
+                    writer.WriteNumber("size_bytes", observation.Identity.SizeBytes);
+                    writer.WriteNumber("unix_mode", observation.Identity.UnixMode);
+                    writer.WriteString("file_type", "regular_file");
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+        return Sha256Digest.Hash(stream.ToArray());
     }
 
     private static Sha256Digest? GetRollbackSnapshotDigest(RollbackSnapshot? snapshot)

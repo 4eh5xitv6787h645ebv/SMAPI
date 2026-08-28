@@ -42,11 +42,12 @@ public class CanonicalOwnershipDocumentsTests
     public void Manifest_RejectsAnyNonExactRootPropertySet(string mutation)
     {
         string canonical = CreateManifest().ToCanonicalJson();
+        string schemaProperty = $"\"schema_version\":{PackageManifest.CurrentSchemaVersion},";
         string mutated = mutation switch
         {
             "extra" => canonical.Insert(1, "\"unexpected\":true,"),
-            "missing" => canonical.Replace("\"schema_version\":1,", "", StringComparison.Ordinal),
-            "duplicate" => canonical.Insert(1, "\"schema_version\":1,"),
+            "missing" => canonical.Replace(schemaProperty, "", StringComparison.Ordinal),
+            "duplicate" => canonical.Insert(1, schemaProperty),
             _ => throw new InvalidOperationException()
         };
 
@@ -77,12 +78,13 @@ public class CanonicalOwnershipDocumentsTests
     public void Manifest_RejectsNoncanonicalWhitespacePropertyOrderAndStringEncoding()
     {
         string canonical = CreateManifest().ToCanonicalJson();
+        string schemaProperty = $"\"schema_version\":{PackageManifest.CurrentSchemaVersion}";
         string whitespace = canonical + "\n";
         string reordered = canonical.Replace(
-            "\"schema_version\":1,\"release\":",
+            $"{schemaProperty},\"release\":",
             "\"release\":",
             StringComparison.Ordinal
-        ).Replace("},\"entries\":", "},\"schema_version\":1,\"entries\":", StringComparison.Ordinal);
+        ).Replace("},\"entries\":", $"}},{schemaProperty},\"entries\":", StringComparison.Ordinal);
         string alternateEncoding = canonical.Replace("StardewValley", "Stardew\\u0056alley", StringComparison.Ordinal);
 
         Action whitespaceParse = () => CanonicalOwnershipDocuments.ParseManifest(Encoding.UTF8.GetBytes(whitespace));
@@ -180,14 +182,18 @@ public class CanonicalOwnershipDocumentsTests
     }
 
     [Test]
-    public void RollbackSnapshot_RejectsWrongReceiptAndInvalidDigestCombination()
+    public void RollbackSnapshot_RejectsWrongReceiptAndInvalidIdentityCombination()
     {
         PackageManifest manifest = CreateManifest();
         InstallationReceipt receipt = OwnershipTestData.Receipt(manifest);
         RollbackSnapshot snapshot = CreateRollback(receipt);
         InstallationReceipt otherReceipt = CopyReceipt(receipt, transactionId: new string('e', 32));
         string invalidCombination = Encoding.UTF8.GetString(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot))
-            .Replace("\"backup_sha256\":null", $"\"backup_sha256\":\"{OwnershipTestData.Digest('7').Value}\"", StringComparison.Ordinal);
+            .Replace(
+                "\"backup\":null",
+                $"\"backup\":{{\"sha256\":\"{OwnershipTestData.Digest('7').Value}\",\"size_bytes\":10,\"unix_mode\":420,\"file_type\":\"regular_file\"}}",
+                StringComparison.Ordinal
+            );
 
         Action wrongReceipt = () => CanonicalOwnershipDocuments.ParseRollbackSnapshot(
             CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot),
@@ -203,6 +209,63 @@ public class CanonicalOwnershipDocumentsTests
     }
 
     [Test]
+    public void RollbackSnapshot_V1IsExplicitlyRetiredBecauseMissingMetadataCannotBeMigrated()
+    {
+        InstallationReceipt receipt = OwnershipTestData.Receipt(CreateManifest());
+        string legacy = $"{{\"schema_version\":1,\"expected_current_receipt_sha256\":\"{receipt.GetCanonicalDigest().Value}\",\"previous_receipt_sha256\":null,\"entries\":[]}}";
+
+        Action parse = () => CanonicalOwnershipDocuments.ParseRollbackSnapshot(Encoding.UTF8.GetBytes(legacy), receipt);
+
+        parse.Should().Throw<OwnershipDocumentException>()
+            .WithMessage("*version 1 is retired*file size*Unix mode*file type*create a new snapshot*");
+    }
+
+    [Test]
+    public void RollbackSnapshot_SizeAndModeAreCanonicalDigestInputsAndUnknownTypeIsRejected()
+    {
+        InstallationReceipt receipt = OwnershipTestData.Receipt(CreateManifest());
+        string canonical = Encoding.UTF8.GetString(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(CreateRollback(receipt)));
+        string changedSize = canonical.Replace("\"size_bytes\":10", "\"size_bytes\":11", StringComparison.Ordinal);
+        string changedMode = canonical.Replace("\"unix_mode\":493", "\"unix_mode\":492", StringComparison.Ordinal);
+        string changedType = canonical.Replace("\"file_type\":\"regular_file\"", "\"file_type\":\"symbolic_link\"", StringComparison.Ordinal);
+
+        RollbackSnapshot sizeSnapshot = CanonicalOwnershipDocuments.ParseRollbackSnapshot(Encoding.UTF8.GetBytes(changedSize), receipt);
+        RollbackSnapshot modeSnapshot = CanonicalOwnershipDocuments.ParseRollbackSnapshot(Encoding.UTF8.GetBytes(changedMode), receipt);
+        Action parseType = () => CanonicalOwnershipDocuments.ParseRollbackSnapshot(Encoding.UTF8.GetBytes(changedType), receipt);
+
+        Sha256Digest.Hash(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(sizeSnapshot))
+            .Should().NotBe(Sha256Digest.Hash(Encoding.UTF8.GetBytes(canonical)));
+        Sha256Digest.Hash(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(modeSnapshot))
+            .Should().NotBe(Sha256Digest.Hash(Encoding.UTF8.GetBytes(canonical)));
+        parseType.Should().Throw<OwnershipDocumentException>().WithMessage("*Unknown recovery file type*");
+    }
+
+    [Test]
+    public void RollbackSnapshot_RejectsCaseAndParentChildCollisions()
+    {
+        RecoveryFileIdentity expected = Identity('2');
+        Action caseCollision = () => new RollbackSnapshot(
+            OwnershipTestData.Digest('1'),
+            null,
+            [
+                new RollbackSnapshotEntry(OwnershipTestData.Path("smapi-internal/A"), OwnedEntryKind.InternalFile, RollbackEntryKind.Remove, expected, null),
+                new RollbackSnapshotEntry(OwnershipTestData.Path("smapi-internal/a"), OwnedEntryKind.InternalFile, RollbackEntryKind.Remove, expected, null)
+            ]
+        );
+        Action parentCollision = () => new RollbackSnapshot(
+            OwnershipTestData.Digest('1'),
+            null,
+            [
+                new RollbackSnapshotEntry(OwnershipTestData.Path("smapi-internal/a"), OwnedEntryKind.InternalFile, RollbackEntryKind.Remove, expected, null),
+                new RollbackSnapshotEntry(OwnershipTestData.Path("smapi-internal/a/b"), OwnedEntryKind.InternalFile, RollbackEntryKind.Remove, expected, null)
+            ]
+        );
+
+        caseCollision.Should().Throw<ArgumentException>().WithMessage("*unique even on case-insensitive filesystems*");
+        parentCollision.Should().Throw<ArgumentException>().WithMessage("*parent*");
+    }
+
+    [Test]
     public void RollbackSnapshot_UninstallTransitionRoundTripsWithoutCurrentReceipt()
     {
         InstallationReceipt priorReceipt = OwnershipTestData.Receipt(CreateManifest());
@@ -214,8 +277,8 @@ public class CanonicalOwnershipDocumentsTests
                     OwnershipTestData.Path("StardewModdingAPI"),
                     OwnedEntryKind.RuntimeFile,
                     RollbackEntryKind.Restore,
-                    expectedCurrentSha256: null,
-                    backupSha256: OwnershipTestData.Digest('8')
+                    expectedCurrent: null,
+                    backup: Identity('8', mode: 420)
                 )
             ]
         );
@@ -230,6 +293,44 @@ public class CanonicalOwnershipDocumentsTests
         CanonicalOwnershipDocuments.SerializeRollbackSnapshot(parsed).Should().Equal(
             CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot)
         );
+    }
+
+    [Test]
+    public void RollbackSnapshot_ReceiptOnlyTransitionRoundTrips()
+    {
+        InstallationReceipt receipt = OwnershipTestData.Receipt(CreateManifest());
+        RollbackSnapshot snapshot = new(receipt.GetCanonicalDigest(), OwnershipTestData.Digest('7'), []);
+
+        RollbackSnapshot parsed = CanonicalOwnershipDocuments.ParseRollbackSnapshot(
+            CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot),
+            receipt
+        );
+
+        parsed.Entries.Should().BeEmpty();
+        parsed.PreviousReceiptSha256.Should().Be(OwnershipTestData.Digest('7'));
+    }
+
+    [Test]
+    public void RollbackSnapshot_OriginalLauncherUsesRecoveryOnlyOwnershipKind()
+    {
+        RollbackSnapshot snapshot = new(
+            null,
+            OwnershipTestData.Digest('1'),
+            [
+                new RollbackSnapshotEntry(
+                    OwnershipTestData.Path("StardewValley-original"),
+                    OwnedEntryKind.RecoveryLauncherBackup,
+                    RollbackEntryKind.Remove,
+                    Identity('f', mode: 493),
+                    null
+                )
+            ]
+        );
+        byte[] bytes = CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot);
+
+        Encoding.UTF8.GetString(bytes).Should().Contain("\"owned_kind\":\"recovery_launcher_backup\"");
+        CanonicalOwnershipDocuments.ParseRollbackSnapshot(bytes, currentReceipt: null).Entries.Single().OwnedKind
+            .Should().Be(OwnedEntryKind.RecoveryLauncherBackup);
     }
 
     private static PackageManifest CreateManifest()
@@ -251,11 +352,17 @@ public class CanonicalOwnershipDocumentsTests
             receipt.GetCanonicalDigest(),
             OwnershipTestData.Digest('7'),
             [
-                new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, runtime.InstalledSha256, OwnershipTestData.Digest('8')),
-                new RollbackSnapshotEntry(internalFile.Path, internalFile.Kind, RollbackEntryKind.Remove, internalFile.InstalledSha256, null)
+                new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, Identity(runtime.InstalledSha256, mode: runtime.UnixMode), Identity('8')),
+                new RollbackSnapshotEntry(internalFile.Path, internalFile.Kind, RollbackEntryKind.Remove, Identity(internalFile.InstalledSha256, mode: internalFile.UnixMode), null)
             ]
         );
     }
+
+    private static RecoveryFileIdentity Identity(char digest, long size = 10, int mode = 420)
+        => Identity(OwnershipTestData.Digest(digest), size, mode);
+
+    private static RecoveryFileIdentity Identity(Sha256Digest digest, long size = 10, int mode = 420)
+        => new(digest, size, mode);
 
     private static void ParseReceipt(InstallationReceipt receipt, PackageManifest manifest)
     {

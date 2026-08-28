@@ -8,6 +8,9 @@ using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
 
+/// <summary>One release artifact identity cross-verified between checksums and build metadata.</summary>
+internal sealed record VerifiedReleaseArtifactIdentity(string Name, long SizeBytes, string Sha256);
+
 /// <summary>Bounds for cross-artifact release verification.</summary>
 public sealed record PackageVerificationLimits
 {
@@ -53,6 +56,7 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
     private readonly string StagingDirectory;
     private readonly string StagingPath;
     private readonly SemaphoreSlim UseLock = new(1, 1);
+    private readonly IReadOnlyDictionary<string, VerifiedReleaseArtifactIdentity> Artifacts;
     private bool Disposed;
 
     /// <summary>The exact fork release identity.</summary>
@@ -79,6 +83,10 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         long sizeBytes,
         string sourceCommit,
         string sourceTree,
+        string buildWorkflow,
+        string buildConfiguration,
+        string runtimeIdentifier,
+        IEnumerable<VerifiedReleaseArtifactIdentity> artifacts,
         string stagingDirectory,
         string stagingPath,
         FileStream stream
@@ -89,6 +97,7 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         this.SizeBytes = sizeBytes;
         this.SourceCommit = sourceCommit;
         this.SourceTree = sourceTree;
+        this.Artifacts = artifacts.ToDictionary(artifact => artifact.Name, StringComparer.Ordinal);
         this.InstallationIdentity = new InstallationReleaseIdentity(
             ForkReleaseIdentity.RepositoryUrl,
             identity.Tag,
@@ -96,11 +105,24 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
             identity.PackageAssetName,
             sourceCommit,
             sourceTree,
-            Sha256Digest.Parse(sha256)
+            Sha256Digest.Parse(sha256),
+            sizeBytes,
+            buildWorkflow,
+            buildConfiguration,
+            runtimeIdentifier
         );
         this.StagingDirectory = stagingDirectory;
         this.StagingPath = stagingPath;
         this.Stream = stream;
+    }
+
+    internal VerifiedReleaseArtifactIdentity GetArtifact(string exactName)
+    {
+        if (this.Disposed)
+            throw new ObjectDisposedException(nameof(VerifiedReleasePackage));
+        if (!this.Artifacts.TryGetValue(exactName, out VerifiedReleaseArtifactIdentity? artifact))
+            throw new PackageSecurityException("The verified release metadata doesn't contain the required companion artifact.");
+        return artifact;
     }
 
     internal async Task<T> UseVerifiedStreamAsync<T>(
@@ -181,7 +203,7 @@ public sealed class ReleasePackageVerifier
         string checksumDocument,
         string metadataDocument,
         ForkReleaseIdentity identity,
-        string? expectedSourceCommit = null,
+        string expectedSourceCommit,
         PackageVerificationLimits? limits = null,
         CancellationToken cancellationToken = default
     )
@@ -192,12 +214,16 @@ public sealed class ReleasePackageVerifier
         ArgumentNullException.ThrowIfNull(checksumDocument);
         ArgumentNullException.ThrowIfNull(metadataDocument);
         ArgumentNullException.ThrowIfNull(identity);
+        if (expectedSourceCommit == null || !ReleasePackageVerifier.CommitPattern.IsMatch(expectedSourceCommit))
+            throw new ArgumentException("The expected source commit must be a full lowercase Git commit.", nameof(expectedSourceCommit));
         limits ??= PackageVerificationLimits.Default;
 
         this.AssertTextBound(checksumDocument, limits.MaxChecksumBytes, "checksum document");
         this.AssertTextBound(metadataDocument, limits.MaxMetadataBytes, "build metadata");
-        string checksumHash = this.ParseChecksumDocument(checksumDocument, identity.PackageAssetName);
+        IReadOnlyDictionary<string, string> checksumHashes = this.ParseChecksumDocument(checksumDocument);
         ReleaseBuildMetadata metadata = this.ParseMetadata(metadataDocument, identity.PackageAssetName);
+        this.AssertArtifactSetsAgree(checksumHashes, metadata.Artifacts);
+        string checksumHash = checksumHashes[identity.PackageAssetName];
 
         string fullPackagePath = Path.GetFullPath(packagePath);
         if (!string.Equals(Path.GetFileName(fullPackagePath), identity.PackageAssetName, StringComparison.Ordinal))
@@ -281,6 +307,10 @@ public sealed class ReleasePackageVerifier
                     size,
                     metadata.Source.Commit,
                     metadata.Source.Tree,
+                    metadata.Build.Workflow,
+                    metadata.Build.Configuration,
+                    metadata.Build.RuntimeIdentifier,
+                    metadata.Artifacts.Select(artifact => new VerifiedReleaseArtifactIdentity(artifact.Name, artifact.SizeBytes, artifact.Sha256)),
                     stagingDirectory,
                     stagingPath,
                     verifiedStream
@@ -318,11 +348,11 @@ public sealed class ReleasePackageVerifier
             throw new PackageSecurityException($"The {description} exceeds its configured size limit.");
     }
 
-    private string ParseChecksumDocument(string document, string expectedAssetName)
+    private IReadOnlyDictionary<string, string> ParseChecksumDocument(string document)
     {
         string[] lines = document.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-        string? expectedHash = null;
-        int entryCount = 0;
+        Dictionary<string, string> entries = new(StringComparer.Ordinal);
+        HashSet<string> caseInsensitiveNames = new(StringComparer.OrdinalIgnoreCase);
         foreach (string rawLine in lines)
         {
             if (rawLine.Length == 0)
@@ -332,18 +362,16 @@ public sealed class ReleasePackageVerifier
             if (!match.Success)
                 throw new PackageSecurityException("SHA256SUMS contains an invalid entry.");
 
-            entryCount++;
             string name = match.Groups["name"].Value;
-            if (!string.Equals(name, expectedAssetName, StringComparison.Ordinal))
-                throw new PackageSecurityException("SHA256SUMS names an unexpected release asset.");
-            if (expectedHash != null)
-                throw new PackageSecurityException("SHA256SUMS contains a duplicate installer entry.");
-            expectedHash = match.Groups["hash"].Value.ToLowerInvariant();
+            if (!caseInsensitiveNames.Add(name) || !entries.TryAdd(name, match.Groups["hash"].Value.ToLowerInvariant()))
+                throw new PackageSecurityException("SHA256SUMS contains duplicate or case-colliding release assets.");
+            if (entries.Count > 32)
+                throw new PackageSecurityException("SHA256SUMS contains too many release assets.");
         }
 
-        if (entryCount != 1 || expectedHash == null)
-            throw new PackageSecurityException("SHA256SUMS must contain exactly one installer package entry.");
-        return expectedHash;
+        if (entries.Count == 0)
+            throw new PackageSecurityException("SHA256SUMS must contain at least one release asset.");
+        return entries;
     }
 
     private ReleaseBuildMetadata ParseMetadata(string document, string expectedAssetName)
@@ -426,7 +454,7 @@ public sealed class ReleasePackageVerifier
             if (matching.Length != 1)
                 throw new PackageSecurityException("build-metadata.json doesn't identify exactly one selected installer package.");
 
-            return new ReleaseBuildMetadata(schemaVersion, release, source, build, matching[0]);
+            return new ReleaseBuildMetadata(schemaVersion, release, source, build, matching[0], artifacts);
         }
         catch (PackageSecurityException)
         {
@@ -442,7 +470,7 @@ public sealed class ReleasePackageVerifier
         ReleaseBuildMetadata metadata,
         ForkReleaseIdentity identity,
         long packageSize,
-        string? expectedSourceCommit
+        string expectedSourceCommit
     )
     {
         if (metadata.SchemaVersion != 1)
@@ -457,14 +485,15 @@ public sealed class ReleasePackageVerifier
             throw new PackageSecurityException("The metadata source commit isn't a full lowercase Git commit.");
         if (!ReleasePackageVerifier.CommitPattern.IsMatch(metadata.Source.Tree))
             throw new PackageSecurityException("The metadata source tree isn't a full lowercase Git tree.");
-        if (expectedSourceCommit != null && !string.Equals(metadata.Source.Commit, expectedSourceCommit, StringComparison.Ordinal))
+        if (!string.Equals(metadata.Source.Commit, expectedSourceCommit, StringComparison.Ordinal))
             throw new PackageSecurityException("The metadata source commit doesn't match the selected release target.");
         if (!string.Equals(metadata.Build.Configuration, "Release", StringComparison.Ordinal))
             throw new PackageSecurityException("The installer package wasn't recorded as a Release build.");
         if (!string.Equals(metadata.Build.RuntimeIdentifier, "linux-x64", StringComparison.Ordinal))
             throw new PackageSecurityException("The installer package wasn't recorded for Linux x86_64.");
-        if (!metadata.Build.Workflow.StartsWith(
-            $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@",
+        if (!string.Equals(
+            metadata.Build.Workflow,
+            $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@refs/tags/{identity.Tag}",
             StringComparison.Ordinal
         ))
         {
@@ -474,6 +503,26 @@ public sealed class ReleasePackageVerifier
             throw new PackageSecurityException("The installer package size doesn't match build-metadata.json.");
         if (!ReleasePackageVerifier.Sha256Pattern.IsMatch(metadata.Artifact.Sha256))
             throw new PackageSecurityException("The metadata package SHA-256 isn't canonical lowercase hexadecimal.");
+    }
+
+    private void AssertArtifactSetsAgree(
+        IReadOnlyDictionary<string, string> checksumHashes,
+        IReadOnlyList<ArtifactSection> metadataArtifacts
+    )
+    {
+        if (checksumHashes.Count != metadataArtifacts.Count)
+            throw new PackageSecurityException("SHA256SUMS and build-metadata.json don't name the same release artifacts.");
+
+        foreach (ArtifactSection artifact in metadataArtifacts)
+        {
+            if (
+                !checksumHashes.TryGetValue(artifact.Name, out string? checksum)
+                || !string.Equals(checksum, artifact.Sha256, StringComparison.Ordinal)
+            )
+            {
+                throw new PackageSecurityException("SHA256SUMS and build-metadata.json disagree about a release artifact.");
+            }
+        }
     }
 
     private static HashSet<string> AssertObject(
@@ -551,7 +600,8 @@ public sealed class ReleasePackageVerifier
         ReleaseSection Release,
         SourceSection Source,
         BuildSection Build,
-        ArtifactSection Artifact
+        ArtifactSection Artifact,
+        IReadOnlyList<ArtifactSection> Artifacts
     );
 
     private sealed record ReleaseSection(string Version, string Tag);

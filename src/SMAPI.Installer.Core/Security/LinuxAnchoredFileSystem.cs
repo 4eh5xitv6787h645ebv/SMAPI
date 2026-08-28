@@ -85,6 +85,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     private const int AtEmptyPath = 0x1000;
     private const uint StatxBasicStats = 0x7ff;
     private const uint RenameNoReplace = 1;
+    private const uint RenameExchange = 2;
     private const ushort FileTypeMask = 0xf000;
     private const ushort FileTypeDirectory = 0x4000;
     private const ushort FileTypeRegular = 0x8000;
@@ -104,6 +105,13 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     /// <summary>The captured identity of this anchored root directory.</summary>
     public LinuxFileIdentity Identity => this.RootIdentity;
 
+    /// <summary>Observe the current metadata for the captured root handle after verifying its stable object identity.</summary>
+    public LinuxFileIdentity GetCurrentRootIdentity()
+    {
+        this.AssertUsable();
+        return GetHandleIdentity(this.RootHandle, requireSingleLinkRegularFile: false);
+    }
+
     /// <summary>Open and anchor a real Linux directory. A symbolic-link root is rejected.</summary>
     public LinuxAnchoredFileSystem(string rootPath)
     {
@@ -113,11 +121,14 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             throw new ArgumentException("An anchored root path is required.", nameof(rootPath));
 
         string fullPath = Path.GetFullPath(rootPath);
-        int descriptor = open(fullPath, OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec, 0);
-        if (descriptor < 0)
-            throw CreatePathException("The anchored root isn't a real accessible directory", Marshal.GetLastWin32Error());
-
-        this.RootHandle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        try
+        {
+            this.RootHandle = OpenAbsoluteDirectoryNoFollow(fullPath);
+        }
+        catch (IOException ex)
+        {
+            throw new IOException("The anchored root isn't a real accessible directory.", ex);
+        }
         try
         {
             this.RootIdentity = GetHandleIdentity(this.RootHandle, requireSingleLinkRegularFile: false);
@@ -621,6 +632,80 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// Atomically publish a known private regular file, replacing either the exact expected destination or no destination.
+    /// The operation never follows the destination leaf and durably flushes both parent directories.
+    /// </summary>
+    public LinuxFileIdentity ReplaceFileAtomically(
+        string sourceRelativePath,
+        string destinationRelativePath,
+        LinuxFileIdentity expectedSource,
+        LinuxFileIdentity? expectedDestination
+    )
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(expectedSource);
+        if (expectedSource.Kind != LinuxAnchoredEntryKind.RegularFile || expectedSource.LinkCount != 1)
+            throw new ArgumentException("The expected replacement source isn't a single-link regular file.", nameof(expectedSource));
+        if (expectedDestination != null && (expectedDestination.Kind != LinuxAnchoredEntryKind.RegularFile || expectedDestination.LinkCount != 1))
+            throw new ArgumentException("The expected replacement destination isn't a single-link regular file.", nameof(expectedDestination));
+        if (string.Equals(sourceRelativePath, destinationRelativePath, StringComparison.Ordinal))
+            throw new ArgumentException("Replacement source and destination must differ.", nameof(destinationRelativePath));
+
+        using ParentAndLeaf source = this.OpenParent(sourceRelativePath);
+        using ParentAndLeaf destination = this.OpenParent(destinationRelativePath);
+        using SafeFileHandle sourceHandle = OpenAt(
+            source.Parent,
+            source.Leaf,
+            OpenReadOnly | OpenNoFollow | OpenCloseOnExec,
+            0,
+            "Couldn't open the anchored replacement source"
+        );
+        LinuxFileIdentity sourceBefore = GetHandleIdentity(sourceHandle, requireSingleLinkRegularFile: true);
+        LinuxFileIdentity? destinationBefore = GetIdentityAt(destination.Parent, destination.Leaf, allowMissing: true, requireSingleLinkRegularFile: true);
+        if (sourceBefore != expectedSource || GetIdentityAt(source.Parent, source.Leaf, false, true) != expectedSource)
+            throw new IOException("The replacement source identity changed before mutation.");
+        if (destinationBefore != expectedDestination)
+            throw new IOException("The replacement destination identity changed before mutation.");
+
+        if (expectedDestination == null)
+            RenameAtNoReplace(source.Parent, source.Leaf, destination.Parent, destination.Leaf);
+        else
+            RenameAtExchange(source.Parent, source.Leaf, destination.Parent, destination.Leaf);
+        Fsync(source.Parent);
+        Fsync(destination.Parent);
+
+        LinuxFileIdentity? result = GetIdentityAt(destination.Parent, destination.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+        LinuxFileIdentity? displaced = expectedDestination == null
+            ? null
+            : GetIdentityAt(source.Parent, source.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+        if (
+            result == null
+            || !result.IsSameObject(expectedSource)
+            || (expectedDestination != null && (displaced == null || !MatchesAfterRename(displaced, expectedDestination)))
+        )
+        {
+            if (expectedDestination != null)
+                TryRollbackUnexpectedExchange(source.Parent, source.Leaf, destination.Parent, destination.Leaf);
+            throw new IOException("The replacement result identity changed during mutation.");
+        }
+        if (displaced != null)
+            this.UnlinkFile(sourceRelativePath, displaced);
+        return result;
+    }
+
+    private static bool MatchesAfterRename(LinuxFileIdentity observed, LinuxFileIdentity expected)
+    {
+        // Linux changes ctime when a name is exchanged. All stable object and content-relevant metadata must still match.
+        return observed.IsSameObject(expected)
+            && observed.Kind == expected.Kind
+            && observed.LinkCount == expected.LinkCount
+            && observed.Size == expected.Size
+            && observed.UnixMode == expected.UnixMode
+            && observed.ModificationSeconds == expected.ModificationSeconds
+            && observed.ModificationNanoseconds == expected.ModificationNanoseconds;
+    }
+
     /// <summary>Rename a known real directory without replacing a destination.</summary>
     public LinuxFileIdentity RenameDirectoryNoReplace(string sourceRelativePath, string destinationRelativePath, LinuxFileIdentity expectedSource)
     {
@@ -797,6 +882,32 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         }
     }
 
+    private static SafeFileHandle OpenAbsoluteDirectoryNoFollow(string absolutePath)
+    {
+        if (!Path.IsPathFullyQualified(absolutePath) || absolutePath[0] != '/')
+            throw new ArgumentException("An anchored Linux root must resolve to an absolute path.", nameof(absolutePath));
+
+        int rootDescriptor = open("/", OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec, 0);
+        if (rootDescriptor < 0)
+            throw CreatePathException("Couldn't anchor the filesystem root", Marshal.GetLastWin32Error());
+        SafeFileHandle current = new((IntPtr)rootDescriptor, ownsHandle: true);
+        try
+        {
+            foreach (string segment in absolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries))
+            {
+                SafeFileHandle next = OpenDirectoryAt(current, segment);
+                current.Dispose();
+                current = next;
+            }
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
+    }
+
     private static SafeFileHandle OpenAt(SafeFileHandle parent, string name, int flags, uint mode, string message)
     {
         int descriptor = openat(parent, name, flags, mode);
@@ -895,11 +1006,42 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         }
     }
 
+    private static void RenameAtExchange(SafeFileHandle sourceParent, string source, SafeFileHandle destinationParent, string destination)
+    {
+        try
+        {
+            if (renameat2(sourceParent, source, destinationParent, destination, RenameExchange) == 0)
+                return;
+            int error = Marshal.GetLastWin32Error();
+            if (error == ErrorNotSupported)
+                throw new PlatformNotSupportedException("Linux renameat2(RENAME_EXCHANGE) is required for fail-closed atomic replacements.");
+            throw CreatePathException("Couldn't exchange anchored files for atomic replacement", error);
+        }
+        catch (EntryPointNotFoundException ex)
+        {
+            throw new PlatformNotSupportedException("Linux renameat2(RENAME_EXCHANGE) is required for fail-closed atomic replacements.", ex);
+        }
+    }
+
     private static void TryRollbackUnexpectedRename(SafeFileHandle sourceParent, string source, SafeFileHandle destinationParent, string destination)
     {
         try
         {
             RenameAtNoReplace(sourceParent, source, destinationParent, destination);
+            Fsync(sourceParent);
+            Fsync(destinationParent);
+        }
+        catch
+        {
+            // The caller receives a fail-closed identity error and must inspect both anchored paths.
+        }
+    }
+
+    private static void TryRollbackUnexpectedExchange(SafeFileHandle sourceParent, string source, SafeFileHandle destinationParent, string destination)
+    {
+        try
+        {
+            RenameAtExchange(sourceParent, source, destinationParent, destination);
             Fsync(sourceParent);
             Fsync(destinationParent);
         }

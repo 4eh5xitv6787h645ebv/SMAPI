@@ -207,6 +207,10 @@ public sealed record ProtocolPlanDigest
         writer.WriteString("source_commit", release.SourceCommit);
         writer.WriteString("source_tree", release.SourceTree);
         writer.WriteString("package_sha256", release.PackageSha256);
+        writer.WriteNumber("package_size_bytes", release.PackageSizeBytes);
+        writer.WriteString("build_workflow", release.BuildWorkflow);
+        writer.WriteString("build_configuration", release.BuildConfiguration);
+        writer.WriteString("runtime_identifier", release.RuntimeIdentifier);
         writer.WriteEndObject();
     }
 }

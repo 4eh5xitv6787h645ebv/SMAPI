@@ -288,8 +288,8 @@ public class InstallationPlannerTests
             receipt.GetCanonicalDigest(),
             OwnershipTestData.Digest('7'),
             [
-                new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, runtime.Sha256, OwnershipTestData.Digest('8')),
-                new RollbackSnapshotEntry(created.Path, created.Kind, RollbackEntryKind.Remove, created.Sha256, null)
+                new RollbackSnapshotEntry(runtime.Path, runtime.Kind, RollbackEntryKind.Restore, Identity(runtime), Identity('8', mode: runtime.UnixMode)),
+                new RollbackSnapshotEntry(created.Path, created.Kind, RollbackEntryKind.Remove, Identity(created), null)
             ]
         );
         LauncherState launcher = LauncherState.Assess(receipt.Launcher.InstalledLauncherSha256, receipt.Launcher.OriginalLauncherSha256, receipt.Launcher);
@@ -299,7 +299,12 @@ public class InstallationPlannerTests
             inventory,
             launcher,
             installedReceipt: receipt,
-            rollbackSnapshot: snapshot
+            rollbackSnapshot: snapshot,
+            recoveryObservations:
+            [
+                new RecoveryFileObservation(runtime.Path, Identity(runtime)),
+                new RecoveryFileObservation(created.Path, Identity(created))
+            ]
         ));
         InstallationInventory driftedInventory = InstallationInventory.Create(
             null,
@@ -311,7 +316,12 @@ public class InstallationPlannerTests
             driftedInventory,
             launcher,
             installedReceipt: receipt,
-            rollbackSnapshot: snapshot
+            rollbackSnapshot: snapshot,
+            recoveryObservations:
+            [
+                new RecoveryFileObservation(runtime.Path, Identity('9', mode: runtime.UnixMode)),
+                new RecoveryFileObservation(created.Path, Identity(created))
+            ]
         ));
 
         valid.CanExecute.Should().BeTrue();
@@ -319,6 +329,12 @@ public class InstallationPlannerTests
         valid.Operations.Should().Contain(operation => operation.Path.Equals(created.Path) && operation.Kind == PlanOperationKind.Remove);
         drifted.Conflicts.Should().ContainSingle(conflict => conflict.Code == PlanConflictCode.RollbackDrift && conflict.Path!.Equals(runtime.Path));
     }
+
+    private static RecoveryFileIdentity Identity(PackageManifestEntry entry)
+        => new(entry.Sha256, entry.SizeBytes, entry.UnixMode);
+
+    private static RecoveryFileIdentity Identity(char digest, long size = 10, int mode = 420)
+        => new(OwnershipTestData.Digest(digest), size, mode);
 
     [Test]
     public void Plans_SortConflictsAndOperationsIndependentlyOfObservationOrder()

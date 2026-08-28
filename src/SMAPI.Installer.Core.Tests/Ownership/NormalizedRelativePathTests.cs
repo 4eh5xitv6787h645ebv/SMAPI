@@ -62,6 +62,23 @@ public class NormalizedRelativePathTests
     }
 
     [Test]
+    public void OwnedNamespacePolicy_OriginalLauncherRuleIsRecoveryOnlyAndExact()
+    {
+        NormalizedRelativePath backup = NormalizedRelativePath.Parse("StardewValley-original");
+
+        Action packageOwnership = () => OwnedNamespacePolicy.AssertAllowed(backup, OwnedEntryKind.RecoveryLauncherBackup);
+        Action wrongRecoveryPath = () => OwnedNamespacePolicy.AssertRecoveryAllowed(
+            NormalizedRelativePath.Parse("StardewValley"),
+            OwnedEntryKind.RecoveryLauncherBackup
+        );
+        Action exactRecoveryPath = () => OwnedNamespacePolicy.AssertRecoveryAllowed(backup, OwnedEntryKind.RecoveryLauncherBackup);
+
+        packageOwnership.Should().Throw<ArgumentException>();
+        wrongRecoveryPath.Should().Throw<ArgumentException>();
+        exactRecoveryPath.Should().NotThrow();
+    }
+
+    [Test]
     public void Sha256Digest_RequiresCanonicalLowercaseHex()
     {
         Action uppercase = () => Sha256Digest.Parse(new string('A', 64));

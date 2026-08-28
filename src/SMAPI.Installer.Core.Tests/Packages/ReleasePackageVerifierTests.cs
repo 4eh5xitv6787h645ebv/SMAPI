@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using FluentAssertions;
 using NUnit.Framework;
+using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Packages;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Packages;
@@ -58,6 +59,12 @@ public sealed class ReleasePackageVerifierTests
         result.InstallationIdentity.SourceCommit.Should().Be(ReleasePackageVerifierTests.Commit);
         result.InstallationIdentity.SourceTree.Should().Be(ReleasePackageVerifierTests.Tree);
         result.InstallationIdentity.PackageSha256.Value.Should().Be(hash);
+        result.InstallationIdentity.PackageSizeBytes.Should().Be(bytes.Length);
+        result.InstallationIdentity.BuildWorkflow.Should().Be(
+            $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@refs/tags/{this.Identity.Tag}"
+        );
+        result.InstallationIdentity.BuildConfiguration.Should().Be("Release");
+        result.InstallationIdentity.RuntimeIdentifier.Should().Be("linux-x64");
     }
 
     [Test]
@@ -74,6 +81,92 @@ public sealed class ReleasePackageVerifierTests
         );
 
         result.Sha256.Should().Be(hash);
+    }
+
+    [Test]
+    public async Task VerifyInstallerPackage_CrossVerifiedCompanion_ReturnsOpaqueAuthority()
+    {
+        (string packagePath, byte[] packageBytes, string packageHash) = this.CreatePackage();
+        string workflow = $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@refs/tags/{this.Identity.Tag}";
+        InstallationReleaseIdentity release = new(
+            InstallationReleaseIdentity.ReviewedRepository,
+            this.Identity.Tag,
+            this.Identity.EmbeddedVersion,
+            this.Identity.PackageAssetName,
+            ReleasePackageVerifierTests.Commit,
+            ReleasePackageVerifierTests.Tree,
+            Sha256Digest.Parse(packageHash),
+            packageBytes.Length,
+            workflow,
+            "Release",
+            "linux-x64"
+        );
+        PackageManifest manifest = new(
+            release,
+            [
+                new PackageManifestEntry(
+                    NormalizedRelativePath.Parse("StardewValley"),
+                    Sha256Digest.Parse(new string('d', 64)),
+                    42,
+                    493,
+                    OwnedEntryKind.Launcher
+                )
+            ]
+        );
+        byte[] manifestBytes = System.Text.Encoding.UTF8.GetBytes(manifest.ToCanonicalJson());
+        string manifestHash = Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant();
+        string manifestName = VerifiedInstallerPackageFactory.GetManifestAssetName(this.Identity);
+        string manifestPath = Path.Combine(this.TempRoot, manifestName);
+        File.WriteAllBytes(manifestPath, manifestBytes);
+        string checksums = $"{packageHash}  {this.Identity.PackageAssetName}\n{manifestHash}  {manifestName}\n";
+
+        VerifiedReleasePackage verified = await new ReleasePackageVerifier().VerifyAsync(
+            packagePath,
+            checksums,
+            this.CreateMetadata(
+                packageHash,
+                packageBytes.Length,
+                companion: (manifestName, manifestBytes.Length, manifestHash)
+            ),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+        await using VerifiedInstallerPackage authority = await new VerifiedInstallerPackageFactory().VerifyAsync(
+            verified,
+            manifestPath
+        );
+
+        authority.Release.Should().Be(release);
+        authority.ManifestSha256.Value.Should().Be(manifestHash);
+        authority.Manifest.Entries.Should().ContainSingle(entry => entry.Path.Value == "StardewValley");
+    }
+
+    [Test]
+    public async Task VerifyInstallerPackage_ChangedCompanion_Rejects()
+    {
+        (string packagePath, byte[] packageBytes, string packageHash) = this.CreatePackage();
+        string manifestName = VerifiedInstallerPackageFactory.GetManifestAssetName(this.Identity);
+        byte[] manifestBytes = "not a canonical manifest"u8.ToArray();
+        string manifestHash = Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant();
+        string manifestPath = Path.Combine(this.TempRoot, manifestName);
+        File.WriteAllBytes(manifestPath, manifestBytes);
+        string checksums = $"{packageHash}  {this.Identity.PackageAssetName}\n{manifestHash}  {manifestName}\n";
+        await using VerifiedReleasePackage verified = await new ReleasePackageVerifier().VerifyAsync(
+            packagePath,
+            checksums,
+            this.CreateMetadata(
+                packageHash,
+                packageBytes.Length,
+                companion: (manifestName, manifestBytes.Length, manifestHash)
+            ),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+        File.WriteAllBytes(manifestPath, "same size but different bytes"u8.ToArray());
+
+        Func<Task> action = () => new VerifiedInstallerPackageFactory().VerifyAsync(verified, manifestPath);
+
+        await action.Should().ThrowAsync<PackageSecurityException>();
     }
 
     [Test]
@@ -114,7 +207,8 @@ public sealed class ReleasePackageVerifierTests
                 path,
                 $"{hash}  {this.Identity.PackageAssetName}\n",
                 metadata,
-                this.Identity
+                this.Identity,
+                ReleasePackageVerifierTests.Commit
             );
             await action.Should().ThrowAsync<PackageSecurityException>();
         }
@@ -177,7 +271,8 @@ public sealed class ReleasePackageVerifierTests
             path,
             $"{otherHash}  {this.Identity.PackageAssetName}\n",
             this.CreateMetadata(hash, bytes.Length),
-            this.Identity
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
         );
 
         await action.Should().ThrowAsync<PackageSecurityException>()
@@ -194,7 +289,8 @@ public sealed class ReleasePackageVerifierTests
             path,
             $"{hash}  {this.Identity.PackageAssetName}\n",
             this.CreateMetadata(new string('0', 64), bytes.Length),
-            this.Identity
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
         );
 
         await action.Should().ThrowAsync<PackageSecurityException>()
@@ -212,7 +308,8 @@ public sealed class ReleasePackageVerifierTests
             path,
             $"{hash}  {this.Identity.PackageAssetName}\n",
             metadata,
-            this.Identity
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
         );
 
         await action.Should().ThrowAsync<PackageSecurityException>()
@@ -248,7 +345,8 @@ public sealed class ReleasePackageVerifierTests
             path,
             checksums,
             this.CreateMetadata(hash, bytes.Length),
-            this.Identity
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
         );
 
         await action.Should().ThrowAsync<PackageSecurityException>();
@@ -270,6 +368,7 @@ public sealed class ReleasePackageVerifierTests
             $"{hash}  {this.Identity.PackageAssetName}\n",
             this.CreateMetadata(hash, bytes.Length),
             this.Identity,
+            ReleasePackageVerifierTests.Commit,
             limits: limits
         );
 
@@ -286,7 +385,13 @@ public sealed class ReleasePackageVerifierTests
         return (path, bytes, hash);
     }
 
-    private string CreateMetadata(string hash, long size, string? repository = null, bool useArtifactsArray = false)
+    private string CreateMetadata(
+        string hash,
+        long size,
+        string? repository = null,
+        bool useArtifactsArray = false,
+        (string Name, long Size, string Hash)? companion = null
+    )
     {
         object release = new { version = this.Identity.EmbeddedVersion, tag = this.Identity.Tag };
         object source = new
@@ -308,14 +413,21 @@ public sealed class ReleasePackageVerifierTests
             dotnet_info = ".NET SDK synthetic"
         };
         object artifact = new { name = this.Identity.PackageAssetName, size_bytes = size, sha256 = hash };
-        return useArtifactsArray
+        object[] artifacts = companion is { } companionArtifact
+            ?
+            [
+                artifact,
+                new { name = companionArtifact.Name, size_bytes = companionArtifact.Size, sha256 = companionArtifact.Hash }
+            ]
+            : [artifact];
+        return useArtifactsArray || companion != null
             ? JsonSerializer.Serialize(new
             {
                 schema_version = 1,
                 release,
                 source,
                 build,
-                artifacts = new[] { artifact },
+                artifacts,
                 reproducibility = "Inputs recorded; byte equality not claimed."
             })
             : JsonSerializer.Serialize(new

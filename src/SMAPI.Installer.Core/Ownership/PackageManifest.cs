@@ -24,7 +24,7 @@ public sealed class PackageManifestEntry
     public OwnedEntryKind Kind { get; }
 
     /// <summary>Construct an immutable manifest entry.</summary>
-    public PackageManifestEntry(NormalizedRelativePath path, Sha256Digest sha256, long sizeBytes, int unixMode, OwnedEntryKind kind)
+    internal PackageManifestEntry(NormalizedRelativePath path, Sha256Digest sha256, long sizeBytes, int unixMode, OwnedEntryKind kind)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(sha256);
@@ -46,7 +46,7 @@ public sealed class PackageManifestEntry
 public sealed class PackageManifest
 {
     /// <summary>The only currently supported manifest schema.</summary>
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     /// <summary>The manifest schema.</summary>
     public int SchemaVersion => PackageManifest.CurrentSchemaVersion;
@@ -58,7 +58,7 @@ public sealed class PackageManifest
     public IReadOnlyList<PackageManifestEntry> Entries { get; }
 
     /// <summary>Construct and validate an immutable package manifest.</summary>
-    public PackageManifest(InstallationReleaseIdentity release, IEnumerable<PackageManifestEntry> entries)
+    internal PackageManifest(InstallationReleaseIdentity release, IEnumerable<PackageManifestEntry> entries)
     {
         ArgumentNullException.ThrowIfNull(release);
         ArgumentNullException.ThrowIfNull(entries);
@@ -154,6 +154,10 @@ internal static class CanonicalOwnershipJson
         writer.WriteString("source_commit", release.SourceCommit);
         writer.WriteString("source_tree", release.SourceTree);
         writer.WriteString("package_sha256", release.PackageSha256.Value);
+        writer.WriteNumber("package_size_bytes", release.PackageSizeBytes);
+        writer.WriteString("build_workflow", release.BuildWorkflow);
+        writer.WriteString("build_configuration", release.BuildConfiguration);
+        writer.WriteString("runtime_identifier", release.RuntimeIdentifier);
         writer.WriteEndObject();
     }
 

@@ -23,7 +23,11 @@ public class ManifestReceiptTests
             release.PackageAssetName,
             release.SourceCommit,
             release.SourceTree,
-            null!
+            null!,
+            release.PackageSizeBytes,
+            release.BuildWorkflow,
+            release.BuildConfiguration,
+            release.RuntimeIdentifier
         );
 
         manifestEntry.Should().Throw<ArgumentNullException>();
@@ -44,7 +48,11 @@ public class ManifestReceiptTests
             valid.PackageAssetName,
             valid.SourceCommit,
             valid.SourceTree,
-            valid.PackageSha256
+            valid.PackageSha256,
+            valid.PackageSizeBytes,
+            valid.BuildWorkflow,
+            valid.BuildConfiguration,
+            valid.RuntimeIdentifier
         );
         Action badRepository = () => new InstallationReleaseIdentity(
             "https://github.com/Pathoschild/SMAPI",
@@ -53,7 +61,11 @@ public class ManifestReceiptTests
             valid.PackageAssetName,
             valid.SourceCommit,
             valid.SourceTree,
-            valid.PackageSha256
+            valid.PackageSha256,
+            valid.PackageSizeBytes,
+            valid.BuildWorkflow,
+            valid.BuildConfiguration,
+            valid.RuntimeIdentifier
         );
 
         badVersion.Should().Throw<ArgumentException>().WithMessage("*doesn't match*");

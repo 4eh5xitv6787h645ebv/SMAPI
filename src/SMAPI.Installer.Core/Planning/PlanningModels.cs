@@ -263,35 +263,84 @@ public enum RollbackEntryKind
     Remove
 }
 
+/// <summary>The bounded filesystem object types a recovery snapshot can authenticate.</summary>
+public enum RecoveryFileType
+{
+    /// <summary>An ordinary non-linked file.</summary>
+    RegularFile
+}
+
+/// <summary>The complete identity of one ordinary file at a recovery boundary.</summary>
+public sealed record RecoveryFileIdentity
+{
+    public Sha256Digest Sha256 { get; }
+    public long SizeBytes { get; }
+    public int UnixMode { get; }
+    public RecoveryFileType FileType { get; }
+
+    public RecoveryFileIdentity(Sha256Digest sha256, long sizeBytes, int unixMode, RecoveryFileType fileType = RecoveryFileType.RegularFile)
+    {
+        ArgumentNullException.ThrowIfNull(sha256);
+        if (sizeBytes < 0)
+            throw new ArgumentOutOfRangeException(nameof(sizeBytes));
+        if (unixMode is < 0 or > 511)
+            throw new ArgumentOutOfRangeException(nameof(unixMode), "Only ordinary 0000-0777 Unix permission bits are allowed.");
+        if (fileType != RecoveryFileType.RegularFile)
+            throw new ArgumentOutOfRangeException(nameof(fileType));
+
+        this.Sha256 = sha256;
+        this.SizeBytes = sizeBytes;
+        this.UnixMode = unixMode;
+        this.FileType = fileType;
+    }
+}
+
+/// <summary>An explicit present-or-absent observation used to build or authenticate durable recovery state.</summary>
+public sealed record RecoveryFileObservation
+{
+    public NormalizedRelativePath Path { get; }
+    public RecoveryFileIdentity? Identity { get; }
+
+    public RecoveryFileObservation(NormalizedRelativePath path, RecoveryFileIdentity? identity)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        this.Path = path;
+        this.Identity = identity;
+    }
+}
+
 /// <summary>One ownership-constrained rollback intent.</summary>
 public sealed class RollbackSnapshotEntry
 {
     public NormalizedRelativePath Path { get; }
     public OwnedEntryKind OwnedKind { get; }
     public RollbackEntryKind Kind { get; }
-    public Sha256Digest? ExpectedCurrentSha256 { get; }
-    public Sha256Digest? BackupSha256 { get; }
+    public RecoveryFileIdentity? ExpectedCurrent { get; }
+    public RecoveryFileIdentity? Backup { get; }
+
+    public Sha256Digest? ExpectedCurrentSha256 => this.ExpectedCurrent?.Sha256;
+    public Sha256Digest? BackupSha256 => this.Backup?.Sha256;
 
     public RollbackSnapshotEntry(
         NormalizedRelativePath path,
         OwnedEntryKind ownedKind,
         RollbackEntryKind kind,
-        Sha256Digest? expectedCurrentSha256,
-        Sha256Digest? backupSha256
+        RecoveryFileIdentity? expectedCurrent,
+        RecoveryFileIdentity? backup
     )
     {
         ArgumentNullException.ThrowIfNull(path);
-        OwnedNamespacePolicy.AssertAllowed(path, ownedKind);
-        if (kind == RollbackEntryKind.Restore && backupSha256 is null)
-            throw new ArgumentException("A restore rollback entry requires a backup digest.", nameof(backupSha256));
-        if (kind == RollbackEntryKind.Remove && (expectedCurrentSha256 is null || backupSha256 is not null))
-            throw new ArgumentException("A remove rollback entry requires only an expected current digest.");
+        OwnedNamespacePolicy.AssertRecoveryAllowed(path, ownedKind);
+        if (kind == RollbackEntryKind.Restore && backup is null)
+            throw new ArgumentException("A restore rollback entry requires a complete backup identity.", nameof(backup));
+        if (kind == RollbackEntryKind.Remove && (expectedCurrent is null || backup is not null))
+            throw new ArgumentException("A remove rollback entry requires only a complete expected-current identity.");
 
         this.Path = path;
         this.OwnedKind = ownedKind;
         this.Kind = kind;
-        this.ExpectedCurrentSha256 = expectedCurrentSha256;
-        this.BackupSha256 = backupSha256;
+        this.ExpectedCurrent = expectedCurrent;
+        this.Backup = backup;
     }
 }
 
@@ -316,11 +365,9 @@ public sealed class RollbackSnapshot
         if (expectedCurrentReceiptSha256 is null && previousReceiptSha256 is null)
             throw new ArgumentException("A rollback snapshot must bind at least one side of its receipt transition.");
         RollbackSnapshotEntry[] ordered = entries.OrderBy(entry => entry.Path.Value, StringComparer.Ordinal).ToArray();
-        if (ordered.Length == 0)
-            throw new ArgumentException("A rollback snapshot must contain at least one entry.", nameof(entries));
-        HashSet<string> paths = new(StringComparer.OrdinalIgnoreCase);
-        if (ordered.Any(entry => !paths.Add(entry.Path.Value)))
-            throw new ArgumentException("Rollback paths must be unique even on case-insensitive filesystems.", nameof(entries));
+        if (ordered.Length == 0 && expectedCurrentReceiptSha256 == previousReceiptSha256)
+            throw new ArgumentException("A receipt-only rollback snapshot must describe a real receipt transition.", nameof(entries));
+        OwnershipCollectionValidation.AssertDistinctFilePaths(ordered.Select(entry => entry.Path), nameof(entries));
 
         this.ExpectedCurrentReceiptSha256 = expectedCurrentReceiptSha256;
         this.PreviousReceiptSha256 = previousReceiptSha256;
@@ -337,6 +384,7 @@ public sealed class InstallationPlanningRequest
     public InstallationReceipt? InstalledReceipt { get; }
     public LauncherState Launcher { get; }
     public RollbackSnapshot? RollbackSnapshot { get; }
+    public IReadOnlyList<RecoveryFileObservation> RecoveryObservations { get; }
 
     public InstallationPlanningRequest(
         InstallationAction action,
@@ -344,7 +392,8 @@ public sealed class InstallationPlanningRequest
         LauncherState launcher,
         PackageManifest? targetManifest = null,
         InstallationReceipt? installedReceipt = null,
-        RollbackSnapshot? rollbackSnapshot = null
+        RollbackSnapshot? rollbackSnapshot = null,
+        IEnumerable<RecoveryFileObservation>? recoveryObservations = null
     )
     {
         ArgumentNullException.ThrowIfNull(inventory);
@@ -355,5 +404,10 @@ public sealed class InstallationPlanningRequest
         this.InstalledReceipt = installedReceipt;
         this.Launcher = launcher;
         this.RollbackSnapshot = rollbackSnapshot;
+        RecoveryFileObservation[] observations = (recoveryObservations ?? Array.Empty<RecoveryFileObservation>())
+            .OrderBy(observation => observation.Path.Value, StringComparer.Ordinal)
+            .ToArray();
+        OwnershipCollectionValidation.AssertDistinctFilePaths(observations.Select(observation => observation.Path), nameof(recoveryObservations));
+        this.RecoveryObservations = new ReadOnlyCollection<RecoveryFileObservation>(observations);
     }
 }

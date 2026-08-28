@@ -154,7 +154,11 @@ public sealed record ProtocolReleaseIdentity(
     string PackageAssetName,
     string SourceCommit,
     string SourceTree,
-    string PackageSha256
+    string PackageSha256,
+    long PackageSizeBytes,
+    string BuildWorkflow,
+    string BuildConfiguration,
+    string RuntimeIdentifier
 );
 
 /// <summary>The canonical selected Linux game-root identity observed during inspection.</summary>

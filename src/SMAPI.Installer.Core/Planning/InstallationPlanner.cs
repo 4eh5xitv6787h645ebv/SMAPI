@@ -219,13 +219,11 @@ public sealed class InstallationPlanner
             return;
         }
 
-        Dictionary<string, CurrentFile> current = request.Inventory.Entries
-            .Where(entry => entry.Current != null)
-            .ToDictionary(entry => entry.Path.Value, entry => entry.Current!, StringComparer.Ordinal);
+        Dictionary<string, RecoveryFileObservation> current = request.RecoveryObservations
+            .ToDictionary(entry => entry.Path.Value, StringComparer.Ordinal);
         foreach (RollbackSnapshotEntry entry in request.RollbackSnapshot.Entries)
         {
-            current.TryGetValue(entry.Path.Value, out CurrentFile? observed);
-            if (observed?.Sha256 != entry.ExpectedCurrentSha256)
+            if (!current.TryGetValue(entry.Path.Value, out RecoveryFileObservation? observed) || observed.Identity != entry.ExpectedCurrent)
             {
                 conflicts.Add(new PlanConflict(PlanConflictCode.RollbackDrift, entry.Path));
                 continue;

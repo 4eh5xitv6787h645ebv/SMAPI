@@ -36,15 +36,31 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
     /// <summary>The verified package digest.</summary>
     public Sha256Digest PackageSha256 { get; }
 
+    /// <summary>The verified package byte length.</summary>
+    public long PackageSizeBytes { get; }
+
+    /// <summary>The exact GitHub Actions workflow reference which built the package.</summary>
+    public string BuildWorkflow { get; }
+
+    /// <summary>The recorded build configuration.</summary>
+    public string BuildConfiguration { get; }
+
+    /// <summary>The recorded runtime identifier.</summary>
+    public string RuntimeIdentifier { get; }
+
     /// <summary>Construct and validate a complete release identity.</summary>
-    public InstallationReleaseIdentity(
+    internal InstallationReleaseIdentity(
         string repository,
         string tag,
         string embeddedVersion,
         string packageAssetName,
         string sourceCommit,
         string sourceTree,
-        Sha256Digest packageSha256
+        Sha256Digest packageSha256,
+        long packageSizeBytes,
+        string buildWorkflow,
+        string buildConfiguration,
+        string runtimeIdentifier
     )
     {
         ArgumentNullException.ThrowIfNull(packageSha256);
@@ -67,6 +83,16 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
             throw new ArgumentException("The source commit must be a full lowercase Git object ID.", nameof(sourceCommit));
         if (sourceTree == null || !InstallationReleaseIdentity.GitObjectPattern.IsMatch(sourceTree))
             throw new ArgumentException("The source tree must be a full lowercase Git object ID.", nameof(sourceTree));
+        if (packageSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(packageSizeBytes), "The verified package size must be positive.");
+
+        string expectedWorkflow = $"4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/{tag}";
+        if (!string.Equals(buildWorkflow, expectedWorkflow, StringComparison.Ordinal))
+            throw new ArgumentException("The build workflow doesn't match the exact reviewed release tag.", nameof(buildWorkflow));
+        if (!string.Equals(buildConfiguration, "Release", StringComparison.Ordinal))
+            throw new ArgumentException("The build configuration must be Release.", nameof(buildConfiguration));
+        if (!string.Equals(runtimeIdentifier, "linux-x64", StringComparison.Ordinal))
+            throw new ArgumentException("The runtime identifier must be linux-x64.", nameof(runtimeIdentifier));
 
         this.Repository = repository;
         this.Tag = tag;
@@ -75,6 +101,10 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
         this.SourceCommit = sourceCommit;
         this.SourceTree = sourceTree;
         this.PackageSha256 = packageSha256;
+        this.PackageSizeBytes = packageSizeBytes;
+        this.BuildWorkflow = buildWorkflow;
+        this.BuildConfiguration = buildConfiguration;
+        this.RuntimeIdentifier = runtimeIdentifier;
     }
 
     /// <inheritdoc />
@@ -87,7 +117,11 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
             && this.PackageAssetName == other.PackageAssetName
             && this.SourceCommit == other.SourceCommit
             && this.SourceTree == other.SourceTree
-            && this.PackageSha256 == other.PackageSha256;
+            && this.PackageSha256 == other.PackageSha256
+            && this.PackageSizeBytes == other.PackageSizeBytes
+            && this.BuildWorkflow == other.BuildWorkflow
+            && this.BuildConfiguration == other.BuildConfiguration
+            && this.RuntimeIdentifier == other.RuntimeIdentifier;
     }
 
     /// <inheritdoc />
@@ -99,6 +133,18 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
     /// <inheritdoc />
     public override int GetHashCode()
     {
-        return HashCode.Combine(this.Repository, this.Tag, this.EmbeddedVersion, this.PackageAssetName, this.SourceCommit, this.SourceTree, this.PackageSha256);
+        HashCode result = new();
+        result.Add(this.Repository, StringComparer.Ordinal);
+        result.Add(this.Tag, StringComparer.Ordinal);
+        result.Add(this.EmbeddedVersion, StringComparer.Ordinal);
+        result.Add(this.PackageAssetName, StringComparer.Ordinal);
+        result.Add(this.SourceCommit, StringComparer.Ordinal);
+        result.Add(this.SourceTree, StringComparer.Ordinal);
+        result.Add(this.PackageSha256);
+        result.Add(this.PackageSizeBytes);
+        result.Add(this.BuildWorkflow, StringComparer.Ordinal);
+        result.Add(this.BuildConfiguration, StringComparer.Ordinal);
+        result.Add(this.RuntimeIdentifier, StringComparer.Ordinal);
+        return result.ToHashCode();
     }
 }

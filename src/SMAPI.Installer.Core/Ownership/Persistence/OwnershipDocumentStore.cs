@@ -1,159 +1,267 @@
-using System.Runtime.InteropServices;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Ownership.Persistence;
 
-/// <summary>Bounded byte storage used by the ownership document trust boundary.</summary>
-public interface IOwnershipDocumentStorage
+/// <summary>The only persisted ownership-document slots exposed across the storage trust boundary.</summary>
+internal enum OwnershipDocumentSlot
 {
-    byte[] ReadBounded(string absolutePath, int maxBytes);
-    void WriteAtomically(string absolutePath, ReadOnlyMemory<byte> bytes, int maxBytes);
+    PackageManifest,
+    InstallationReceipt,
+    RollbackSnapshot
 }
 
-/// <summary>Same-directory atomic filesystem storage with durable file contents.</summary>
-public sealed class AtomicOwnershipDocumentStorage : IOwnershipDocumentStorage
+/// <summary>Bounded storage addressed only through fixed ownership-document slots.</summary>
+internal interface IOwnershipDocumentStorage : IDisposable
 {
-    private const int LinuxOpenReadOnly = 0;
-    private const int LinuxOpenDirectory = 0x10000;
-    private const int LinuxOpenCloseOnExec = 0x80000;
+    byte[] ReadBounded(OwnershipDocumentSlot slot, int maxBytes);
+    void WriteAtomically(OwnershipDocumentSlot slot, ReadOnlyMemory<byte> bytes, int maxBytes);
+}
 
-    public byte[] ReadBounded(string absolutePath, int maxBytes)
+/// <summary>
+/// Linux ownership-document storage anchored to pre-existing private state and game-workspace directories.
+/// Both roots must be real directories with exact <c>0700</c> permissions. Document names are fixed here and
+/// can't be supplied by callers.
+/// </summary>
+internal sealed class LinuxAnchoredOwnershipDocumentStorage : IOwnershipDocumentStorage
+{
+    private const int PrivateDirectoryMode = 0x1c0; // 0700
+    private const int PrivateFileMode = 0x180; // 0600
+    private const string ManifestName = "package-manifest.json";
+    private const string ReceiptName = "receipt.json";
+    private const string RollbackName = "rollback-snapshot.json";
+
+    private readonly LinuxAnchoredFileSystem State;
+    private readonly LinuxAnchoredFileSystem GameWorkspace;
+    private readonly Action AssertNotRoot;
+    private readonly Dictionary<OwnershipDocumentSlot, LinuxFileIdentity> KnownDocuments = new();
+    private readonly object SyncRoot = new();
+    private bool Disposed;
+
+    public LinuxAnchoredOwnershipDocumentStorage(string privateStateDirectory, string privateGameWorkspaceDirectory)
+        : this(privateStateDirectory, privateGameWorkspaceDirectory, LinuxPrivilegeGuard.AssertNotRoot) { }
+
+    internal LinuxAnchoredOwnershipDocumentStorage(
+        string privateStateDirectory,
+        string privateGameWorkspaceDirectory,
+        Action assertNotRoot
+    )
     {
-        string path = ValidateAbsolutePath(absolutePath);
-        if (maxBytes <= 0)
-            throw new ArgumentOutOfRangeException(nameof(maxBytes));
+        this.AssertNotRoot = assertNotRoot ?? throw new ArgumentNullException(nameof(assertNotRoot));
+        this.AssertNotRoot();
 
-        using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-        if (stream.Length <= 0 || stream.Length > maxBytes || stream.Length > int.MaxValue)
-            throw new OwnershipDocumentException("The persisted ownership document has an invalid or excessive byte length.");
-
-        byte[] bytes = new byte[(int)stream.Length];
-        int offset = 0;
-        while (offset < bytes.Length)
-        {
-            int read = stream.Read(bytes, offset, bytes.Length - offset);
-            if (read == 0)
-                throw new EndOfStreamException("The persisted ownership document changed while it was being read.");
-            offset += read;
-        }
-        if (stream.ReadByte() != -1)
-            throw new OwnershipDocumentException("The persisted ownership document grew beyond its validated byte length.");
-        return bytes;
-    }
-
-    public void WriteAtomically(string absolutePath, ReadOnlyMemory<byte> bytes, int maxBytes)
-    {
-        string path = ValidateAbsolutePath(absolutePath);
-        if (maxBytes <= 0)
-            throw new ArgumentOutOfRangeException(nameof(maxBytes));
-        if (bytes.Length == 0 || bytes.Length > maxBytes)
-            throw new OwnershipDocumentException("The ownership document has an invalid or excessive byte length.");
-
-        string directory = Path.GetDirectoryName(path)!;
-        Directory.CreateDirectory(directory);
-        string temporaryPath = Path.Combine(directory, $".{Path.GetFileName(path)}.tmp-{Guid.NewGuid():N}");
+        LinuxAnchoredFileSystem? state = null;
+        LinuxAnchoredFileSystem? workspace = null;
         try
         {
-            using (FileStream stream = new(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            state = new LinuxAnchoredFileSystem(privateStateDirectory);
+            AssertPrivateDirectory(state, "ownership state");
+            workspace = new LinuxAnchoredFileSystem(privateGameWorkspaceDirectory);
+            AssertPrivateDirectory(workspace, "game ownership workspace");
+            this.State = state;
+            this.GameWorkspace = workspace;
+        }
+        catch
+        {
+            workspace?.Dispose();
+            state?.Dispose();
+            throw;
+        }
+    }
+
+    public byte[] ReadBounded(OwnershipDocumentSlot slot, int maxBytes)
+    {
+        lock (this.SyncRoot)
+        {
+            this.AssertAvailable();
+            if (maxBytes <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxBytes));
+
+            (LinuxAnchoredFileSystem root, string name) = this.Resolve(slot);
+            AssertPrivateDirectory(root, slot == OwnershipDocumentSlot.InstallationReceipt ? "game ownership workspace" : "ownership state");
+            using LinuxAnchoredFile file = root.OpenRegularFileForRead(name);
+            AssertPrivateFile(file.Identity);
+            this.AssertKnownIdentity(slot, file.Identity);
+            if (file.Identity.Size <= 0 || file.Identity.Size > maxBytes)
+                throw new OwnershipDocumentException("The persisted ownership document has an invalid or excessive byte length.");
+            try
             {
-                if (!OperatingSystem.IsWindows() && Chmod(temporaryPath, Convert.ToUInt32("600", 8)) != 0)
-                    throw CreateNativeIOException("Couldn't restrict ownership document permissions.");
-                stream.Write(bytes.Span);
-                stream.Flush(true);
+                byte[] bytes = root.ReadAllBytes(file, maxBytes);
+                this.KnownDocuments[slot] = file.Identity;
+                return bytes;
             }
-            File.Move(temporaryPath, path, true);
-            if (OperatingSystem.IsLinux())
-                SyncLinuxDirectory(directory);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-                File.Delete(temporaryPath);
+            catch (IOException ex)
+            {
+                throw new OwnershipDocumentException("The persisted ownership document changed or exceeded its byte limit.", ex);
+            }
         }
     }
 
-    private static string ValidateAbsolutePath(string path)
+    public void WriteAtomically(OwnershipDocumentSlot slot, ReadOnlyMemory<byte> bytes, int maxBytes)
     {
-        if (string.IsNullOrWhiteSpace(path))
-            throw new ArgumentException("A persisted ownership document path is required.", nameof(path));
-        if (!Path.IsPathFullyQualified(path))
-            throw new ArgumentException("A persisted ownership document path must be absolute.", nameof(path));
-        return Path.GetFullPath(path);
-    }
-
-    private static void SyncLinuxDirectory(string directory)
-    {
-        int descriptor = Open(directory, LinuxOpenReadOnly | LinuxOpenDirectory | LinuxOpenCloseOnExec);
-        if (descriptor < 0)
-            throw CreateNativeIOException("Couldn't open the ownership document directory for synchronization.");
-        try
+        lock (this.SyncRoot)
         {
-            if (Fsync(descriptor) != 0)
-                throw CreateNativeIOException("Couldn't durably synchronize the ownership document directory.");
-        }
-        finally
-        {
-            Close(descriptor);
+            this.AssertAvailable();
+            if (maxBytes <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxBytes));
+            if (bytes.Length == 0 || bytes.Length > maxBytes)
+                throw new OwnershipDocumentException("The ownership document has an invalid or excessive byte length.");
+
+            (LinuxAnchoredFileSystem root, string name) = this.Resolve(slot);
+            AssertPrivateDirectory(root, slot == OwnershipDocumentSlot.InstallationReceipt ? "game ownership workspace" : "ownership state");
+            LinuxFileIdentity? previous = root.Stat(name);
+            if (previous != null)
+            {
+                AssertPrivateFile(previous);
+                this.AssertKnownIdentity(slot, previous);
+            }
+            else if (this.KnownDocuments.ContainsKey(slot))
+                throw new IOException("A previously observed ownership document disappeared before replacement.");
+
+            string temporaryName = $".{name}.tmp-{Guid.NewGuid():N}";
+            LinuxFileIdentity? temporaryIdentity = null;
+            try
+            {
+                using (LinuxAnchoredFile temporary = root.CreateNewFile(temporaryName, PrivateFileMode))
+                {
+                    root.AppendAndFsync(temporary, temporaryName, bytes.Span, expectedLength: 0, maximumLength: maxBytes);
+                    temporaryIdentity = root.Stat(temporaryName)
+                        ?? throw new IOException("The temporary ownership document disappeared before replacement.");
+                    AssertPrivateFile(temporaryIdentity);
+                }
+
+                LinuxFileIdentity persistedIdentity = root.ReplaceFileAtomically(temporaryName, name, temporaryIdentity, previous);
+                temporaryIdentity = null;
+                using LinuxAnchoredFile persisted = root.OpenRegularFileForRead(name);
+                if (persisted.Identity != persistedIdentity)
+                    throw new IOException("The ownership-document leaf changed after atomic replacement.");
+                AssertPrivateFile(persisted.Identity);
+                byte[] actual = root.ReadAllBytes(persisted, maxBytes);
+                if (!actual.AsSpan().SequenceEqual(bytes.Span))
+                    throw new IOException("The durably replaced ownership document didn't match the supplied bytes.");
+                this.KnownDocuments[slot] = persisted.Identity;
+            }
+            finally
+            {
+                if (temporaryIdentity != null)
+                {
+                    try
+                    {
+                        root.UnlinkFile(temporaryName, temporaryIdentity);
+                    }
+                    catch
+                    {
+                        // Preserve the primary failure; private-state inspection can remove unexpected debris.
+                    }
+                }
+            }
         }
     }
 
-    private static IOException CreateNativeIOException(string message)
+    public void Dispose()
     {
-        return new IOException(message, new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+        if (this.Disposed)
+            return;
+        this.GameWorkspace.Dispose();
+        this.State.Dispose();
+        this.Disposed = true;
     }
 
-    [DllImport("libc", EntryPoint = "chmod", SetLastError = true)]
-    private static extern int Chmod(string path, uint mode);
+    private static void AssertPrivateDirectory(LinuxAnchoredFileSystem root, string description)
+    {
+        if (root.GetCurrentRootIdentity().UnixMode != PrivateDirectoryMode)
+            throw new IOException($"The private {description} directory must have exact 0700 permissions.");
+    }
 
-    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
-    private static extern int Open(string path, int flags);
+    private static void AssertPrivateFile(LinuxFileIdentity identity)
+    {
+        if (identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1 || identity.UnixMode != PrivateFileMode)
+            throw new IOException("A persisted ownership document must be a single-link regular file with exact 0600 permissions.");
+    }
 
-    [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
-    private static extern int Fsync(int descriptor);
+    private (LinuxAnchoredFileSystem Root, string Name) Resolve(OwnershipDocumentSlot slot)
+    {
+        return slot switch
+        {
+            OwnershipDocumentSlot.PackageManifest => (this.State, ManifestName),
+            OwnershipDocumentSlot.RollbackSnapshot => (this.State, RollbackName),
+            OwnershipDocumentSlot.InstallationReceipt => (this.GameWorkspace, ReceiptName),
+            _ => throw new ArgumentOutOfRangeException(nameof(slot))
+        };
+    }
 
-    [DllImport("libc", EntryPoint = "close")]
-    private static extern int Close(int descriptor);
+    private void AssertAvailable()
+    {
+        if (this.Disposed)
+            throw new ObjectDisposedException(nameof(LinuxAnchoredOwnershipDocumentStorage));
+        this.AssertNotRoot();
+    }
+
+    private void AssertKnownIdentity(OwnershipDocumentSlot slot, LinuxFileIdentity observed)
+    {
+        if (this.KnownDocuments.TryGetValue(slot, out LinuxFileIdentity? known) && observed != known)
+            throw new IOException("A persisted ownership-document leaf was replaced after it was observed.");
+    }
 }
 
 /// <summary>Typed ownership persistence which cannot load a receipt or rollback snapshot without its verified parent state.</summary>
-public sealed class OwnershipDocumentStore
+public sealed class OwnershipDocumentStore : IDisposable
 {
     private readonly IOwnershipDocumentStorage Storage;
     private readonly OwnershipPersistenceLimits Limits;
+    private readonly bool OwnsStorage;
 
-    public OwnershipDocumentStore(IOwnershipDocumentStorage storage, OwnershipPersistenceLimits? limits = null)
+    internal OwnershipDocumentStore(IOwnershipDocumentStorage storage, OwnershipPersistenceLimits? limits = null, bool ownsStorage = false)
     {
         this.Storage = storage ?? throw new ArgumentNullException(nameof(storage));
         this.Limits = limits ?? OwnershipPersistenceLimits.Default;
+        this.OwnsStorage = ownsStorage;
     }
 
-    public PackageManifest ReadManifest(string absolutePath)
+    /// <summary>Open production Linux storage rooted at two pre-existing exact-0700 private directories.</summary>
+    public static OwnershipDocumentStore OpenLinux(
+        string privateStateDirectory,
+        string privateGameWorkspaceDirectory,
+        OwnershipPersistenceLimits? limits = null
+    )
     {
-        return CanonicalOwnershipDocuments.ParseManifest(this.Read(absolutePath), this.Limits);
+        return new OwnershipDocumentStore(
+            new LinuxAnchoredOwnershipDocumentStorage(privateStateDirectory, privateGameWorkspaceDirectory),
+            limits,
+            ownsStorage: true
+        );
     }
 
-    public void WriteManifest(string absolutePath, PackageManifest manifest)
+    public PackageManifest ReadManifest()
     {
-        this.Write(absolutePath, CanonicalOwnershipDocuments.SerializeManifest(manifest));
+        return CanonicalOwnershipDocuments.ParseManifest(this.Read(OwnershipDocumentSlot.PackageManifest), this.Limits);
     }
 
-    public InstallationReceipt ReadReceipt(string absolutePath, PackageManifest verifiedManifest)
+    public void WriteManifest(PackageManifest manifest)
     {
-        return CanonicalOwnershipDocuments.ParseReceipt(this.Read(absolutePath), verifiedManifest, this.Limits);
+        this.Write(OwnershipDocumentSlot.PackageManifest, CanonicalOwnershipDocuments.SerializeManifest(manifest));
     }
 
-    public void WriteReceipt(string absolutePath, InstallationReceipt receipt, PackageManifest verifiedManifest)
+    public InstallationReceipt ReadReceipt(PackageManifest verifiedManifest)
+    {
+        return CanonicalOwnershipDocuments.ParseReceipt(this.Read(OwnershipDocumentSlot.InstallationReceipt), verifiedManifest, this.Limits);
+    }
+
+    public void WriteReceipt(InstallationReceipt receipt, PackageManifest verifiedManifest)
     {
         CanonicalOwnershipDocuments.AssertReceiptMatchesManifest(receipt, verifiedManifest);
-        this.Write(absolutePath, CanonicalOwnershipDocuments.SerializeReceipt(receipt));
+        this.Write(OwnershipDocumentSlot.InstallationReceipt, CanonicalOwnershipDocuments.SerializeReceipt(receipt));
     }
 
-    public StardewModdingAPI.Installer.Core.Planning.RollbackSnapshot ReadRollbackSnapshot(string absolutePath, InstallationReceipt? currentReceipt)
+    public StardewModdingAPI.Installer.Core.Planning.RollbackSnapshot ReadRollbackSnapshot(InstallationReceipt? currentReceipt)
     {
-        return CanonicalOwnershipDocuments.ParseRollbackSnapshot(this.Read(absolutePath), currentReceipt, this.Limits);
+        return CanonicalOwnershipDocuments.ParseRollbackSnapshot(
+            this.Read(OwnershipDocumentSlot.RollbackSnapshot),
+            currentReceipt,
+            this.Limits
+        );
     }
 
     public void WriteRollbackSnapshot(
-        string absolutePath,
         StardewModdingAPI.Installer.Core.Planning.RollbackSnapshot snapshot,
         InstallationReceipt? currentReceipt
     )
@@ -161,18 +269,24 @@ public sealed class OwnershipDocumentStore
         ArgumentNullException.ThrowIfNull(snapshot);
         if (snapshot.ExpectedCurrentReceiptSha256 != currentReceipt?.GetCanonicalDigest())
             throw new OwnershipDocumentException("The rollback snapshot doesn't target the supplied current receipt state.");
-        this.Write(absolutePath, CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot));
+        this.Write(OwnershipDocumentSlot.RollbackSnapshot, CanonicalOwnershipDocuments.SerializeRollbackSnapshot(snapshot));
     }
 
-    private ReadOnlyMemory<byte> Read(string path)
+    public void Dispose()
     {
-        return this.Storage.ReadBounded(path, this.Limits.MaxDocumentBytes);
+        if (this.OwnsStorage)
+            this.Storage.Dispose();
     }
 
-    private void Write(string path, byte[] bytes)
+    private ReadOnlyMemory<byte> Read(OwnershipDocumentSlot slot)
+    {
+        return this.Storage.ReadBounded(slot, this.Limits.MaxDocumentBytes);
+    }
+
+    private void Write(OwnershipDocumentSlot slot, byte[] bytes)
     {
         if (bytes.Length > this.Limits.MaxDocumentBytes)
             throw new OwnershipDocumentException("The canonical ownership document exceeds the configured byte limit.");
-        this.Storage.WriteAtomically(path, bytes, this.Limits.MaxDocumentBytes);
+        this.Storage.WriteAtomically(slot, bytes, this.Limits.MaxDocumentBytes);
     }
 }
