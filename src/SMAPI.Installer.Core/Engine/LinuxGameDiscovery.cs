@@ -73,6 +73,7 @@ public sealed class LinuxGameFolderException : Exception
 public sealed class LinuxGameDiscovery
 {
     private const int MaximumCandidates = 64;
+    private const int MaximumCandidateInputs = 256;
     private const int MaximumSteamLibraryDocumentBytes = 256 * 1024;
     private static readonly Version MinimumSupportedGameVersion = new(1, 6, 14);
 
@@ -111,13 +112,15 @@ public sealed class LinuxGameDiscovery
         cancellationToken.ThrowIfCancellationRequested();
 
         List<string> paths = new(MaximumCandidates);
+        HashSet<string> inputPaths = new(StringComparer.Ordinal);
+        int inputCount = 0;
         if (includeConventionalPaths)
         {
             foreach (string path in GetConventionalPaths(cancellationToken))
             {
-                if (paths.Count >= MaximumCandidates)
+                if (++inputCount > MaximumCandidateInputs || paths.Count >= MaximumCandidates)
                     break;
-                paths.Add(path);
+                AddCandidatePath(path, paths, inputPaths);
             }
         }
         if (additionalPaths is not null)
@@ -125,10 +128,9 @@ public sealed class LinuxGameDiscovery
             foreach (string path in additionalPaths)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (paths.Count >= MaximumCandidates)
+                if (++inputCount > MaximumCandidateInputs || paths.Count >= MaximumCandidates)
                     break;
-                if (!string.IsNullOrWhiteSpace(path))
-                    paths.Add(path);
+                AddCandidatePath(path, paths, inputPaths);
             }
         }
 
@@ -150,6 +152,23 @@ public sealed class LinuxGameDiscovery
         return result
             .OrderBy(candidate => candidate.CanonicalPath, StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private static void AddCandidatePath(string path, List<string> paths, HashSet<string> inputPaths)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        string key;
+        try
+        {
+            key = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            key = path;
+        }
+        if (inputPaths.Add(key))
+            paths.Add(path);
     }
 
     internal static LinuxGameFolderCandidate Validate(

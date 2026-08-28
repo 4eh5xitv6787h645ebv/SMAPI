@@ -102,7 +102,10 @@ public sealed class LinuxGameDiscoveryTests
     {
         string game = this.CreateValidGame();
         string missing = Path.Combine(this.TempRoot, "missing");
-        string[] paths = Enumerable.Repeat(game, 80).Append(missing).ToArray();
+        string[] paths = Enumerable.Repeat(game, 63)
+            .Append(missing)
+            .Concat(Enumerable.Range(0, 200).Select(index => Path.Combine(this.TempRoot, $"extra-{index}")))
+            .ToArray();
 
         IReadOnlyList<LinuxGameFolderCandidate> result = new LinuxGameDiscovery().Discover(
             paths,
@@ -111,8 +114,9 @@ public sealed class LinuxGameDiscoveryTests
             new Version(1, 0)
         );
 
-        result.Should().ContainSingle();
-        result[0].Status.Should().Be(LinuxGameFolderStatus.Valid);
+        result.Should().HaveCount(64);
+        result.Should().ContainSingle(candidate => candidate.Status == LinuxGameFolderStatus.Valid);
+        result.Should().Contain(candidate => candidate.CanonicalPath == missing && candidate.Status == LinuxGameFolderStatus.MissingDirectory);
     }
 
     private string CreateValidGame()
