@@ -71,6 +71,29 @@ public sealed class GeneratedFileExecutionTests
     }
 
     [Test]
+    public void InstallOutcome_ReportsActionAndSeparatesManagedPathsFromPrivateInstallerState()
+    {
+        string game = this.CreateGame(Dependencies("net6.0"), 0x1a4);
+        using TemplatePackageAuthority package = this.CreatePackage();
+        LinuxInstallerEngine engine = new();
+        using InspectedInstallationState inspection = Inspect(engine, game, package);
+
+        InstallationExecutionOutcome outcome = engine.ExecuteWithOutcomeAsync(
+            inspection,
+            inspection.ConfirmationDigest,
+            "/tmp/smapi-install.log"
+        ).GetAwaiter().GetResult();
+
+        outcome.Action.Should().Be(InstallationAction.Install);
+        outcome.Status.Should().Be(InstallationExecutionStatus.Succeeded);
+        outcome.Transaction!.TransactionId.Should().NotBe(Guid.Empty);
+        outcome.ManagedGamePathChanges.Should().Contain(change => change.RelativePath == ResultPath);
+        outcome.ManagedGamePathChanges.Should().OnlyContain(change => !change.RelativePath.StartsWith(".smapi-installer/", StringComparison.Ordinal));
+        outcome.InternalStateChanges.Should().NotBeEmpty().And.OnlyContain(change => change.RelativePath.StartsWith(".smapi-installer/", StringComparison.Ordinal));
+        outcome.SanitizedLogPath.Should().Be("/tmp/smapi-install.log");
+    }
+
+    [Test]
     public void Execution_SourceContentChangesAfterInspection_FailsBeforeMutation()
     {
         string game = this.CreateGame(Dependencies("first"), 0x1a4);
@@ -256,6 +279,14 @@ public sealed class GeneratedFileExecutionTests
             Execute(inspection, engine);
         }
 
+        if (action == InstallationAction.Backup)
+        {
+            using InstallerOperationLease evolvedLease = InstallerOperationLease.Acquire(game);
+            AnchoredCoreStateAuthority evolvedState = AnchoredCoreStateAuthority.Inspect(evolvedLease);
+            evolvedState.Manifest!.Entries.Single(entry => entry.Path.Value == ResultPath).Sha256.Should().Be(Hash(evolved));
+            evolvedState.Receipt!.Entries.Single(entry => entry.Path.Value == ResultPath).InstalledSha256.Should().Be(Hash(evolved));
+        }
+
         if (action == InstallationAction.Uninstall)
             File.Exists(Path.Combine(game, ResultPath)).Should().BeFalse();
         else
@@ -263,6 +294,14 @@ public sealed class GeneratedFileExecutionTests
 
         using CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
         Execute(engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult(), engine);
+
+        if (action == InstallationAction.Backup)
+        {
+            using InstallerOperationLease restoredLease = InstallerOperationLease.Acquire(game);
+            AnchoredCoreStateAuthority restoredState = AnchoredCoreStateAuthority.Inspect(restoredLease);
+            restoredState.Manifest!.Entries.Single(entry => entry.Path.Value == ResultPath).Sha256.Should().Be(Hash(original));
+            restoredState.Receipt!.Entries.Single(entry => entry.Path.Value == ResultPath).InstalledSha256.Should().Be(Hash(original));
+        }
 
         File.ReadAllText(Path.Combine(game, SourcePath)).Should().Be(evolved);
         File.ReadAllText(Path.Combine(game, ResultPath)).Should().Be(evolved);

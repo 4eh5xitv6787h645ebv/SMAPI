@@ -103,7 +103,6 @@ public sealed class CommittedRecoveryStateTests
     [TestCase(InstallationAction.Update, true, false, true)]
     [TestCase(InstallationAction.Repair, true, false, true)]
     [TestCase(InstallationAction.Uninstall, true, true, true)]
-    [TestCase(InstallationAction.Backup, true, true, true)]
     [TestCase(InstallationAction.Rollback, false, false, false)]
     public void Pointer_RejectsActionTupleMismatch(
         InstallationAction action,
@@ -225,6 +224,79 @@ public sealed class CommittedRecoveryStateTests
             normal.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(2);
             Directory.EnumerateDirectories(Path.Combine(game, ".smapi-installer", "recovery", "generations"))
                 .Should().HaveCount(2);
+        }
+    }
+
+    [Test]
+    public void PruneOutcome_ReportsLogicalPublicationPhysicalCleanupAndPendingWorkAtFaultBoundaries()
+    {
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
+        using (package)
+        {
+            RecoveryPrunePlan plan = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            LinuxInstallerEngine interrupted = new(
+                new InstallerTransactionExecutor(),
+                new BoundaryTerminationFaultInjector(RecoveryPruneBoundary.AfterPointerPublish)
+            );
+
+            RecoveryPruneOutcome outcome = interrupted.ExecuteRecoveryPruneWithOutcomeAsync(plan, plan.ConfirmationDigest).GetAwaiter().GetResult();
+
+            outcome.Status.Should().Be(RecoveryPruneOutcomeStatus.Interrupted);
+            outcome.LogicallyRemovedGenerationIds.Should().Equal(plan.RemovedGenerationIds);
+            outcome.PhysicallyCleanedGenerationIds.Should().BeEmpty();
+            outcome.PendingCleanupGenerationIds.Should().BeEquivalentTo(plan.CleanupGenerationIds);
+            outcome.AuxiliaryCleanupPending.Should().BeFalse();
+        }
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public void PruneOutcome_CleanupOnlyFaultReportsExactPhysicalAndAuxiliaryPending(bool afterLastGeneration)
+    {
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
+        using (package)
+        {
+            RecoveryPrunePlan initial = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            LinuxInstallerEngine publishing = new(
+                new InstallerTransactionExecutor(),
+                new BoundaryTerminationFaultInjector(RecoveryPruneBoundary.AfterPointerPublish)
+            );
+            publishing.ExecuteRecoveryPruneWithOutcomeAsync(initial, initial.ConfirmationDigest).GetAwaiter().GetResult().Status
+                .Should().Be(RecoveryPruneOutcomeStatus.Interrupted);
+            RecoveryPrunePlan cleanup = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            cleanup.RemovedGenerationIds.Should().BeEmpty();
+            int failAfter = afterLastGeneration ? cleanup.CleanupGenerationIds.Count : 1;
+            LinuxInstallerEngine failing = new(new InstallerTransactionExecutor(), new CleanupCountTerminationFaultInjector(failAfter));
+
+            RecoveryPruneOutcome outcome = failing.ExecuteRecoveryPruneWithOutcomeAsync(cleanup, cleanup.ConfirmationDigest).GetAwaiter().GetResult();
+
+            outcome.Status.Should().Be(RecoveryPruneOutcomeStatus.Interrupted);
+            outcome.LogicallyRemovedGenerationIds.Should().BeEmpty();
+            outcome.PhysicallyCleanedGenerationIds.Should().HaveCount(failAfter);
+            outcome.PendingCleanupGenerationIds.Should().HaveCount(cleanup.CleanupGenerationIds.Count - failAfter);
+            outcome.AuxiliaryCleanupPending.Should().BeFalse();
+            outcome.RequiresCleanup.Should().Be(!afterLastGeneration);
+        }
+    }
+
+    [Test]
+    public void PruneOutcome_CancellationAfterPublicationIsTruthfulAndResumable()
+    {
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
+        using (package)
+        using (CancellationTokenSource source = new())
+        {
+            RecoveryPrunePlan plan = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            LinuxInstallerEngine cancelling = new(new InstallerTransactionExecutor(), new CancellingPruneFaultInjector(source));
+
+            RecoveryPruneOutcome outcome = cancelling.ExecuteRecoveryPruneWithOutcomeAsync(plan, plan.ConfirmationDigest, source.Token).GetAwaiter().GetResult();
+
+            outcome.Status.Should().Be(RecoveryPruneOutcomeStatus.CancelledWithCleanupPending);
+            outcome.LogicallyRemovedGenerationIds.Should().Equal(plan.RemovedGenerationIds);
+            outcome.PhysicallyCleanedGenerationIds.Should().BeEmpty();
+            RecoveryPrunePlan resume = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            resume.RemovedGenerationIds.Should().BeEmpty();
+            resume.CleanupGenerationIds.Should().BeEquivalentTo(plan.CleanupGenerationIds);
         }
     }
 
@@ -767,6 +839,29 @@ public sealed class CommittedRecoveryStateTests
         {
             if (boundary == this.Target)
                 throw new SimulatedProcessTerminationException($"Simulated termination at {boundary}.");
+        }
+    }
+
+    private sealed class CancellingPruneFaultInjector : IRecoveryPruneFaultInjector
+    {
+        private readonly CancellationTokenSource Source;
+        public CancellingPruneFaultInjector(CancellationTokenSource source) => this.Source = source;
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null)
+        {
+            if (boundary == RecoveryPruneBoundary.AfterPointerPublish)
+                this.Source.Cancel();
+        }
+    }
+
+    private sealed class CleanupCountTerminationFaultInjector : IRecoveryPruneFaultInjector
+    {
+        private readonly int FailAfter;
+        private int Cleaned;
+        public CleanupCountTerminationFaultInjector(int failAfter) => this.FailAfter = failAfter;
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null)
+        {
+            if (boundary == RecoveryPruneBoundary.AfterGenerationCleanup && ++this.Cleaned == this.FailAfter)
+                throw new SimulatedProcessTerminationException("Simulated cleanup-only interruption.");
         }
     }
 

@@ -373,6 +373,15 @@ public sealed class LinuxInstallerEngine
     )
         => Task.Run(() => this.Execute(inspection, confirmedDigest, cancellationToken), cancellationToken);
 
+    /// <summary>Execute one exact inspection and return a bounded truthful result for success, cancellation, rollback, or interruption.</summary>
+    public Task<InstallationExecutionOutcome> ExecuteWithOutcomeAsync(
+        InspectedInstallationState inspection,
+        Sha256Digest confirmedDigest,
+        string? sanitizedLogPath = null,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(() => this.ExecuteWithOutcome(inspection, confirmedDigest, sanitizedLogPath, cancellationToken));
+
     private TransactionResult Execute(
         InspectedInstallationState inspection,
         Sha256Digest confirmedDigest,
@@ -424,6 +433,107 @@ public sealed class LinuxInstallerEngine
             );
             return this.Materializer.Apply(lease, preparation, coreState, cancellationToken);
         }
+    }
+
+    private InstallationExecutionOutcome ExecuteWithOutcome(
+        InspectedInstallationState inspection,
+        Sha256Digest confirmedDigest,
+        string? sanitizedLogPath,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(inspection);
+        ArgumentNullException.ThrowIfNull(confirmedDigest);
+        ValidateSanitizedLogPath(sanitizedLogPath);
+        InstallationAction action = inspection.Action;
+        try
+        {
+            inspection.AssertUsable();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!inspection.Plan.CanExecute)
+                throw new ExecutionCompilationException(ExecutionCompilationError.NonExecutablePlan, "A plan with unresolved conflicts can't execute.");
+            if (inspection.ConfirmationDigest != confirmedDigest)
+                throw new ExecutionCompilationException(ExecutionCompilationError.StalePlan, "The supplied confirmation digest doesn't match this inspected plan.");
+
+            using InstallerOperationLease lease = InstallerOperationLease.Acquire(inspection.GameRoot.CanonicalPath);
+            lease.AssertRootAndGeneration(inspection.GameRoot, inspection.OperationGeneration);
+            IReadOnlyList<TransactionResult> recovered = this.Executor.RecoverLocked(lease);
+            if (recovered.Count > 0)
+            {
+                return new(
+                    action,
+                    InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired,
+                    null,
+                    recovered,
+                    TransactionErrorCode.PathChanged,
+                    "An interrupted operation was recovered. Inspect and confirm the installation again.",
+                    sanitizedLogPath
+                );
+            }
+            lease.AssertRootAndGeneration(inspection.GameRoot, inspection.OperationGeneration);
+            LinuxGameDiscovery.AssertValid(lease, cancellationToken);
+            using InspectedInstallationState current = this.InspectLocked(
+                lease,
+                action,
+                inspection.TargetPackageContent,
+                inspection.RollbackContent,
+                inspection.ModifiedFileReplacementApprovals,
+                cancellationToken
+            );
+            if (current.ConfirmationDigest != inspection.ConfirmationDigest)
+                throw new ExecutionCompilationException(ExecutionCompilationError.StalePlan, "The installation state changed after confirmation.");
+            AnchoredCoreStateAuthority coreState = AnchoredCoreStateAuthority.Inspect(lease);
+            InstallationPlanningRequest request = InstallationStateInspector.CreateRequest(
+                lease.Game,
+                action,
+                inspection.TargetPackageContent,
+                inspection.RollbackContent,
+                coreState,
+                inspection.ModifiedFileReplacementApprovals,
+                cancellationToken
+            );
+            InstallationExecutionPreparation preparation = this.Compiler.Prepare(current.Binding, current.Plan, request, Guid.NewGuid());
+            TransactionExecutionOutcome transaction = this.Materializer.ApplyWithOutcome(lease, preparation, coreState, cancellationToken);
+            return new(
+                action,
+                MapStatus(transaction.Status),
+                transaction,
+                Array.Empty<TransactionResult>(),
+                transaction.ErrorCode,
+                transaction.SafeMessage,
+                sanitizedLogPath
+            );
+        }
+        catch (OperationCanceledException)
+        {
+            return new(action, InstallationExecutionStatus.CancelledBeforeMutation, null, Array.Empty<TransactionResult>(), null, "The operation was cancelled before mutation.", sanitizedLogPath);
+        }
+        catch (Exception exception)
+        {
+            TransactionErrorCode code = InstallerTransactionExecutor.GetErrorCode(exception);
+            return new(action, InstallationExecutionStatus.FailedBeforeMutation, null, Array.Empty<TransactionResult>(), code, InstallerTransactionExecutor.SafeMessage(code), sanitizedLogPath);
+        }
+    }
+
+    private static InstallationExecutionStatus MapStatus(TransactionOutcomeStatus status)
+        => status switch
+        {
+            TransactionOutcomeStatus.Committed => InstallationExecutionStatus.Succeeded,
+            TransactionOutcomeStatus.CommittedWithCleanupWarning => InstallationExecutionStatus.SucceededWithCleanupWarning,
+            TransactionOutcomeStatus.CancelledBeforeMutation => InstallationExecutionStatus.CancelledBeforeMutation,
+            TransactionOutcomeStatus.CancelledAndRolledBack => InstallationExecutionStatus.CancelledAndRolledBack,
+            TransactionOutcomeStatus.FailedAndRolledBack => InstallationExecutionStatus.FailedAndRolledBack,
+            TransactionOutcomeStatus.InterruptedRecoveryRequired or TransactionOutcomeStatus.RollbackFailedRecoveryRequired
+                => InstallationExecutionStatus.InterruptedRecoveryRequired,
+            _ => InstallationExecutionStatus.FailedBeforeMutation
+        };
+
+    private static void ValidateSanitizedLogPath(string? path)
+    {
+        if (path is null)
+            return;
+        if (path.Length is 0 or > 1024 || path.Any(char.IsControl))
+            throw new ArgumentException("A sanitized log path must be nonempty, bounded, and contain no control characters.", nameof(path));
     }
 
     /// <summary>Open the current committed recovery generation through an opaque anchored handle owned by the caller.</summary>
@@ -573,6 +683,14 @@ public sealed class LinuxInstallerEngine
     )
         => Task.Run(() => this.ExecuteRecoveryPrune(plan, confirmedDigest, cancellationToken), cancellationToken);
 
+    /// <summary>Execute a recovery-pruning decision and return its exact logical-publication and physical-cleanup result.</summary>
+    public Task<RecoveryPruneOutcome> ExecuteRecoveryPruneWithOutcomeAsync(
+        RecoveryPrunePlan plan,
+        Sha256Digest confirmedDigest,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(() => this.ExecuteRecoveryPruneWithOutcome(plan, confirmedDigest, cancellationToken));
+
     private int ExecuteRecoveryPrune(
         RecoveryPrunePlan plan,
         Sha256Digest confirmedDigest,
@@ -599,6 +717,45 @@ public sealed class LinuxInstallerEngine
             cancellationToken,
             this.Progress
         );
+    }
+
+    private RecoveryPruneOutcome ExecuteRecoveryPruneWithOutcome(
+        RecoveryPrunePlan plan,
+        Sha256Digest confirmedDigest,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(confirmedDigest);
+        if (plan.ConfirmationDigest != confirmedDigest)
+            return new(RecoveryPruneOutcomeStatus.FailedBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, TransactionErrorCode.PathChanged, "The recovery history changed and must be inspected again.");
+        try
+        {
+            using InstallerOperationLease lease = InstallerOperationLease.Acquire(plan.GameRoot.CanonicalPath);
+            lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
+            if (this.Executor.RecoverLocked(lease).Count > 0)
+                return new(RecoveryPruneOutcomeStatus.FailedBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, TransactionErrorCode.PathChanged, "An interrupted operation was recovered. Inspect recovery retention again.");
+            lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
+            AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+            cancellationToken.ThrowIfCancellationRequested();
+            return CommittedRecoveryHandle.ExecutePrunePlanWithOutcome(
+                lease,
+                state,
+                plan,
+                this.RecoveryPruneFaultInjector,
+                cancellationToken,
+                this.Progress
+            );
+        }
+        catch (OperationCanceledException)
+        {
+            return new(RecoveryPruneOutcomeStatus.CancelledBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, null, "Recovery pruning was cancelled before publication.");
+        }
+        catch (Exception exception)
+        {
+            TransactionErrorCode code = InstallerTransactionExecutor.GetErrorCode(exception);
+            return new(RecoveryPruneOutcomeStatus.FailedBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, code, InstallerTransactionExecutor.SafeMessage(code));
+        }
     }
 
     internal InspectedInstallationState InspectLocked(

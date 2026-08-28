@@ -478,7 +478,15 @@ internal sealed class InstallerExecutionCompiler
                 );
 
             case InstallationAction.Backup:
-                return new ReceiptPreparationInstruction(ReceiptPreparationKind.None, null, null);
+                if (!request.HasGeneratedOwnershipEvolution)
+                    return new ReceiptPreparationInstruction(ReceiptPreparationKind.None, null, null);
+                InstallationReceipt evolvedReceipt = request.InstalledReceipt
+                    ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "An ownership-normalizing backup has no evolved receipt.");
+                return new ReceiptPreparationInstruction(
+                    ReceiptPreparationKind.WriteAtomically,
+                    binding.InstalledReceiptSha256,
+                    new GeneratedCanonicalReceiptSource(evolvedReceipt, CanonicalOwnershipDocuments.SerializeReceipt(evolvedReceipt))
+                );
 
             case InstallationAction.Rollback:
                 {
@@ -549,7 +557,15 @@ internal sealed class InstallerExecutionCompiler
                 );
 
             case InstallationAction.Backup:
-                return new ManifestPreparationInstruction(ReceiptPreparationKind.None, null, null);
+                if (!request.HasGeneratedOwnershipEvolution)
+                    return new ManifestPreparationInstruction(ReceiptPreparationKind.None, null, null);
+                PackageManifest evolvedManifest = request.InstalledManifest
+                    ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "An ownership-normalizing backup has no evolved manifest.");
+                return new ManifestPreparationInstruction(
+                    ReceiptPreparationKind.WriteAtomically,
+                    binding.InstalledManifestSha256,
+                    new GeneratedCanonicalManifestSource(evolvedManifest, CanonicalOwnershipDocuments.SerializeManifest(evolvedManifest))
+                );
 
             case InstallationAction.Rollback:
                 {

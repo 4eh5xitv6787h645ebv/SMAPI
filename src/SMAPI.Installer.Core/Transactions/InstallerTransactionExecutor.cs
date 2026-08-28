@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
@@ -42,7 +43,7 @@ internal sealed class InstallerTransactionExecutor
 
         this.Progress.Report(new(TransactionStage.Recovering, 0, plan.Operations.Count));
         this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
-        return this.ApplyLockedCore(lease, payload, plan, cancellationToken);
+        return this.ApplyLockedCore(lease, payload, plan, cancellationToken, captureOutcome: false).Outcome.Result!;
     }
 
     /// <summary>Apply through the same exclusive root lease which was revalidated against user confirmation.</summary>
@@ -76,14 +77,52 @@ internal sealed class InstallerTransactionExecutor
             );
         }
         lease.AssertRootAndGeneration(expectedRoot, expectedGeneration);
-        return this.ApplyLockedCore(lease, payload, plan, cancellationToken);
+        return this.ApplyLockedCore(lease, payload, plan, cancellationToken, captureOutcome: false).Outcome.Result!;
     }
 
-    private TransactionResult ApplyLockedCore(
+    internal TransactionExecutionOutcome ApplyLockedWithOutcome(
         InstallerOperationLease lease,
         LinuxAnchoredFileSystem payload,
         TransactionPlan plan,
-        CancellationToken cancellationToken
+        GameRootIdentity expectedRoot,
+        ulong expectedGeneration,
+        CancellationToken cancellationToken = default
+    )
+    {
+        try
+        {
+            LinuxPrivilegeGuard.AssertNotRoot();
+            ArgumentNullException.ThrowIfNull(lease);
+            ArgumentNullException.ThrowIfNull(payload);
+            ArgumentNullException.ThrowIfNull(plan);
+            ValidatePlan(plan);
+            lease.AssertRootAndGeneration(expectedRoot, expectedGeneration);
+            this.Progress.Report(new(TransactionStage.Recovering, 0, plan.Operations.Count));
+            IReadOnlyList<TransactionResult> recovered = this.RecoverIncompleteTransactionsLocked(lease.Game, lease.Workspace, lease.CanonicalGameRoot);
+            if (recovered.Count > 0)
+            {
+                lease.ReserveNextGeneration(expectedGeneration);
+                return FailureOutcome(plan.TransactionId, TransactionOutcomeStatus.FailedBeforeMutation, TransactionErrorCode.PathChanged);
+            }
+            lease.AssertRootAndGeneration(expectedRoot, expectedGeneration);
+            return this.ApplyLockedCore(lease, payload, plan, cancellationToken, captureOutcome: true).Outcome;
+        }
+        catch (OperationCanceledException)
+        {
+            return FailureOutcome(plan.TransactionId, TransactionOutcomeStatus.CancelledBeforeMutation, null, TransactionCancellationDisposition.ObservedBeforeMutation);
+        }
+        catch (Exception exception)
+        {
+            return FailureOutcome(plan.TransactionId, TransactionOutcomeStatus.FailedBeforeMutation, GetErrorCode(exception));
+        }
+    }
+
+    private TransactionExecutionAttempt ApplyLockedCore(
+        InstallerOperationLease lease,
+        LinuxAnchoredFileSystem payload,
+        TransactionPlan plan,
+        CancellationToken cancellationToken,
+        bool captureOutcome
     )
     {
         LinuxAnchoredFileSystem game = lease.Game;
@@ -122,17 +161,31 @@ internal sealed class InstallerTransactionExecutor
             game.RenameDirectoryNoReplace(preparationRelativePath, transactionRelativePath, preparationIdentity);
             this.FaultInjector.AtSetupBoundary(plan.TransactionId, TransactionSetupBoundary.TransactionPublished);
         }
-        catch (SimulatedProcessTerminationException)
+        catch (SimulatedProcessTerminationException exception)
         {
             preparedEventsFile?.Dispose();
             preparedTransaction?.Dispose();
+            if (captureOutcome)
+                return new(FailureOutcome(plan.TransactionId, TransactionOutcomeStatus.InterruptedRecoveryRequired, TransactionErrorCode.IoFailure), exception);
             throw;
         }
-        catch
+        catch (Exception exception)
         {
             preparedEventsFile?.Dispose();
             preparedTransaction?.Dispose();
-            this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
+            try
+            {
+                this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
+            }
+            catch (Exception recoveryException)
+            {
+                if (captureOutcome)
+                    return new(FailureOutcome(plan.TransactionId, TransactionOutcomeStatus.RollbackFailedRecoveryRequired, GetErrorCode(recoveryException)), recoveryException);
+                throw;
+            }
+            if (captureOutcome)
+                return new(FailureOutcome(plan.TransactionId, TransactionOutcomeStatus.FailedBeforeMutation, GetErrorCode(exception)), exception);
+            ExceptionDispatchInfo.Capture(exception).Throw();
             throw;
         }
         using LinuxAnchoredFileSystem transaction = preparedTransaction;
@@ -156,25 +209,146 @@ internal sealed class InstallerTransactionExecutor
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Committed);
             committed = true;
         }
-        catch (SimulatedProcessTerminationException)
+        catch (SimulatedProcessTerminationException exception)
         {
+            if (captureOutcome)
+            {
+                replay = TransactionJournalStore.ReadEvents(transaction, journal);
+                return new(CreateInterruptedOutcome(plan, replay), exception);
+            }
             throw;
         }
-        catch
+        catch (Exception exception)
         {
             eventsFile.Dispose();
-            this.RollBackJournal(game, transaction, journal);
-            CleanupFinalTransaction(transaction);
+            replay = TransactionJournalStore.ReadEvents(transaction, journal);
+            IReadOnlyList<TransactionPathChange> changed = GetAppliedChanges(plan, replay);
+            try
+            {
+                this.RollBackJournal(game, transaction, journal);
+                CleanupFinalTransaction(transaction);
+            }
+            catch (Exception rollbackException)
+            {
+                if (captureOutcome)
+                {
+                    TransactionExecutionOutcome failed = new(
+                        plan.TransactionId,
+                        TransactionOutcomeStatus.RollbackFailedRecoveryRequired,
+                        null,
+                        changed,
+                        Array.Empty<TransactionPathChange>(),
+                        TransactionCancellationDisposition.None,
+                        GetErrorCode(rollbackException),
+                        SafeMessage(GetErrorCode(rollbackException))
+                    );
+                    return new(failed, rollbackException);
+                }
+                throw;
+            }
+            if (captureOutcome)
+            {
+                bool cancelled = exception is OperationCanceledException;
+                bool changedBeforeCancellation = changed.Count > 0;
+                TransactionExecutionOutcome rolledBack = new(
+                    plan.TransactionId,
+                    cancelled
+                        ? changedBeforeCancellation ? TransactionOutcomeStatus.CancelledAndRolledBack : TransactionOutcomeStatus.CancelledBeforeMutation
+                        : TransactionOutcomeStatus.FailedAndRolledBack,
+                    TransactionStatus.RolledBack,
+                    changed,
+                    changed,
+                    cancelled
+                        ? changedBeforeCancellation ? TransactionCancellationDisposition.ObservedAfterMutationAndRolledBack : TransactionCancellationDisposition.ObservedBeforeMutation
+                        : TransactionCancellationDisposition.None,
+                    cancelled ? null : GetErrorCode(exception),
+                    cancelled
+                        ? changedBeforeCancellation ? "Cancellation was observed after mutation began and every changed path was rolled back." : "The operation was cancelled before game-file mutation."
+                        : SafeMessage(GetErrorCode(exception))
+                );
+                return new(rolledBack, exception);
+            }
+            ExceptionDispatchInfo.Capture(exception).Throw();
             throw;
         }
 
         if (!committed)
             throw new InstallerTransactionException(TransactionErrorCode.IoFailure, "The transaction ended without a durable terminal event.");
-        CleanupFinalTransaction(transaction);
-        this.TrimFinalTransactions(game, workspace, canonicalGameRoot);
+        Exception? cleanupWarning = null;
+        try
+        {
+            this.FaultInjector.AfterDurableCommit(plan.TransactionId);
+            CleanupFinalTransaction(transaction);
+            this.TrimFinalTransactions(game, workspace, canonicalGameRoot);
+        }
+        catch (Exception exception)
+        {
+            cleanupWarning = exception;
+        }
         this.Progress.Report(new(TransactionStage.Completed, plan.Operations.Count, plan.Operations.Count));
-        return new(plan.TransactionId, TransactionStatus.Committed, plan.Operations.Count);
+        IReadOnlyList<TransactionPathChange> committedChanges = plan.Operations
+            .Select(operation => new TransactionPathChange(operation.RelativePath, operation.Kind))
+            .ToArray();
+        TransactionExecutionOutcome outcome = new(
+            plan.TransactionId,
+            cleanupWarning is null ? TransactionOutcomeStatus.Committed : TransactionOutcomeStatus.CommittedWithCleanupWarning,
+            TransactionStatus.Committed,
+            committedChanges,
+            Array.Empty<TransactionPathChange>(),
+            cancellationToken.IsCancellationRequested
+                ? TransactionCancellationDisposition.RequestedAfterMutationStartedAndCommitted
+                : TransactionCancellationDisposition.None,
+            cleanupWarning is null ? null : GetErrorCode(cleanupWarning),
+            cleanupWarning is null ? null : "The operation committed, but obsolete installer recovery data could not be cleaned up."
+        );
+        return new(outcome, cleanupWarning);
     }
+
+    private static TransactionExecutionOutcome CreateInterruptedOutcome(TransactionPlan plan, TransactionJournalReplay replay)
+    {
+        IReadOnlyList<TransactionPathChange> changed = GetAppliedChanges(plan, replay);
+        return new(
+            plan.TransactionId,
+            TransactionOutcomeStatus.InterruptedRecoveryRequired,
+            null,
+            changed,
+            Array.Empty<TransactionPathChange>(),
+            TransactionCancellationDisposition.None,
+            TransactionErrorCode.IoFailure,
+            "The operation was interrupted and requires recovery before another installation operation."
+        );
+    }
+
+    private static IReadOnlyList<TransactionPathChange> GetAppliedChanges(TransactionPlan plan, TransactionJournalReplay replay)
+        => replay.AppliedOperations
+            .OrderBy(index => index)
+            .Select(index => new TransactionPathChange(plan.Operations[index].RelativePath, plan.Operations[index].Kind))
+            .ToArray();
+
+    private static TransactionExecutionOutcome FailureOutcome(
+        Guid transactionId,
+        TransactionOutcomeStatus status,
+        TransactionErrorCode? code,
+        TransactionCancellationDisposition cancellation = TransactionCancellationDisposition.None
+    )
+        => new(transactionId, status, null, Array.Empty<TransactionPathChange>(), Array.Empty<TransactionPathChange>(), cancellation, code, SafeMessage(code));
+
+    internal static TransactionErrorCode GetErrorCode(Exception exception)
+        => exception is InstallerTransactionException transaction ? transaction.Code : TransactionErrorCode.IoFailure;
+
+    internal static string? SafeMessage(TransactionErrorCode? code)
+        => code switch
+        {
+            null => null,
+            TransactionErrorCode.InvalidPlan => "The installer operation is invalid and must be inspected again.",
+            TransactionErrorCode.UnsafePath => "An installer path is unsafe.",
+            TransactionErrorCode.PathChanged or TransactionErrorCode.ExistingFileMismatch => "The game installation changed and must be inspected again.",
+            TransactionErrorCode.PayloadMismatch => "The verified package content changed or failed validation.",
+            TransactionErrorCode.ConcurrentOperation => "Another installer operation is active.",
+            TransactionErrorCode.WorkspaceConflict => "The installer workspace needs attention before continuing.",
+            TransactionErrorCode.RecoveryFailed => "Automatic recovery could not safely finish.",
+            _ => "The installer operation failed because of an input/output error."
+        };
 
     /// <summary>Recover every incomplete transaction under a game root.</summary>
     public IReadOnlyList<TransactionResult> RecoverIncompleteTransactions(string gameRoot)
@@ -442,8 +616,8 @@ internal sealed class InstallerTransactionExecutor
         string transactionPrefix = $"{WorkspaceName}/{TransactionsName}/{plan.TransactionId:N}/";
         for (int index = 0; index < plan.Operations.Count; index++)
         {
-            this.Progress.Report(new(TransactionStage.Applying, index, plan.Operations.Count));
             TransactionFileOperation operation = plan.Operations[index];
+            this.Progress.Report(new(GetMutationStage(operation), index, plan.Operations.Count));
             TransactionJournalEntry entry = journal.Entries[index];
             LinuxFileIdentity? existing = ValidateExisting(
                 game,
@@ -487,6 +661,19 @@ internal sealed class InstallerTransactionExecutor
             this.FaultInjector.AfterMutation(plan.TransactionId, index);
         }
         return replay;
+    }
+
+    private static TransactionStage GetMutationStage(TransactionFileOperation operation)
+    {
+        if (operation.RelativePath == "StardewValley" || operation.RelativePath == "StardewValley-original")
+            return TransactionStage.UpdatingLauncher;
+        if (operation.RelativePath == TransactionPlan.CoreRecoveryPointerRelativePath)
+            return TransactionStage.PublishingRecovery;
+        if (operation.RelativePath is TransactionPlan.CoreManifestRelativePath or TransactionPlan.CoreReceiptRelativePath)
+            return TransactionStage.UpdatingInstallerState;
+        return operation.Kind == TransactionOperationKind.RemoveFile
+            ? TransactionStage.RemovingFiles
+            : TransactionStage.WritingFiles;
     }
 
     private static LinuxFileIdentity? ValidateExisting(

@@ -342,6 +342,25 @@ public sealed class VerifiedCanonicalManifestSource : PreparationSource
     public byte[] GetCanonicalBytes() => this.Bytes.ToArray();
 }
 
+/// <summary>A canonical installed manifest regenerated from exact observed game-source evidence.</summary>
+public sealed class GeneratedCanonicalManifestSource : PreparationSource
+{
+    public PackageManifest Manifest { get; }
+    public Sha256Digest Sha256 { get; }
+    private readonly byte[] Bytes;
+
+    internal GeneratedCanonicalManifestSource(PackageManifest manifest, byte[] bytes)
+    {
+        this.Manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
+        this.Bytes = bytes.ToArray();
+        this.Sha256 = Sha256Digest.Hash(this.Bytes);
+        if (this.Sha256 != manifest.GetCanonicalDigest())
+            throw new ArgumentException("The canonical manifest bytes don't match the regenerated manifest.", nameof(bytes));
+    }
+
+    public byte[] GetCanonicalBytes() => this.Bytes.ToArray();
+}
+
 /// <summary>One typed preparation instruction corresponding one-to-one with a planner operation.</summary>
 public sealed class FilePreparationInstruction
 {

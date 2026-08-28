@@ -266,7 +266,13 @@ public enum TransactionStage
     Inspecting,
     VerifyingRecovery,
     PreparingRecovery,
-    PreparingPayload
+    PreparingPayload,
+    WritingFiles,
+    RemovingFiles,
+    UpdatingLauncher,
+    UpdatingInstallerState,
+    PublishingRecovery,
+    CleaningRecovery
 }
 
 /// <summary>A bounded transaction progress update. A <see langword="null"/> total denotes indeterminate pre-mutation work.</summary>
@@ -327,6 +333,9 @@ public interface ITransactionFaultInjector
 
     /// <summary>Called after an operation mutation is durable.</summary>
     void AfterMutation(Guid transactionId, int operationIndex);
+
+    /// <summary>Called after the committed event is durable but before best-effort final-store cleanup.</summary>
+    void AfterDurableCommit(Guid transactionId) { }
 }
 
 /// <summary>Durable transaction setup boundaries exposed for deterministic crash testing.</summary>

@@ -29,6 +29,21 @@ internal sealed class InstallationExecutionMaterializer
         InstallationExecutionPreparation preparation,
         AnchoredCoreStateAuthority currentState,
         CancellationToken cancellationToken = default
+    ) => (TransactionResult)this.ApplyCore(lease, preparation, currentState, captureOutcome: false, cancellationToken);
+
+    public TransactionExecutionOutcome ApplyWithOutcome(
+        InstallerOperationLease lease,
+        InstallationExecutionPreparation preparation,
+        AnchoredCoreStateAuthority currentState,
+        CancellationToken cancellationToken = default
+    ) => (TransactionExecutionOutcome)this.ApplyCore(lease, preparation, currentState, captureOutcome: true, cancellationToken);
+
+    private object ApplyCore(
+        InstallerOperationLease lease,
+        InstallationExecutionPreparation preparation,
+        AnchoredCoreStateAuthority currentState,
+        bool captureOutcome,
+        CancellationToken cancellationToken
     )
     {
         ArgumentNullException.ThrowIfNull(lease);
@@ -140,14 +155,23 @@ internal sealed class InstallationExecutionMaterializer
             AssertRecoveryBindings(lease.Game, recovery.PathBindings, cancellationToken);
             currentState.AssertUsable(lease);
             lease.AssertRootAndGeneration(binding.GameRoot, binding.OperationGeneration);
-            return this.Executor.ApplyLocked(
-                lease,
-                payload,
-                transaction,
-                binding.GameRoot,
-                binding.OperationGeneration,
-                cancellationToken
-            );
+            return captureOutcome
+                ? this.Executor.ApplyLockedWithOutcome(
+                    lease,
+                    payload,
+                    transaction,
+                    binding.GameRoot,
+                    binding.OperationGeneration,
+                    cancellationToken
+                )
+                : this.Executor.ApplyLocked(
+                    lease,
+                    payload,
+                    transaction,
+                    binding.GameRoot,
+                    binding.OperationGeneration,
+                    cancellationToken
+                );
         }
         finally
         {
@@ -409,6 +433,8 @@ internal sealed class InstallationExecutionMaterializer
             case VerifiedCanonicalManifestSource manifest:
                 manifest.Authority.AssertUsable();
                 return staging.StageBytes(manifest.GetCanonicalBytes());
+            case GeneratedCanonicalManifestSource manifest:
+                return staging.StageBytes(manifest.GetCanonicalBytes());
             case GeneratedCanonicalReceiptSource receipt:
                 return staging.StageBytes(receipt.GetCanonicalBytes());
             case RecoverySnapshotSource recovery when recovery.Content == expectedRecoveryContent:
@@ -526,6 +552,7 @@ internal sealed class InstallationExecutionMaterializer
         return source switch
         {
             VerifiedCanonicalManifestSource manifest => manifest.Sha256,
+            GeneratedCanonicalManifestSource manifest => manifest.Sha256,
             GeneratedCanonicalReceiptSource receipt => receipt.Sha256,
             RecoverySnapshotSource recovery when recovery.ExpectedContentSha256 is not null => recovery.ExpectedContentSha256,
             _ => throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "A core document source has no exact digest.")

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -65,10 +66,9 @@ internal sealed record CommittedRecoveryPointer
             InstallationAction.Install => hasResult && !hasPrevious,
             InstallationAction.Update or InstallationAction.Repair => hasResult && hasPrevious,
             InstallationAction.Uninstall => !hasResult && hasPrevious,
-            InstallationAction.Backup => hasResult
-                && hasPrevious
-                && resultManifestSha256 == previousManifestSha256
-                && resultReceiptSha256 == previousReceiptSha256,
+            // Backup normally preserves the tuple, but may atomically normalize an exact generated-file recipe
+            // evolution while retaining the prior tuple in this same recovery generation.
+            InstallationAction.Backup => hasResult && hasPrevious,
             InstallationAction.Rollback => hasResult || hasPrevious,
             _ => false
         };
@@ -1119,95 +1119,159 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         ITransactionProgressSink? progress = null
     )
     {
+        RecoveryPruneAttempt attempt = ExecutePrunePlanAttempt(lease, currentState, plan, faultInjector, cancellationToken, progress, observeCleanupCancellation: false);
+        if (attempt.Failure is not null)
+            ExceptionDispatchInfo.Capture(attempt.Failure).Throw();
+        return attempt.Outcome.PhysicallyCleanedGenerationIds.Count;
+    }
+
+    internal static RecoveryPruneOutcome ExecutePrunePlanWithOutcome(
+        InstallerOperationLease lease,
+        AnchoredCoreStateAuthority currentState,
+        RecoveryPrunePlan plan,
+        IRecoveryPruneFaultInjector? faultInjector = null,
+        CancellationToken cancellationToken = default,
+        ITransactionProgressSink? progress = null
+    )
+        => ExecutePrunePlanAttempt(lease, currentState, plan, faultInjector, cancellationToken, progress, observeCleanupCancellation: true).Outcome;
+
+    private static RecoveryPruneAttempt ExecutePrunePlanAttempt(
+        InstallerOperationLease lease,
+        AnchoredCoreStateAuthority currentState,
+        RecoveryPrunePlan plan,
+        IRecoveryPruneFaultInjector? faultInjector,
+        CancellationToken cancellationToken,
+        ITransactionProgressSink? progress,
+        bool observeCleanupCancellation
+    )
+    {
         ArgumentNullException.ThrowIfNull(plan);
         ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         faultInjector ??= NullRecoveryPruneFaultInjector.Instance;
-        lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
-        currentState.AssertUsable(lease);
-        RecoveryPrunePlan exact = CreatePrunePlan(
-            lease.Game,
-            lease.RootIdentity,
-            lease.Generation,
-            currentState,
-            plan.RetainNewest,
-            cancellationToken,
-            safeProgress
-        );
-        if (exact.ConfirmationDigest != plan.ConfirmationDigest)
-            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The exact recovery history changed after prune inspection.");
-        RecoveryHistoryState state = ReadHistoryState(lease.Game, currentState, cancellationToken);
-        int logicalRemovalCount = plan.RemovedGenerationIds.Count;
-        RecoveryRetentionRecord? publication = null;
-        byte[]? publicationBytes = null;
-        Sha256Digest? publicationSha256 = null;
-        CommittedRecoveryPointer? publishedPointer = null;
-        byte[]? publishedPointerBytes = null;
-        if (logicalRemovalCount > 0)
+        List<Guid> physicallyCleaned = new();
+        bool logicalStatePublished = false;
+        bool auxiliaryCleanupPending = false;
+        try
         {
-            CommittedRecoveryPointer cutoff = state.Chain[plan.RetainedGenerationIds.Count - 1];
-            CommittedRecoveryPointer truncated = state.Chain[plan.RetainedGenerationIds.Count];
-            publication = new RecoveryRetentionRecord(
-                plan.HeadPointerSha256,
-                currentState.Pointer!.SchemaVersion,
-                currentState.Pointer.RetentionSha256,
-                cutoff.GenerationId,
-                GetPointerDigest(cutoff),
-                truncated.GenerationId,
-                GetPointerDigest(truncated),
-                plan.RetainedGenerationIds.ToArray(),
-                plan.CleanupGenerationIds.ToArray()
+            lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
+            currentState.AssertUsable(lease);
+            RecoveryPrunePlan exact = CreatePrunePlan(
+                lease.Game,
+                lease.RootIdentity,
+                lease.Generation,
+                currentState,
+                plan.RetainNewest,
+                cancellationToken,
+                safeProgress
             );
-            publicationBytes = CanonicalRecoveryRetentionDocument.Serialize(publication);
-            publicationSha256 = Sha256Digest.Hash(publicationBytes);
-            publishedPointer = currentState.Pointer.WithRetention(publicationSha256);
-            publishedPointerBytes = CanonicalRecoveryPointerDocument.Serialize(publishedPointer);
-        }
+            if (exact.ConfirmationDigest != plan.ConfirmationDigest)
+                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The exact recovery history changed after prune inspection.");
+            RecoveryHistoryState state = ReadHistoryState(lease.Game, currentState, cancellationToken);
+            int logicalRemovalCount = plan.RemovedGenerationIds.Count;
+            RecoveryRetentionRecord? publication = null;
+            byte[]? publicationBytes = null;
+            Sha256Digest? publicationSha256 = null;
+            CommittedRecoveryPointer? publishedPointer = null;
+            byte[]? publishedPointerBytes = null;
+            if (logicalRemovalCount > 0)
+            {
+                CommittedRecoveryPointer cutoff = state.Chain[plan.RetainedGenerationIds.Count - 1];
+                CommittedRecoveryPointer truncated = state.Chain[plan.RetainedGenerationIds.Count];
+                publication = new RecoveryRetentionRecord(
+                    plan.HeadPointerSha256,
+                    currentState.Pointer!.SchemaVersion,
+                    currentState.Pointer.RetentionSha256,
+                    cutoff.GenerationId,
+                    GetPointerDigest(cutoff),
+                    truncated.GenerationId,
+                    GetPointerDigest(truncated),
+                    plan.RetainedGenerationIds.ToArray(),
+                    plan.CleanupGenerationIds.ToArray()
+                );
+                publicationBytes = CanonicalRecoveryRetentionDocument.Serialize(publication);
+                publicationSha256 = Sha256Digest.Hash(publicationBytes);
+                publishedPointer = currentState.Pointer.WithRetention(publicationSha256);
+                publishedPointerBytes = CanonicalRecoveryPointerDocument.Serialize(publishedPointer);
+            }
 
-        Sha256Digest? currentRetentionSha256 = currentState.Pointer?.RetentionSha256;
-        Sha256Digest[] orphanDocuments = state.RetentionDocumentCatalog
-            .Where(digest => digest != currentRetentionSha256)
-            .ToArray();
-        if (plan.CleanupGenerationIds.Count == 0 && orphanDocuments.Length == 0)
-            throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "The recovery-prune plan has no retained history or physical cleanup change to apply.");
-        cancellationToken.ThrowIfCancellationRequested();
-        lease.ReserveNextGeneration(lease.Generation);
-        RemovePendingPointer(lease.Game, plan.PendingPointerSha256, faultInjector);
-        currentState.AssertUsable(lease);
-        DeleteRetentionDocuments(lease.Game, orphanDocuments, currentRetentionSha256, faultInjector);
-        if (publication is not null)
-        {
-            PublishRetentionDocument(lease.Game, publicationSha256!, publicationBytes!, faultInjector);
-            LinuxFileIdentity pendingPointerIdentity = StagePendingPointer(lease.Game, publishedPointerBytes!);
-            faultInjector.AtBoundary(RecoveryPruneBoundary.BeforePointerPublish);
-            currentState.ReplacePointerAtomically(lease, PendingPointerPath, pendingPointerIdentity);
-            faultInjector.AtBoundary(RecoveryPruneBoundary.AfterPointerPublish);
-            currentState = AnchoredCoreStateAuthority.Inspect(lease);
-            state = ReadHistoryState(lease.Game, currentState);
-            if (
-                state.Retention is null
-                || state.RetentionSha256 != publicationSha256
-                || currentState.Pointer?.RetentionSha256 != publicationSha256
-                || currentState.Pointer != publishedPointer
-            )
-                throw new OwnershipDocumentException("The published recovery-retention boundary failed exact verification.");
-        }
+            Sha256Digest? currentRetentionSha256 = currentState.Pointer?.RetentionSha256;
+            Sha256Digest[] orphanDocuments = state.RetentionDocumentCatalog
+                .Where(digest => digest != currentRetentionSha256)
+                .ToArray();
+            if (plan.CleanupGenerationIds.Count == 0 && orphanDocuments.Length == 0)
+                throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "The recovery-prune plan has no retained history or physical cleanup change to apply.");
+            cancellationToken.ThrowIfCancellationRequested();
+            lease.ReserveNextGeneration(lease.Generation);
+            auxiliaryCleanupPending = plan.PendingPointerSha256 is not null || orphanDocuments.Length > 0;
+            RemovePendingPointer(lease.Game, plan.PendingPointerSha256, faultInjector);
+            currentState.AssertUsable(lease);
+            DeleteRetentionDocuments(lease.Game, orphanDocuments, currentRetentionSha256, faultInjector);
+            auxiliaryCleanupPending = false;
+            if (publication is not null)
+            {
+                auxiliaryCleanupPending = true;
+                PublishRetentionDocument(lease.Game, publicationSha256!, publicationBytes!, faultInjector);
+                LinuxFileIdentity pendingPointerIdentity = StagePendingPointer(lease.Game, publishedPointerBytes!);
+                faultInjector.AtBoundary(RecoveryPruneBoundary.BeforePointerPublish);
+                currentState.ReplacePointerAtomically(lease, PendingPointerPath, pendingPointerIdentity);
+                logicalStatePublished = true;
+                auxiliaryCleanupPending = currentRetentionSha256 is not null;
+                faultInjector.AtBoundary(RecoveryPruneBoundary.AfterPointerPublish);
+                currentState = AnchoredCoreStateAuthority.Inspect(lease);
+                state = ReadHistoryState(lease.Game, currentState);
+                if (
+                    state.Retention is null
+                    || state.RetentionSha256 != publicationSha256
+                    || currentState.Pointer?.RetentionSha256 != publicationSha256
+                    || currentState.Pointer != publishedPointer
+                )
+                    throw new OwnershipDocumentException("The published recovery-retention boundary failed exact verification.");
+            }
 
-        int removed = 0;
-        foreach (Guid generationId in plan.CleanupGenerationIds.Reverse())
-        {
-            faultInjector.AtBoundary(RecoveryPruneBoundary.BeforeGenerationCleanup, generationId);
-            if (DeleteGenerationIfPresent(lease.Game, generationId, faultInjector))
-                removed++;
-            faultInjector.AtBoundary(RecoveryPruneBoundary.AfterGenerationCleanup, generationId);
+            foreach (Guid generationId in plan.CleanupGenerationIds.Reverse())
+            {
+                if (observeCleanupCancellation)
+                    cancellationToken.ThrowIfCancellationRequested();
+                safeProgress.Report(new(TransactionStage.CleaningRecovery, physicallyCleaned.Count, plan.CleanupGenerationIds.Count));
+                faultInjector.AtBoundary(RecoveryPruneBoundary.BeforeGenerationCleanup, generationId);
+                if (DeleteGenerationIfPresent(lease.Game, generationId, faultInjector))
+                    physicallyCleaned.Add(generationId);
+                faultInjector.AtBoundary(RecoveryPruneBoundary.AfterGenerationCleanup, generationId);
+            }
+            Sha256Digest? retainedDocument = currentState.Pointer?.RetentionSha256;
+            DeleteRetentionDocuments(
+                lease.Game,
+                ReadRetentionDocumentCatalog(lease.Game).Where(digest => digest != retainedDocument),
+                retainedDocument,
+                faultInjector
+            );
+            auxiliaryCleanupPending = false;
+            Guid[] logical = logicalStatePublished ? plan.RemovedGenerationIds.ToArray() : Array.Empty<Guid>();
+            Guid[] pending = plan.CleanupGenerationIds.Except(physicallyCleaned).ToArray();
+            return new(new(RecoveryPruneOutcomeStatus.Succeeded, logical, physicallyCleaned.ToArray(), pending, false, null, null), null);
         }
-        Sha256Digest? retainedDocument = currentState.Pointer?.RetentionSha256;
-        DeleteRetentionDocuments(
-            lease.Game,
-            ReadRetentionDocumentCatalog(lease.Game).Where(digest => digest != retainedDocument),
-            retainedDocument,
-            faultInjector
-        );
-        return removed;
+        catch (Exception exception)
+        {
+            Guid[] logical = logicalStatePublished ? plan.RemovedGenerationIds.ToArray() : Array.Empty<Guid>();
+            Guid[] pending = (logicalStatePublished || physicallyCleaned.Count > 0)
+                ? plan.CleanupGenerationIds.Except(physicallyCleaned).ToArray()
+                : Array.Empty<Guid>();
+            RecoveryPruneOutcomeStatus status = exception switch
+            {
+                OperationCanceledException when logicalStatePublished || physicallyCleaned.Count > 0 => RecoveryPruneOutcomeStatus.CancelledWithCleanupPending,
+                OperationCanceledException => RecoveryPruneOutcomeStatus.CancelledBeforePublication,
+                SimulatedProcessTerminationException => RecoveryPruneOutcomeStatus.Interrupted,
+                _ when logicalStatePublished || physicallyCleaned.Count > 0 => RecoveryPruneOutcomeStatus.FailedWithCleanupPending,
+                _ => RecoveryPruneOutcomeStatus.FailedBeforePublication
+            };
+            TransactionErrorCode? code = exception is OperationCanceledException
+                ? null
+                : InstallerTransactionExecutor.GetErrorCode(exception);
+            string? message = exception is OperationCanceledException
+                ? "Recovery cleanup was cancelled at a safe boundary."
+                : InstallerTransactionExecutor.SafeMessage(code);
+            return new(new(status, logical, physicallyCleaned.ToArray(), pending, auxiliaryCleanupPending, code, message), exception);
+        }
     }
 
     private static RecoveryHistoryState ReadHistoryState(
