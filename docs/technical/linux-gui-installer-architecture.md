@@ -12,7 +12,7 @@ This document defines the Phase 4 safety boundary for the fork's Linux desktop i
 
 ## Project boundaries
 
-`SMAPI.Installer.Core` is a UI-independent `net6.0` library used by the console installer and GUI. It owns:
+`SMAPI.Installer.Core` is the implemented UI-independent `net6.0` safety library. The console installer and GUI will both use it after their adapters are integrated; neither adapter is part of the initial core-only pull request. The core owns:
 
 - game discovery and validation;
 - release identity, package metadata, download, checksum validation, and bounded extraction;
@@ -20,9 +20,9 @@ This document defines the Phase 4 safety boundary for the fork's Linux desktop i
 - operation locks, recovery backups, journals, apply/recovery/rollback, and post-verification;
 - structured progress, stable error codes, and bounded private logs.
 
-`SMAPI.Installer` remains the console adapter and the only backend process allowed to mutate a game directory. Its prompts describe a core-generated plan and then invoke the core; it must not retain an independent mutation path. It also exposes a versioned one-shot JSONL protocol for the GUI. One backend process owns the complete handshake, inspect/plan, confirmation, revalidation, apply, and result session. Standard output contains protocol JSON only, standard error is diagnostic, communication uses inherited stdin/stdout with no listener or socket, and the GUI launches it with an argument list rather than a shell.
+`SMAPI.Installer` will remain the console adapter and become the only backend process allowed to mutate a game directory. Its prompts will describe a core-generated plan and then invoke the core; the integration must remove its independent Linux mutation path. It will also expose the core's versioned one-shot JSONL protocol for the GUI. One backend process will own the complete handshake, inspect/plan, confirmation, revalidation, apply, and result session. Standard output will contain protocol JSON only, standard error will be diagnostic, communication will use inherited stdin/stdout with no listener or socket, and the GUI will launch it with an argument list rather than a shell.
 
-`SMAPI.Installer.Gui` is a Linux-only `net10.0` Avalonia 12.1.1 adapter. It selects and verifies releases, stages the matching package/backend, and drives only the structured backend protocol; it never writes the game directory directly. View models are toolkit-independent where practical. The first package is self-contained, not trimmed, and not Native AOT so correctness and accessibility remain observable. Avalonia is pinned because its current Linux support includes X11, XWayland, an opt-in experimental native Wayland backend, and AT-SPI2 exposure. If packaged Orca/AT-SPI qualification fails, GTK 4 is the documented fallback rather than weakening the acceptance criteria.
+`SMAPI.Installer.Gui` will be a Linux-only `net10.0` Avalonia 12.1.1 adapter. It will select and verify releases, stage the matching package/backend, and drive only the structured backend protocol; it must never write the game directory directly. View models will be toolkit-independent where practical. The first package will be self-contained, not trimmed, and not Native AOT so correctness and accessibility remain observable. Avalonia is the planned pinned toolkit because its current Linux support includes X11, XWayland, an opt-in experimental native Wayland backend, and AT-SPI2 exposure. If packaged Orca/AT-SPI qualification fails, GTK 4 is the documented fallback rather than weakening the acceptance criteria.
 
 ## Core model
 
@@ -30,7 +30,7 @@ This document defines the Phase 4 safety boundary for the fork's Linux desktop i
 
 A release identity contains the fork-specific tag, semantic fork version, exact commit and tree, package filename and size, SHA-256, and build-workflow identity. Selection accepts only releases from the configured fork repository over HTTPS whose tag matches the fork namespace. A downgrade or prerelease is always labelled explicitly.
 
-The downloader writes a unique mode-0600 `.part` file, enforces cancellation, timeout and size bounds while streaming, and discards incomplete downloads. Redirects are restricted to HTTPS GitHub release-asset hosts. The package filename, size, digest, tag, version, commit, tree, and embedded build metadata must agree before extraction. A checksum is never described as provenance; provenance is shown as verified only after an attestation has actually been verified.
+The downloader writes a unique mode-0600 sibling staging file, enforces cancellation, timeout and size bounds while streaming, and discards incomplete downloads. Redirects are restricted to HTTPS GitHub release-asset hosts. The package filename, size, digest, tag, version, commit, tree, and embedded build metadata must agree before extraction. A checksum is never described as provenance; provenance is shown as verified only after an attestation has actually been verified.
 
 Networking stays in the GUI service boundary behind an injectable transport. The core supplies the release-identity, digest, metadata-agreement, and bounded-extraction policies so protocol and console/package tests cannot disagree with the GUI.
 
@@ -105,7 +105,9 @@ Logs exclude authentication data, signed URL query strings, cookies, response bo
 
 ## Blocking verification
 
-The core test suite uses synthetic fixtures and injected filesystems/network/time/process probes. It covers deterministic plans and ownership states; receipt/manifest tampering; launcher ambiguity; exact release identity; journal fault injection before and after each operation; restart recovery; disk/permission/read-only/cross-device failures; concurrent and stale locks; links, hard links, path swaps, special files, and Unicode paths; exact preservation and rollback; bounded/redacted logs; interrupted/oversized/off-host downloads; mismatched metadata/digests; corrupt and hostile archives; monotonic progress; and cancellation boundaries.
+The current core-only suite uses synthetic fixtures, real disposable Linux filesystems, bounded loopback networking, and explicit transaction/recovery fault injectors. It covers deterministic plans and ownership states; receipt/manifest tampering; launcher ambiguity; exact release identity; journal fault injection at durable boundaries; restart recovery; concurrent and stale locks; permission-mode drift; links, hard links, path swaps, special files, and Unicode paths; exact preservation and rollback; bounded/redacted logs; interrupted/oversized/off-host downloads; mismatched metadata/digests; corrupt and hostile archives; monotonic progress; and cancellation boundaries.
+
+Before the console or GUI package can ship, acceptance testing must additionally exercise explicit disk-full, read-only-filesystem, and cross-device failure scenarios, along with the adapter and desktop cases below. Those cases are blocking target coverage, not claims about the initial core-only suite.
 
 GUI tests cover view-state transitions, keyboard traversal, automation names/roles/states, safe default and restored focus, error focus, scaling and narrow layouts. Packaged desktop qualification covers Xvfb/X11, GNOME and KDE on X11 and Wayland through XWayland, Orca/AT-SPI inspection, interrupted close/recovery, root refusal before side effects, and exact public-artifact lifecycle operations.
 
@@ -113,7 +115,9 @@ The release workflow builds an exact reviewed commit, retains the console fallba
 
 ## Delivery sequence
 
-1. Merge the reviewed shared-core/console-adapter PR into `develop` after unit, fault-injection, preservation, and existing lifecycle tests pass.
-2. Build the GUI, release acquisition, desktop tests, documentation, and packaging on a new branch from that merged `develop`.
-3. Address independent security/privacy and UX/accessibility review findings before packaging.
-4. Merge the GUI PR, publish the next fork-specific Linux alpha from its exact reviewed commit, and verify its public artifact in a clean isolated environment.
+1. Merge the reviewed core-only PR into `develop` after unit, fault-injection, preservation, and existing lifecycle tests pass.
+2. Integrate the console adapter and package/protocol host on a new branch from that merged `develop`; remove the old independent Linux mutation path and pass adapter, manual-path, packaging, and explicit disk-full/read-only/cross-device tests.
+3. Merge the reviewed console/package integration into `develop`.
+4. Build the GUI, release acquisition, desktop tests, screenshots, documentation, and packaging on a new branch from that merged `develop`.
+5. Address independent security/privacy and UX/accessibility review findings before packaging.
+6. Merge the GUI PR, publish the next fork-specific Linux alpha from its exact reviewed commit, and verify its public artifact in a clean isolated environment.
