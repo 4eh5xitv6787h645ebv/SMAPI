@@ -58,7 +58,14 @@ internal sealed class InstallationPlanner
             return;
         }
 
-        this.PlanLauncherInstallOrUpdate(request.TargetManifest, request.Launcher, isFreshInstall: true, operations, conflicts);
+        this.PlanLauncherInstallOrUpdate(
+            request.TargetManifest,
+            request.Launcher,
+            isFreshInstall: true,
+            operations,
+            conflicts,
+            request.ModifiedFileReplacementApprovals
+        );
         foreach (InventoryEntry entry in request.Inventory.Entries.Where(entry => entry.Path.Value != "StardewValley"))
         {
             if (entry.Target == null)
@@ -77,10 +84,16 @@ internal sealed class InstallationPlanner
                     conflicts.Add(new PlanConflict(PlanConflictCode.PreservedTargetCollision, entry.Path));
                     break;
                 case InventoryClassification.Legacy:
-                    conflicts.Add(new PlanConflict(PlanConflictCode.LegacyOwnershipUnconfirmed, entry.Path));
+                    if (IsApprovedReplacement(request.ModifiedFileReplacementApprovals, entry.Path, entry.Current))
+                        operations.Add(Replace(entry));
+                    else
+                        conflicts.Add(new PlanConflict(PlanConflictCode.LegacyOwnershipUnconfirmed, entry.Path));
                     break;
                 case InventoryClassification.UnknownCollision:
-                    conflicts.Add(new PlanConflict(PlanConflictCode.UnknownCollision, entry.Path));
+                    if (IsApprovedReplacement(request.ModifiedFileReplacementApprovals, entry.Path, entry.Current))
+                        operations.Add(Replace(entry));
+                    else
+                        conflicts.Add(new PlanConflict(PlanConflictCode.UnknownCollision, entry.Path));
                     break;
                 case InventoryClassification.UnchangedOwned:
                 case InventoryClassification.ModifiedOwned:
@@ -97,9 +110,16 @@ internal sealed class InstallationPlanner
         if (!this.AssertManifestAndReceiptPresent(request, conflicts))
             return;
 
-        this.PlanLauncherInstallOrUpdate(request.TargetManifest!, request.Launcher, isFreshInstall: false, operations, conflicts);
+        this.PlanLauncherInstallOrUpdate(
+            request.TargetManifest!,
+            request.Launcher,
+            isFreshInstall: false,
+            operations,
+            conflicts,
+            request.ModifiedFileReplacementApprovals
+        );
         foreach (InventoryEntry entry in request.Inventory.Entries.Where(entry => entry.Path.Value != "StardewValley"))
-            this.PlanUpdateEntry(entry, operations, conflicts);
+            this.PlanUpdateEntry(entry, request.ModifiedFileReplacementApprovals, operations, conflicts);
     }
 
     private void PlanRepair(InstallationPlanningRequest request, List<PlannedOperation> operations, List<PlanConflict> conflicts)
@@ -163,7 +183,7 @@ internal sealed class InstallationPlanner
             return;
         }
 
-        this.PlanLauncherUninstall(request.Launcher, operations, conflicts);
+        this.PlanLauncherUninstall(request.Launcher, request.ModifiedFileReplacementApprovals, operations, conflicts);
         foreach (InventoryEntry entry in request.Inventory.Entries.Where(entry => entry.Path.Value != "StardewValley"))
         {
             if (entry.Installed == null)
@@ -180,7 +200,10 @@ internal sealed class InstallationPlanner
                 case InventoryClassification.Absent:
                     break;
                 case InventoryClassification.ModifiedOwned:
-                    conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
+                    if (IsApprovedReplacement(request.ModifiedFileReplacementApprovals, entry.Path, entry.Current))
+                        operations.Add(new PlannedOperation(PlanOperationKind.Remove, entry.Path, entry.Current!.Sha256, null));
+                    else
+                        conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
                     break;
                 default:
                     this.AddCollisionConflict(entry, conflicts);
@@ -350,7 +373,12 @@ internal sealed class InstallationPlanner
         return request.TargetManifest != null && request.InstalledReceipt != null;
     }
 
-    private void PlanUpdateEntry(InventoryEntry entry, List<PlannedOperation> operations, List<PlanConflict> conflicts)
+    private void PlanUpdateEntry(
+        InventoryEntry entry,
+        IReadOnlyList<ModifiedFileReplacementApproval> approvals,
+        List<PlannedOperation> operations,
+        List<PlanConflict> conflicts
+    )
     {
         if (entry.Target != null && entry.Installed != null)
         {
@@ -369,7 +397,10 @@ internal sealed class InstallationPlanner
                     operations.Add(Create(entry));
                     return;
                 case InventoryClassification.ModifiedOwned:
-                    conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
+                    if (IsApprovedReplacement(approvals, entry.Path, entry.Current))
+                        operations.Add(Replace(entry));
+                    else
+                        conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
                     return;
                 default:
                     this.AddCollisionConflict(entry, conflicts);
@@ -383,6 +414,13 @@ internal sealed class InstallationPlanner
             {
                 case InventoryClassification.Absent:
                     operations.Add(Create(entry));
+                    break;
+                case InventoryClassification.Legacy:
+                case InventoryClassification.UnknownCollision:
+                    if (IsApprovedReplacement(approvals, entry.Path, entry.Current))
+                        operations.Add(Replace(entry));
+                    else
+                        this.AddCollisionConflict(entry, conflicts);
                     break;
                 default:
                     this.AddCollisionConflict(entry, conflicts);
@@ -401,7 +439,10 @@ internal sealed class InstallationPlanner
                 case InventoryClassification.Absent:
                     break;
                 case InventoryClassification.ModifiedOwned:
-                    conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
+                    if (IsApprovedReplacement(approvals, entry.Path, entry.Current))
+                        operations.Add(new PlannedOperation(PlanOperationKind.Remove, entry.Path, entry.Current!.Sha256, null));
+                    else
+                        conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
                     break;
                 default:
                     this.AddCollisionConflict(entry, conflicts);
@@ -462,6 +503,39 @@ internal sealed class InstallationPlanner
                 else
                     conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedInstalledLauncher, InstallationPlanner.LauncherPath));
                 break;
+            case LauncherClassification.AmbiguousBackup when isFreshInstall:
+                if (
+                    modifiedApprovals is not null
+                    && IsApprovedReplacement(
+                        modifiedApprovals,
+                        InstallationPlanner.LauncherPath,
+                        launcher.CurrentLauncherSha256,
+                        launcher.CurrentLauncherUnixMode
+                    )
+                    && IsApprovedReplacement(
+                        modifiedApprovals,
+                        InstallationPlanner.LauncherBackupPath,
+                        launcher.BackupLauncherSha256,
+                        launcher.BackupLauncherUnixMode
+                    )
+                )
+                {
+                    operations.Add(new PlannedOperation(
+                        PlanOperationKind.Retain,
+                        InstallationPlanner.LauncherBackupPath,
+                        launcher.BackupLauncherSha256,
+                        launcher.BackupLauncherSha256
+                    ));
+                    operations.Add(new PlannedOperation(
+                        PlanOperationKind.Replace,
+                        InstallationPlanner.LauncherPath,
+                        launcher.CurrentLauncherSha256,
+                        target.Sha256
+                    ));
+                }
+                else
+                    conflicts.Add(new PlanConflict(PlanConflictCode.AmbiguousLauncherBackup, InstallationPlanner.LauncherBackupPath));
+                break;
             case LauncherClassification.AmbiguousBackup:
                 conflicts.Add(new PlanConflict(PlanConflictCode.AmbiguousLauncherBackup, InstallationPlanner.LauncherBackupPath));
                 break;
@@ -498,7 +572,12 @@ internal sealed class InstallationPlanner
                 && approval.ObservedUnixMode == unixMode
             );
 
-    private void PlanLauncherUninstall(LauncherState launcher, List<PlannedOperation> operations, List<PlanConflict> conflicts)
+    private void PlanLauncherUninstall(
+        LauncherState launcher,
+        IReadOnlyList<ModifiedFileReplacementApproval> approvals,
+        List<PlannedOperation> operations,
+        List<PlanConflict> conflicts
+    )
     {
         switch (launcher.Classification)
         {
@@ -518,7 +597,30 @@ internal sealed class InstallationPlanner
                 ));
                 break;
             case LauncherClassification.InstalledModified:
-                conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedInstalledLauncher, InstallationPlanner.LauncherPath));
+                if (
+                    IsApprovedReplacement(
+                        approvals,
+                        InstallationPlanner.LauncherPath,
+                        launcher.CurrentLauncherSha256,
+                        launcher.CurrentLauncherUnixMode
+                    )
+                )
+                {
+                    operations.Add(new PlannedOperation(
+                        PlanOperationKind.Restore,
+                        InstallationPlanner.LauncherPath,
+                        launcher.CurrentLauncherSha256,
+                        launcher.BackupLauncherSha256
+                    ));
+                    operations.Add(new PlannedOperation(
+                        PlanOperationKind.Remove,
+                        InstallationPlanner.LauncherBackupPath,
+                        launcher.BackupLauncherSha256,
+                        null
+                    ));
+                }
+                else
+                    conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedInstalledLauncher, InstallationPlanner.LauncherPath));
                 break;
             case LauncherClassification.AmbiguousBackup:
                 conflicts.Add(new PlanConflict(PlanConflictCode.AmbiguousLauncherBackup, InstallationPlanner.LauncherBackupPath));

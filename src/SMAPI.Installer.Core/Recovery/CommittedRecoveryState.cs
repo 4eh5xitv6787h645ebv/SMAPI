@@ -1850,9 +1850,15 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             if (
                 !entries.TryGetValue(receiptEntry.Path.Value, out RollbackSnapshotEntry? snapshotEntry)
                 || snapshotEntry.Kind != RollbackEntryKind.Restore
+                || snapshotEntry.OwnedKind != receiptEntry.Kind
                 || snapshotEntry.ExpectedCurrent != snapshotEntry.Backup
-                || snapshotEntry.Backup?.Sha256 != receiptEntry.InstalledSha256
-                || snapshotEntry.Backup.UnixMode != receiptEntry.UnixMode
+                || (
+                    receiptEntry.Kind != OwnedEntryKind.GeneratedFile
+                    && (
+                        snapshotEntry.Backup?.Sha256 != receiptEntry.InstalledSha256
+                        || snapshotEntry.Backup.UnixMode != receiptEntry.UnixMode
+                    )
+                )
             )
             {
                 throw new OwnershipDocumentException("A committed user backup doesn't match its authenticated receipt entries.");

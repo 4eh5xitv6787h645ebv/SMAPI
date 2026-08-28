@@ -1,5 +1,5 @@
-using System.Security.Cryptography;
 using System.Runtime.Versioning;
+using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
 using NUnit.Framework;
@@ -515,7 +515,7 @@ public sealed class CommittedRecoveryStateTests
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-recovery-tests-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(path);
+        LinuxGameTestFolder.MakeValid(path);
         this.TemporaryDirectories.Add(path);
         return path;
     }

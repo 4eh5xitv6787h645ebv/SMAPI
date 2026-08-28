@@ -49,6 +49,21 @@ public static class OwnedNamespacePolicy
         "StardewModdingAPI-net6.deps.json"
     };
 
+    private static readonly HashSet<string> RecognizedLegacyFiles = new(
+        RuntimeFiles.Where(path => path != "steam_appid.txt").Concat(GeneratedFiles),
+        StringComparer.Ordinal
+    );
+
+    /// <summary>
+    /// Get whether an exact manifest destination is a compiled legacy-SMAPI candidate when present without a receipt.
+    /// This intentionally excludes generic game-adjacent names which aren't evidence of an older SMAPI installation.
+    /// </summary>
+    internal static bool IsRecognizedLegacyCandidate(PackageManifestEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        return RecognizedLegacyFiles.Contains(entry.Path.Value);
+    }
+
     /// <summary>Get whether a path is in the complete compiled transaction destination allowlist.</summary>
     /// <remarks>This is intentionally independent of package or receipt input. Transaction execution must fail closed even if a caller bypasses the planner.</remarks>
     public static bool IsAllowedTransactionDestination(NormalizedRelativePath path)

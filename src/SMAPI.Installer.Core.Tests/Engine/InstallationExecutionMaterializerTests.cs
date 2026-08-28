@@ -553,6 +553,9 @@ public sealed class InstallationExecutionMaterializerTests
         candidate.ObservedSizeBytes.Should().Be(21);
         candidate.ObservedUnixMode.Should().Be(0x1a4);
         candidate.ObservedFileType.Should().Be(RecoveryFileType.RegularFile);
+        candidate.Reason.Should().Be(FileReplacementCandidateReason.ModifiedReceiptOwned);
+        candidate.Disposition.Should().Be(FileReplacementCandidateDisposition.Replace);
+        candidate.ProposedResultSha256.Should().Be(Hash("runtime one"));
 
         Execute(engine.ApproveRepairAsync(blocked, [candidate]).GetAwaiter().GetResult(), engine);
         File.ReadAllText(runtimePath).Should().Be("runtime one");
@@ -722,7 +725,7 @@ public sealed class InstallationExecutionMaterializerTests
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-materializer-tests-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(path);
+        LinuxGameTestFolder.MakeValid(path);
         this.TemporaryDirectories.Add(path);
         return path;
     }

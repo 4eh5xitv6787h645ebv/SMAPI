@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>Stardew Valley</AssemblyName>
+    <RootNamespace>SyntheticStardewValleyAssembly</RootNamespace>
+    <AssemblyVersion>1.6.15.0</AssemblyVersion>
+    <FileVersion>1.6.15.0</FileVersion>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>

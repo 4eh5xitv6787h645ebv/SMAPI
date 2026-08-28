@@ -41,7 +41,8 @@ public sealed class GeneratedFileExecutionTests
     [Test]
     public void Install_DerivesExactResultAndPersistsRecipeAndResultAuthority()
     {
-        string game = this.CreateGame("{\"runtimeTarget\":\"net6.0\"}", 0x1a0);
+        string source = Dependencies("net6.0");
+        string game = this.CreateGame(source, 0x1a0);
         using TemplatePackageAuthority package = this.CreatePackage();
         LinuxInstallerEngine engine = new();
 
@@ -49,19 +50,19 @@ public sealed class GeneratedFileExecutionTests
         {
             inspection.Plan.CanExecute.Should().BeTrue();
             PlannedOperation generated = inspection.Plan.Operations.Single(operation => operation.Path.Value == ResultPath);
-            generated.ResultSha256.Should().Be(Hash("{\"runtimeTarget\":\"net6.0\"}"));
+            generated.ResultSha256.Should().Be(Hash(source));
             engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult().Status
                 .Should().Be(TransactionStatus.Committed);
         }
 
-        File.ReadAllText(Path.Combine(game, ResultPath)).Should().Be("{\"runtimeTarget\":\"net6.0\"}");
+        File.ReadAllText(Path.Combine(game, ResultPath)).Should().Be(source);
         File.GetUnixFileMode(Path.Combine(game, ResultPath)).Should().Be((UnixFileMode)0x1a0);
         using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
         PackageManifest committed = state.Manifest!;
         GeneratedFileRecipe recipe = committed.GeneratedFiles.Should().ContainSingle().Subject;
         recipe.SourcePath.Value.Should().Be(SourcePath);
-        recipe.SourceIdentity.Should().Be(new RecoveryFileIdentity(Hash("{\"runtimeTarget\":\"net6.0\"}"), 26, 0x1a0));
+        recipe.SourceIdentity.Should().Be(new RecoveryFileIdentity(Hash(source), Encoding.UTF8.GetByteCount(source), 0x1a0));
         PackageManifestEntry result = committed.Entries.Single(entry => entry.Path.Value == ResultPath);
         result.Kind.Should().Be(OwnedEntryKind.GeneratedFile);
         result.Sha256.Should().Be(recipe.SourceIdentity!.Sha256);
@@ -72,11 +73,11 @@ public sealed class GeneratedFileExecutionTests
     [Test]
     public void Execution_SourceContentChangesAfterInspection_FailsBeforeMutation()
     {
-        string game = this.CreateGame("first", 0x1a4);
+        string game = this.CreateGame(Dependencies("first"), 0x1a4);
         using TemplatePackageAuthority package = this.CreatePackage();
         LinuxInstallerEngine engine = new();
         using InspectedInstallationState inspection = Inspect(engine, game, package);
-        File.WriteAllText(Path.Combine(game, SourcePath), "second");
+        File.WriteAllText(Path.Combine(game, SourcePath), Dependencies("second"));
 
         Action execute = () => engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult();
 
@@ -88,7 +89,7 @@ public sealed class GeneratedFileExecutionTests
     [Test]
     public void Execution_SourceModeChangesAfterInspection_FailsBeforeMutation()
     {
-        string game = this.CreateGame("same bytes", 0x1a4);
+        string game = this.CreateGame(Dependencies("same-bytes"), 0x1a4);
         using TemplatePackageAuthority package = this.CreatePackage();
         LinuxInstallerEngine engine = new();
         using InspectedInstallationState inspection = Inspect(engine, game, package);
@@ -120,7 +121,7 @@ public sealed class GeneratedFileExecutionTests
     [Test]
     public void Inspection_SourceHasAnotherHardLink_IsRejected()
     {
-        string game = this.CreateGame("shared", 0x1a4);
+        string game = this.CreateGame(Dependencies("shared"), 0x1a4);
         link(Path.Combine(game, SourcePath), Path.Combine(game, "shared-deps.json"))
             .Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
         using TemplatePackageAuthority package = this.CreatePackage();
@@ -165,7 +166,7 @@ public sealed class GeneratedFileExecutionTests
     [Test]
     public void Execution_SourceSwappedToSymbolicLink_IsRejectedWithoutFollowingIt()
     {
-        string game = this.CreateGame("inside", 0x1a4);
+        string game = this.CreateGame(Dependencies("inside"), 0x1a4);
         string outside = Path.Combine(this.CreateDirectory(), "outside.json");
         File.WriteAllText(outside, "outside");
         using TemplatePackageAuthority package = this.CreatePackage();
@@ -176,7 +177,7 @@ public sealed class GeneratedFileExecutionTests
 
         Action execute = () => engine.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult();
 
-        execute.Should().Throw<InstallerTransactionException>();
+        execute.Should().Throw<LinuxGameFolderException>().Which.Status.Should().Be(LinuxGameFolderStatus.UnsafeGameDependencies);
         File.ReadAllText(outside).Should().Be("outside");
         File.Exists(Path.Combine(game, ResultPath)).Should().BeFalse();
     }
@@ -184,7 +185,7 @@ public sealed class GeneratedFileExecutionTests
     [Test]
     public void Inspection_Cancelled_DoesNotCreateInstallerState()
     {
-        string game = this.CreateGame("deps", 0x1a4);
+        string game = this.CreateGame(Dependencies("deps"), 0x1a4);
         using TemplatePackageAuthority package = this.CreatePackage();
         using CancellationTokenSource cancellation = new();
         cancellation.Cancel();
@@ -203,20 +204,121 @@ public sealed class GeneratedFileExecutionTests
     [Test]
     public void UninstallRollback_RestoresCapturedGeneratedBytesWithoutReadingChangedGameSource()
     {
-        string game = this.CreateGame("original deps", 0x1a4);
+        string original = Dependencies("original-deps");
+        string changed = Dependencies("new-game-deps");
+        string game = this.CreateGame(original, 0x1a4);
         using TemplatePackageAuthority package = this.CreatePackage();
         LinuxInstallerEngine engine = new();
         Execute(Inspect(engine, game, package), engine);
         using (InspectedInstallationState uninstall = engine.InspectAsync(game, InstallationAction.Uninstall).GetAwaiter().GetResult())
             Execute(uninstall, engine);
-        File.WriteAllText(Path.Combine(game, SourcePath), "new game deps");
+        File.WriteAllText(Path.Combine(game, SourcePath), changed);
 
         using CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
         using InspectedInstallationState rollback = engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult();
         Execute(rollback, engine);
 
-        File.ReadAllText(Path.Combine(game, ResultPath)).Should().Be("original deps");
-        File.ReadAllText(Path.Combine(game, SourcePath)).Should().Be("new game deps");
+        File.ReadAllText(Path.Combine(game, ResultPath)).Should().Be(original);
+        File.ReadAllText(Path.Combine(game, SourcePath)).Should().Be(changed);
+    }
+
+    [TestCase(InstallationAction.Backup)]
+    [TestCase(InstallationAction.Repair)]
+    [TestCase(InstallationAction.Update)]
+    [TestCase(InstallationAction.Uninstall)]
+    public void GeneratedRecipeEvolution_AllInstalledActionsNormalizeOwnershipAndRollbackToExactEvolvedState(
+        InstallationAction action
+    )
+    {
+        string original = Dependencies("original-runtime");
+        string evolved = Dependencies("evolved-runtime");
+        string game = this.CreateGame(original, 0x1a4);
+        using TemplatePackageAuthority installedPackage = this.CreatePackage();
+        using TemplatePackageAuthority updatePackage = this.CreatePackage(alpha: 2);
+        LinuxInstallerEngine engine = new();
+        Execute(Inspect(engine, game, installedPackage), engine);
+        Write(game, SourcePath, evolved, 0x1a4);
+        Write(game, ResultPath, evolved, 0x1a4);
+
+        IVerifiedPackageContentAuthority? target = action switch
+        {
+            InstallationAction.Repair => installedPackage,
+            InstallationAction.Update => updatePackage,
+            _ => null
+        };
+        using (InspectedInstallationState inspection = Inspect(engine, game, action, target))
+        {
+            inspection.Plan.Conflicts.Should().NotContain(conflict =>
+                conflict.Code == PlanConflictCode.ModifiedOwnedFile
+                && conflict.Path != null
+                && conflict.Path.Value == ResultPath
+            );
+            Execute(inspection, engine);
+        }
+
+        if (action == InstallationAction.Uninstall)
+            File.Exists(Path.Combine(game, ResultPath)).Should().BeFalse();
+        else
+            File.ReadAllText(Path.Combine(game, ResultPath)).Should().Be(evolved);
+
+        using CommittedRecoveryHandle recovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
+        Execute(engine.InspectAsync(game, InstallationAction.Rollback, recovery: recovery).GetAwaiter().GetResult(), engine);
+
+        File.ReadAllText(Path.Combine(game, SourcePath)).Should().Be(evolved);
+        File.ReadAllText(Path.Combine(game, ResultPath)).Should().Be(evolved);
+        using (InspectedInstallationState normalize = Inspect(
+            engine,
+            game,
+            InstallationAction.Repair,
+            installedPackage
+        ))
+            Execute(normalize, engine);
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        PackageManifestEntry generated = state.Manifest!.Entries.Single(entry => entry.Path.Value == ResultPath);
+        generated.Sha256.Should().Be(Hash(evolved));
+        state.Receipt!.Entries.Single(entry => entry.Path.Value == ResultPath).InstalledSha256
+            .Should().Be(Hash(evolved));
+    }
+
+    [Test]
+    public void GeneratedRecipeEvolution_MismatchedTargetNeverEvolvesOwnershipSilently()
+    {
+        string original = Dependencies("original-runtime");
+        string evolved = Dependencies("evolved-runtime");
+        string game = this.CreateGame(original, 0x1a4);
+        using TemplatePackageAuthority package = this.CreatePackage();
+        LinuxInstallerEngine engine = new();
+        Execute(Inspect(engine, game, package), engine);
+        Sha256Digest originalManifest;
+        Sha256Digest originalReceipt;
+        using (InstallerOperationLease lease = InstallerOperationLease.Acquire(game))
+        {
+            AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+            originalManifest = state.ManifestSha256!;
+            originalReceipt = state.ReceiptSha256!;
+        }
+
+        Write(game, SourcePath, evolved, 0x1a4);
+        Write(game, ResultPath, "untrusted mismatch", 0x1a4);
+        using (InspectedInstallationState blocked = Inspect(engine, game, InstallationAction.Uninstall, package: null))
+        {
+            blocked.Plan.CanExecute.Should().BeFalse();
+            blocked.Plan.Conflicts.Should().Contain(conflict =>
+                conflict.Code == PlanConflictCode.ModifiedOwnedFile
+                && conflict.Path != null
+                && conflict.Path.Value == ResultPath
+            );
+            Action execute = () => engine.ExecuteAsync(blocked, blocked.ConfirmationDigest).GetAwaiter().GetResult();
+            execute.Should().Throw<ExecutionCompilationException>().Which.Error
+                .Should().Be(ExecutionCompilationError.NonExecutablePlan);
+        }
+        AssertOwnershipDigests(game, originalManifest, originalReceipt);
+
+        Write(game, ResultPath, original, 0x1a4);
+        using (InspectedInstallationState sourceOnly = Inspect(engine, game, InstallationAction.Backup, package: null))
+            Execute(sourceOnly, engine);
+        AssertOwnershipDigests(game, originalManifest, originalReceipt);
     }
 
     private string CreateGame(string deps, int mode)
@@ -229,17 +331,19 @@ public sealed class GeneratedFileExecutionTests
     private string CreateGameWithoutSource()
     {
         string game = this.CreateDirectory();
+        LinuxGameTestFolder.MakeValid(game);
+        File.Delete(Path.Combine(game, SourcePath));
         Write(game, "StardewValley", "vanilla launcher", 0x1ed);
         return game;
     }
 
-    private TemplatePackageAuthority CreatePackage()
+    private TemplatePackageAuthority CreatePackage(int alpha = 1)
     {
         string payload = this.CreateDirectory();
         Write(payload, "StardewValley", "smapi launcher", 0x1ed);
         Write(payload, "StardewModdingAPI.dll", "runtime", 0x1a4);
         PackageManifest manifest = new(
-            OwnershipTestData.Release(),
+            OwnershipTestData.Release(alpha),
             new[]
             {
                 Entry("StardewValley", "smapi launcher", 0x1ed, OwnedEntryKind.Launcher),
@@ -262,9 +366,17 @@ public sealed class GeneratedFileExecutionTests
         string game,
         IVerifiedPackageContentAuthority package
     )
+        => Inspect(engine, game, InstallationAction.Install, package);
+
+    private static InspectedInstallationState Inspect(
+        LinuxInstallerEngine engine,
+        string game,
+        InstallationAction action,
+        IVerifiedPackageContentAuthority? package
+    )
     {
         using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
-        return engine.InspectLocked(lease, InstallationAction.Install, package, null);
+        return engine.InspectLocked(lease, action, package, null);
     }
 
     private static void Execute(InspectedInstallationState inspection, LinuxInstallerEngine engine)
@@ -289,6 +401,21 @@ public sealed class GeneratedFileExecutionTests
         => new(NormalizedRelativePath.Parse(path), Hash(contents), Encoding.UTF8.GetByteCount(contents), mode, kind);
 
     private static Sha256Digest Hash(string contents) => Sha256Digest.Hash(Encoding.UTF8.GetBytes(contents));
+
+    private static void AssertOwnershipDigests(
+        string game,
+        Sha256Digest expectedManifest,
+        Sha256Digest expectedReceipt
+    )
+    {
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.ManifestSha256.Should().Be(expectedManifest);
+        state.ReceiptSha256.Should().Be(expectedReceipt);
+    }
+
+    private static string Dependencies(string runtime)
+        => $"{{\"runtimeTarget\":{{\"name\":\"{runtime}\"}},\"targets\":{{\"{runtime}\":{{}}}}}}";
 
     private static void Write(string root, string relativePath, string contents, int mode)
     {

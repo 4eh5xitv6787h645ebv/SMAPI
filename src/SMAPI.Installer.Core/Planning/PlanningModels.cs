@@ -105,13 +105,43 @@ public sealed record PlannedOperation
     }
 }
 
+/// <summary>The stable core-derived reason an exact file requires explicit approval.</summary>
+public enum FileReplacementCandidateReason
+{
+    /// <summary>A receipt-owned non-launcher file differs from the exact installed identity.</summary>
+    ModifiedReceiptOwned,
+    /// <summary>The receipt-owned installed launcher differs from the exact installed identity.</summary>
+    ModifiedInstalledLauncher,
+    /// <summary>A compiled, recognized legacy SMAPI destination exists without a receipt.</summary>
+    LegacyInstaller,
+    /// <summary>An intended package destination contains an unowned file of unknown origin.</summary>
+    UnknownCollision,
+    /// <summary>The current launcher is part of a recognized official or legacy launcher/backup pair.</summary>
+    OfficialOrLegacyLauncher,
+    /// <summary>The existing original-launcher backup will be trusted and retained during adoption.</summary>
+    OfficialLauncherBackup
+}
+
+/// <summary>The exact operation proposed for a core-minted file candidate.</summary>
+public enum FileReplacementCandidateDisposition
+{
+    /// <summary>Replace the observed file with the selected package result.</summary>
+    Replace,
+    /// <summary>Remove the observed receipt-owned file.</summary>
+    Remove,
+    /// <summary>Restore the observed installed launcher from its receipt-authenticated backup.</summary>
+    Restore,
+    /// <summary>Trust and retain the exact observed official-launcher backup.</summary>
+    TrustRetained
+}
+
 /// <summary>
-/// A core-minted, reviewable candidate for replacing one exact modified receipt-owned file during repair.
+/// A core-minted, reviewable candidate for replacing, removing, restoring, or retaining one exact installer-relevant file.
 /// This candidate can only be selected through the still-usable inspection which issued it.
 /// </summary>
 public sealed class ModifiedFileReplacementCandidate
 {
-    /// <summary>The canonical receipt-owned path observed by the core.</summary>
+    /// <summary>The canonical installer-relevant path observed by the core.</summary>
     public NormalizedRelativePath Path { get; }
     /// <summary>The observed content digest.</summary>
     public Sha256Digest ObservedSha256 { get; }
@@ -121,13 +151,22 @@ public sealed class ModifiedFileReplacementCandidate
     public int ObservedUnixMode { get; }
     /// <summary>The observed bounded file type.</summary>
     public RecoveryFileType ObservedFileType { get; }
+    /// <summary>The core-derived reason this exact path requires explicit approval.</summary>
+    public FileReplacementCandidateReason Reason { get; }
+    /// <summary>The core-derived operation which approval permits for this exact path.</summary>
+    public FileReplacementCandidateDisposition Disposition { get; }
+    /// <summary>The exact proposed result digest for replacement, restoration, or retained content; null for removal.</summary>
+    public Sha256Digest? ProposedResultSha256 { get; }
     internal object SourceAuthority { get; }
     internal RecoveryFileIdentity ObservedIdentity { get; }
 
     internal ModifiedFileReplacementCandidate(
         object sourceAuthority,
         NormalizedRelativePath path,
-        RecoveryFileIdentity observedIdentity
+        RecoveryFileIdentity observedIdentity,
+        FileReplacementCandidateReason reason,
+        FileReplacementCandidateDisposition disposition,
+        Sha256Digest? proposedResultSha256
     )
     {
         ArgumentNullException.ThrowIfNull(sourceAuthority);
@@ -140,10 +179,29 @@ public sealed class ModifiedFileReplacementCandidate
         this.ObservedSizeBytes = observedIdentity.SizeBytes;
         this.ObservedUnixMode = observedIdentity.UnixMode;
         this.ObservedFileType = observedIdentity.FileType;
+        this.Reason = reason;
+        this.Disposition = disposition;
+        this.ProposedResultSha256 = proposedResultSha256;
+    }
+
+    internal ModifiedFileReplacementCandidate(
+        object sourceAuthority,
+        NormalizedRelativePath path,
+        RecoveryFileIdentity observedIdentity
+    )
+        : this(
+            sourceAuthority,
+            path,
+            observedIdentity,
+            FileReplacementCandidateReason.ModifiedReceiptOwned,
+            FileReplacementCandidateDisposition.Replace,
+            proposedResultSha256: null
+        )
+    {
     }
 }
 
-/// <summary>An internal full-identity repair authorization derived only from a core-minted candidate.</summary>
+/// <summary>An internal full-identity replacement or removal authorization derived only from a core-minted candidate.</summary>
 internal sealed record ModifiedFileReplacementApproval
 {
     public NormalizedRelativePath Path { get; }
@@ -507,7 +565,16 @@ internal sealed class InstallationPlanningRequest
     public InstallationAction Action { get; }
     public InstallationInventory Inventory { get; }
     public PackageManifest? TargetManifest { get; }
+    public PackageManifest? InstalledManifest { get; }
     public InstallationReceipt? InstalledReceipt { get; }
+    public PackageManifest? PersistedInstalledManifest { get; }
+    public InstallationReceipt? PersistedInstalledReceipt { get; }
+    public Sha256Digest? PersistedManifestSha256 { get; }
+    public Sha256Digest? PersistedReceiptSha256 { get; }
+    public bool HasGeneratedOwnershipEvolution =>
+        this.InstalledManifest is not null
+        && this.PersistedManifestSha256 is not null
+        && this.InstalledManifest.GetCanonicalDigest() != this.PersistedManifestSha256;
     public LauncherState Launcher { get; }
     public RollbackSnapshot? RollbackSnapshot { get; }
     public InstallationAction? RollbackOriginAction { get; }
@@ -527,7 +594,12 @@ internal sealed class InstallationPlanningRequest
         InstallationAction? rollbackOriginAction = null,
         IEnumerable<ModifiedFileReplacementApproval>? modifiedFileReplacementApprovals = null,
         RecoveryCapacityState? recoveryCapacity = null,
-        ObservedInstallationState observedState = ObservedInstallationState.Unknown
+        ObservedInstallationState observedState = ObservedInstallationState.Unknown,
+        PackageManifest? installedManifest = null,
+        Sha256Digest? persistedManifestSha256 = null,
+        Sha256Digest? persistedReceiptSha256 = null,
+        PackageManifest? persistedInstalledManifest = null,
+        InstallationReceipt? persistedInstalledReceipt = null
     )
     {
         ArgumentNullException.ThrowIfNull(inventory);
@@ -535,7 +607,12 @@ internal sealed class InstallationPlanningRequest
         this.Action = action;
         this.Inventory = inventory;
         this.TargetManifest = targetManifest;
+        this.InstalledManifest = installedManifest;
         this.InstalledReceipt = installedReceipt;
+        this.PersistedInstalledManifest = persistedInstalledManifest ?? installedManifest;
+        this.PersistedInstalledReceipt = persistedInstalledReceipt ?? installedReceipt;
+        this.PersistedManifestSha256 = persistedManifestSha256 ?? installedReceipt?.ManifestSha256;
+        this.PersistedReceiptSha256 = persistedReceiptSha256 ?? installedReceipt?.GetCanonicalDigest();
         this.Launcher = launcher;
         this.RollbackSnapshot = rollbackSnapshot;
         this.RollbackOriginAction = rollbackOriginAction;

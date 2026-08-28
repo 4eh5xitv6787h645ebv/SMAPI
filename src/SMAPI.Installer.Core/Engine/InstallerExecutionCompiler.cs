@@ -83,8 +83,8 @@ internal sealed class InstallerExecutionCompiler
             operationGeneration,
             plan.GetCanonicalDigest(),
             request.TargetManifest?.GetCanonicalDigest(),
-            request.InstalledReceipt?.GetCanonicalDigest(),
-            request.InstalledReceipt?.ManifestSha256,
+            request.PersistedReceiptSha256,
+            request.PersistedManifestSha256,
             GetRollbackSnapshotDigest(request.RollbackSnapshot),
             GetRecoveryObservationsDigest(request.RecoveryObservations),
             rollbackContent?.GenerationId,
@@ -124,7 +124,7 @@ internal sealed class InstallerExecutionCompiler
         );
         AssertSameDigest(
             binding.InstalledReceiptSha256,
-            currentRequest.InstalledReceipt?.GetCanonicalDigest(),
+            currentRequest.PersistedReceiptSha256,
             ExecutionCompilationError.StaleInstalledReceipt,
             "The installed receipt changed after planning."
         );
@@ -407,7 +407,13 @@ internal sealed class InstallerExecutionCompiler
 
         InstallationReceiptEntry installed = request.InstalledReceipt?.Entries.SingleOrDefault(entry => entry.Path.Equals(operation.Path))
             ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Remove destination '{operation.Path}' isn't in the installed receipt.");
-        if (installed.InstalledSha256 != operation.ExpectedCurrentSha256)
+        if (
+            installed.InstalledSha256 != operation.ExpectedCurrentSha256
+            && !request.ModifiedFileReplacementApprovals.Any(approval =>
+                approval.Path.Equals(operation.Path)
+                && approval.ObservedSha256 == operation.ExpectedCurrentSha256
+            )
+        )
             throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Remove destination '{operation.Path}' doesn't match the installed receipt.");
     }
 
@@ -426,15 +432,23 @@ internal sealed class InstallerExecutionCompiler
                 {
                     PackageManifest manifest = request.TargetManifest
                         ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt-writing action has no target manifest.");
+                    bool createdLauncherBackup = request.Action == InstallationAction.Install
+                        && plan.Operations.Any(operation => operation.Kind == PlanOperationKind.Create && operation.Path.Equals(LauncherBackupPath));
                     Sha256Digest originalLauncher = request.Action == InstallationAction.Install
-                        ? plan.Operations.Single(operation => operation.Kind == PlanOperationKind.Create && operation.Path.Equals(LauncherBackupPath)).ResultSha256!
+                        ? createdLauncherBackup
+                            ? plan.Operations.Single(operation => operation.Kind == PlanOperationKind.Create && operation.Path.Equals(LauncherBackupPath)).ResultSha256!
+                            : request.Launcher.BackupLauncherSha256
+                                ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "An adopted installation has no observed original-launcher backup.")
                         : request.InstalledReceipt?.Launcher.OriginalLauncherSha256
                             ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt update has no original-launcher identity.");
                     int originalLauncherMode = request.Action == InstallationAction.Install
-                        ? request.RecoveryObservations.Single(observation => observation.Path.Equals(LauncherPath)).Identity?.UnixMode
-                            ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt install has no original-launcher mode identity.")
+                        ? createdLauncherBackup
+                            ? request.RecoveryObservations.Single(observation => observation.Path.Equals(LauncherPath)).Identity?.UnixMode
+                                ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt install has no original-launcher mode identity.")
+                            : request.Launcher.BackupLauncherUnixMode
+                                ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "An adopted installation has no original-launcher backup mode.")
                         : request.InstalledReceipt?.Launcher.OriginalLauncherUnixMode
-                            ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt update has no original-launcher mode identity.");
+                            ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt update has no original-launcher identity.");
                     PackageManifestEntry launcher = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
                     InstallationReceipt generated = new(
                         manifest.Release,
@@ -600,10 +614,10 @@ internal sealed class InstallerExecutionCompiler
             },
             ReceiptPreparationKind.RemoveAtomically => null,
             ReceiptPreparationKind.None when request.Action == InstallationAction.Backup
-                => request.InstalledReceipt?.GetCanonicalDigest(),
+                => request.PersistedInstalledReceipt?.GetCanonicalDigest(),
             _ => throw Error(ExecutionCompilationError.InvalidOperationMapping, "A mutating action must have an exact receipt transition.")
         };
-        Sha256Digest? previousReceipt = request.InstalledReceipt?.GetCanonicalDigest();
+        Sha256Digest? previousReceipt = request.PersistedInstalledReceipt?.GetCanonicalDigest();
 
         List<RollbackSnapshotEntry> entries = new();
         FilePreparationInstruction[] recoveryInstructions = request.Action == InstallationAction.Backup
@@ -654,9 +668,9 @@ internal sealed class InstallerExecutionCompiler
                 changed.Contains(observation.Path.Value) && observation.Identity is not null
             ))
             .ToArray();
-        byte[]? previousReceiptBytes = request.InstalledReceipt is null
+        byte[]? previousReceiptBytes = request.PersistedInstalledReceipt is null
             ? null
-            : CanonicalOwnershipDocuments.SerializeReceipt(request.InstalledReceipt);
+            : CanonicalOwnershipDocuments.SerializeReceipt(request.PersistedInstalledReceipt);
         return new RecoverySnapshotPreparation(snapshot, snapshotBytes, bindings, previousReceiptBytes);
     }
 

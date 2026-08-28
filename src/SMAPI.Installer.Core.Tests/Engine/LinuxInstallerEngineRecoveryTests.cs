@@ -46,6 +46,7 @@ public sealed class LinuxInstallerEngineRecoveryTests
             faultInjector: new MutationTerminationFaultInjector(afterOperation: 1)
         ).Apply(game, payload, plan);
         interrupt.Should().Throw<SimulatedProcessTerminationException>();
+        File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)0x1ed);
         File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be("SMAPI launcher");
         File.ReadAllText(Path.Combine(game, "StardewValley-original")).Should().Be("vanilla launcher");
 
@@ -150,7 +151,7 @@ public sealed class LinuxInstallerEngineRecoveryTests
     }
 
     [Test]
-    public async Task RecoverInterruptedOperation_WhenNamedRootIsReplaced_DoesNotTouchReplacementAndFailsPathChanged()
+    public async Task RecoverInterruptedOperation_WhenNamedRootIsReplaced_ReportsRecoveredAnchoredRootAndDoesNotTouchReplacement()
     {
         string parent = this.CreateDirectory();
         string game = Path.Combine(parent, "game");
@@ -183,9 +184,13 @@ public sealed class LinuxInstallerEngineRecoveryTests
             progress.Release();
         }
 
-        Func<Task> observe = async () => { await recovery; };
-        InstallerTransactionException exception = (await observe.Should().ThrowAsync<InstallerTransactionException>()).Which;
-        exception.Code.Should().Be(TransactionErrorCode.PathChanged);
+        InterruptedOperationRecoveryResult result = await recovery;
+        result.RecoveredTransactions.Should().ContainSingle().Which.Should().Be(
+            new TransactionResult(plan.TransactionId, TransactionStatus.Recovered, 1)
+        );
+        result.NamedRootStillSelected.Should().BeFalse();
+        result.NamedRootSelectionChanged.Should().BeTrue();
+        result.RequiresFreshInspection.Should().BeTrue();
         File.ReadAllText(Path.Combine(movedGame, "StardewModdingAPI.dll")).Should().Be("original");
         File.ReadAllText(Path.Combine(game, "unrelated.txt")).Should().Be("replacement root sentinel");
         File.Exists(Path.Combine(game, "StardewModdingAPI.dll")).Should().BeFalse();
@@ -223,7 +228,7 @@ public sealed class LinuxInstallerEngineRecoveryTests
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-engine-recovery-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(path);
+        LinuxGameTestFolder.MakeValid(path);
         this.TemporaryDirectories.Add(path);
         return path;
     }

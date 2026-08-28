@@ -1,5 +1,5 @@
-using System.Text.Json;
 using System.Runtime.Versioning;
+using System.Text.Json;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Engine;
@@ -84,6 +84,20 @@ public sealed class LinuxGameDiscoveryTests
     }
 
     [Test]
+    public void Validate_RejectsManagedAssemblyWithWrongIdentity()
+    {
+        string game = this.CreateValidGame();
+        File.Copy(
+            typeof(LinuxGameDiscovery).Assembly.Location,
+            Path.Combine(game, "Stardew Valley.dll"),
+            overwrite: true
+        );
+
+        LinuxGameDiscovery.Validate(game, new Version(1, 0), CancellationToken.None).Status
+            .Should().Be(LinuxGameFolderStatus.InvalidGameAssembly);
+    }
+
+    [Test]
     public void Validate_RejectsUnsupportedVersionAndHonorsCancellation()
     {
         string game = this.CreateValidGame();
@@ -122,15 +136,7 @@ public sealed class LinuxGameDiscoveryTests
     private string CreateValidGame()
     {
         string game = Path.Combine(this.TempRoot, $"game-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(game);
-        File.Copy(typeof(LinuxGameDiscovery).Assembly.Location, Path.Combine(game, "Stardew Valley.dll"));
-        this.WriteDependencies(game);
-        string launcher = Path.Combine(game, "StardewValley");
-        File.WriteAllText(launcher, "#!/bin/sh\nexit 0\n");
-        File.SetUnixFileMode(
-            launcher,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute
-        );
+        LinuxGameTestFolder.MakeValid(game);
         return game;
     }
 

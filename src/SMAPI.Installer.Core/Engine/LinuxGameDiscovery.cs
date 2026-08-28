@@ -217,53 +217,76 @@ public sealed class LinuxGameDiscovery
     )
     {
         ArgumentNullException.ThrowIfNull(inspection);
+        return Validate(
+            inspection.Game,
+            inspection.RootIdentity,
+            minimumSupportedVersion,
+            cancellationToken,
+            inspection.AssertStable
+        );
+    }
+
+    private static LinuxGameFolderCandidate Validate(
+        LinuxAnchoredFileSystem game,
+        GameRootIdentity gameRoot,
+        Version minimumSupportedVersion,
+        CancellationToken cancellationToken,
+        Action assertStable
+    )
+    {
+        ArgumentNullException.ThrowIfNull(game);
+        ArgumentNullException.ThrowIfNull(gameRoot);
         ArgumentNullException.ThrowIfNull(minimumSupportedVersion);
+        ArgumentNullException.ThrowIfNull(assertStable);
         cancellationToken.ThrowIfCancellationRequested();
 
         LinuxGameFolderStatus? assemblyStatus = TryOpenMarker(
-            inspection.Game,
+            game,
             "Stardew Valley.dll",
             LinuxGameFolderStatus.MissingGameAssembly,
             LinuxGameFolderStatus.UnsafeGameAssembly,
             out LinuxAnchoredFile? assembly
         );
         if (assemblyStatus is not null)
-            return Candidate(inspection, assemblyStatus.Value);
+            return Candidate(gameRoot, assemblyStatus.Value);
         using (assembly)
         {
             Version version;
             try
             {
-                byte[] bytes = ReadBounded(inspection.Game, assembly!, 64 * 1024 * 1024, cancellationToken);
+                byte[] bytes = ReadBounded(game, assembly!, 64 * 1024 * 1024, cancellationToken);
                 using PEReader reader = new(new MemoryStream(bytes, writable: false));
                 if (!reader.HasMetadata)
-                    return Candidate(inspection, LinuxGameFolderStatus.InvalidGameAssembly);
+                    return Candidate(gameRoot, LinuxGameFolderStatus.InvalidGameAssembly);
                 MetadataReader metadata = reader.GetMetadataReader();
                 if (!metadata.IsAssembly)
-                    return Candidate(inspection, LinuxGameFolderStatus.InvalidGameAssembly);
-                version = metadata.GetAssemblyDefinition().Version;
+                    return Candidate(gameRoot, LinuxGameFolderStatus.InvalidGameAssembly);
+                AssemblyDefinition definition = metadata.GetAssemblyDefinition();
+                if (metadata.GetString(definition.Name) != "Stardew Valley")
+                    return Candidate(gameRoot, LinuxGameFolderStatus.InvalidGameAssembly);
+                version = definition.Version;
             }
             catch (Exception ex) when (ex is BadImageFormatException or IOException)
             {
-                return Candidate(inspection, LinuxGameFolderStatus.InvalidGameAssembly);
+                return Candidate(gameRoot, LinuxGameFolderStatus.InvalidGameAssembly);
             }
             if (version < minimumSupportedVersion)
-                return Candidate(inspection, LinuxGameFolderStatus.UnsupportedGameVersion, version);
+                return Candidate(gameRoot, LinuxGameFolderStatus.UnsupportedGameVersion, version);
 
             LinuxGameFolderStatus? dependenciesStatus = TryOpenMarker(
-                inspection.Game,
+                game,
                 "Stardew Valley.deps.json",
                 LinuxGameFolderStatus.MissingGameDependencies,
                 LinuxGameFolderStatus.UnsafeGameDependencies,
                 out LinuxAnchoredFile? dependencies
             );
             if (dependenciesStatus is not null)
-                return Candidate(inspection, dependenciesStatus.Value, version);
+                return Candidate(gameRoot, dependenciesStatus.Value, version);
             using (dependencies)
             {
                 try
                 {
-                    byte[] bytes = ReadBounded(inspection.Game, dependencies!, 16 * 1024 * 1024, cancellationToken);
+                    byte[] bytes = ReadBounded(game, dependencies!, 16 * 1024 * 1024, cancellationToken);
                     using JsonDocument document = JsonDocument.Parse(
                         bytes,
                         new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 64 }
@@ -282,33 +305,33 @@ public sealed class LinuxGameDiscovery
                         || target.ValueKind != JsonValueKind.Object
                     )
                     {
-                        return Candidate(inspection, LinuxGameFolderStatus.InvalidGameDependencies, version);
+                        return Candidate(gameRoot, LinuxGameFolderStatus.InvalidGameDependencies, version);
                     }
                 }
                 catch (JsonException)
                 {
-                    return Candidate(inspection, LinuxGameFolderStatus.InvalidGameDependencies, version);
+                    return Candidate(gameRoot, LinuxGameFolderStatus.InvalidGameDependencies, version);
                 }
             }
 
             LinuxGameFolderStatus? launcherStatus = TryOpenMarker(
-                inspection.Game,
+                game,
                 "StardewValley",
                 LinuxGameFolderStatus.MissingLauncher,
                 LinuxGameFolderStatus.UnsafeLauncher,
                 out LinuxAnchoredFile? launcher
             );
             if (launcherStatus is not null)
-                return Candidate(inspection, launcherStatus.Value, version);
+                return Candidate(gameRoot, launcherStatus.Value, version);
             using (launcher)
             {
                 if (launcher!.Identity.Size <= 0 || (launcher.Identity.UnixMode & 0x49) == 0)
-                    return Candidate(inspection, LinuxGameFolderStatus.UnsafeLauncher, version);
+                    return Candidate(gameRoot, LinuxGameFolderStatus.UnsafeLauncher, version);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            inspection.AssertStable();
-            return Candidate(inspection, LinuxGameFolderStatus.Valid, version);
+            assertStable();
+            return Candidate(gameRoot, LinuxGameFolderStatus.Valid, version);
         }
     }
 
@@ -324,17 +347,36 @@ public sealed class LinuxGameDiscovery
         }
     }
 
+    internal static void AssertValid(InstallerOperationLease lease, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        LinuxGameFolderCandidate candidate = Validate(
+            lease.Game,
+            lease.RootIdentity,
+            MinimumSupportedGameVersion,
+            cancellationToken,
+            () => lease.AssertRootAndGeneration(lease.RootIdentity, lease.Generation)
+        );
+        if (!candidate.IsValid)
+        {
+            throw new LinuxGameFolderException(
+                candidate.Status,
+                $"The selected game folder failed validation ({candidate.Status})."
+            );
+        }
+    }
+
     private static LinuxGameFolderCandidate Candidate(
-        InstallerInspectionLease inspection,
+        GameRootIdentity gameRoot,
         LinuxGameFolderStatus status,
         Version? version = null
     )
     {
         return new LinuxGameFolderCandidate(
-            inspection.CanonicalGameRoot,
+            gameRoot.CanonicalPath,
             status,
             version,
-            inspection.RootIdentity
+            gameRoot
         );
     }
 
@@ -386,10 +428,7 @@ public sealed class LinuxGameDiscovery
         CancellationToken cancellationToken
     )
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        byte[] result = game.ReadAllBytes(file, maximumBytes);
-        cancellationToken.ThrowIfCancellationRequested();
-        return result;
+        return game.ReadAllBytes(file, maximumBytes, cancellationToken);
     }
 
     private static IEnumerable<string> GetConventionalPaths(CancellationToken cancellationToken)

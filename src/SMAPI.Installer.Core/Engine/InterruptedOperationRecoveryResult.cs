@@ -6,8 +6,14 @@ namespace StardewModdingAPI.Installer.Core.Engine;
 /// <summary>The bounded result of explicitly recovering interrupted installer work under one anchored game-root lease.</summary>
 public sealed class InterruptedOperationRecoveryResult
 {
-    /// <summary>The exact game root which was recovered and revalidated.</summary>
+    /// <summary>The exact anchored game root which was recovered; its original named path may no longer select it.</summary>
     public GameRootIdentity GameRoot { get; }
+
+    /// <summary>Whether the originally selected named path still resolves to the exact recovered root.</summary>
+    public bool NamedRootStillSelected { get; }
+
+    /// <summary>Whether the named path was removed or replaced while the anchored recovery completed.</summary>
+    public bool NamedRootSelectionChanged => !this.NamedRootStillSelected;
 
     /// <summary>The operation generation observed after the exclusive lease was acquired and before recovery began.</summary>
     public ulong PreviousOperationGeneration { get; }
@@ -28,7 +34,8 @@ public sealed class InterruptedOperationRecoveryResult
         GameRootIdentity gameRoot,
         ulong previousOperationGeneration,
         ulong currentOperationGeneration,
-        IEnumerable<TransactionResult> recoveredTransactions
+        IEnumerable<TransactionResult> recoveredTransactions,
+        bool namedRootStillSelected = true
     )
     {
         ArgumentNullException.ThrowIfNull(gameRoot);
@@ -45,6 +52,7 @@ public sealed class InterruptedOperationRecoveryResult
             throw new ArgumentException("Interrupted-operation recovery can report only recovered transactions.", nameof(recoveredTransactions));
 
         this.GameRoot = gameRoot;
+        this.NamedRootStillSelected = namedRootStillSelected;
         this.PreviousOperationGeneration = previousOperationGeneration;
         this.CurrentOperationGeneration = currentOperationGeneration;
         this.RecoveredTransactions = new ReadOnlyCollection<TransactionResult>(recovered);

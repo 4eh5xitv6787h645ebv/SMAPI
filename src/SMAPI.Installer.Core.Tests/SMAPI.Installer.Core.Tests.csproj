@@ -18,5 +18,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SMAPI.Installer.Core\SMAPI.Installer.Core.csproj" />
+    <ProjectReference Include="..\SMAPI.Installer.TestGameMarker\SMAPI.Installer.TestGameMarker.csproj" />
   </ItemGroup>
 </Project>

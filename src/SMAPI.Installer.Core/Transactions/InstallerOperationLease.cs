@@ -183,6 +183,33 @@ internal sealed class InstallerOperationLease : IDisposable
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The installer operation generation changed after confirmation.");
     }
 
+    /// <summary>
+    /// Assert that the anchored root and operation generation remain exact, then report whether the original named path
+    /// still selects that root. A replaced or missing named path is reported without discarding completed anchored work.
+    /// </summary>
+    public bool AssertAnchoredRootAndGenerationAndCheckNamedSelection(
+        GameRootIdentity expectedRoot,
+        ulong expectedGeneration
+    )
+    {
+        this.AssertUsable();
+        if (expectedRoot != this.RootIdentity || !expectedRoot.Matches(this.Game.GetCurrentRootIdentity()))
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The anchored game-root identity changed during the operation.");
+        (LinuxFileIdentity identity, ulong generation) = ReadGeneration(this.Workspace);
+        if (identity != this.GenerationIdentity || generation != this.Generation || generation != expectedGeneration)
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The installer operation generation changed during the operation.");
+
+        try
+        {
+            using LinuxAnchoredFileSystem currentlyNamedRoot = new(this.CanonicalGameRoot);
+            return expectedRoot.Matches(currentlyNamedRoot.Identity);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     public void Dispose()
     {
         if (this.Disposed)

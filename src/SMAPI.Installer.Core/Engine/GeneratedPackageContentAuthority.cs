@@ -41,8 +41,46 @@ internal sealed class GeneratedPackageContentAuthority : IVerifiedPackageContent
         if (package.Manifest.GeneratedFiles.Count == 0)
             return package;
 
+        Dictionary<string, RecoveryFileIdentity> sources = ObserveSources(
+            game,
+            package.Manifest.GeneratedFiles,
+            rejectChangedResolvedIdentity: true,
+            cancellationToken
+        );
+
+        if (package.Manifest.HasResolvedGeneratedFiles)
+            return package;
+        return new GeneratedPackageContentAuthority(package, package.Manifest.ResolveGeneratedFiles(sources));
+    }
+
+    internal static PackageManifest ResolveInstalledManifestEvolution(
+        LinuxAnchoredFileSystem game,
+        PackageManifest installedManifest,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(game);
+        ArgumentNullException.ThrowIfNull(installedManifest);
+        if (installedManifest.GeneratedFiles.Count == 0)
+            return installedManifest;
+        Dictionary<string, RecoveryFileIdentity> sources = ObserveSources(
+            game,
+            installedManifest.GeneratedFiles,
+            rejectChangedResolvedIdentity: false,
+            cancellationToken
+        );
+        return installedManifest.ResolveGeneratedFiles(sources);
+    }
+
+    private static Dictionary<string, RecoveryFileIdentity> ObserveSources(
+        LinuxAnchoredFileSystem game,
+        IReadOnlyList<GeneratedFileRecipe> recipes,
+        bool rejectChangedResolvedIdentity,
+        CancellationToken cancellationToken
+    )
+    {
         Dictionary<string, RecoveryFileIdentity> sources = new(StringComparer.Ordinal);
-        foreach (GeneratedFileRecipe recipe in package.Manifest.GeneratedFiles)
+        foreach (GeneratedFileRecipe recipe in recipes)
         {
             cancellationToken.ThrowIfCancellationRequested();
             LinuxFileIdentity? before = ReadSourceIdentity(game, recipe.SourcePath);
@@ -71,7 +109,7 @@ internal sealed class GeneratedPackageContentAuthority : IVerifiedPackageContent
                     TransactionErrorCode.ExistingFileMismatch,
                     $"Required generated-file source '{recipe.SourcePath}' isn't a present regular file."
                 );
-            if (recipe.SourceIdentity is not null && recipe.SourceIdentity != identity)
+            if (rejectChangedResolvedIdentity && recipe.SourceIdentity is not null && recipe.SourceIdentity != identity)
             {
                 throw new ExecutionCompilationException(
                     ExecutionCompilationError.StaleManifest,
@@ -81,10 +119,7 @@ internal sealed class GeneratedPackageContentAuthority : IVerifiedPackageContent
             if (!sources.TryAdd(recipe.SourcePath.Value, identity) && sources[recipe.SourcePath.Value] != identity)
                 throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "Generated recipes disagree about one source identity.");
         }
-
-        if (package.Manifest.HasResolvedGeneratedFiles)
-            return package;
-        return new GeneratedPackageContentAuthority(package, package.Manifest.ResolveGeneratedFiles(sources));
+        return sources;
     }
 
     public LinuxAnchoredFile OpenFile(PackageManifestEntry expected, CancellationToken cancellationToken = default)

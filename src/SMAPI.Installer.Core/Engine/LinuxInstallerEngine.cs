@@ -29,7 +29,7 @@ public sealed class InspectedInstallationState : IDisposable
     public ObservedInstallationState ObservedState { get; }
     /// <summary>The exact recovery-generation capacity observed while this plan was created.</summary>
     public RecoveryCapacityState RecoveryCapacity { get; }
-    /// <summary>Get the deterministic exact modified-file candidates which this blocked repair inspection can authorize.</summary>
+    /// <summary>Get the deterministic exact file candidates which this blocked inspection can authorize.</summary>
     public IReadOnlyList<ModifiedFileReplacementCandidate> ModifiedFileReplacementCandidates { get; }
     internal BoundInstallationPlan Binding { get; }
     internal IVerifiedPackageContentAuthority? TargetPackageContent { get; }
@@ -142,7 +142,25 @@ public sealed class LinuxInstallerEngine
         CancellationToken cancellationToken = default
     )
         => Task.Run(
-            () => this.ApproveRepair(sourceInspection, selectedCandidates, cancellationToken),
+            () => this.ApproveFileReplacements(sourceInspection, selectedCandidates, requireRepair: true, cancellationToken),
+            cancellationToken
+        );
+
+    /// <summary>
+    /// Select exact core-minted replacement or removal candidates from a blocked install, update, repair, or uninstall
+    /// inspection, revalidate them through the anchored game root, and return a replacement inspection.
+    /// </summary>
+    /// <remarks>
+    /// Partial selection leaves all unselected conflicts blocked. The source inspection and every borrowed content
+    /// authority must remain usable until this method completes; this method does not dispose them.
+    /// </remarks>
+    public Task<InspectedInstallationState> ApproveFileReplacementsAsync(
+        InspectedInstallationState sourceInspection,
+        IEnumerable<ModifiedFileReplacementCandidate> selectedCandidates,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(
+            () => this.ApproveFileReplacements(sourceInspection, selectedCandidates, requireRepair: false, cancellationToken),
             cancellationToken
         );
 
@@ -179,12 +197,16 @@ public sealed class LinuxInstallerEngine
         else if (recovered.Count == 0 || lease.Generation <= previousGeneration)
             throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "Interrupted-operation recovery published an inconsistent operation generation.");
 
-        lease.AssertRootAndGeneration(gameRootIdentity, lease.Generation);
+        bool namedRootStillSelected = lease.AssertAnchoredRootAndGenerationAndCheckNamedSelection(
+            gameRootIdentity,
+            lease.Generation
+        );
         InterruptedOperationRecoveryResult result = new(
             gameRootIdentity,
             previousGeneration,
             lease.Generation,
-            recovered
+            recovered,
+            namedRootStillSelected
         );
         this.Progress.Report(new(TransactionStage.Completed, recovered.Count, recovered.Count));
         return result;
@@ -204,6 +226,7 @@ public sealed class LinuxInstallerEngine
         IVerifiedPackageContentAuthority? packageAuthority = targetPackage;
         ICommittedRecoveryContentAuthority? recoveryAuthority = recovery;
         using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
+        LinuxGameDiscovery.AssertValid(inspection, cancellationToken);
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
         InspectedInstallationState result = this.InspectCore(
             inspection.Game,
@@ -230,9 +253,10 @@ public sealed class LinuxInstallerEngine
         }
     }
 
-    private InspectedInstallationState ApproveRepair(
+    private InspectedInstallationState ApproveFileReplacements(
         InspectedInstallationState sourceInspection,
         IEnumerable<ModifiedFileReplacementCandidate> selectedCandidates,
+        bool requireRepair,
         CancellationToken cancellationToken
     )
     {
@@ -241,15 +265,20 @@ public sealed class LinuxInstallerEngine
         this.Progress.Report(new(TransactionStage.Inspecting, 0, null));
         sourceInspection.AssertUsable();
         cancellationToken.ThrowIfCancellationRequested();
-        if (sourceInspection.Action != InstallationAction.Repair || sourceInspection.Plan.CanExecute)
+        bool supportedAction = sourceInspection.Action is
+            InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair or InstallationAction.Uninstall;
+        if ((requireRepair && sourceInspection.Action != InstallationAction.Repair) || !supportedAction || sourceInspection.Plan.CanExecute)
         {
             throw new ExecutionCompilationException(
                 ExecutionCompilationError.NonExecutablePlan,
-                "Repair candidates can only be selected from a blocked repair inspection."
+                requireRepair
+                    ? "Repair candidates can only be selected from a blocked repair inspection."
+                    : "File candidates can only be selected from a supported blocked inspection."
             );
         }
-        IVerifiedPackageContentAuthority targetPackage = sourceInspection.TargetPackageContent
-            ?? throw new ExecutionCompilationException(ExecutionCompilationError.StaleManifest, "The repair inspection has no live package authority.");
+        IVerifiedPackageContentAuthority? targetPackage = sourceInspection.TargetPackageContent;
+        if (sourceInspection.Action is InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair && targetPackage is null)
+            throw new ExecutionCompilationException(ExecutionCompilationError.StaleManifest, "The inspection has no live package authority.");
 
         List<ModifiedFileReplacementCandidate> selected = new();
         HashSet<ModifiedFileReplacementCandidate> unique = new(ReferenceEqualityComparer.Instance);
@@ -257,11 +286,11 @@ public sealed class LinuxInstallerEngine
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (selected.Count >= sourceInspection.ModifiedFileReplacementCandidates.Count)
-                throw new ArgumentException("The repair-candidate selection exceeds the bounded issued set.", nameof(selectedCandidates));
+                throw new ArgumentException("The file-candidate selection exceeds the bounded issued set.", nameof(selectedCandidates));
             if (candidate is null)
-                throw new ArgumentException("A selected repair candidate can't be null.", nameof(selectedCandidates));
+                throw new ArgumentException("A selected file candidate can't be null.", nameof(selectedCandidates));
             if (!unique.Add(candidate))
-                throw new ArgumentException("A repair candidate can't be selected more than once.", nameof(selectedCandidates));
+                throw new ArgumentException("A file candidate can't be selected more than once.", nameof(selectedCandidates));
             if (
                 !ReferenceEquals(candidate.SourceAuthority, sourceInspection.RepairCandidateAuthority)
                 || !sourceInspection.ModifiedFileReplacementCandidates.Any(issued => ReferenceEquals(issued, candidate))
@@ -269,7 +298,7 @@ public sealed class LinuxInstallerEngine
             {
                 throw new ExecutionCompilationException(
                     ExecutionCompilationError.StalePlan,
-                    "A selected repair candidate wasn't issued by this exact inspection."
+                    "A selected file candidate wasn't issued by this exact inspection."
                 );
             }
             selected.Add(candidate);
@@ -281,9 +310,10 @@ public sealed class LinuxInstallerEngine
         {
             throw new ExecutionCompilationException(
                 ExecutionCompilationError.StalePlan,
-                "The game root or installer generation changed after the repair candidates were inspected."
+                "The game root or installer generation changed after the file candidates were inspected."
             );
         }
+        LinuxGameDiscovery.AssertValid(inspection, cancellationToken);
         foreach (ModifiedFileReplacementCandidate candidate in selected)
         {
             RecoveryFileObservation observed = InstallationStateInspector.ReadObservation(
@@ -295,7 +325,7 @@ public sealed class LinuxInstallerEngine
             {
                 throw new ExecutionCompilationException(
                     ExecutionCompilationError.StalePlan,
-                    $"Repair candidate '{candidate.Path}' changed after inspection."
+                    $"File candidate '{candidate.Path}' changed after inspection."
                 );
             }
         }
@@ -309,9 +339,9 @@ public sealed class LinuxInstallerEngine
             inspection.Game,
             inspection.RootIdentity,
             inspection.Generation,
-            InstallationAction.Repair,
+            sourceInspection.Action,
             targetPackage,
-            null,
+            sourceInspection.RollbackContent,
             approvals,
             state,
             cancellationToken
@@ -363,6 +393,7 @@ public sealed class LinuxInstallerEngine
         if (this.Executor.RecoverLocked(lease).Count > 0)
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "Crash recovery invalidated the inspected plan. Inspect and confirm again.");
         lease.AssertRootAndGeneration(inspection.GameRoot, inspection.OperationGeneration);
+        LinuxGameDiscovery.AssertValid(lease, cancellationToken);
         InspectedInstallationState current = this.InspectLocked(
             lease,
             inspection.Action,
@@ -654,7 +685,7 @@ public sealed class LinuxInstallerEngine
         );
         InstallationPlan plan = new InstallationPlanner().Plan(request);
         object repairCandidateAuthority = new();
-        ModifiedFileReplacementCandidate[] repairCandidates = InstallationStateInspector.CreateRepairCandidates(
+        ModifiedFileReplacementCandidate[] repairCandidates = InstallationStateInspector.CreateReplacementCandidates(
             game,
             request,
             plan,
@@ -771,6 +802,37 @@ internal static class InstallationStateInspector
             if (current is not null)
                 currentFiles.Add(current);
         }
+        PackageManifest? installedManifest = state.Manifest;
+        if (receipt is not null && installedManifest is not null && installedManifest.GeneratedFiles.Count > 0)
+        {
+            PackageManifest evolved = GeneratedPackageContentAuthority.ResolveInstalledManifestEvolution(
+                game,
+                installedManifest,
+                cancellationToken
+            );
+            bool exactGeneratedResults = evolved.Entries
+                .Where(entry => entry.Kind == OwnedEntryKind.GeneratedFile)
+                .All(entry => currentFiles.SingleOrDefault(file => file.Path.Equals(entry.Path)) is CurrentFile current
+                    && current.Sha256 == entry.Sha256
+                    && current.UnixMode == entry.UnixMode
+                );
+            if (exactGeneratedResults && evolved.GetCanonicalDigest() != installedManifest.GetCanonicalDigest())
+            {
+                installedManifest = evolved;
+                receipt = new InstallationReceipt(
+                    evolved.Release,
+                    evolved.GetCanonicalDigest(),
+                    receipt.TransactionId,
+                    evolved.Entries.Select(entry => new InstallationReceiptEntry(
+                        entry.Path,
+                        entry.Sha256,
+                        entry.UnixMode,
+                        entry.Kind
+                    )),
+                    receipt.Launcher
+                );
+            }
+        }
         CurrentFile? currentLauncher = currentFiles.SingleOrDefault(file => file.Path.Equals(LauncherPath));
         CurrentFile? launcherBackup = ReadCurrentFile(game, LauncherBackupPath, cancellationToken);
         LauncherState launcher = LauncherState.Assess(
@@ -780,7 +842,18 @@ internal static class InstallationStateInspector
             currentLauncher?.UnixMode,
             launcherBackup?.UnixMode
         );
-        InstallationInventory inventory = InstallationInventory.Create(targetManifest, receipt, currentFiles);
+        NormalizedRelativePath[] legacyPaths = receipt is null && targetManifest is not null
+            ? targetManifest.Entries
+                .Where(OwnedNamespacePolicy.IsRecognizedLegacyCandidate)
+                .Select(entry => entry.Path)
+                .ToArray()
+            : Array.Empty<NormalizedRelativePath>();
+        InstallationInventory inventory = InstallationInventory.Create(
+            targetManifest,
+            receipt,
+            currentFiles,
+            legacyPaths: legacyPaths
+        );
         RollbackSnapshot? rollbackSnapshot = recovery?.Snapshot;
         RecoveryCapacityState recoveryCapacity = CommittedRecoveryHandle.InspectCapacity(game, cancellationToken);
         ObservedInstallationState observedState = GetObservedState(receipt, inventory, launcher);
@@ -807,7 +880,12 @@ internal static class InstallationStateInspector
             recovery?.OriginAction,
             modifiedFileReplacementApprovals,
             recoveryCapacity,
-            observedState
+            observedState,
+            installedManifest,
+            state.ManifestSha256,
+            state.ReceiptSha256,
+            state.Manifest,
+            state.Receipt
         );
         InstallationPlan plan = new InstallationPlanner().Plan(initial);
         IEnumerable<NormalizedRelativePath> required = action switch
@@ -835,7 +913,12 @@ internal static class InstallationStateInspector
             recovery?.OriginAction,
             modifiedFileReplacementApprovals,
             recoveryCapacity,
-            observedState
+            observedState,
+            installedManifest,
+            state.ManifestSha256,
+            state.ReceiptSha256,
+            state.Manifest,
+            state.Receipt
         );
     }
 
@@ -847,12 +930,19 @@ internal static class InstallationStateInspector
     {
         if (receipt is null)
         {
-            bool hasCollision = inventory.Entries.Any(entry =>
+            bool hasLegacyEvidence = inventory.Entries.Any(entry =>
                 !entry.Path.Equals(LauncherPath)
                 && entry.Current is not null
-                && entry.Classification is InventoryClassification.Legacy or InventoryClassification.UnknownCollision
+                && entry.Classification == InventoryClassification.Legacy
             );
-            return launcher.Classification == LauncherClassification.FreshVanilla && !hasCollision
+            if (hasLegacyEvidence)
+                return ObservedInstallationState.LegacyOrOfficial;
+            bool hasUnknownCollision = inventory.Entries.Any(entry =>
+                !entry.Path.Equals(LauncherPath)
+                && entry.Current is not null
+                && entry.Classification == InventoryClassification.UnknownCollision
+            );
+            return launcher.Classification == LauncherClassification.FreshVanilla && !hasUnknownCollision
                 ? ObservedInstallationState.NotInstalled
                 : ObservedInstallationState.Unknown;
         }
@@ -865,7 +955,7 @@ internal static class InstallationStateInspector
             : ObservedInstallationState.KnownModified;
     }
 
-    internal static ModifiedFileReplacementCandidate[] CreateRepairCandidates(
+    internal static ModifiedFileReplacementCandidate[] CreateReplacementCandidates(
         LinuxAnchoredFileSystem game,
         InstallationPlanningRequest request,
         InstallationPlan plan,
@@ -874,15 +964,25 @@ internal static class InstallationStateInspector
     )
     {
         ArgumentNullException.ThrowIfNull(sourceAuthority);
-        if (request.Action != InstallationAction.Repair || plan.CanExecute)
+        if (
+            request.Action is not (InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair or InstallationAction.Uninstall)
+            || plan.CanExecute
+        )
             return Array.Empty<ModifiedFileReplacementCandidate>();
 
-        NormalizedRelativePath[] paths = plan.Conflicts
-            .Where(conflict => conflict.Path is not null && conflict.Code is PlanConflictCode.ModifiedOwnedFile or PlanConflictCode.ModifiedInstalledLauncher)
+        List<NormalizedRelativePath> candidatePaths = plan.Conflicts
+            .Where(conflict => conflict.Path is not null && IsApprovableConflict(request.Action, conflict.Code))
             .Select(conflict => conflict.Path!)
+            .ToList();
+        if (IsOfficialLauncherAdoptionCandidate(request, plan))
+        {
+            candidatePaths.Add(LauncherPath);
+            candidatePaths.Add(LauncherBackupPath);
+        }
+        NormalizedRelativePath[] paths = candidatePaths
             .Distinct()
             .OrderBy(path => path.Value, StringComparer.Ordinal)
-            .Where(path => IsExactRepairCandidate(request, path))
+            .Where(path => IsExactReplacementCandidate(request, path))
             .ToArray();
         List<ModifiedFileReplacementCandidate> result = new(paths.Length);
         foreach (NormalizedRelativePath path in paths)
@@ -890,12 +990,24 @@ internal static class InstallationStateInspector
             cancellationToken.ThrowIfCancellationRequested();
             RecoveryFileObservation observation = ReadObservation(game, path, cancellationToken);
             RecoveryFileIdentity identity = observation.Identity
-                ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"Repair candidate '{path}' disappeared during inspection.");
-            CurrentFile expected = request.Inventory.Entries.Single(entry => entry.Path.Equals(path)).Current
-                ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"Repair candidate '{path}' has no current inventory observation.");
-            if (identity.Sha256 != expected.Sha256 || identity.UnixMode != expected.UnixMode)
-                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"Repair candidate '{path}' changed during inspection.");
-            result.Add(new ModifiedFileReplacementCandidate(sourceAuthority, path, identity));
+                ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"File candidate '{path}' disappeared during inspection.");
+            (Sha256Digest expectedSha256, int expectedUnixMode) = GetExpectedCandidateIdentity(request, path);
+            if (identity.Sha256 != expectedSha256 || identity.UnixMode != expectedUnixMode)
+                throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"File candidate '{path}' changed during inspection.");
+            if (request.ModifiedFileReplacementApprovals.Any(approval =>
+                approval.Path.Equals(path) && approval.ObservedIdentity == identity
+            ))
+                continue;
+            (FileReplacementCandidateReason reason, FileReplacementCandidateDisposition disposition, Sha256Digest? proposedResult) =
+                GetCandidatePresentation(request, path, identity.Sha256);
+            result.Add(new ModifiedFileReplacementCandidate(
+                sourceAuthority,
+                path,
+                identity,
+                reason,
+                disposition,
+                proposedResult
+            ));
         }
         return result.ToArray();
     }
@@ -924,24 +1036,166 @@ internal static class InstallationStateInspector
         );
     }
 
-    private static bool IsExactRepairCandidate(InstallationPlanningRequest request, NormalizedRelativePath path)
+    private static bool IsApprovableConflict(InstallationAction action, PlanConflictCode code)
+    {
+        return action switch
+        {
+            InstallationAction.Install => code is PlanConflictCode.LegacyOwnershipUnconfirmed or PlanConflictCode.UnknownCollision,
+            InstallationAction.Update => code is PlanConflictCode.ModifiedOwnedFile or PlanConflictCode.ModifiedInstalledLauncher
+                or PlanConflictCode.LegacyOwnershipUnconfirmed or PlanConflictCode.UnknownCollision,
+            InstallationAction.Repair => code is PlanConflictCode.ModifiedOwnedFile or PlanConflictCode.ModifiedInstalledLauncher,
+            InstallationAction.Uninstall => code is PlanConflictCode.ModifiedOwnedFile or PlanConflictCode.ModifiedInstalledLauncher,
+            _ => false
+        };
+    }
+
+    private static bool IsOfficialLauncherAdoptionCandidate(InstallationPlanningRequest request, InstallationPlan plan)
+    {
+        return request.Action == InstallationAction.Install
+            && request.InstalledReceipt is null
+            && request.TargetManifest is not null
+            && request.Launcher.Classification == LauncherClassification.AmbiguousBackup
+            && request.Launcher.CurrentLauncherSha256 is not null
+            && request.Launcher.CurrentLauncherUnixMode is not null
+            && request.Launcher.BackupLauncherSha256 is not null
+            && request.Launcher.BackupLauncherUnixMode is not null
+            && request.Inventory.Entries.Any(entry => entry.Current is not null && entry.Classification == InventoryClassification.Legacy)
+            && plan.Conflicts.Any(conflict => conflict.Code == PlanConflictCode.AmbiguousLauncherBackup);
+    }
+
+    private static bool IsExactReplacementCandidate(InstallationPlanningRequest request, NormalizedRelativePath path)
     {
         if (path.Equals(LauncherPath))
         {
-            return request.Launcher.Classification == LauncherClassification.InstalledModified
+            bool modifiedOwnedLauncher = request.Launcher.Classification == LauncherClassification.InstalledModified
                 && request.Launcher.CurrentLauncherSha256 is not null
                 && request.Launcher.CurrentLauncherUnixMode is not null
                 && request.InstalledReceipt is not null
-                && request.TargetManifest is not null;
+                && (request.Action == InstallationAction.Uninstall || request.TargetManifest is not null);
+            bool officialLauncher = request.Action == InstallationAction.Install
+                && request.InstalledReceipt is null
+                && request.TargetManifest is not null
+                && request.Launcher.Classification == LauncherClassification.AmbiguousBackup
+                && request.Launcher.CurrentLauncherSha256 is not null
+                && request.Launcher.CurrentLauncherUnixMode is not null;
+            return modifiedOwnedLauncher || officialLauncher;
+        }
+        if (path.Equals(LauncherBackupPath))
+        {
+            return request.Action == InstallationAction.Install
+                && request.InstalledReceipt is null
+                && request.TargetManifest is not null
+                && request.Launcher.Classification == LauncherClassification.AmbiguousBackup
+                && request.Launcher.BackupLauncherSha256 is not null
+                && request.Launcher.BackupLauncherUnixMode is not null;
         }
         InventoryEntry? entry = request.Inventory.Entries.SingleOrDefault(candidate => candidate.Path.Equals(path));
-        return entry is
+        if (entry?.Current is null)
+            return false;
+        return request.Action switch
         {
-            Classification: InventoryClassification.ModifiedOwned,
-            Current: not null,
-            Installed: not null,
-            Target: not null
+            InstallationAction.Install => entry.Target is not null
+                && entry.Installed is null
+                && entry.Classification is InventoryClassification.Legacy or InventoryClassification.UnknownCollision,
+            InstallationAction.Update => (
+                    entry.Classification == InventoryClassification.ModifiedOwned
+                    && entry.Installed is not null
+                ) || (
+                    entry.Target is not null
+                    && entry.Installed is null
+                    && entry.Classification is InventoryClassification.Legacy or InventoryClassification.UnknownCollision
+                ),
+            InstallationAction.Repair => entry.Classification == InventoryClassification.ModifiedOwned
+                && entry.Installed is not null
+                && entry.Target is not null,
+            InstallationAction.Uninstall => entry.Classification == InventoryClassification.ModifiedOwned
+                && entry.Installed is not null,
+            _ => false
         };
+    }
+
+    private static (Sha256Digest Sha256, int UnixMode) GetExpectedCandidateIdentity(
+        InstallationPlanningRequest request,
+        NormalizedRelativePath path
+    )
+    {
+        if (path.Equals(LauncherPath))
+        {
+            return (
+                request.Launcher.CurrentLauncherSha256
+                    ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The launcher candidate has no content identity."),
+                request.Launcher.CurrentLauncherUnixMode
+                    ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The launcher candidate has no mode identity.")
+            );
+        }
+        if (path.Equals(LauncherBackupPath))
+        {
+            return (
+                request.Launcher.BackupLauncherSha256
+                    ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The launcher-backup candidate has no content identity."),
+                request.Launcher.BackupLauncherUnixMode
+                    ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The launcher-backup candidate has no mode identity.")
+            );
+        }
+        CurrentFile current = request.Inventory.Entries.Single(entry => entry.Path.Equals(path)).Current
+            ?? throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"File candidate '{path}' has no current inventory observation.");
+        return (current.Sha256, current.UnixMode);
+    }
+
+    private static (
+        FileReplacementCandidateReason Reason,
+        FileReplacementCandidateDisposition Disposition,
+        Sha256Digest? ProposedResult
+    ) GetCandidatePresentation(
+        InstallationPlanningRequest request,
+        NormalizedRelativePath path,
+        Sha256Digest observedSha256
+    )
+    {
+        if (path.Equals(LauncherBackupPath))
+        {
+            return (
+                FileReplacementCandidateReason.OfficialLauncherBackup,
+                FileReplacementCandidateDisposition.TrustRetained,
+                observedSha256
+            );
+        }
+        if (path.Equals(LauncherPath))
+        {
+            if (request.Action == InstallationAction.Install && request.InstalledReceipt is null)
+            {
+                return (
+                    FileReplacementCandidateReason.OfficialOrLegacyLauncher,
+                    FileReplacementCandidateDisposition.Replace,
+                    request.TargetManifest!.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher).Sha256
+                );
+            }
+            if (request.Action == InstallationAction.Uninstall)
+            {
+                return (
+                    FileReplacementCandidateReason.ModifiedInstalledLauncher,
+                    FileReplacementCandidateDisposition.Restore,
+                    request.Launcher.BackupLauncherSha256
+                );
+            }
+            return (
+                FileReplacementCandidateReason.ModifiedInstalledLauncher,
+                FileReplacementCandidateDisposition.Replace,
+                request.TargetManifest!.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher).Sha256
+            );
+        }
+
+        InventoryEntry entry = request.Inventory.Entries.Single(candidate => candidate.Path.Equals(path));
+        FileReplacementCandidateReason reason = entry.Classification switch
+        {
+            InventoryClassification.ModifiedOwned => FileReplacementCandidateReason.ModifiedReceiptOwned,
+            InventoryClassification.Legacy => FileReplacementCandidateReason.LegacyInstaller,
+            InventoryClassification.UnknownCollision => FileReplacementCandidateReason.UnknownCollision,
+            _ => throw new InvalidOperationException($"Candidate '{path}' has no presentable conflict classification.")
+        };
+        if (request.Action == InstallationAction.Uninstall || entry.Target is null)
+            return (reason, FileReplacementCandidateDisposition.Remove, null);
+        return (reason, FileReplacementCandidateDisposition.Replace, entry.Target.Sha256);
     }
 
     private static CurrentFile? ReadCurrentFile(

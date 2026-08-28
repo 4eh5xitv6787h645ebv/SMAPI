@@ -108,7 +108,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         string launcher = Path.Combine(game, "StardewValley");
         await File.WriteAllTextAsync(launcher, "vanilla launcher");
         File.SetUnixFileMode(launcher, (UnixFileMode)493);
@@ -121,7 +121,11 @@ public sealed class VerifiedPackageContentTests
 
         inspection.Plan.CanExecute.Should().BeTrue();
         Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse();
-        Directory.EnumerateFileSystemEntries(game).Should().Equal(launcher);
+        Directory.EnumerateFileSystemEntries(game).Select(Path.GetFileName).Should().BeEquivalentTo(
+            "Stardew Valley.dll",
+            "Stardew Valley.deps.json",
+            "StardewValley"
+        );
         (await File.ReadAllTextAsync(launcher)).Should().Be("vanilla launcher");
         File.GetUnixFileMode(launcher).Should().Be((UnixFileMode)493);
     }
@@ -137,7 +141,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "cancelled-inspection-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         string launcher = Path.Combine(game, "StardewValley");
         await File.WriteAllTextAsync(launcher, "vanilla launcher");
         File.SetUnixFileMode(launcher, (UnixFileMode)493);
@@ -176,7 +180,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "borrowed-package-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         await File.WriteAllTextAsync(Path.Combine(game, "StardewValley"), "vanilla launcher");
         File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)493);
         LinuxInstallerEngine engine = new();
@@ -199,7 +203,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "disposed-package-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         string launcher = Path.Combine(game, "StardewValley");
         await File.WriteAllTextAsync(launcher, "vanilla launcher");
         File.SetUnixFileMode(launcher, (UnixFileMode)493);
@@ -225,7 +229,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "cancelled-execution-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         string launcher = Path.Combine(game, "StardewValley");
         await File.WriteAllTextAsync(launcher, "vanilla launcher");
         File.SetUnixFileMode(launcher, (UnixFileMode)493);
@@ -252,7 +256,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "facade-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         string launcher = Path.Combine(game, "StardewValley");
         await File.WriteAllTextAsync(launcher, "vanilla launcher");
         File.SetUnixFileMode(launcher, (UnixFileMode)493);
@@ -290,7 +294,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "dispose-during-approval-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         await File.WriteAllTextAsync(Path.Combine(game, "StardewValley"), "vanilla launcher");
         File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)493);
         LinuxInstallerEngine engine = new();
@@ -322,7 +326,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "bounded-approval-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         await File.WriteAllTextAsync(Path.Combine(game, "StardewValley"), "vanilla launcher");
         File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)493);
         LinuxInstallerEngine engine = new();
@@ -354,7 +358,7 @@ public sealed class VerifiedPackageContentTests
         VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
         await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
         string game = Path.Combine(this.TempRoot, "failed-borrow-game");
-        Directory.CreateDirectory(game);
+        LinuxGameTestFolder.MakeValid(game);
         string launcher = Path.Combine(game, "StardewValley");
         await File.WriteAllTextAsync(launcher, "vanilla launcher");
         File.SetUnixFileMode(launcher, (UnixFileMode)493);
@@ -366,7 +370,7 @@ public sealed class VerifiedPackageContentTests
 
         await execute.Should().ThrowAsync<Exception>();
         string retryGame = Path.Combine(this.TempRoot, "failed-borrow-retry-game");
-        Directory.CreateDirectory(retryGame);
+        LinuxGameTestFolder.MakeValid(retryGame);
         string retryLauncher = Path.Combine(retryGame, "StardewValley");
         await File.WriteAllTextAsync(retryLauncher, "vanilla launcher");
         File.SetUnixFileMode(retryLauncher, (UnixFileMode)493);

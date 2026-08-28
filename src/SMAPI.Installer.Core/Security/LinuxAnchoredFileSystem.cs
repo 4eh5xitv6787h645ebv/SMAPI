@@ -380,12 +380,17 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     }
 
     /// <summary>Read a bounded stable regular file through its already-open handle.</summary>
-    public byte[] ReadAllBytes(LinuxAnchoredFile file, int maximumBytes)
+    public byte[] ReadAllBytes(
+        LinuxAnchoredFile file,
+        int maximumBytes,
+        CancellationToken cancellationToken = default
+    )
     {
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(file);
         if (maximumBytes < 0)
             throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        cancellationToken.ThrowIfCancellationRequested();
         file.AssertOpen();
 
         LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
@@ -395,7 +400,12 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         int offset = 0;
         while (offset < result.Length)
         {
-            int count = RandomAccess.Read(file.Handle, result.AsSpan(offset), offset);
+            cancellationToken.ThrowIfCancellationRequested();
+            int count = RandomAccess.Read(
+                file.Handle,
+                result.AsSpan(offset, Math.Min(128 * 1024, result.Length - offset)),
+                offset
+            );
             if (count == 0)
                 throw new EndOfStreamException("The anchored file became shorter while it was read.");
             offset += count;
@@ -404,6 +414,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         LinuxFileIdentity after = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
         if (after != before)
             throw new IOException("The anchored file identity changed while it was read.");
+        cancellationToken.ThrowIfCancellationRequested();
         return result;
     }
 
