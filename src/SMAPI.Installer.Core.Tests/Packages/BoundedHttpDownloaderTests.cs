@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using FluentAssertions;
 using NUnit.Framework;
@@ -8,6 +10,7 @@ using StardewModdingAPI.Installer.Core.Packages;
 namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 
 [TestFixture]
+[SupportedOSPlatform("linux")]
 public sealed class BoundedHttpDownloaderTests
 {
     private string TempRoot = null!;
@@ -55,7 +58,9 @@ public sealed class BoundedHttpDownloaderTests
         );
 
         File.ReadAllBytes(destination).Should().Equal(content);
-        File.Exists(destination + ".part").Should().BeFalse();
+        File.ReadAllText(destination + ".part").Should().Be("stale partial download");
+        File.GetUnixFileMode(destination).Should().Be(UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
         result.BytesReceived.Should().Be(content.Length);
         result.FinalUri.AbsolutePath.Should().Be("/asset");
         progress.Values.Should().ContainSingle().Which.BytesReceived.Should().Be(content.Length);
@@ -84,7 +89,7 @@ public sealed class BoundedHttpDownloaderTests
 
         await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*size limit*");
         File.ReadAllText(destination).Should().Be("previous verified package");
-        File.Exists(destination + ".part").Should().BeFalse();
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
     }
 
     [Test]
@@ -109,7 +114,7 @@ public sealed class BoundedHttpDownloaderTests
         );
 
         await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*while streaming*");
-        File.Exists(destination + ".part").Should().BeFalse();
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
     }
 
     [Test]
@@ -139,7 +144,7 @@ public sealed class BoundedHttpDownloaderTests
 
         await download.Invoking(async task => await task).Should().ThrowAsync<OperationCanceledException>();
         File.Exists(destination).Should().BeFalse();
-        File.Exists(destination + ".part").Should().BeFalse();
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
     }
 
     [Test]
@@ -166,7 +171,7 @@ public sealed class BoundedHttpDownloaderTests
         PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
         exception.Message.Should().Contain("timed out");
         exception.Message.Should().NotContain("super-secret");
-        File.Exists(destination + ".part").Should().BeFalse();
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
     }
 
     [Test]
@@ -189,6 +194,181 @@ public sealed class BoundedHttpDownloaderTests
         exception.Message.Should().NotContain("super-secret");
     }
 
+    [Test]
+    public async Task DownloadAsync_InProgressTemporaryIsUniquePrivateAndLegacyPartIsUntouched()
+    {
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using LoopbackHttpServer server = new(async (_, _, stream, cancellationToken) =>
+        {
+            await LoopbackHttpServer.WriteRawAsync(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\npart",
+                cancellationToken
+            );
+            await release.Task.WaitAsync(cancellationToken);
+            await LoopbackHttpServer.WriteRawAsync(stream, "done", cancellationToken);
+        });
+        using BoundedHttpDownloader downloader = new(new LoopbackDownloadPolicy());
+        string destination = Path.Combine(this.TempRoot, "package.zip");
+        File.WriteAllText(destination + ".part", "sentinel");
+
+        Task<DownloadResult> download = downloader.DownloadAsync(
+            server.BaseUri,
+            destination,
+            new DownloadLimits(1024, TimeSpan.FromSeconds(10), 0)
+        );
+        string temporary = await this.WaitForTemporaryCountAsync(1);
+
+        Path.GetFileName(temporary).Should().MatchRegex("^\\.smapi-download-[0-9a-f]{32}\\.tmp$");
+        File.GetUnixFileMode(temporary).Should().Be(UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.ReadAllText(destination + ".part").Should().Be("sentinel");
+
+        release.TrySetResult();
+        await download;
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
+        File.ReadAllText(destination + ".part").Should().Be("sentinel");
+    }
+
+    [Test]
+    public async Task DownloadAsync_ConcurrentSameDestination_FirstPublisherWinsAndLoserCleansOnlyOwnTemporary()
+    {
+        TaskCompletionSource releaseFirst = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseSecond = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using LoopbackHttpServer firstServer = CreateGatedServer("first", releaseFirst);
+        await using LoopbackHttpServer secondServer = CreateGatedServer("second", releaseSecond);
+        using BoundedHttpDownloader firstDownloader = new(new LoopbackDownloadPolicy());
+        using BoundedHttpDownloader secondDownloader = new(new LoopbackDownloadPolicy());
+        string destination = Path.Combine(this.TempRoot, "package.zip");
+
+        Task<DownloadResult> first = firstDownloader.DownloadAsync(
+            firstServer.BaseUri,
+            destination,
+            new DownloadLimits(1024, TimeSpan.FromSeconds(10), 0)
+        );
+        Task<DownloadResult> second = secondDownloader.DownloadAsync(
+            secondServer.BaseUri,
+            destination,
+            new DownloadLimits(1024, TimeSpan.FromSeconds(10), 0)
+        );
+        await this.WaitForTemporaryCountAsync(2);
+
+        releaseFirst.TrySetResult();
+        await first;
+        releaseSecond.TrySetResult();
+
+        await second.Invoking(async task => await task).Should().ThrowAsync<PackageSecurityException>();
+        File.ReadAllText(destination).Should().Be("first");
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
+
+        static LoopbackHttpServer CreateGatedServer(string content, TaskCompletionSource release)
+        {
+            return new LoopbackHttpServer(async (_, _, stream, cancellationToken) =>
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(content);
+                await LoopbackHttpServer.WriteRawAsync(
+                    stream,
+                    $"HTTP/1.1 200 OK\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n",
+                    cancellationToken
+                );
+                await release.Task.WaitAsync(cancellationToken);
+                await stream.WriteAsync(bytes, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+            });
+        }
+    }
+
+    [Test]
+    public async Task DownloadAsync_ExistingDestinationSymlinkOrHardlink_FailsClosedWithoutChangingEitherTarget()
+    {
+        byte[] content = Encoding.UTF8.GetBytes("download");
+        await using LoopbackHttpServer server = new(async (_, _, stream, cancellationToken) =>
+        {
+            await LoopbackHttpServer.WriteResponseAsync(stream, "200 OK", content, cancellationToken: cancellationToken);
+        });
+        string target = Path.Combine(this.TempRoot, "target.zip");
+        File.WriteAllText(target, "sentinel");
+        foreach (string destination in new[]
+        {
+            Path.Combine(this.TempRoot, "symlink.zip"),
+            Path.Combine(this.TempRoot, "hardlink.zip")
+        })
+        {
+            if (destination.EndsWith("symlink.zip", StringComparison.Ordinal))
+                File.CreateSymbolicLink(destination, target);
+            else
+                link(target, destination).Should().Be(0, $"link(2) failed with errno {Marshal.GetLastWin32Error()}");
+            using BoundedHttpDownloader downloader = new(new LoopbackDownloadPolicy());
+
+            Func<Task> action = () => downloader.DownloadAsync(
+                server.BaseUri,
+                destination,
+                new DownloadLimits(1024, TimeSpan.FromSeconds(5), 0)
+            );
+
+            await action.Should().ThrowAsync<PackageSecurityException>();
+            File.ReadAllText(target).Should().Be("sentinel");
+            File.ReadAllText(destination).Should().Be("sentinel");
+            this.GetDownloadTemporaryPaths().Should().BeEmpty();
+        }
+    }
+
+    [Test]
+    public async Task DownloadAsync_DestinationDirectoryPathReplacedDuringStreaming_DoesNotPublishIntoReplacement()
+    {
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using LoopbackHttpServer server = new(async (_, _, stream, cancellationToken) =>
+        {
+            await LoopbackHttpServer.WriteRawAsync(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\npart",
+                cancellationToken
+            );
+            await release.Task.WaitAsync(cancellationToken);
+            await LoopbackHttpServer.WriteRawAsync(stream, "done", cancellationToken);
+        });
+        using BoundedHttpDownloader downloader = new(new LoopbackDownloadPolicy());
+        string selected = Path.Combine(this.TempRoot, "selected");
+        string displaced = Path.Combine(this.TempRoot, "displaced");
+        Directory.CreateDirectory(selected);
+        string destination = Path.Combine(selected, "package.zip");
+        Task<DownloadResult> download = downloader.DownloadAsync(
+            server.BaseUri,
+            destination,
+            new DownloadLimits(1024, TimeSpan.FromSeconds(10), 0)
+        );
+        await this.WaitForTemporaryCountAsync(1, selected);
+        Directory.Move(selected, displaced);
+        Directory.CreateDirectory(selected);
+        File.WriteAllText(destination, "replacement sentinel");
+
+        release.TrySetResult();
+
+        await download.Invoking(async task => await task).Should().ThrowAsync<PackageSecurityException>();
+        File.ReadAllText(destination).Should().Be("replacement sentinel");
+        Directory.EnumerateFiles(displaced, ".smapi-download-*.tmp").Should().BeEmpty();
+        File.Exists(Path.Combine(displaced, "package.zip")).Should().BeFalse();
+    }
+
+    private string[] GetDownloadTemporaryPaths(string? directory = null)
+    {
+        return Directory.Exists(directory ?? this.TempRoot)
+            ? Directory.GetFiles(directory ?? this.TempRoot, ".smapi-download-*.tmp")
+            : [];
+    }
+
+    private async Task<string> WaitForTemporaryCountAsync(int expected, string? directory = null)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            string[] paths = this.GetDownloadTemporaryPaths(directory);
+            if (paths.Length == expected)
+                return paths[0];
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"Expected {expected} private download staging file(s).");
+    }
+
     private sealed class LoopbackDownloadPolicy : IDownloadUriPolicy
     {
         public void AssertAllowed(Uri uri, bool isInitial)
@@ -204,6 +384,9 @@ public sealed class BoundedHttpDownloaderTests
             }
         }
     }
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int link(string oldPath, string newPath);
 
     private sealed class CaptureProgress : IProgress<DownloadProgress>
     {
