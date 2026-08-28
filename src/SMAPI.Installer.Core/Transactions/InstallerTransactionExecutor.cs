@@ -29,7 +29,7 @@ public sealed class InstallerTransactionExecutor
         using FileStream operationLock = AcquireLock(workspace);
 
         this.Progress.Report(new(TransactionStage.Recovering, 0, plan.Operations.Count));
-        RecoverIncompleteTransactionsLocked(canonicalGameRoot, workspace);
+        this.RecoverIncompleteTransactionsLocked(canonicalGameRoot, workspace);
 
         string transactionDirectory = Path.Combine(workspace, "transactions", plan.TransactionId.ToString("N"));
         if (Directory.Exists(transactionDirectory))
@@ -48,14 +48,14 @@ public sealed class InstallerTransactionExecutor
 
         try
         {
-            StagePayload(canonicalPayloadRoot, transactionDirectory, plan, cancellationToken);
+            this.StagePayload(canonicalPayloadRoot, transactionDirectory, plan, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            RevalidateAll(canonicalGameRoot, plan);
+            this.RevalidateAll(canonicalGameRoot, plan);
             cancellationToken.ThrowIfCancellationRequested();
 
             journal.Status = TransactionJournalStatus.Applying;
             TransactionJournalStore.WriteDurable(journalPath, journal);
-            ApplyMutations(canonicalGameRoot, transactionDirectory, plan, journal, journalPath);
+            this.ApplyMutations(canonicalGameRoot, transactionDirectory, plan, journal, journalPath);
 
             this.Progress.Report(new(TransactionStage.Verifying, plan.Operations.Count, plan.Operations.Count));
             VerifyResults(canonicalGameRoot, plan);
@@ -71,7 +71,7 @@ public sealed class InstallerTransactionExecutor
         }
         catch
         {
-            RollBackJournal(canonicalGameRoot, transactionDirectory, journal, journalPath);
+            this.RollBackJournal(canonicalGameRoot, transactionDirectory, journal, journalPath);
             throw;
         }
     }
@@ -82,7 +82,7 @@ public sealed class InstallerTransactionExecutor
         string canonicalGameRoot = TransactionPath.GetCanonicalRoot(gameRoot, nameof(gameRoot));
         string workspace = EnsureWorkspace(canonicalGameRoot);
         using FileStream operationLock = AcquireLock(workspace);
-        return RecoverIncompleteTransactionsLocked(canonicalGameRoot, workspace);
+        return this.RecoverIncompleteTransactionsLocked(canonicalGameRoot, workspace);
     }
 
     private static void ValidatePlan(TransactionPlan plan)
@@ -273,7 +273,7 @@ public sealed class InstallerTransactionExecutor
 
             this.Progress.Report(new(TransactionStage.Recovering, 0, journal.Entries.Count));
             int changed = journal.Entries.Count(entry => entry.MutationApplied || File.Exists(Path.Combine(directory, entry.BackupRelativePath.Replace('/', Path.DirectorySeparatorChar))));
-            RollBackJournal(gameRoot, directory, journal, journalPath);
+            this.RollBackJournal(gameRoot, directory, journal, journalPath);
             results.Add(new(journal.TransactionId, TransactionStatus.Recovered, changed));
         }
         return results;
