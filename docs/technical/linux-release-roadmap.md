@@ -226,6 +226,18 @@ Scope constraints apply throughout:
 - [x] Merge and close the core-only PR before dependent console/package integration work ([merged PR #175](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175)).
 - [x] Delete the merged core feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`93027308c41f3e06117fa6f43732a5b1a40bf336`).
 
+### Read-only runtime dispatcher integration
+
+- [x] Remove launch-time dependency-file mutation from the unreleased Linux runtime dispatcher and keep installer mutation ownership explicit ([merged PR #177](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177); exact reviewed head [`a545e0ce`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/a545e0ce950bac1d0db22d90ad2b1eba641345d3)).
+- [x] Reject missing, mismatched, mode-mismatched, linked, special, empty, or oversized dependency metadata and unsafe runtime hosts without writing or following external entries ([49-case exact-head suite and independent review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177#issuecomment-5458180796)).
+- [x] Bound dependency comparison, detect ordinary replacement observed during validation, and document the nonprivileged same-user race boundary without overstating guarantees ([security/architecture re-review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177#issuecomment-5458180796)).
+- [x] Probe and document GNU launcher prerequisites with path-free diagnostics, while keeping published alpha.1 behavior distinct from unreleased next-alpha/source behavior ([testing/UX/documentation re-review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177#issuecomment-5458180796)).
+- [x] Preserve runtime selection, GC policy, exact argument forwarding, and usable current recovery guidance ([independent exact-head review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177#issuecomment-5458180796)).
+- [x] Pass 49/49 focused tests, Release warnings-as-errors, shell syntax, formatting, diff checks, package qualification, and deterministic performance gates ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33214697603); [performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33214697600)).
+- [x] Address every actionable runtime-dispatcher security, portability, testing, UX, and documentation finding and obtain clean exact-head re-reviews ([review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177#issuecomment-5458180796)).
+- [x] Merge and close focused [PR #177](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/177) into `develop` ([`42eb00ff`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/42eb00ffcaff75d4d583655677d10a2e80f54b7d)).
+- [x] Delete the merged dispatcher feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`42eb00ffcaff75d4d583655677d10a2e80f54b7d`).
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
