@@ -20,6 +20,7 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPackageId package = ProtocolPackageId.CreateRandom();
         ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom();
         ProtocolRecoverySelectionId recovery = ProtocolRecoverySelectionId.CreateRandom();
+        ProtocolRecoverySelectionId retainedRecovery = ProtocolRecoverySelectionId.CreateRandom();
         ProtocolCandidateId candidate = ProtocolCandidateId.CreateRandom();
         ProtocolPlanCandidate[] candidates = [new(candidate, ProtocolCandidateKind.LegacyInstallerFile, "legacy", HashA, 10, 420, HashB, true, "Observed legacy file.")];
         ProtocolPlanOperation[] operations = [new(PlanOperationKind.Create, "a", null, HashA)];
@@ -27,7 +28,7 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPlanId plan = ProtocolPlanId.CreateRandom();
         ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
         ProtocolPrunePlanId prune = ProtocolPrunePlanId.CreateRandom();
-        ProtocolPlanDigest pruneDigest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 0, [], [recovery], "Prune.", [], true);
+        ProtocolPlanDigest pruneDigest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [retainedRecovery], [recovery], "Prune.", [], true);
 
         ProtocolRequest[] requests =
         [
@@ -35,20 +36,25 @@ internal sealed class ProtocolJsonSerializerTests
             new OpenPackageRequest(session, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json"),
             new ListRecoveriesRequest(session, "/game"), new InspectPlanRequest(session, "/game", InstallerOperation.Repair, package, null),
             new SelectPlanCandidatesRequest(session, plan, digest, [candidate]), new ConfirmPlanRequest(session, plan, digest), new ExecutePlanRequest(session, plan, digest), new CancelPlanRequest(session, plan, digest),
-            new InspectPruneRequest(session, catalog, 0), new ConfirmPruneRequest(session, prune, pruneDigest), new ExecutePruneRequest(session, prune, pruneDigest)
+            new InspectPruneRequest(session, catalog, 1), new ConfirmPruneRequest(session, prune, pruneDigest), new ExecutePruneRequest(session, prune, pruneDigest), new CancelPruneRequest(session, prune, pruneDigest)
         ];
         ProtocolEvent[] events =
         [
             new HandshakeEvent(session, "server", ["v1"]), new GameDiscoveryEvent(session, [new("/game", ProtocolGameCandidateState.Valid, "Stardew Valley")]),
-            new PackageOpenedEvent(session, package, CreateRelease()), new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(recovery, "11111111111111111111111111111111", InstallerOperation.Backup, true, true)]),
+            new PackageOpenedEvent(session, package, CreateRelease()), new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(retainedRecovery, "11111111111111111111111111111111", InstallerOperation.Backup, true, true), new(recovery, "22222222222222222222222222222222", InstallerOperation.Update, false, false)]),
             new PlanEvent(session, plan, digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true),
-            new PrunePlanEvent(session, prune, pruneDigest, ExecutionDigest, catalog, GameRoot, HashA, 0, [], [recovery], "Prune.", [], true),
+            new PrunePlanEvent(session, prune, pruneDigest, ExecutionDigest, catalog, GameRoot, HashA, 1, [retainedRecovery], [recovery], "Prune.", [], true),
             new ProgressEvent(session, plan, digest, 0, InstallerProgressStage.BackingUp, 0, null, "Hashing."),
+            new PruneProgressEvent(session, prune, pruneDigest, 0, ProtocolPruneProgressStage.Revalidating, 0, null, "Revalidating."),
             new SuccessEvent(session, plan, digest, InstallerOperation.Repair, "Done.", 1, ProtocolRecoveryResult.NotNeeded, "Launch.", "/tmp/smapi.log"),
             new RolledBackFailureEvent(session, plan, digest, "copy-failed", "Failed.", "Restored.", 1, ProtocolRecoveryResult.Succeeded, "Retry.", null),
             new RecoverableInterruptionEvent(session, plan, digest, "power-loss", "Interrupted.", InstallerRecoveryAction.InspectAgain, "Journal retained.", 1, ProtocolRecoveryResult.Pending, "Inspect.", null),
             new CancelledEvent(session, plan, digest, "Cancelled.", "Safe.", 0, ProtocolRecoveryResult.NotNeeded, "Close.", null),
-            new PruneSuccessEvent(session, prune, pruneDigest, 1, "Pruned.", "Close.", null), new PrePlanErrorEvent(session, "invalid-package", "Invalid.", "Choose another.", false, null)
+            new PruneSuccessEvent(session, prune, pruneDigest, 1, "Pruned.", "Close.", null),
+            new PruneFailureEvent(session, prune, pruneDigest, "failed", "Failed.", 0, ProtocolRecoveryResult.Succeeded, "Retry.", null),
+            new PruneInterruptionEvent(session, prune, pruneDigest, "interrupted", "Interrupted.", InstallerRecoveryAction.InspectAgain, 0, ProtocolRecoveryResult.Pending, "Inspect.", null),
+            new PruneCancelledEvent(session, prune, pruneDigest, "Cancelled.", "Safe.", 0, ProtocolRecoveryResult.NotNeeded, "Close.", null),
+            new PrePlanErrorEvent(session, "invalid-package", "Invalid.", "Choose another.", false, null)
         ];
 
         foreach (ProtocolRequest request in requests)
@@ -91,11 +97,26 @@ internal sealed class ProtocolJsonSerializerTests
     }
 
     [Test]
+    public void RollbackDigest_BindsFullCatalogRootHeadAndGenerationAuthority()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId selection = ProtocolRecoverySelectionId.CreateRandom();
+        ProtocolRecoveryGeneration generation = new(selection, "11111111111111111111111111111111", InstallerOperation.Backup, true, true);
+        ProtocolRecoveryAuthority authority = new(catalog, selection, GameRoot, HashA, generation);
+        ProtocolPlanOperation[] operations = [new(PlanOperationKind.Restore, "a", null, HashA)];
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, authority, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
+        PlanEvent plan = new(session, ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Rollback, null, authority, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
+        ProtocolJsonSerializer.SerializeLine(plan).Should().NotBeEmpty();
+        ProtocolRecoveryAuthority changed = authority with { HeadSha256 = HashB };
+        new PlanEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, null, changed, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, plan.Candidates, plan.Summary, plan.Warnings, true)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*display data*");
+    }
+
+    [Test]
     public void PruneDigest_BindsExactCatalogMembershipAndDisplayData()
     {
-        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId removed = ProtocolRecoverySelectionId.CreateRandom(); ProtocolPrunePlanId id = ProtocolPrunePlanId.CreateRandom();
-        ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 0, [], [removed], "Prune.", [], true);
-        PrunePlanEvent plan = new(session, id, digest, ExecutionDigest, catalog, GameRoot, HashA, 0, [], [removed], "Prune.", [], true);
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId retained = ProtocolRecoverySelectionId.CreateRandom(); ProtocolRecoverySelectionId removed = ProtocolRecoverySelectionId.CreateRandom(); ProtocolPrunePlanId id = ProtocolPrunePlanId.CreateRandom();
+        ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [retained], [removed], "Prune.", [], true);
+        PrunePlanEvent plan = new(session, id, digest, ExecutionDigest, catalog, GameRoot, HashA, 1, [retained], [removed], "Prune.", [], true);
         ProtocolJsonSerializer.SerializeLine(plan).Should().NotBeEmpty();
         new PrunePlanEvent(plan.SessionId, plan.PrunePlanId, plan.PruneDigest, plan.ExecutionBindingDigest, plan.CatalogId, plan.GameRoot, plan.HeadSha256, plan.RetainNewest, plan.RetainedSelectionIds, [ProtocolRecoverySelectionId.CreateRandom()], plan.Summary, plan.Warnings, true)
             .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact catalog selection*");
@@ -109,6 +130,50 @@ internal sealed class ProtocolJsonSerializerTests
             .Should().Throw<ProtocolException>().WithMessage("*too large*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrePlanErrorEvent(session, "bad", new string('x', 4097), "Retry.", false, null))).Should().Throw<ProtocolException>();
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new DiscoverGamesRequest(new ProtocolSessionId(new string('0', 32))))).Should().Throw<ProtocolException>().WithMessage("*session ID*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 0))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 65))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
+    }
+
+    [Test]
+    public void Deserialize_EnforcesByteDepthAndNestedExactnessLimits()
+    {
+        string oversized = new string('x', ProtocolJsonSerializer.MaxLineBytes + 1);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(oversized)).Should().Throw<ProtocolException>().WithMessage("*byte limit*");
+        string deep = "{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":" + string.Concat(Enumerable.Repeat("{\"x\":", ProtocolJsonSerializer.MaxDepth + 1)) + "0" + new string('}', ProtocolJsonSerializer.MaxDepth + 1) + "}";
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(deep)).Should().Throw<ProtocolException>().WithMessage("*strict version 1 JSON*");
+
+        string plan = ProtocolJsonSerializer.SerializeLine(CreatePlan());
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(plan.Replace("\"evidence\":\"Observed.\"", "\"evidence\":\"Observed.\",\"evidence\":\"Again.\"", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*duplicate 'evidence'*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(plan.Replace(",\"evidence\":\"Observed.\"", "", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*missing the required 'evidence'*");
+    }
+
+    [Test]
+    public void WireAndDigests_AreDeterministicAndEnumTokensAreCanonical()
+    {
+        PlanEvent plan = CreatePlan();
+        ProtocolJsonSerializer.SerializeLine(plan).Should().Be(ProtocolJsonSerializer.SerializeLine(plan));
+        ProtocolPlanDigest.Compute(plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, plan.Candidates, plan.Summary, plan.Warnings, true).Should().Be(plan.PlanDigest);
+        string line = ProtocolJsonSerializer.SerializeLine(new InspectPlanRequest(plan.SessionId, "/game", InstallerOperation.Repair, plan.PackageId, null));
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(line.Replace("\"repair\"", "\"Repair\"", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*canonical camel case*");
+    }
+
+    [Test]
+    public void UnsafePathsUndefinedEnumsAndNoOpPrunesAreRejected()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom();
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new ListRecoveriesRequest(session, "/game/../other"))).Should().Throw<ProtocolException>().WithMessage("*canonical absolute Linux path*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new GameDiscoveryEvent(session, [new("/game", (ProtocolGameCandidateState)999, "Game")]))).Should().Throw<ProtocolException>().WithMessage("*isn't defined*");
+        ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId only = ProtocolRecoverySelectionId.CreateRandom(); ProtocolPrunePlanId id = ProtocolPrunePlanId.CreateRandom();
+        ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [only], [], "No-op.", [], true);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrunePlanEvent(session, id, digest, ExecutionDigest, catalog, GameRoot, HashA, 1, [only], [], "No-op.", [], true))).Should().Throw<ProtocolException>().WithMessage("*no-op*");
+    }
+
+    [Test]
+    public void RecoveryCatalog_RejectsInvalidCurrentAndCheckpointSemantics()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId selection = ProtocolRecoverySelectionId.CreateRandom();
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(selection, "11111111111111111111111111111111", InstallerOperation.Update, false, false)]))).Should().Throw<ProtocolException>().WithMessage("*first generation as current*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(selection, "11111111111111111111111111111111", InstallerOperation.Update, true, true)]))).Should().Throw<ProtocolException>().WithMessage("*checkpoint flag*");
     }
 
     private static PlanEvent CreatePlan()
@@ -121,7 +186,7 @@ internal sealed class ProtocolJsonSerializerTests
     }
 
     private static PlanEvent AlterPlan(PlanEvent plan, string? summary = null, ProtocolPlanCandidate[]? candidates = null, ProtocolPackageId? packageId = null) =>
-        new(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, packageId ?? plan.PackageId, plan.RecoverySelectionId, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, candidates ?? plan.Candidates, summary ?? plan.Summary, plan.Warnings, plan.RequiresConfirmation);
+        new(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, packageId ?? plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, candidates ?? plan.Candidates, summary ?? plan.Summary, plan.Warnings, plan.RequiresConfirmation);
 
     private static ProtocolReleaseIdentity CreateRelease() => new(
         "https://github.com/4eh5xitv6787h645ebv/SMAPI", "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2",

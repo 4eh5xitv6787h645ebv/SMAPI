@@ -16,7 +16,7 @@ public static class ProtocolJsonSerializer
     public const int MaxPackages = 16;
     public const int MaxGameCandidates = 64;
     public const int MaxRecoveryCatalogs = 64;
-    public const int MaxRecoveryGenerations = 256;
+    public const int MaxRecoveryGenerations = 64;
     public const int MaxPlanCandidates = 256;
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -103,18 +103,23 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.InspectPruneRequest] = C("inspect-prune.request", typeof(InspectPruneRequest), true, "sessionId", "catalogId", "retainNewest"),
         [ProtocolMessageKind.ConfirmPruneRequest] = C("confirm-prune.request", typeof(ConfirmPruneRequest), true, "sessionId", "prunePlanId", "pruneDigest"),
         [ProtocolMessageKind.ExecutePruneRequest] = C("execute-prune.request", typeof(ExecutePruneRequest), true, "sessionId", "prunePlanId", "pruneDigest"),
+        [ProtocolMessageKind.CancelPruneRequest] = C("cancel-prune.request", typeof(CancelPruneRequest), true, "sessionId", "prunePlanId", "pruneDigest"),
         [ProtocolMessageKind.HandshakeEvent] = C("handshake.event", typeof(HandshakeEvent), false, "sessionId", "serverVersion", "capabilities"),
         [ProtocolMessageKind.GameDiscoveryEvent] = C("game-discovery.event", typeof(GameDiscoveryEvent), false, "sessionId", "candidates"),
         [ProtocolMessageKind.PackageOpenedEvent] = C("package-opened.event", typeof(PackageOpenedEvent), false, "sessionId", "packageId", "release"),
         [ProtocolMessageKind.RecoveryCatalogEvent] = C("recovery-catalog.event", typeof(RecoveryCatalogEvent), false, "sessionId", "catalogId", "gameRoot", "headSha256", "generations"),
-        [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoverySelectionId", "gameRoot", "currentRelease", "targetRelease", "observedState", "operations", "conflicts", "candidates", "summary", "warnings", "requiresConfirmation"),
+        [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operations", "conflicts", "candidates", "summary", "warnings", "requiresConfirmation"),
         [ProtocolMessageKind.PrunePlanEvent] = C("prune-plan.event", typeof(PrunePlanEvent), false, "sessionId", "prunePlanId", "pruneDigest", "executionBindingDigest", "catalogId", "gameRoot", "headSha256", "retainNewest", "retainedSelectionIds", "removedSelectionIds", "summary", "warnings", "requiresConfirmation"),
         [ProtocolMessageKind.ProgressEvent] = C("progress.event", typeof(ProgressEvent), false, "sessionId", "planId", "planDigest", "sequence", "stage", "completedUnits", "totalUnits", "message"),
+        [ProtocolMessageKind.PruneProgressEvent] = C("prune-progress.event", typeof(PruneProgressEvent), false, "sessionId", "prunePlanId", "pruneDigest", "sequence", "stage", "completedUnits", "totalUnits", "message"),
         [ProtocolMessageKind.SuccessEvent] = C("success.event", typeof(SuccessEvent), false, "sessionId", "planId", "planDigest", "operation", "summary", "filesChanged", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.RolledBackFailureEvent] = C("rolled-back-failure.event", typeof(RolledBackFailureEvent), false, "sessionId", "planId", "planDigest", "errorCode", "message", "rollbackSummary", "filesChanged", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.RecoverableInterruptionEvent] = C("recoverable-interruption.event", typeof(RecoverableInterruptionEvent), false, "sessionId", "planId", "planDigest", "errorCode", "message", "recoveryAction", "recoverySummary", "filesChanged", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.CancelledEvent] = C("cancelled.event", typeof(CancelledEvent), false, "sessionId", "planId", "planDigest", "summary", "safeStateSummary", "filesChanged", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.PruneSuccessEvent] = C("prune-success.event", typeof(PruneSuccessEvent), false, "sessionId", "prunePlanId", "pruneDigest", "removedGenerationCount", "summary", "safeNextStep", "sanitizedLogPath"),
+        [ProtocolMessageKind.PruneFailureEvent] = C("prune-failure.event", typeof(PruneFailureEvent), false, "sessionId", "prunePlanId", "pruneDigest", "errorCode", "message", "removedGenerationCount", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
+        [ProtocolMessageKind.PruneInterruptionEvent] = C("prune-interruption.event", typeof(PruneInterruptionEvent), false, "sessionId", "prunePlanId", "pruneDigest", "errorCode", "message", "recoveryAction", "removedGenerationCount", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
+        [ProtocolMessageKind.PruneCancelledEvent] = C("prune-cancelled.event", typeof(PruneCancelledEvent), false, "sessionId", "prunePlanId", "pruneDigest", "summary", "safeStateSummary", "removedGenerationCount", "recoveryResult", "safeNextStep", "sanitizedLogPath"),
         [ProtocolMessageKind.PrePlanErrorEvent] = C("pre-plan-error.event", typeof(PrePlanErrorEvent), false, "sessionId", "errorCode", "message", "safeNextStep", "isTerminal", "sanitizedLogPath")
     };
 
@@ -133,6 +138,7 @@ public static class ProtocolJsonSerializer
                 AssertObjectArray(payload.GetProperty("generations"), ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint"], "recovery generation", MaxRecoveryGenerations); break;
             case ProtocolMessageKind.PlanEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot"));
+                AssertOptionalRecoveryAuthority(payload.GetProperty("recoveryAuthority"));
                 AssertOptionalReleaseObject(payload.GetProperty("currentRelease"), "current release identity");
                 AssertOptionalReleaseObject(payload.GetProperty("targetRelease"), "target release identity");
                 AssertObjectArray(payload.GetProperty("operations"), ["kind", "path", "expectedCurrentSha256", "resultSha256"], "plan operation", 2048);
@@ -141,6 +147,7 @@ public static class ProtocolJsonSerializer
             case ProtocolMessageKind.PrunePlanEvent:
                 AssertGameRoot(payload.GetProperty("gameRoot")); break;
         }
+        AssertCanonicalEnums(kind, payload);
     }
 
     private static void ValidateMessage(ProtocolMessage message)
@@ -158,9 +165,10 @@ public static class ProtocolJsonSerializer
             case ConfirmPlanRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); break;
             case ExecutePlanRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); break;
             case CancelPlanRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); break;
-            case InspectPruneRequest v: Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.CatalogId.Value, "recovery catalog"); if (v.RetainNewest < 0 || v.RetainNewest > MaxRecoveryGenerations) throw new ProtocolException("The protocol 'retainNewest' value is outside its bound."); break;
+            case InspectPruneRequest v: Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.CatalogId.Value, "recovery catalog"); if (v.RetainNewest is < 1 or > MaxRecoveryGenerations) throw new ProtocolException("The protocol 'retainNewest' value must be between 1 and 64."); break;
             case ConfirmPruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
             case ExecutePruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
+            case CancelPruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
             case HandshakeEvent v: Session(v.SessionId); Text(v.ServerVersion, "serverVersion"); Strings(v.Capabilities, "capabilities", 256); break;
             case GameDiscoveryEvent v: Session(v.SessionId); Objects(v.Candidates, "candidates", MaxGameCandidates); foreach (ProtocolGameCandidate c in v.Candidates) { AbsolutePath(c.CanonicalPath, "candidate.canonicalPath"); Defined(c.State, "candidate.state"); Text(c.DisplayName, "candidate.displayName"); } NoDuplicates(v.Candidates.Select(c => c.CanonicalPath), "game candidate path"); break;
             case PackageOpenedEvent v: Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.PackageId.Value, "package"); ValidateRelease(v.Release, "release"); break;
@@ -168,11 +176,15 @@ public static class ProtocolJsonSerializer
             case PlanEvent v: ValidatePlan(v); break;
             case PrunePlanEvent v: ValidatePrune(v); break;
             case ProgressEvent v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Defined(v.Stage, "stage"); Text(v.Message, "message"); if (v.Sequence < 0 || v.CompletedUnits < 0 || v.TotalUnits < 0 || v.CompletedUnits > v.TotalUnits) throw new ProtocolException("The protocol progress counters are inconsistent."); break;
+            case PruneProgressEvent v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); Defined(v.Stage, "stage"); Text(v.Message, "message"); if (v.Sequence < 0 || v.CompletedUnits < 0 || v.TotalUnits < 0 || v.CompletedUnits > v.TotalUnits) throw new ProtocolException("The protocol prune progress counters are inconsistent."); break;
             case SuccessEvent v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Defined(v.Operation, "operation"); Terminal(v.Summary, v.FilesChanged, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); break;
             case RolledBackFailureEvent v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Text(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Text(v.RollbackSummary, "rollbackSummary"); Terminal(v.RollbackSummary, v.FilesChanged, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); break;
             case RecoverableInterruptionEvent v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Text(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Defined(v.RecoveryAction, "recoveryAction"); Text(v.RecoverySummary, "recoverySummary"); Terminal(v.RecoverySummary, v.FilesChanged, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); break;
             case CancelledEvent v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); Text(v.Summary, "summary"); Text(v.SafeStateSummary, "safeStateSummary"); Terminal(v.Summary, v.FilesChanged, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); break;
             case PruneSuccessEvent v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); if (v.RemovedGenerationCount < 0 || v.RemovedGenerationCount > MaxRecoveryGenerations) throw new ProtocolException("The removed-generation count is outside its bound."); Text(v.Summary, "summary"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); break;
+            case PruneFailureEvent v: PruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.ErrorCode, v.Message, v.RemovedGenerationCount, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); break;
+            case PruneInterruptionEvent v: PruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.ErrorCode, v.Message, v.RemovedGenerationCount, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); Defined(v.RecoveryAction, "recoveryAction"); break;
+            case PruneCancelledEvent v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); Text(v.Summary, "summary"); Text(v.SafeStateSummary, "safeStateSummary"); ValidatePruneTerminalDetails(v.RemovedGenerationCount, v.RecoveryResult, v.SafeNextStep, v.SanitizedLogPath); break;
             case PrePlanErrorEvent v: Session(v.SessionId); Text(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Text(v.SafeNextStep, "safeNextStep"); OptionalLog(v.SanitizedLogPath); break;
             default: throw new ProtocolException("The message isn't part of the version 1 protocol.");
         }
@@ -181,13 +193,20 @@ public static class ProtocolJsonSerializer
     private static void ValidateCatalog(RecoveryCatalogEvent v)
     {
         Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.CatalogId.Value, "recovery catalog"); GameRoot(v.GameRoot); Hex(v.HeadSha256, 64, "headSha256"); Objects(v.Generations, "generations", MaxRecoveryGenerations);
+        if (v.Generations.Length == 0)
+            throw new ProtocolException("A recovery catalog must contain at least one authenticated generation.");
         HashSet<string> generations = new(StringComparer.Ordinal); HashSet<ProtocolRecoverySelectionId> selections = [];
-        foreach (ProtocolRecoveryGeneration item in v.Generations)
+        for (int index = 0; index < v.Generations.Length; index++)
         {
+            ProtocolRecoveryGeneration item = v.Generations[index];
             ProtocolIdentifier.AssertCanonical(item.SelectionId.Value, "recovery selection");
             if (!selections.Add(item.SelectionId)) throw new ProtocolException("The recovery catalog contains a duplicate selection ID.");
             if (item.GenerationId.Length != 32 || item.GenerationId.Any(c => c is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')) || !generations.Add(item.GenerationId)) throw new ProtocolException("The recovery catalog contains an invalid or duplicate generation ID.");
             Defined(item.OriginOperation, "originOperation");
+            if (item.IsCurrent != (index == 0))
+                throw new ProtocolException("The recovery catalog must mark exactly its first generation as current.");
+            if (item.IsUserCheckpoint != (item.OriginOperation == InstallerOperation.Backup))
+                throw new ProtocolException("The recovery generation checkpoint flag doesn't match its core-derived origin operation.");
         }
     }
 
@@ -195,21 +214,24 @@ public static class ProtocolJsonSerializer
     {
         PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); ProtocolPlanDigest.AssertCanonical(v.ExecutionBindingDigest.Value); Defined(v.Operation, "operation");
         if (v.PackageId is { } package) ProtocolIdentifier.AssertCanonical(package.Value, "package");
-        if (v.RecoverySelectionId is { } recovery) ProtocolIdentifier.AssertCanonical(recovery.Value, "recovery selection");
-        ValidatePlanAuthorities(v.Operation, v.PackageId, v.RecoverySelectionId);
+        ValidateRecoveryAuthority(v.RecoveryAuthority);
+        ValidatePlanAuthorities(v.Operation, v.PackageId, v.RecoveryAuthority?.SelectionId);
         GameRoot(v.GameRoot); ValidateRelease(v.CurrentRelease, "currentRelease", true); ValidateRelease(v.TargetRelease, "targetRelease", true); ValidateReleaseSemantics(v.Operation, v.CurrentRelease, v.TargetRelease);
         Defined(v.ObservedState, "observedState"); ValidatePlanCollections(v.Operations, v.Conflicts, v.Candidates); Text(v.Summary, "summary"); Strings(v.Warnings, "warnings", 256);
         if (!v.RequiresConfirmation) throw new ProtocolException("Every version 1 operation plan must require explicit confirmation.");
-        ProtocolPlanDigest expected = ProtocolPlanDigest.Compute(v.ExecutionBindingDigest, v.Operation, v.PackageId, v.RecoverySelectionId, v.GameRoot, v.CurrentRelease, v.TargetRelease, v.ObservedState, v.Operations, v.Conflicts, v.Candidates, v.Summary, v.Warnings, true);
+        ProtocolPlanDigest expected = ProtocolPlanDigest.Compute(v.ExecutionBindingDigest, v.Operation, v.PackageId, v.RecoveryAuthority, v.GameRoot, v.CurrentRelease, v.TargetRelease, v.ObservedState, v.Operations, v.Conflicts, v.Candidates, v.Summary, v.Warnings, true);
         if (v.PlanDigest != expected) throw new ProtocolException("The protocol plan digest doesn't match the canonical structured execution plan and display data.");
     }
 
     private static void ValidatePrune(PrunePlanEvent v)
     {
         PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); ProtocolPlanDigest.AssertCanonical(v.ExecutionBindingDigest.Value); ProtocolIdentifier.AssertCanonical(v.CatalogId.Value, "recovery catalog"); GameRoot(v.GameRoot); Hex(v.HeadSha256, 64, "headSha256");
-        if (v.RetainNewest < 0 || v.RetainNewest > MaxRecoveryGenerations) throw new ProtocolException("The protocol 'retainNewest' value is outside its bound.");
+        if (v.RetainNewest is < 1 or > MaxRecoveryGenerations) throw new ProtocolException("The protocol 'retainNewest' value must be between 1 and 64.");
         IdArray(v.RetainedSelectionIds, "retainedSelectionIds", MaxRecoveryGenerations); IdArray(v.RemovedSelectionIds, "removedSelectionIds", MaxRecoveryGenerations);
         if (v.RetainedSelectionIds.Intersect(v.RemovedSelectionIds).Any()) throw new ProtocolException("A recovery selection can't be both retained and removed.");
+        int catalogCount = v.RetainedSelectionIds.Length + v.RemovedSelectionIds.Length;
+        if (v.RemovedSelectionIds.Length == 0 || v.RetainedSelectionIds.Length != Math.Min(v.RetainNewest, catalogCount))
+            throw new ProtocolException("The prune plan is a no-op or isn't the exact ordered catalog partition.");
         Text(v.Summary, "summary"); Strings(v.Warnings, "warnings", 256); if (!v.RequiresConfirmation) throw new ProtocolException("Every prune plan must require explicit confirmation.");
         ProtocolPlanDigest expected = ProtocolPlanDigest.ComputePrune(v.ExecutionBindingDigest, v.CatalogId, v.GameRoot, v.HeadSha256, v.RetainNewest, v.RetainedSelectionIds, v.RemovedSelectionIds, v.Summary, v.Warnings, true);
         if (v.PruneDigest != expected) throw new ProtocolException("The protocol prune digest doesn't match the exact catalog selection and display data.");
@@ -237,6 +259,22 @@ public static class ProtocolJsonSerializer
     }
 
     private static void ValidateInspectAuthorities(InspectPlanRequest v) => ValidatePlanAuthorities(v.Operation, v.PackageId, v.RecoverySelectionId);
+
+    private static void ValidateRecoveryAuthority(ProtocolRecoveryAuthority? authority)
+    {
+        if (authority is null)
+            return;
+        ProtocolIdentifier.AssertCanonical(authority.CatalogId.Value, "recovery catalog");
+        ProtocolIdentifier.AssertCanonical(authority.SelectionId.Value, "recovery selection");
+        GameRoot(authority.GameRoot);
+        Hex(authority.HeadSha256, 64, "recoveryAuthority.headSha256");
+        ProtocolIdentifier.AssertCanonical(authority.Generation.SelectionId.Value, "recovery selection");
+        if (authority.Generation.SelectionId != authority.SelectionId)
+            throw new ProtocolException("The recovery authority generation doesn't match its selection ID.");
+        if (authority.Generation.GenerationId.Length != 32 || !Guid.TryParseExact(authority.Generation.GenerationId, "N", out Guid generation) || generation == Guid.Empty || authority.Generation.GenerationId.Any(c => c is >= 'A' and <= 'F'))
+            throw new ProtocolException("The recovery authority generation ID isn't canonical.");
+        Defined(authority.Generation.OriginOperation, "recoveryAuthority.generation.originOperation");
+    }
     private static void ValidatePlanAuthorities(InstallerOperation operation, ProtocolPackageId? packageId, ProtocolRecoverySelectionId? recoveryId)
     {
         bool packageRequired = operation is InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair;
@@ -248,7 +286,7 @@ public static class ProtocolJsonSerializer
     private static void ValidateReleaseSemantics(InstallerOperation operation, ProtocolReleaseIdentity? current, ProtocolReleaseIdentity? target)
     {
         if (operation is InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair) { if (target is null) throw new ProtocolException("This operation requires an exact target release."); }
-        else if (target is not null) throw new ProtocolException("This operation must not invent a target release.");
+        else if (operation is InstallerOperation.Backup or InstallerOperation.Uninstall && target is not null) throw new ProtocolException("This operation must not invent a target release.");
         if (operation == InstallerOperation.Install && current is not null) throw new ProtocolException("A fresh install must not invent a current release.");
     }
 
@@ -270,13 +308,15 @@ public static class ProtocolJsonSerializer
     }
 
     private static void Terminal(string summary, int changed, ProtocolRecoveryResult recovery, string next, string? log) { Text(summary, "summary"); if (changed < 0) throw new ProtocolException("The files-changed count can't be negative."); Defined(recovery, "recoveryResult"); Text(next, "safeNextStep"); OptionalLog(log); }
+    private static void PruneTerminal(ProtocolSessionId session, ProtocolPrunePlanId plan, ProtocolPlanDigest digest, string code, string message, int removed, ProtocolRecoveryResult recovery, string next, string? log) { PruneBinding(session, plan, digest); Text(code, "errorCode"); Text(message, "message"); ValidatePruneTerminalDetails(removed, recovery, next, log); }
+    private static void ValidatePruneTerminalDetails(int removed, ProtocolRecoveryResult recovery, string next, string? log) { if (removed < 0 || removed > MaxRecoveryGenerations) throw new ProtocolException("The removed-generation count is outside its bound."); Defined(recovery, "recoveryResult"); Text(next, "safeNextStep"); OptionalLog(log); }
     private static void OptionalLog(string? value) { if (value is not null) AbsolutePath(value, "sanitizedLogPath"); }
     private static void Session(ProtocolSessionId id) => ProtocolIdentifier.AssertCanonical(id.Value, "session");
     private static void PlanBinding(ProtocolSessionId session, ProtocolPlanId plan, ProtocolPlanDigest digest) { Session(session); ProtocolIdentifier.AssertCanonical(plan.Value, "plan"); ArgumentNullException.ThrowIfNull(digest); ProtocolPlanDigest.AssertCanonical(digest.Value); }
     private static void PruneBinding(ProtocolSessionId session, ProtocolPrunePlanId plan, ProtocolPlanDigest digest) { Session(session); ProtocolIdentifier.AssertCanonical(plan.Value, "prune plan"); ArgumentNullException.ThrowIfNull(digest); ProtocolPlanDigest.AssertCanonical(digest.Value); }
     private static void GameRoot(ProtocolGameRootIdentity root) { ArgumentNullException.ThrowIfNull(root); AbsolutePath(root.CanonicalPath, "gameRoot.canonicalPath"); if (root.Inode == 0) throw new ProtocolException("The game-root inode must be nonzero."); }
     private static void Text(string? value, string field) { if (string.IsNullOrWhiteSpace(value) || value.Length > 4096 || value.Any(char.IsControl)) throw new ProtocolException($"The protocol '{field}' text is empty, too long, or contains control characters."); }
-    private static void Strings(string[] values, string field, int max) { Objects(values, field, max); foreach (string value in values) Text(value, field); }
+    private static void Strings(string[] values, string field, int max) { Objects(values, field, max); foreach (string value in values) Text(value, field); if (values.Distinct(StringComparer.Ordinal).Count() != values.Length) throw new ProtocolException($"The protocol '{field}' collection contains duplicates."); }
     private static void Objects<T>(T[]? values, string field, int max) { if (values is null || values.Length > max || values.Any(v => v is null)) throw new ProtocolException($"The protocol '{field}' collection is missing, contains null, or is too large."); }
     private static void IdArray<T>(T[] values, string field, int max) where T : struct { Objects(values, field, max); if (values.Distinct().Count() != values.Length) throw new ProtocolException($"The protocol '{field}' collection contains duplicate IDs."); foreach (T value in values) { string? text = value.GetType().GetProperty("Value")?.GetValue(value) as string; ProtocolIdentifier.AssertCanonical(text, field); } }
     private static void NoDuplicates(IEnumerable<string> values, string field) { if (values.Distinct(StringComparer.Ordinal).Count() != values.Count()) throw new ProtocolException($"The protocol {field} collection contains duplicates."); }
@@ -295,6 +335,52 @@ public static class ProtocolJsonSerializer
     }
     private static void AssertObjectArray(JsonElement element, IReadOnlyCollection<string> properties, string description, int max) { if (element.ValueKind != JsonValueKind.Array) throw new ProtocolException($"The protocol {description} collection must be an array."); int index = 0; foreach (JsonElement item in element.EnumerateArray()) { if (index >= max) throw new ProtocolException($"The protocol {description} collection is too large."); AssertExactObject(item, properties, $"{description} at index {index++}"); } }
     private static void AssertGameRoot(JsonElement e) => AssertExactObject(e, ["canonicalPath", "deviceMajor", "deviceMinor", "inode", "operationGeneration"], "game-root identity");
+    private static void AssertOptionalRecoveryAuthority(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Null)
+            return;
+        AssertExactObject(element, ["catalogId", "selectionId", "gameRoot", "headSha256", "generation"], "recovery authority");
+        AssertGameRoot(element.GetProperty("gameRoot"));
+        AssertExactObject(element.GetProperty("generation"), ["selectionId", "generationId", "originOperation", "isCurrent", "isUserCheckpoint"], "recovery authority generation");
+    }
+
+    private static void AssertCanonicalEnums(ProtocolMessageKind kind, JsonElement payload)
+    {
+        switch (kind)
+        {
+            case ProtocolMessageKind.InspectPlanRequest: AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation"); break;
+            case ProtocolMessageKind.GameDiscoveryEvent:
+                foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray()) AssertCanonicalEnum<ProtocolGameCandidateState>(item.GetProperty("state"), "candidate.state");
+                break;
+            case ProtocolMessageKind.RecoveryCatalogEvent:
+                foreach (JsonElement item in payload.GetProperty("generations").EnumerateArray()) AssertCanonicalEnum<InstallerOperation>(item.GetProperty("originOperation"), "generation.originOperation");
+                break;
+            case ProtocolMessageKind.PlanEvent:
+                AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation");
+                AssertCanonicalEnum<ObservedInstallState>(payload.GetProperty("observedState"), "observedState");
+                foreach (JsonElement item in payload.GetProperty("operations").EnumerateArray()) AssertCanonicalEnum<PlanOperationKind>(item.GetProperty("kind"), "operation.kind");
+                foreach (JsonElement item in payload.GetProperty("conflicts").EnumerateArray()) AssertCanonicalEnum<PlanConflictCode>(item.GetProperty("code"), "conflict.code");
+                foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray()) AssertCanonicalEnum<ProtocolCandidateKind>(item.GetProperty("kind"), "candidate.kind");
+                if (payload.GetProperty("recoveryAuthority").ValueKind != JsonValueKind.Null) AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("recoveryAuthority").GetProperty("generation").GetProperty("originOperation"), "recoveryAuthority.generation.originOperation");
+                break;
+            case ProtocolMessageKind.ProgressEvent: AssertCanonicalEnum<InstallerProgressStage>(payload.GetProperty("stage"), "stage"); break;
+            case ProtocolMessageKind.PruneProgressEvent: AssertCanonicalEnum<ProtocolPruneProgressStage>(payload.GetProperty("stage"), "stage"); break;
+            case ProtocolMessageKind.SuccessEvent: AssertCanonicalEnum<InstallerOperation>(payload.GetProperty("operation"), "operation"); AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
+            case ProtocolMessageKind.RolledBackFailureEvent or ProtocolMessageKind.CancelledEvent or ProtocolMessageKind.PruneFailureEvent or ProtocolMessageKind.PruneCancelledEvent:
+                AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
+            case ProtocolMessageKind.RecoverableInterruptionEvent:
+                AssertCanonicalEnum<InstallerRecoveryAction>(payload.GetProperty("recoveryAction"), "recoveryAction"); AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
+            case ProtocolMessageKind.PruneInterruptionEvent:
+                AssertCanonicalEnum<InstallerRecoveryAction>(payload.GetProperty("recoveryAction"), "recoveryAction"); AssertCanonicalEnum<ProtocolRecoveryResult>(payload.GetProperty("recoveryResult"), "recoveryResult"); break;
+        }
+    }
+
+    private static void AssertCanonicalEnum<T>(JsonElement element, string field) where T : struct, Enum
+    {
+        string? token = element.ValueKind == JsonValueKind.String ? element.GetString() : null;
+        if (token is null || !Enum.GetValues<T>().Any(value => JsonNamingPolicy.CamelCase.ConvertName(value.ToString()) == token))
+            throw new ProtocolException($"The protocol '{field}' enum token isn't canonical camel case.");
+    }
     private static void AssertOptionalReleaseObject(JsonElement e, string d) { if (e.ValueKind != JsonValueKind.Null) AssertReleaseObject(e, d); }
     private static void AssertReleaseObject(JsonElement e, string d) => AssertExactObject(e, ["repository", "tag", "embeddedVersion", "packageAssetName", "sourceCommit", "sourceTree", "packageSha256", "packageSizeBytes", "buildWorkflow", "buildConfiguration", "runtimeIdentifier"], d);
     private sealed record MessageContract(string WireName, Type Type, bool IsRequest, string[] Properties);

@@ -82,7 +82,7 @@ public sealed record ProtocolPlanDigest
         ProtocolPlanDigest executionBindingDigest,
         InstallerOperation operation,
         ProtocolPackageId? packageId,
-        ProtocolRecoverySelectionId? recoverySelectionId,
+        ProtocolRecoveryAuthority? recoveryAuthority,
         ProtocolGameRootIdentity gameRoot,
         ProtocolReleaseIdentity? currentRelease,
         ProtocolReleaseIdentity? targetRelease,
@@ -98,7 +98,7 @@ public sealed record ProtocolPlanDigest
         writer.WriteString("execution_binding_sha256", executionBindingDigest.Value);
         writer.WriteString("action", operation.ToString().ToLowerInvariant());
         WriteOptionalId(writer, "package_id", packageId?.Value);
-        WriteOptionalId(writer, "recovery_selection_id", recoverySelectionId?.Value);
+        WriteRecoveryAuthority(writer, recoveryAuthority);
         WriteGameRoot(writer, gameRoot);
         WriteRelease(writer, "current_release", currentRelease);
         WriteRelease(writer, "target_release", targetRelease);
@@ -215,6 +215,29 @@ public sealed record ProtocolPlanDigest
         writer.WriteString("build_workflow", release.BuildWorkflow);
         writer.WriteString("build_configuration", release.BuildConfiguration);
         writer.WriteString("runtime_identifier", release.RuntimeIdentifier);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteRecoveryAuthority(Utf8JsonWriter writer, ProtocolRecoveryAuthority? authority)
+    {
+        if (authority is null)
+        {
+            writer.WriteNull("recovery_authority");
+            return;
+        }
+
+        writer.WriteStartObject("recovery_authority");
+        writer.WriteString("catalog_id", authority.CatalogId.Value);
+        writer.WriteString("selection_id", authority.SelectionId.Value);
+        WriteGameRoot(writer, authority.GameRoot);
+        writer.WriteString("head_sha256", authority.HeadSha256);
+        writer.WriteStartObject("generation");
+        writer.WriteString("selection_id", authority.Generation.SelectionId.Value);
+        writer.WriteString("generation_id", authority.Generation.GenerationId);
+        writer.WriteString("origin_operation", JsonNamingPolicy.CamelCase.ConvertName(authority.Generation.OriginOperation.ToString()));
+        writer.WriteBoolean("is_current", authority.Generation.IsCurrent);
+        writer.WriteBoolean("is_user_checkpoint", authority.Generation.IsUserCheckpoint);
+        writer.WriteEndObject();
         writer.WriteEndObject();
     }
 

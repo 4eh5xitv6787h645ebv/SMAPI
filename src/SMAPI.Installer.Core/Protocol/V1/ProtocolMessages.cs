@@ -18,6 +18,7 @@ public enum ProtocolMessageKind
     InspectPruneRequest,
     ConfirmPruneRequest,
     ExecutePruneRequest,
+    CancelPruneRequest,
     HandshakeEvent,
     GameDiscoveryEvent,
     PackageOpenedEvent,
@@ -25,11 +26,15 @@ public enum ProtocolMessageKind
     PlanEvent,
     PrunePlanEvent,
     ProgressEvent,
+    PruneProgressEvent,
     SuccessEvent,
     RolledBackFailureEvent,
     RecoverableInterruptionEvent,
     CancelledEvent,
     PruneSuccessEvent,
+    PruneFailureEvent,
+    PruneInterruptionEvent,
+    PruneCancelledEvent,
     PrePlanErrorEvent
 }
 
@@ -94,6 +99,15 @@ public enum ProtocolCandidateKind
     ModifiedReceiptOwnedFile,
     LegacyInstallerFile,
     UnknownCollision
+}
+
+public enum ProtocolPruneProgressStage
+{
+    Revalidating,
+    PublishingRetention,
+    RemovingGenerations,
+    VerifyingRecovery,
+    Finalizing
 }
 
 public abstract record ProtocolMessage
@@ -199,6 +213,12 @@ public sealed record ExecutePruneRequest(ProtocolSessionId SessionId, ProtocolPr
     public override ProtocolMessageKind Kind => ProtocolMessageKind.ExecutePruneRequest;
 }
 
+public sealed record CancelPruneRequest(ProtocolSessionId SessionId, ProtocolPrunePlanId PrunePlanId, ProtocolPlanDigest PruneDigest) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.CancelPruneRequest;
+}
+
 public sealed record HandshakeEvent(ProtocolSessionId SessionId, string ServerVersion, string[] Capabilities) : ProtocolEvent
 {
     [JsonIgnore]
@@ -255,6 +275,15 @@ public sealed record ProtocolRecoveryGenerationSource(
     InstallerOperation OriginOperation,
     bool IsCurrent,
     bool IsUserCheckpoint
+);
+
+/// <summary>The exact authenticated catalog, game root, head, and generation selected for rollback.</summary>
+public sealed record ProtocolRecoveryAuthority(
+    ProtocolRecoveryCatalogId CatalogId,
+    ProtocolRecoverySelectionId SelectionId,
+    ProtocolGameRootIdentity GameRoot,
+    string HeadSha256,
+    ProtocolRecoveryGeneration Generation
 );
 
 public sealed record RecoveryCatalogEvent : ProtocolEvent
@@ -329,7 +358,7 @@ public sealed record PlanEvent : ProtocolEvent
     public ProtocolPlanDigest ExecutionBindingDigest { get; }
     public InstallerOperation Operation { get; }
     public ProtocolPackageId? PackageId { get; }
-    public ProtocolRecoverySelectionId? RecoverySelectionId { get; }
+    public ProtocolRecoveryAuthority? RecoveryAuthority { get; }
     public ProtocolGameRootIdentity GameRoot { get; }
     public ProtocolReleaseIdentity? CurrentRelease { get; }
     public ProtocolReleaseIdentity? TargetRelease { get; }
@@ -349,7 +378,7 @@ public sealed record PlanEvent : ProtocolEvent
         ProtocolPlanDigest executionBindingDigest,
         InstallerOperation operation,
         ProtocolPackageId? packageId,
-        ProtocolRecoverySelectionId? recoverySelectionId,
+        ProtocolRecoveryAuthority? recoveryAuthority,
         ProtocolGameRootIdentity gameRoot,
         ProtocolReleaseIdentity? currentRelease,
         ProtocolReleaseIdentity? targetRelease,
@@ -368,7 +397,7 @@ public sealed record PlanEvent : ProtocolEvent
         this.ExecutionBindingDigest = executionBindingDigest;
         this.Operation = operation;
         this.PackageId = packageId;
-        this.RecoverySelectionId = recoverySelectionId;
+        this.RecoveryAuthority = recoveryAuthority;
         this.GameRoot = gameRoot;
         this.CurrentRelease = currentRelease;
         this.TargetRelease = targetRelease;
@@ -458,6 +487,21 @@ public sealed record ProgressEvent(
     public override ProtocolMessageKind Kind => ProtocolMessageKind.ProgressEvent;
 }
 
+public sealed record PruneProgressEvent(
+    ProtocolSessionId SessionId,
+    ProtocolPrunePlanId PrunePlanId,
+    ProtocolPlanDigest PruneDigest,
+    long Sequence,
+    ProtocolPruneProgressStage Stage,
+    long CompletedUnits,
+    long? TotalUnits,
+    string Message
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PruneProgressEvent;
+}
+
 public sealed record SuccessEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
@@ -537,6 +581,55 @@ public sealed record PruneSuccessEvent(
 {
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.PruneSuccessEvent;
+}
+
+public sealed record PruneFailureEvent(
+    ProtocolSessionId SessionId,
+    ProtocolPrunePlanId PrunePlanId,
+    ProtocolPlanDigest PruneDigest,
+    string ErrorCode,
+    string Message,
+    int RemovedGenerationCount,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PruneFailureEvent;
+}
+
+public sealed record PruneInterruptionEvent(
+    ProtocolSessionId SessionId,
+    ProtocolPrunePlanId PrunePlanId,
+    ProtocolPlanDigest PruneDigest,
+    string ErrorCode,
+    string Message,
+    InstallerRecoveryAction RecoveryAction,
+    int RemovedGenerationCount,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PruneInterruptionEvent;
+}
+
+public sealed record PruneCancelledEvent(
+    ProtocolSessionId SessionId,
+    ProtocolPrunePlanId PrunePlanId,
+    ProtocolPlanDigest PruneDigest,
+    string Summary,
+    string SafeStateSummary,
+    int RemovedGenerationCount,
+    ProtocolRecoveryResult RecoveryResult,
+    string SafeNextStep,
+    string? SanitizedLogPath
+) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.PruneCancelledEvent;
 }
 
 public sealed record PrePlanErrorEvent(
