@@ -335,7 +335,7 @@ inspect_unique_regular_file() {
 
 print_dependency_repair_guidance() {
     printf '%s\n' "SMAPI can't safely launch with the game's .NET runtime because dependency metadata is missing, unsafe, or out of date." >&2
-    printf '%s\n' "Run the Linux installer with --repair --game-path \"<your game folder>\", then try again." >&2
+    printf '%s\n' "Re-run \"install on Linux.sh\" from the same verified installer package and choose Install, then try again." >&2
 }
 
 # The game-runtime host needs an exact installer-owned copy of the game's deps file before CoreCLR

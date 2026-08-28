@@ -18,7 +18,7 @@ internal class LinuxRuntimeDispatcherTests
     private const long MaximumDependencyMetadataBytes = 16L * 1024 * 1024;
     private const string DependencyRepairGuidance =
         "SMAPI can't safely launch with the game's .NET runtime because dependency metadata is missing, unsafe, or out of date.\n"
-        + "Run the Linux installer with --repair --game-path \"<your game folder>\", then try again.\n";
+        + "Re-run \"install on Linux.sh\" from the same verified installer package and choose Install, then try again.\n";
 
     private static readonly string[] NativeGcSettings =
     {
