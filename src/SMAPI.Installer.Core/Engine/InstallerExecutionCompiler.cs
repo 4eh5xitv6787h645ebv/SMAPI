@@ -240,6 +240,29 @@ internal sealed class InstallerExecutionCompiler
             ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Write destination '{operation.Path}' isn't supplied by the verified manifest.");
         if (target.Sha256 != operation.ResultSha256)
             throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Write destination '{operation.Path}' doesn't match its verified package digest.");
+        if (target.Kind == OwnedEntryKind.GeneratedFile && request.TargetManifest!.SchemaVersion >= PackageManifest.CurrentSchemaVersion)
+        {
+            GeneratedFileRecipe recipe = request.TargetManifest!.GeneratedFiles.SingleOrDefault(candidate => candidate.Path.Equals(target.Path))
+                ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Generated destination '{operation.Path}' has no exact manifest recipe.");
+            if (
+                recipe.SourceIdentity is null
+                || recipe.SourceIdentity.Sha256 != target.Sha256
+                || recipe.SourceIdentity.SizeBytes != target.SizeBytes
+                || recipe.SourceIdentity.UnixMode != target.UnixMode
+            )
+            {
+                throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Generated destination '{operation.Path}' isn't bound to its exact source result.");
+            }
+            return new FilePreparationInstruction(
+                operation,
+                PreparationInstructionKind.WriteTransactionDestination,
+                new GeneratedGameFileSource(recipe),
+                target.UnixMode,
+                target.SizeBytes,
+                RecoveryFileType.RegularFile,
+                GetObservedIdentity(observations, operation.Path)
+            );
+        }
         return new FilePreparationInstruction(
             operation,
             PreparationInstructionKind.WriteTransactionDestination,

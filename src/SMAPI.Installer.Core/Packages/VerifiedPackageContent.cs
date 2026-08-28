@@ -12,6 +12,8 @@ internal interface IVerifiedPackageContentAuthority
 {
     PackageManifest Manifest { get; }
     Sha256Digest ManifestSha256 { get; }
+    /// <summary>The original caller-owned authority identity retained through core-derived wrappers.</summary>
+    object AuthorityIdentity => this;
     LinuxAnchoredFile OpenFile(PackageManifestEntry expected, CancellationToken cancellationToken = default);
     void AssertUsable();
 }

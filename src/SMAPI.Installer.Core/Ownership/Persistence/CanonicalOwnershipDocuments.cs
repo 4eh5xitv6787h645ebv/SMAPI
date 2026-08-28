@@ -21,11 +21,19 @@ internal static class CanonicalOwnershipDocuments
         limits ??= OwnershipPersistenceLimits.Default;
         return ParseCanonical(bytes, limits, root =>
         {
-            AssertExactObject(root, "manifest", "schema_version", "release", "entries");
-            AssertSchema(root, PackageManifest.CurrentSchemaVersion);
+            int schemaVersion = GetInt32(root.GetProperty("schema_version"), "schema_version");
+            if (schemaVersion == PackageManifest.LegacySchemaVersion)
+                AssertExactObject(root, "manifest", "schema_version", "release", "entries");
+            else if (schemaVersion == PackageManifest.CurrentSchemaVersion)
+                AssertExactObject(root, "manifest", "schema_version", "release", "entries", "generated_files");
+            else
+                throw new OwnershipDocumentException($"Unsupported ownership document schema version {schemaVersion}.");
             InstallationReleaseIdentity release = ParseRelease(root.GetProperty("release"));
             PackageManifestEntry[] entries = ParseArray(root.GetProperty("entries"), limits, "manifest entries", ParseManifestEntry);
-            return new PackageManifest(release, entries);
+            GeneratedFileRecipe[] generated = schemaVersion == PackageManifest.CurrentSchemaVersion
+                ? ParseArray(root.GetProperty("generated_files"), limits, "generated files", ParseGeneratedFileRecipe)
+                : Array.Empty<GeneratedFileRecipe>();
+            return new PackageManifest(release, entries, generated, schemaVersion);
         }, SerializeManifest, "package manifest");
     }
 
@@ -224,7 +232,7 @@ internal static class CanonicalOwnershipDocuments
         {
             throw;
         }
-        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException or OverflowException)
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException or OverflowException or KeyNotFoundException)
         {
             throw new OwnershipDocumentException($"The {documentName} is invalid.", ex);
         }
@@ -271,6 +279,17 @@ internal static class CanonicalOwnershipDocuments
             GetInt64(element.GetProperty("size_bytes"), "entry.size_bytes"),
             GetInt32(element.GetProperty("unix_mode"), "entry.unix_mode"),
             ParseOwnedKind(element.GetProperty("kind"), "entry.kind")
+        );
+    }
+
+    private static GeneratedFileRecipe ParseGeneratedFileRecipe(JsonElement element)
+    {
+        AssertExactObject(element, "generated file", "path", "recipe", "source_path", "source_identity");
+        return new GeneratedFileRecipe(
+            ParsePath(element.GetProperty("path"), "generated_file.path"),
+            GetString(element.GetProperty("recipe"), "generated_file.recipe"),
+            ParsePath(element.GetProperty("source_path"), "generated_file.source_path"),
+            ParseRecoveryFileIdentity(element.GetProperty("source_identity"), "generated_file.source_identity")
         );
     }
 

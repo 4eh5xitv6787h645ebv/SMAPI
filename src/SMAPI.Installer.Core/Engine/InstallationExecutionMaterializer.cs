@@ -371,6 +371,12 @@ internal sealed class InstallationExecutionMaterializer
                 enforceMode = true;
                 expectedIdentity = new RecoveryFileIdentity(currentFile.Sha256, currentFile.SizeBytes, currentFile.UnixMode, currentFile.FileType);
                 break;
+            case GeneratedGameFileSource generated:
+                opened = lease.Game.OpenRegularFileForRead(generated.SourcePath.Value);
+                sourceRoot = lease.Game;
+                enforceMode = true;
+                expectedIdentity = new RecoveryFileIdentity(generated.Sha256, generated.SizeBytes, generated.UnixMode, generated.FileType);
+                break;
             case RecoverySnapshotSource recovery when recovery.Content == RecoverySnapshotContent.GameFile:
                 RecoveryFileIdentity identity = new(
                     recovery.ExpectedContentSha256!,

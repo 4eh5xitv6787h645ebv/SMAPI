@@ -33,6 +33,7 @@ public sealed class InspectedInstallationState : IDisposable
     public IReadOnlyList<ModifiedFileReplacementCandidate> ModifiedFileReplacementCandidates { get; }
     internal BoundInstallationPlan Binding { get; }
     internal IVerifiedPackageContentAuthority? TargetPackageContent { get; }
+    internal object? TargetPackageAuthorityIdentity => this.TargetPackageContent?.AuthorityIdentity;
     internal ICommittedRecoveryContentAuthority? RollbackContent { get; }
     internal IReadOnlyList<ModifiedFileReplacementApproval> ModifiedFileReplacementApprovals { get; }
     internal object RepairCandidateAuthority { get; }
@@ -626,6 +627,8 @@ public sealed class LinuxInstallerEngine
             throw new ArgumentException("Only rollback accepts and requires a committed recovery handle.", nameof(recovery));
 
         cancellationToken.ThrowIfCancellationRequested();
+        if (targetPackage is not null)
+            targetPackage = GeneratedPackageContentAuthority.Resolve(game, targetPackage, cancellationToken);
         ModifiedFileReplacementApproval[] approvals = (modifiedFileReplacementApprovals ?? Array.Empty<ModifiedFileReplacementApproval>())
             .ToArray();
         foreach (ModifiedFileReplacementApproval approval in approvals)

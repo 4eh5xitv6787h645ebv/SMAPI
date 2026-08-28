@@ -234,6 +234,30 @@ public sealed class CurrentGameFileSource : PreparationSource
     }
 }
 
+/// <summary>An exact game-owned source selected solely by a verified core generation recipe.</summary>
+public sealed class GeneratedGameFileSource : PreparationSource
+{
+    public string Recipe { get; }
+    public NormalizedRelativePath SourcePath { get; }
+    public Sha256Digest Sha256 { get; }
+    public long SizeBytes { get; }
+    public int UnixMode { get; }
+    public RecoveryFileType FileType { get; }
+
+    internal GeneratedGameFileSource(GeneratedFileRecipe recipe)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        RecoveryFileIdentity identity = recipe.SourceIdentity
+            ?? throw new ArgumentException("A generated source recipe must be resolved.", nameof(recipe));
+        this.Recipe = recipe.Recipe;
+        this.SourcePath = recipe.SourcePath;
+        this.Sha256 = identity.Sha256;
+        this.SizeBytes = identity.SizeBytes;
+        this.UnixMode = identity.UnixMode;
+        this.FileType = identity.FileType;
+    }
+}
+
 /// <summary>The logical object selected from an identity-bound recovery snapshot.</summary>
 public enum RecoverySnapshotContent
 {
