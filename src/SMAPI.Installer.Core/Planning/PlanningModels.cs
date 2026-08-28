@@ -355,15 +355,6 @@ public sealed class RollbackSnapshot
 
     public IReadOnlyList<RollbackSnapshotEntry> Entries { get; }
 
-    /// <summary>Whether this is a user checkpoint whose safe current-state preconditions are rebound at restore time.</summary>
-    public bool IsUserBackup => this.ExpectedCurrentReceiptSha256 == this.PreviousReceiptSha256
-        && this.ExpectedCurrentReceiptSha256 is not null
-        && this.Entries.All(entry =>
-            entry.Kind == RollbackEntryKind.Restore
-            && entry.ExpectedCurrent is not null
-            && entry.ExpectedCurrent == entry.Backup
-        );
-
     internal RollbackSnapshot(
         Sha256Digest? expectedCurrentReceiptSha256,
         Sha256Digest? previousReceiptSha256,
@@ -393,6 +384,7 @@ internal sealed class InstallationPlanningRequest
     public InstallationReceipt? InstalledReceipt { get; }
     public LauncherState Launcher { get; }
     public RollbackSnapshot? RollbackSnapshot { get; }
+    public InstallationAction? RollbackOriginAction { get; }
     public IReadOnlyList<RecoveryFileObservation> RecoveryObservations { get; }
 
     internal InstallationPlanningRequest(
@@ -402,7 +394,8 @@ internal sealed class InstallationPlanningRequest
         PackageManifest? targetManifest = null,
         InstallationReceipt? installedReceipt = null,
         RollbackSnapshot? rollbackSnapshot = null,
-        IEnumerable<RecoveryFileObservation>? recoveryObservations = null
+        IEnumerable<RecoveryFileObservation>? recoveryObservations = null,
+        InstallationAction? rollbackOriginAction = null
     )
     {
         ArgumentNullException.ThrowIfNull(inventory);
@@ -413,6 +406,7 @@ internal sealed class InstallationPlanningRequest
         this.InstalledReceipt = installedReceipt;
         this.Launcher = launcher;
         this.RollbackSnapshot = rollbackSnapshot;
+        this.RollbackOriginAction = rollbackOriginAction;
         RecoveryFileObservation[] observations = (recoveryObservations ?? Array.Empty<RecoveryFileObservation>())
             .OrderBy(observation => observation.Path.Value, StringComparer.Ordinal)
             .ToArray();

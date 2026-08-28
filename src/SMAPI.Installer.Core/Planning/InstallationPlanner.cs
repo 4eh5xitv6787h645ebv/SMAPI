@@ -190,10 +190,20 @@ internal sealed class InstallationPlanner
         HashSet<string> planned = new(StringComparer.Ordinal);
         foreach (InventoryEntry entry in request.Inventory.Entries.Where(entry => entry.Installed is not null))
         {
-            if (entry.Current != null && planned.Add(entry.Path.Value))
+            if (entry.Classification != InventoryClassification.UnchangedOwned || entry.Current is null)
+            {
+                conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedOwnedFile, entry.Path));
+                continue;
+            }
+            if (planned.Add(entry.Path.Value))
                 operations.Add(new PlannedOperation(PlanOperationKind.Backup, entry.Path, entry.Current.Sha256, entry.Current.Sha256));
         }
 
+        if (request.Launcher.Classification != LauncherClassification.InstalledUnchanged)
+        {
+            conflicts.Add(new PlanConflict(PlanConflictCode.ModifiedInstalledLauncher, InstallationPlanner.LauncherPath));
+            return;
+        }
         if (request.Launcher.CurrentLauncherSha256 is not null && planned.Add(InstallationPlanner.LauncherPath.Value))
         {
             operations.Add(new PlannedOperation(
@@ -221,7 +231,7 @@ internal sealed class InstallationPlanner
             conflicts.Add(new PlanConflict(PlanConflictCode.RollbackSnapshotRequired));
             return;
         }
-        if (request.RollbackSnapshot.IsUserBackup)
+        if (request.RollbackOriginAction == InstallationAction.Backup)
         {
             this.PlanUserBackupRollback(request, operations, conflicts);
             return;

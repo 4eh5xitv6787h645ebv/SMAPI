@@ -136,6 +136,7 @@ public sealed class BoundInstallationPlan
 internal interface ICommittedRecoveryContentAuthority
 {
     Guid GenerationId { get; }
+    InstallationAction OriginAction { get; }
     GameRootIdentity GameRoot { get; }
     RollbackSnapshot Snapshot { get; }
     Sha256Digest SnapshotSha256 { get; }

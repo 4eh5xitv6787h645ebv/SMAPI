@@ -250,7 +250,7 @@ internal sealed class AnchoredCoreStateAuthority
     public Sha256Digest? PointerSha256 => this.PointerBytes is null ? null : Sha256Digest.Hash(this.PointerBytes);
 
     private AnchoredCoreStateAuthority(
-        InstallerOperationLease lease,
+        GameRootIdentity gameRoot,
         PackageManifest? manifest,
         InstallationReceipt? receipt,
         CommittedRecoveryPointer? pointer,
@@ -262,7 +262,7 @@ internal sealed class AnchoredCoreStateAuthority
         LinuxFileIdentity? pointerIdentity
     )
     {
-        this.GameRoot = lease.RootIdentity;
+        this.GameRoot = gameRoot;
         this.Manifest = manifest;
         this.Receipt = receipt;
         this.Pointer = pointer;
@@ -275,15 +275,22 @@ internal sealed class AnchoredCoreStateAuthority
     }
 
     public static AnchoredCoreStateAuthority Inspect(InstallerOperationLease lease)
+        => Inspect(lease.Game, lease.RootIdentity);
+
+    public static AnchoredCoreStateAuthority Inspect(
+        LinuxAnchoredFileSystem game,
+        GameRootIdentity gameRoot
+    )
     {
-        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(game);
+        ArgumentNullException.ThrowIfNull(gameRoot);
         (byte[]? manifestBytes, LinuxFileIdentity? manifestIdentity) = ReadOptional(
-            lease.Game,
+            game,
             TransactionPlan.CoreManifestRelativePath,
             OwnershipPersistenceLimits.Default.MaxDocumentBytes
         );
         (byte[]? receiptBytes, LinuxFileIdentity? receiptIdentity) = ReadOptional(
-            lease.Game,
+            game,
             TransactionPlan.CoreReceiptRelativePath,
             OwnershipPersistenceLimits.Default.MaxDocumentBytes
         );
@@ -293,7 +300,7 @@ internal sealed class AnchoredCoreStateAuthority
         InstallationReceipt? receipt = receiptBytes is null ? null : CanonicalOwnershipDocuments.ParseReceipt(receiptBytes, manifest!);
 
         (byte[]? pointerBytes, LinuxFileIdentity? pointerIdentity) = ReadOptional(
-            lease.Game,
+            game,
             TransactionPlan.CoreRecoveryPointerRelativePath,
             CanonicalRecoveryPointerDocument.MaximumBytes
         );
@@ -306,7 +313,7 @@ internal sealed class AnchoredCoreStateAuthority
             throw new OwnershipDocumentException("The current recovery pointer doesn't describe the installed ownership tuple.");
         }
         return new AnchoredCoreStateAuthority(
-            lease,
+            gameRoot,
             manifest,
             receipt,
             pointer,
@@ -320,13 +327,17 @@ internal sealed class AnchoredCoreStateAuthority
     }
 
     public void AssertUsable(InstallerOperationLease lease)
+        => this.AssertUsable(lease.Game, lease.RootIdentity);
+
+    public void AssertUsable(LinuxAnchoredFileSystem game, GameRootIdentity gameRoot)
     {
-        ArgumentNullException.ThrowIfNull(lease);
-        if (lease.RootIdentity != this.GameRoot)
+        ArgumentNullException.ThrowIfNull(game);
+        ArgumentNullException.ThrowIfNull(gameRoot);
+        if (gameRoot != this.GameRoot)
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The inspected core state belongs to another game root.");
-        AssertUnchanged(lease.Game, TransactionPlan.CoreManifestRelativePath, this.ManifestIdentity, this.ManifestSha256);
-        AssertUnchanged(lease.Game, TransactionPlan.CoreReceiptRelativePath, this.ReceiptIdentity, this.ReceiptSha256);
-        AssertUnchanged(lease.Game, TransactionPlan.CoreRecoveryPointerRelativePath, this.PointerIdentity, this.PointerSha256);
+        AssertUnchanged(game, TransactionPlan.CoreManifestRelativePath, this.ManifestIdentity, this.ManifestSha256);
+        AssertUnchanged(game, TransactionPlan.CoreReceiptRelativePath, this.ReceiptIdentity, this.ReceiptSha256);
+        AssertUnchanged(game, TransactionPlan.CoreRecoveryPointerRelativePath, this.PointerIdentity, this.PointerSha256);
     }
 
     private static (byte[]? Bytes, LinuxFileIdentity? Identity) ReadOptional(LinuxAnchoredFileSystem game, string path, int maxBytes)
@@ -395,6 +406,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
     internal GameRootIdentity GameRoot { get; }
     internal CommittedRecoveryPointer Pointer { get; }
     GameRootIdentity ICommittedRecoveryContentAuthority.GameRoot => this.GameRoot;
+    InstallationAction ICommittedRecoveryContentAuthority.OriginAction => this.Action;
     Sha256Digest? ICommittedRecoveryContentAuthority.PreviousManifestSha256 => this.PreviousManifestSha256;
     Sha256Digest? ICommittedRecoveryContentAuthority.PreviousReceiptSha256 => this.PreviousReceiptSha256;
     Sha256Digest ICommittedRecoveryContentAuthority.AuthorizedHeadPointerSha256 => this.AuthorizedHeadPointerSha256;
@@ -431,13 +443,24 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         InstallerOperationLease lease,
         AnchoredCoreStateAuthority currentState
     )
+        => OpenCurrent(lease.Game, lease.CanonicalGameRoot, lease.RootIdentity, currentState);
+
+    internal static CommittedRecoveryHandle OpenCurrent(
+        LinuxAnchoredFileSystem game,
+        string canonicalGameRoot,
+        GameRootIdentity gameRoot,
+        AnchoredCoreStateAuthority currentState
+    )
     {
-        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(game);
+        if (string.IsNullOrWhiteSpace(canonicalGameRoot))
+            throw new ArgumentException("A canonical game root is required.", nameof(canonicalGameRoot));
+        ArgumentNullException.ThrowIfNull(gameRoot);
         ArgumentNullException.ThrowIfNull(currentState);
-        currentState.AssertUsable(lease);
+        currentState.AssertUsable(game, gameRoot);
         CommittedRecoveryPointer pointer = currentState.Pointer
             ?? throw new OwnershipDocumentException("There is no committed recovery generation to open.");
-        return Open(lease, pointer, currentState.PointerSha256
+        return Open(game, canonicalGameRoot, gameRoot, pointer, currentState.PointerSha256
             ?? throw new OwnershipDocumentException("The current recovery pointer digest is unavailable."));
     }
 
@@ -446,12 +469,24 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         AnchoredCoreStateAuthority currentState,
         Guid generationId
     )
+        => OpenSelected(lease.Game, lease.CanonicalGameRoot, lease.RootIdentity, currentState, generationId);
+
+    internal static CommittedRecoveryHandle OpenSelected(
+        LinuxAnchoredFileSystem game,
+        string canonicalGameRoot,
+        GameRootIdentity gameRoot,
+        AnchoredCoreStateAuthority currentState,
+        Guid generationId
+    )
     {
-        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(game);
+        if (string.IsNullOrWhiteSpace(canonicalGameRoot))
+            throw new ArgumentException("A canonical game root is required.", nameof(canonicalGameRoot));
+        ArgumentNullException.ThrowIfNull(gameRoot);
         ArgumentNullException.ThrowIfNull(currentState);
         if (generationId == Guid.Empty)
             throw new ArgumentException("A recovery generation ID is required.", nameof(generationId));
-        currentState.AssertUsable(lease);
+        currentState.AssertUsable(game, gameRoot);
         CommittedRecoveryPointer pointer = currentState.Pointer
             ?? throw new OwnershipDocumentException("There is no committed recovery generation to select.");
         Sha256Digest headDigest = currentState.PointerSha256
@@ -462,24 +497,26 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             if (!visited.Add(pointer.GenerationId))
                 throw new OwnershipDocumentException("The committed recovery chain contains a cycle.");
             if (pointer.GenerationId == generationId)
-                return Open(lease, pointer, headDigest);
-            pointer = ReadPreviousPointer(lease.Game, pointer);
+                return Open(game, canonicalGameRoot, gameRoot, pointer, headDigest);
+            pointer = ReadPreviousPointer(game, pointer);
         }
         throw new OwnershipDocumentException("The selected recovery generation isn't present in the bounded committed chain.");
     }
 
     private static CommittedRecoveryHandle Open(
-        InstallerOperationLease lease,
+        LinuxAnchoredFileSystem game,
+        string canonicalGameRoot,
+        GameRootIdentity gameRoot,
         CommittedRecoveryPointer pointer,
         Sha256Digest authorizedHeadPointerSha256
     )
     {
         string generationPath = $".smapi-installer/recovery/generations/{pointer.GenerationId:N}";
-        LinuxAnchoredFileSystem namedGameRoot = new(lease.CanonicalGameRoot);
+        LinuxAnchoredFileSystem namedGameRoot = new(canonicalGameRoot);
         LinuxAnchoredFileSystem? generation = null;
         try
         {
-            if (!lease.RootIdentity.Matches(namedGameRoot.Identity))
+            if (!gameRoot.Matches(game.GetCurrentRootIdentity()) || !gameRoot.Matches(namedGameRoot.Identity))
                 throw new OwnershipDocumentException("The named game root changed while opening committed recovery state.");
             generation = namedGameRoot.OpenSubdirectory(generationPath);
             if (generation.Identity.UnixMode != PrivateDirectoryMode)
@@ -502,6 +539,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
 
             LinuxFileIdentity? previousReceiptIdentity = null;
             LinuxFileIdentity? previousManifestIdentity = null;
+            InstallationReceipt? previousReceiptModel = null;
             if (pointer.PreviousReceiptSha256 is not null)
             {
                 (byte[] previousReceipt, LinuxFileIdentity receiptIdentity) = ReadRequired(
@@ -525,9 +563,12 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                 InstallationReceipt receipt = CanonicalOwnershipDocuments.ParseReceipt(previousReceipt, manifest);
                 if (receipt.GetCanonicalDigest() != snapshot.PreviousReceiptSha256)
                     throw new OwnershipDocumentException("The committed recovery receipt doesn't match its snapshot.");
+                previousReceiptModel = receipt;
                 previousReceiptIdentity = receiptIdentity;
                 previousManifestIdentity = manifestIdentity;
             }
+            if (pointer.Action == InstallationAction.Backup)
+                AssertCompleteUserBackup(snapshot, previousReceiptModel);
 
             if (pointer.PreviousPointerSha256 is not null)
             {
@@ -585,7 +626,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             }
 
             CommittedRecoveryHandle result = new(
-                lease.RootIdentity,
+                gameRoot,
                 pointer,
                 snapshot,
                 namedGameRoot,
@@ -632,6 +673,38 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             throw new OwnershipDocumentException("A previous recovery pointer doesn't match the committed chain transition.");
         }
         return previous;
+    }
+
+    private static void AssertCompleteUserBackup(
+        RollbackSnapshot snapshot,
+        InstallationReceipt? previousReceipt
+    )
+    {
+        if (previousReceipt is null || snapshot.Entries.Count != previousReceipt.Entries.Count + 1)
+            throw new OwnershipDocumentException("A committed user backup isn't complete for its authenticated receipt.");
+        Dictionary<string, RollbackSnapshotEntry> entries = snapshot.Entries.ToDictionary(entry => entry.Path.Value, StringComparer.Ordinal);
+        foreach (InstallationReceiptEntry receiptEntry in previousReceipt.Entries)
+        {
+            if (
+                !entries.TryGetValue(receiptEntry.Path.Value, out RollbackSnapshotEntry? snapshotEntry)
+                || snapshotEntry.Kind != RollbackEntryKind.Restore
+                || snapshotEntry.ExpectedCurrent != snapshotEntry.Backup
+                || snapshotEntry.Backup?.Sha256 != receiptEntry.InstalledSha256
+                || snapshotEntry.Backup.UnixMode != receiptEntry.UnixMode
+            )
+            {
+                throw new OwnershipDocumentException("A committed user backup doesn't match its authenticated receipt entries.");
+            }
+        }
+        if (
+            !entries.TryGetValue("StardewValley-original", out RollbackSnapshotEntry? launcherBackup)
+            || launcherBackup.Kind != RollbackEntryKind.Restore
+            || launcherBackup.ExpectedCurrent != launcherBackup.Backup
+            || launcherBackup.Backup?.Sha256 != previousReceipt.Launcher.OriginalLauncherSha256
+        )
+        {
+            throw new OwnershipDocumentException("A committed user backup doesn't contain the authenticated original launcher.");
+        }
     }
 
     LinuxAnchoredFile ICommittedRecoveryContentAuthority.OpenGameFile(
@@ -723,13 +796,6 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                 || Sha256Digest.Parse(this.Generation.ComputeSha256(snapshot)) != this.SnapshotSha256
             )
                 throw new OwnershipDocumentException("The committed recovery snapshot changed after selection.");
-        }
-        foreach (RecoveryContentBinding binding in this.GameFiles.Values)
-        {
-            using LinuxAnchoredFile file = this.Generation.OpenRegularFileForRead(binding.Name);
-            if (file.Identity != binding.FileIdentity)
-                throw new OwnershipDocumentException("A committed recovery content file changed after selection.");
-            AssertContentIdentity(this.Generation, file, binding.Expected);
         }
     }
 

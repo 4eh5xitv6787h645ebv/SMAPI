@@ -1,16 +1,20 @@
 using System.IO.Compression;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using NUnit.Framework;
+using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 
 [TestFixture]
+[SupportedOSPlatform("linux")]
 public sealed class VerifiedPackageContentTests
 {
     private const string Commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -90,6 +94,35 @@ public sealed class VerifiedPackageContentTests
 
         await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*Unix mode*");
         await authority.DisposeAsync();
+    }
+
+    [Test]
+    public async Task PublicInspectAsync_WithVerifiedContent_IsReadOnlyForUntouchedGame()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "game");
+        Directory.CreateDirectory(game);
+        string launcher = Path.Combine(game, "StardewValley");
+        await File.WriteAllTextAsync(launcher, "vanilla launcher");
+        File.SetUnixFileMode(launcher, (UnixFileMode)493);
+
+        using InspectedInstallationState inspection = await new LinuxInstallerEngine().InspectAsync(
+            game,
+            InstallationAction.Install,
+            content
+        );
+
+        inspection.Plan.CanExecute.Should().BeTrue();
+        Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse();
+        Directory.EnumerateFileSystemEntries(game).Should().Equal(launcher);
+        (await File.ReadAllTextAsync(launcher)).Should().Be("vanilla launcher");
+        File.GetUnixFileMode(launcher).Should().Be((UnixFileMode)493);
     }
 
     private async Task<VerifiedInstallerPackage> CreateAuthorityAsync(

@@ -219,7 +219,20 @@ public class InstallerExecutionCompilerTests
         );
         InstallationPlanningRequest request = new(
             InstallationAction.Backup,
-            InstallationInventory.Create(manifest, receipt, [runtime, userFile], preservedPaths: [userPath]),
+            InstallationInventory.Create(
+                manifest,
+                receipt,
+                [
+                    runtime,
+                    new CurrentFile(
+                        OwnershipTestData.Path("StardewValley"),
+                        receipt.Launcher.InstalledLauncherSha256,
+                        manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher).UnixMode
+                    ),
+                    userFile
+                ],
+                preservedPaths: [userPath]
+            ),
             LauncherState.Assess(launcher, original, receipt.Launcher),
             targetManifest: manifest,
             installedReceipt: receipt
@@ -276,7 +289,8 @@ public class InstallerExecutionCompilerTests
             [
                 new RecoveryFileObservation(runtime.Path, Identity(runtime.InstalledSha256, mode: runtime.UnixMode)),
                 new RecoveryFileObservation(created.Path, Identity(created.InstalledSha256, mode: created.UnixMode))
-            ]
+            ],
+            rollbackOriginAction: InstallationAction.Update
         );
 
         (InstallationPlan plan, InstallationExecutionPreparation preparation) = this.Compile(request);
@@ -326,7 +340,8 @@ public class InstallerExecutionCompilerTests
             InstallationInventory.Create(null, null, []),
             LauncherState.Assess(OwnershipTestData.Digest('f'), null, null),
             rollbackSnapshot: snapshot,
-            recoveryObservations: [new RecoveryFileObservation(runtimePath, null)]
+            recoveryObservations: [new RecoveryFileObservation(runtimePath, null)],
+            rollbackOriginAction: InstallationAction.Uninstall
         );
 
         (InstallationPlan plan, InstallationExecutionPreparation preparation) = this.Compile(request);
@@ -574,7 +589,7 @@ public class InstallerExecutionCompilerTests
     private static ICommittedRecoveryContentAuthority? RecoveryAuthority(InstallationPlanningRequest request)
     {
         return request.Action == InstallationAction.Rollback && request.RollbackSnapshot is not null
-            ? new FakeRecoveryContentAuthority(request.RollbackSnapshot)
+            ? new FakeRecoveryContentAuthority(request.RollbackSnapshot, request.RollbackOriginAction!.Value)
             : null;
     }
 
@@ -599,6 +614,7 @@ public class InstallerExecutionCompilerTests
     private sealed class FakeRecoveryContentAuthority : ICommittedRecoveryContentAuthority
     {
         public Guid GenerationId { get; } = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        public InstallationAction OriginAction { get; }
         public GameRootIdentity GameRoot => InstallerExecutionCompilerTests.GameRoot;
         public RollbackSnapshot Snapshot { get; }
         public Sha256Digest SnapshotSha256 => Sha256Digest.Hash(CanonicalOwnershipDocuments.SerializeRollbackSnapshot(this.Snapshot));
@@ -606,9 +622,10 @@ public class InstallerExecutionCompilerTests
         public Sha256Digest? PreviousReceiptSha256 => this.Snapshot.PreviousReceiptSha256;
         public Sha256Digest AuthorizedHeadPointerSha256 => OwnershipTestData.Digest('9');
 
-        public FakeRecoveryContentAuthority(RollbackSnapshot snapshot)
+        public FakeRecoveryContentAuthority(RollbackSnapshot snapshot, InstallationAction originAction)
         {
             this.Snapshot = snapshot;
+            this.OriginAction = originAction;
         }
 
         public LinuxAnchoredFile OpenGameFile(NormalizedRelativePath path, RecoveryFileIdentity expectedIdentity)

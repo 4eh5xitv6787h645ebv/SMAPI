@@ -54,9 +54,9 @@ public sealed class LinuxInstallerEngine
     private readonly InstallerTransactionExecutor Executor;
     private readonly InstallationExecutionMaterializer Materializer;
 
-    public LinuxInstallerEngine()
+    public LinuxInstallerEngine(ITransactionProgressSink? progress = null)
     {
-        this.Executor = new InstallerTransactionExecutor();
+        this.Executor = new InstallerTransactionExecutor(progress);
         this.Materializer = new InstallationExecutionMaterializer(this.Executor);
     }
 
@@ -74,13 +74,44 @@ public sealed class LinuxInstallerEngine
         CommittedRecoveryHandle? recovery = null,
         CancellationToken cancellationToken = default
     )
+        => Task.Run(
+            () => this.Inspect(gameRoot, action, targetPackage, recovery, cancellationToken),
+            cancellationToken
+        );
+
+    private InspectedInstallationState Inspect(
+        string gameRoot,
+        InstallationAction action,
+        VerifiedPackageContent? targetPackage,
+        CommittedRecoveryHandle? recovery,
+        CancellationToken cancellationToken
+    )
     {
         cancellationToken.ThrowIfCancellationRequested();
         IVerifiedPackageContentAuthority? packageAuthority = targetPackage;
         ICommittedRecoveryContentAuthority? recoveryAuthority = recovery;
-        using InstallerOperationLease lease = InstallerOperationLease.Acquire(gameRoot);
-        this.Executor.RecoverLocked(lease);
-        return Task.FromResult(this.InspectLocked(lease, action, packageAuthority, recoveryAuthority));
+        using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
+        InspectedInstallationState result = this.InspectCore(
+            inspection.Game,
+            inspection.RootIdentity,
+            inspection.Generation,
+            action,
+            packageAuthority,
+            recoveryAuthority,
+            state
+        );
+        try
+        {
+            state.AssertUsable(inspection.Game, inspection.RootIdentity);
+            inspection.AssertStable();
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Execute only the exact opaque inspection and digest the user reviewed.</summary>
@@ -88,6 +119,13 @@ public sealed class LinuxInstallerEngine
         InspectedInstallationState inspection,
         Sha256Digest confirmedDigest,
         CancellationToken cancellationToken = default
+    )
+        => Task.Run(() => this.Execute(inspection, confirmedDigest, cancellationToken), cancellationToken);
+
+    private TransactionResult Execute(
+        InspectedInstallationState inspection,
+        Sha256Digest confirmedDigest,
+        CancellationToken cancellationToken
     )
     {
         ArgumentNullException.ThrowIfNull(inspection);
@@ -116,7 +154,7 @@ public sealed class LinuxInstallerEngine
                 throw new ExecutionCompilationException(ExecutionCompilationError.StalePlan, "The installation state changed after confirmation.");
             AnchoredCoreStateAuthority coreState = AnchoredCoreStateAuthority.Inspect(lease);
             InstallationPlanningRequest request = InstallationStateInspector.CreateRequest(
-                lease,
+                lease.Game,
                 inspection.Action,
                 inspection.TargetPackageContent,
                 inspection.RollbackContent,
@@ -128,7 +166,7 @@ public sealed class LinuxInstallerEngine
                 request,
                 Guid.NewGuid()
             );
-            return Task.FromResult(this.Materializer.Apply(lease, preparation, coreState, cancellationToken));
+            return this.Materializer.Apply(lease, preparation, coreState, cancellationToken);
         }
     }
 
@@ -137,12 +175,32 @@ public sealed class LinuxInstallerEngine
         string gameRoot,
         CancellationToken cancellationToken = default
     )
+        => Task.Run(() => this.OpenCurrentRecovery(gameRoot, cancellationToken), cancellationToken);
+
+    private CommittedRecoveryHandle OpenCurrentRecovery(
+        string gameRoot,
+        CancellationToken cancellationToken
+    )
     {
         cancellationToken.ThrowIfCancellationRequested();
-        using InstallerOperationLease lease = InstallerOperationLease.Acquire(gameRoot);
-        this.Executor.RecoverLocked(lease);
-        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
-        return Task.FromResult(CommittedRecoveryHandle.OpenCurrent(lease, state));
+        using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
+        CommittedRecoveryHandle result = CommittedRecoveryHandle.OpenCurrent(
+            inspection.Game,
+            inspection.CanonicalGameRoot,
+            inspection.RootIdentity,
+            state
+        );
+        try
+        {
+            inspection.AssertStable();
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Open one selected generation from the bounded authenticated recovery chain.</summary>
@@ -151,12 +209,34 @@ public sealed class LinuxInstallerEngine
         Guid generationId,
         CancellationToken cancellationToken = default
     )
+        => Task.Run(() => this.OpenRecovery(gameRoot, generationId, cancellationToken), cancellationToken);
+
+    private CommittedRecoveryHandle OpenRecovery(
+        string gameRoot,
+        Guid generationId,
+        CancellationToken cancellationToken
+    )
     {
         cancellationToken.ThrowIfCancellationRequested();
-        using InstallerOperationLease lease = InstallerOperationLease.Acquire(gameRoot);
-        this.Executor.RecoverLocked(lease);
-        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
-        return Task.FromResult(CommittedRecoveryHandle.OpenSelected(lease, state, generationId));
+        using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
+        CommittedRecoveryHandle result = CommittedRecoveryHandle.OpenSelected(
+            inspection.Game,
+            inspection.CanonicalGameRoot,
+            inspection.RootIdentity,
+            state,
+            generationId
+        );
+        try
+        {
+            inspection.AssertStable();
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
     internal InspectedInstallationState InspectLocked(
@@ -178,8 +258,39 @@ public sealed class LinuxInstallerEngine
             throw new ArgumentException("Only rollback accepts and requires a committed recovery handle.", nameof(recovery));
 
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        return this.InspectCore(
+            lease.Game,
+            lease.RootIdentity,
+            lease.Generation,
+            action,
+            targetPackage,
+            recovery,
+            state
+        );
+    }
+
+    private InspectedInstallationState InspectCore(
+        LinuxAnchoredFileSystem game,
+        GameRootIdentity gameRoot,
+        ulong operationGeneration,
+        InstallationAction action,
+        IVerifiedPackageContentAuthority? targetPackage,
+        ICommittedRecoveryContentAuthority? recovery,
+        AnchoredCoreStateAuthority state
+    )
+    {
+        if (action is InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair)
+        {
+            if (targetPackage is null)
+                throw new ArgumentException("This action requires a verified target package.", nameof(targetPackage));
+        }
+        else if (targetPackage is not null)
+            throw new ArgumentException("This action doesn't accept a target package.", nameof(targetPackage));
+        if ((action == InstallationAction.Rollback) != (recovery is not null))
+            throw new ArgumentException("Only rollback accepts and requires a committed recovery handle.", nameof(recovery));
+
         InstallationPlanningRequest request = InstallationStateInspector.CreateRequest(
-            lease,
+            game,
             action,
             targetPackage,
             recovery,
@@ -189,15 +300,15 @@ public sealed class LinuxInstallerEngine
         if (!plan.CanExecute)
             return new InspectedInstallationState(
                 plan,
-                CreateNonExecutableBinding(plan, lease, state),
+                CreateNonExecutableBinding(plan, gameRoot, operationGeneration, state),
                 targetPackage,
                 recovery
             );
         BoundInstallationPlan binding = this.Compiler.BindPlan(
             plan,
             request,
-            lease.RootIdentity,
-            lease.Generation,
+            gameRoot,
+            operationGeneration,
             targetPackage,
             recovery,
             state.PointerSha256
@@ -207,14 +318,15 @@ public sealed class LinuxInstallerEngine
 
     private static BoundInstallationPlan CreateNonExecutableBinding(
         InstallationPlan plan,
-        InstallerOperationLease lease,
+        GameRootIdentity gameRoot,
+        ulong operationGeneration,
         AnchoredCoreStateAuthority state
     )
     {
         return new BoundInstallationPlan(
             plan.Action,
-            lease.RootIdentity,
-            lease.Generation,
+            gameRoot,
+            operationGeneration,
             plan.GetCanonicalDigest(),
             null,
             state.ReceiptSha256,
@@ -235,7 +347,7 @@ internal static class InstallationStateInspector
     private static readonly NormalizedRelativePath LauncherBackupPath = NormalizedRelativePath.Parse("StardewValley-original");
 
     public static InstallationPlanningRequest CreateRequest(
-        InstallerOperationLease lease,
+        LinuxAnchoredFileSystem game,
         InstallationAction action,
         IVerifiedPackageContentAuthority? targetPackage,
         ICommittedRecoveryContentAuthority? recovery,
@@ -251,12 +363,12 @@ internal static class InstallationStateInspector
             inventoryPaths.UnionWith(receipt.Entries.Select(entry => entry.Path));
         inventoryPaths.Add(LauncherPath);
         CurrentFile[] currentFiles = inventoryPaths
-            .Select(path => ReadCurrentFile(lease.Game, path))
+            .Select(path => ReadCurrentFile(game, path))
             .Where(file => file is not null)
             .Cast<CurrentFile>()
             .ToArray();
         Sha256Digest? launcherSha = currentFiles.SingleOrDefault(file => file.Path.Equals(LauncherPath))?.Sha256;
-        CurrentFile? launcherBackup = ReadCurrentFile(lease.Game, LauncherBackupPath);
+        CurrentFile? launcherBackup = ReadCurrentFile(game, LauncherBackupPath);
         LauncherState launcher = LauncherState.Assess(launcherSha, launcherBackup?.Sha256, receipt?.Launcher);
         InstallationInventory inventory = InstallationInventory.Create(targetManifest, receipt, currentFiles);
         RollbackSnapshot? rollbackSnapshot = recovery?.Snapshot;
@@ -270,15 +382,16 @@ internal static class InstallationStateInspector
             rollbackSnapshot,
             action == InstallationAction.Rollback && rollbackSnapshot is not null
                 ? ReadObservations(
-                    lease.Game,
+                    game,
                     rollbackSnapshot.Entries.Select(entry => entry.Path)
                         .Concat(
-                            rollbackSnapshot.IsUserBackup
+                            recovery?.OriginAction == InstallationAction.Backup
                                 ? receipt?.Entries.Select(entry => entry.Path) ?? Array.Empty<NormalizedRelativePath>()
                                 : Array.Empty<NormalizedRelativePath>()
                         )
                 )
-                : Array.Empty<RecoveryFileObservation>()
+                : Array.Empty<RecoveryFileObservation>(),
+            recovery?.OriginAction
         );
         InstallationPlan plan = new InstallationPlanner().Plan(initial);
         IEnumerable<NormalizedRelativePath> required = action switch
@@ -288,13 +401,13 @@ internal static class InstallationStateInspector
                 .Append(LauncherPath)
                 .Append(LauncherBackupPath),
             InstallationAction.Backup => plan.Operations.Select(operation => operation.Path),
-            InstallationAction.Rollback when rollbackSnapshot?.IsUserBackup == true => rollbackSnapshot.Entries
+            InstallationAction.Rollback when recovery?.OriginAction == InstallationAction.Backup => rollbackSnapshot!.Entries
                 .Select(entry => entry.Path)
                 .Concat(receipt?.Entries.Select(entry => entry.Path) ?? Array.Empty<NormalizedRelativePath>()),
             InstallationAction.Rollback => rollbackSnapshot?.Entries.Select(entry => entry.Path) ?? Array.Empty<NormalizedRelativePath>(),
             _ => throw new ArgumentOutOfRangeException(nameof(action))
         };
-        RecoveryFileObservation[] observations = ReadObservations(lease.Game, required.Distinct());
+        RecoveryFileObservation[] observations = ReadObservations(game, required.Distinct());
         return new InstallationPlanningRequest(
             action,
             inventory,
@@ -302,7 +415,8 @@ internal static class InstallationStateInspector
             targetManifest,
             receipt,
             rollbackSnapshot,
-            observations
+            observations,
+            recovery?.OriginAction
         );
     }
 

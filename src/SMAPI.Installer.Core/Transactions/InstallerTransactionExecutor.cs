@@ -8,11 +8,12 @@ namespace StardewModdingAPI.Installer.Core.Transactions;
 /// <summary>Applies immutable Linux file plans through anchored descriptors with durable exact rollback.</summary>
 internal sealed class InstallerTransactionExecutor
 {
-    private const string WorkspaceName = ".smapi-installer";
+    internal const string WorkspaceName = ".smapi-installer";
     private const string TransactionsName = "transactions";
-    private const string WorkspaceMarkerName = "state-version";
-    private const string WorkspaceMarkerContents = "smapi-installer-state-v2\n";
+    internal const string WorkspaceMarkerName = "state-version";
+    internal const string WorkspaceMarkerContents = "smapi-installer-state-v2\n";
     private const int MaximumRetainedFinalTransactions = 16;
+    private const int MaximumTransactionStoreEntries = 32;
     private readonly ITransactionProgressSink Progress;
     private readonly ITransactionFaultInjector FaultInjector;
 
@@ -493,7 +494,7 @@ internal sealed class InstallerTransactionExecutor
     {
         using LinuxAnchoredFileSystem transactions = workspace.OpenSubdirectory(TransactionsName);
         List<TransactionResult> results = new();
-        foreach (string name in transactions.EnumerateEntryNames())
+        foreach (string name in EnumerateTransactionStore(transactions))
         {
             LinuxFileIdentity? identity = transactions.Stat(name);
             if (name.StartsWith("preparing-", StringComparison.Ordinal))
@@ -776,7 +777,7 @@ internal sealed class InstallerTransactionExecutor
     {
         using LinuxAnchoredFileSystem transactions = workspace.OpenSubdirectory(TransactionsName);
         List<(string Name, long CreatedUtcTicks)> finals = new();
-        foreach (string name in transactions.EnumerateEntryNames())
+        foreach (string name in EnumerateTransactionStore(transactions))
         {
             LinuxFileIdentity? identity = transactions.Stat(name);
             if (identity?.Kind != LinuxAnchoredEntryKind.Directory || !Guid.TryParseExact(name, "N", out Guid id))
@@ -811,6 +812,22 @@ internal sealed class InstallerTransactionExecutor
             LinuxFileIdentity emptyIdentity = transactions.Stat(name)
                 ?? throw RecoveryError("A retained transaction disappeared before directory removal.");
             transactions.RemoveEmptyDirectory(name, emptyIdentity);
+        }
+    }
+
+    private static IReadOnlyList<string> EnumerateTransactionStore(LinuxAnchoredFileSystem transactions)
+    {
+        try
+        {
+            return transactions.EnumerateEntryNames(maximumEntries: MaximumTransactionStoreEntries);
+        }
+        catch (IOException exception)
+        {
+            throw new InstallerTransactionException(
+                TransactionErrorCode.RecoveryFailed,
+                "The transaction store exceeds its bounded entry limit.",
+                exception
+            );
         }
     }
 

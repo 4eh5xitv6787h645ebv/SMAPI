@@ -159,7 +159,7 @@ internal sealed class InstallerOperationLease : IDisposable
         return ReadGeneration(workspace);
     }
 
-    private static (LinuxFileIdentity Identity, ulong Generation) ReadGeneration(LinuxAnchoredFileSystem workspace)
+    internal static (LinuxFileIdentity Identity, ulong Generation) ReadGeneration(LinuxAnchoredFileSystem workspace)
     {
         using LinuxAnchoredFile file = workspace.OpenRegularFileForRead(GenerationFileName);
         if (file.Identity.UnixMode != 0x180 || file.Identity.Size != GenerationByteLength)
@@ -187,5 +187,94 @@ internal sealed class InstallerOperationLease : IDisposable
     {
         if (this.Disposed)
             throw new ObjectDisposedException(nameof(InstallerOperationLease));
+    }
+}
+
+/// <summary>A genuinely read-only, retry-validated view used before user confirmation.</summary>
+internal sealed class InstallerInspectionLease : IDisposable
+{
+    private bool Disposed;
+
+    public string CanonicalGameRoot { get; }
+    public LinuxAnchoredFileSystem Game { get; }
+    public GameRootIdentity RootIdentity { get; }
+    public ulong Generation { get; }
+
+    private InstallerInspectionLease(
+        string canonicalGameRoot,
+        LinuxAnchoredFileSystem game,
+        GameRootIdentity rootIdentity,
+        ulong generation
+    )
+    {
+        this.CanonicalGameRoot = canonicalGameRoot;
+        this.Game = game;
+        this.RootIdentity = rootIdentity;
+        this.Generation = generation;
+    }
+
+    public static InstallerInspectionLease Open(string gameRoot)
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        string canonicalRoot = TransactionPath.GetCanonicalRoot(gameRoot, nameof(gameRoot));
+        LinuxAnchoredFileSystem game = new(canonicalRoot);
+        try
+        {
+            GameRootIdentity root = GameRootIdentity.From(canonicalRoot, game.Identity);
+            ulong generation = ReadExistingGeneration(game);
+            InstallerInspectionLease result = new(canonicalRoot, game, root, generation);
+            game = null!;
+            result.AssertStable();
+            return result;
+        }
+        finally
+        {
+            game?.Dispose();
+        }
+    }
+
+    public void AssertStable()
+    {
+        if (this.Disposed)
+            throw new ObjectDisposedException(nameof(InstallerInspectionLease));
+        using LinuxAnchoredFileSystem named = new(this.CanonicalGameRoot);
+        if (
+            !this.RootIdentity.Matches(this.Game.GetCurrentRootIdentity())
+            || !this.RootIdentity.Matches(named.Identity)
+            || ReadExistingGeneration(this.Game) != this.Generation
+        )
+        {
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The game root or installer generation changed during read-only inspection.");
+        }
+    }
+
+    public void Dispose()
+    {
+        if (this.Disposed)
+            return;
+        this.Disposed = true;
+        this.Game.Dispose();
+    }
+
+    private static ulong ReadExistingGeneration(LinuxAnchoredFileSystem game)
+    {
+        LinuxFileIdentity? workspaceIdentity = game.Stat(InstallerTransactionExecutor.WorkspaceName);
+        if (workspaceIdentity is null)
+            return 0;
+        if (workspaceIdentity.Kind != LinuxAnchoredEntryKind.Directory || workspaceIdentity.UnixMode != 0x1c0)
+            throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The existing installer workspace has unsafe metadata.");
+        using LinuxAnchoredFileSystem workspace = game.OpenSubdirectory(InstallerTransactionExecutor.WorkspaceName);
+        using (LinuxAnchoredFile marker = workspace.OpenRegularFileForRead(InstallerTransactionExecutor.WorkspaceMarkerName))
+        {
+            byte[] expected = Encoding.UTF8.GetBytes(InstallerTransactionExecutor.WorkspaceMarkerContents);
+            if (
+                marker.Identity.UnixMode != 0x180
+                || marker.Identity.Size != expected.Length
+                || !workspace.ReadAllBytes(marker, expected.Length).AsSpan().SequenceEqual(expected)
+            )
+                throw new InstallerTransactionException(TransactionErrorCode.WorkspaceConflict, "The existing installer workspace marker isn't recognized.");
+        }
+        LinuxFileIdentity? generationIdentity = workspace.Stat("operation-generation");
+        return generationIdentity is null ? 0 : InstallerOperationLease.ReadGeneration(workspace).Generation;
     }
 }

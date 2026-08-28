@@ -241,7 +241,12 @@ public class InstallationPlannerTests
             manifest,
             receipt,
             [
-                OwnershipTestData.Current(runtime, digest: '9'),
+                OwnershipTestData.Current(runtime),
+                new CurrentFile(
+                    OwnershipTestData.Path("StardewValley"),
+                    receipt.Launcher.InstalledLauncherSha256,
+                    manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher).UnixMode
+                ),
                 new CurrentFile(preservedPath, OwnershipTestData.Digest('8'), 420)
             ],
             preservedPaths: [preservedPath]
@@ -281,6 +286,35 @@ public class InstallationPlannerTests
         plan.CanExecute.Should().BeFalse();
         plan.Conflicts.Should().ContainSingle(conflict => conflict.Code == PlanConflictCode.InstalledReceiptRequired);
         plan.Operations.Should().BeEmpty();
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public void Backup_MissingOrModifiedReceiptFile_IsNonExecutable(bool modified)
+    {
+        PackageManifest manifest = OwnershipTestData.Manifest(
+            otherEntries: [OwnershipTestData.Entry("StardewModdingAPI", '2', OwnedEntryKind.RuntimeFile)]
+        );
+        InstallationReceipt receipt = OwnershipTestData.Receipt(manifest);
+        PackageManifestEntry runtime = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.RuntimeFile);
+        List<CurrentFile> current = receipt.Entries
+            .Where(entry => !entry.Path.Equals(runtime.Path))
+            .Select(entry => new CurrentFile(entry.Path, entry.InstalledSha256, entry.UnixMode))
+            .ToList();
+        if (modified)
+            current.Add(OwnershipTestData.Current(runtime, digest: '9'));
+        InstallationInventory inventory = InstallationInventory.Create(manifest, receipt, current);
+
+        InstallationPlan plan = this.Planner.Plan(new InstallationPlanningRequest(
+            InstallationAction.Backup,
+            inventory,
+            LauncherState.Assess(receipt.Launcher.InstalledLauncherSha256, receipt.Launcher.OriginalLauncherSha256, receipt.Launcher),
+            targetManifest: manifest,
+            installedReceipt: receipt
+        ));
+
+        plan.CanExecute.Should().BeFalse();
+        plan.Conflicts.Should().Contain(conflict => conflict.Code == PlanConflictCode.ModifiedOwnedFile && conflict.Path!.Equals(runtime.Path));
     }
 
     [Test]
