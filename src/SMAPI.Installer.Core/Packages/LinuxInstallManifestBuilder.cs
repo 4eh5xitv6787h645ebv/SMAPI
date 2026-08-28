@@ -188,14 +188,12 @@ public sealed class LinuxInstallManifestBuilder
         string installer = Path.Combine(linuxDirectory.FullName, "SMAPI.Installer");
         FileSystemInfo[] linuxEntries = linuxDirectory.EnumerateFileSystemInfos().ToArray();
         if (
-            linuxEntries.Length != 2
+            linuxEntries.Length < 2
             || linuxEntries.Any(entry => entry is not FileInfo)
-            || !linuxEntries.Select(entry => entry.Name).OrderBy(name => name, StringComparer.Ordinal).SequenceEqual(
-                new[] { "SMAPI.Installer", "install.dat" },
-                StringComparer.Ordinal
-            )
-            || !File.Exists(nestedArchive)
-            || !File.Exists(installer)
+            || linuxEntries.Count(entry => entry.Name == "install.dat") != 1
+            || linuxEntries.Count(entry => entry.Name == "SMAPI.Installer") != 1
+            || new FileInfo(nestedArchive).Length <= 0
+            || new FileInfo(installer).Length <= 0
         )
         {
             throw new PackageSecurityException("The finalized package is missing its Linux installer or nested payload.");

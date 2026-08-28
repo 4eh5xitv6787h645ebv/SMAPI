@@ -36,7 +36,7 @@ public sealed class LinuxInstallManifestBuilderTests
     [Test]
     public async Task BuildAsync_ClassifiesPayloadAndEmitsCanonicalDeterministicSchemaThreeManifest()
     {
-        string package = this.CreatePackage();
+        string package = this.CreatePackage(extraLinuxSupportFiles: true);
         LinuxInstallManifestBuilder builder = new();
 
         LinuxInstallManifestBuildResult first = await builder.BuildAsync(
@@ -104,6 +104,16 @@ public sealed class LinuxInstallManifestBuilderTests
     }
 
     [Test]
+    public async Task BuildAsync_RejectsUnexpectedLinuxSupportSubdirectory()
+    {
+        string package = this.CreatePackage(extraLinuxSupportDirectory: true);
+
+        Func<Task> action = () => this.BuildAsync(package);
+
+        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*missing its Linux installer or nested payload*");
+    }
+
+    [Test]
     public async Task BuildAsync_RejectsNonTagWorkflowWithoutProducingAuthority()
     {
         string package = this.CreatePackage();
@@ -133,6 +143,8 @@ public sealed class LinuxInstallManifestBuilderTests
     private string CreatePackage(
         (string Path, string Contents, int Type, int Mode)? additionalNested = null,
         bool extraOuterFile = false,
+        bool extraLinuxSupportFiles = false,
+        bool extraLinuxSupportDirectory = false,
         string suffix = ""
     )
     {
@@ -147,6 +159,13 @@ public sealed class LinuxInstallManifestBuilderTests
         AddFile(archive, $"{root}/install on Linux.sh", "#!/bin/sh", 493);
         AddFile(archive, $"{root}/internal/linux/SMAPI.Installer", "installer", 493);
         AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
+        if (extraLinuxSupportFiles)
+        {
+            AddFile(archive, $"{root}/internal/linux/SMAPI.Installer.dll", "managed support", 420);
+            AddFile(archive, $"{root}/internal/linux/libhostfxr.so", "native support", 493);
+        }
+        if (extraLinuxSupportDirectory)
+            AddFile(archive, $"{root}/internal/linux/support/runtime.dll", "nested support", 420);
         if (extraOuterFile)
             AddFile(archive, $"{root}/unexpected.txt", "unexpected", 420);
         return package;
