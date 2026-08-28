@@ -1,8 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using StardewModdingAPI.Installer.Core.Security;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Privacy;
 

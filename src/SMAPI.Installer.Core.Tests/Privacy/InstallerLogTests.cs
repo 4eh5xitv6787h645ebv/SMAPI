@@ -1,9 +1,9 @@
-using System.Runtime.Versioning;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using FluentAssertions;
 using NUnit.Framework;
-using StardewModdingAPI.Installer.Core.Privacy;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Privacy;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Privacy;
 

@@ -1,5 +1,5 @@
-using System.Security.Cryptography;
 using System.Runtime.Versioning;
+using System.Security.Cryptography;
 using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Transactions;
