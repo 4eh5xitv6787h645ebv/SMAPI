@@ -22,7 +22,7 @@ internal static class Program
         new InventoryChestIdleScenario(),
         new ContentCacheEnumerationScenario(),
         new ContentInvalidationScenario(),
-        new TmxTileTransformScenario()
+        new TmxLayerConversionScenario()
     ];
 
     /// <summary>Run the benchmark command.</summary>

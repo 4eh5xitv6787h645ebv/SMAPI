@@ -23,16 +23,16 @@
     "content.invalidation-scan": {
       "operations": 10000,
       "warmupOperations": 10000,
-      "expectedDigest": "ebfb5766b642eda5",
+      "expectedDigest": "5d61d883703a1ff5",
       "maxAllocatedBytesPerOperation": 32,
-      "informationalMedianNanosecondsPerOperation": 352.8066
+      "informationalMedianNanosecondsPerOperation": 851.0754
     },
     "event.cached-dispatch": {
       "operations": 10000,
       "warmupOperations": 10000,
-      "expectedDigest": "54b5800a826caed5",
+      "expectedDigest": "dbec8702764df53a",
       "maxAllocatedBytesPerOperation": 0,
-      "informationalMedianNanosecondsPerOperation": 46.3712
+      "informationalMedianNanosecondsPerOperation": 141.034
     },
     "infrastructure.canary": {
       "operations": 10000,
@@ -69,19 +69,19 @@
       "maxAllocatedBytesPerOperation": 0,
       "informationalMedianNanosecondsPerOperation": 351.5078
     },
-    "tmx.tile-transform": {
-      "operations": 10000,
-      "warmupOperations": 10000,
-      "expectedDigest": "cb2dcf49ada7018d",
+    "tmx.layer-conversion": {
+      "operations": 128,
+      "warmupOperations": 64,
+      "expectedDigest": "d66a31765a222d25",
       "maxAllocatedBytesPerOperation": 0,
-      "informationalMedianNanosecondsPerOperation": 11.2153
+      "informationalMedianNanosecondsPerOperation": 158624.890625
     },
     "tracking.inventory-chest-idle": {
       "operations": 10000,
       "warmupOperations": 10000,
-      "expectedDigest": "f541f86352b51b45",
+      "expectedDigest": "42a60a957ccf7fe5",
       "maxAllocatedBytesPerOperation": 0,
-      "informationalMedianNanosecondsPerOperation": 2.7382
+      "informationalMedianNanosecondsPerOperation": 2130.1852
     }
   }
 }

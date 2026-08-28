@@ -33,14 +33,14 @@ paths that must execute through the test host in an isolated game environment.
 
 | Area | Blocking coverage |
 | --- | --- |
-| map/TMX conversion | exact-zero console gate for the production per-tile transform path; absolute and relative allocation gates for full synthetic conversion in NUnit |
+| map/TMX conversion | exact-zero console gate for production layer traversal, transform decoding, and indexed sheet/animation resolution; absolute and relative allocation gates for full xTile-object conversion in NUnit |
 | canonical paths | exact-zero console gate and NUnit gate; allocating normalization has an absolute console ceiling |
 | JSON streaming | console ceiling for a one-megabyte file and NUnit large-versus-small allocation delta |
 | parsed asset names | absolute console parser ceiling; exact-zero NUnit cache-hit and localized base-name gates |
 | cached reflection | exact-zero console and NUnit field/property/method wrapper gates |
-| event dispatch | exact-zero console cached-callback gate and warmed stateful multi-handler NUnit gate |
-| inventory and chest idle tracking | exact-zero console idle-state gate plus NUnit gates for a 36-slot inventory and 32 representative chests |
-| content invalidation | absolute console scan and enumeration gates plus predicate/operation/content-cache NUnit gates |
+| event dispatch | exact-zero console gate through warmed `ManagedEvent.Raise` and a stateful multi-handler NUnit gate |
+| inventory and chest idle tracking | exact-zero console gate through the production transition/diff/reset core plus NUnit gates for a real 36-slot inventory and 32 representative game chests |
+| content invalidation | absolute console scan with visit/key/value correctness evidence and enumeration gates plus predicate/operation/content-cache NUnit gates |
 | runner infrastructure | digest, allocation, runtime, timing-non-gate, and deterministic writer self-tests |
 
 Run the focused test layer against an executable isolated game copy (reference assemblies are
@@ -70,8 +70,8 @@ Every console run writes:
 
 The workflow appends the Markdown report to the job summary and uploads both result files even when a
 required gate fails. It uses read-only repository permissions and downloads only the public reference
-assemblies pinned in the workflow. CI executes standalone production seams for every required hot-path
-area, and builds the more complete game-bound NUnit gates. The full focused NUnit category is run in the
+assemblies pinned in the workflow. CI executes game-independent production cores for every required
+hot-path area (and the complete `ManagedEvent.Raise` path), and builds the more complete game-bound NUnit gates. The full focused NUnit category is run in the
 isolated release-qualification environment because public reference assemblies can't host test
 discovery. CI does not contain, fetch, or inspect any private benchmark fixture, modpack, or save.
 

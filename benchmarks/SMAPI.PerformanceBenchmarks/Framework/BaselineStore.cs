@@ -39,8 +39,12 @@ internal static class BaselineStore
             BaselineStore.ValidateProperties(runtime, "baseline runtime", "framework", "runtimeVersion", "rid");
         if (root.TryGetProperty("scenarios", out JsonElement scenarios) && scenarios.ValueKind == JsonValueKind.Object)
         {
+            HashSet<string> scenarioIds = new(StringComparer.Ordinal);
             foreach (JsonProperty scenario in scenarios.EnumerateObject())
             {
+                if (!scenarioIds.Add(scenario.Name))
+                    throw new InvalidOperationException($"The baseline scenarios contain duplicate scenario ID '{scenario.Name}'.");
+
                 BaselineStore.ValidateProperties(
                     scenario.Value,
                     $"scenario '{scenario.Name}'",
@@ -71,13 +75,15 @@ internal static class BaselineStore
             throw new InvalidOperationException($"Unsupported baseline schema {baseline.SchemaVersion}; expected {BaselineStore.SchemaVersion}.");
         if (string.IsNullOrWhiteSpace(baseline.Runtime.Framework) || string.IsNullOrWhiteSpace(baseline.Runtime.RuntimeVersion) || string.IsNullOrWhiteSpace(baseline.Runtime.Rid))
             throw new InvalidOperationException("The baseline runtime must specify framework, runtimeVersion, and rid.");
+        if (!BaselineStore.IsThreePartVersion(baseline.Runtime.RuntimeVersion))
+            throw new InvalidOperationException("The baseline runtimeVersion must contain exactly three numeric components.");
         if (baseline.Scenarios.Count == 0)
             throw new InvalidOperationException("The baseline must contain at least one scenario.");
 
         foreach ((string id, ScenarioBaseline scenario) in baseline.Scenarios)
         {
-            if (string.IsNullOrWhiteSpace(id))
-                throw new InvalidOperationException("A baseline scenario ID is empty.");
+            if (!BaselineStore.IsScenarioId(id))
+                throw new InvalidOperationException($"Baseline scenario ID '{id}' isn't canonical.");
             if (scenario is null)
                 throw new InvalidOperationException($"Scenario '{id}' is null.");
             if (scenario.Operations <= 0)
@@ -95,33 +101,79 @@ internal static class BaselineStore
         }
     }
 
-    /// <summary>Reject duplicate or unknown properties before model deserialization.</summary>
-    private static void ValidateProperties(JsonElement element, string description, params string[] allowedProperties)
+    /// <summary>Require the exact property set and reject duplicate fields before model deserialization.</summary>
+    private static void ValidateProperties(JsonElement element, string description, params string[] requiredProperties)
     {
         if (element.ValueKind != JsonValueKind.Object)
             throw new InvalidOperationException($"The {description} must be a JSON object.");
 
-        HashSet<string> allowed = new(allowedProperties, StringComparer.Ordinal);
+        HashSet<string> required = new(requiredProperties, StringComparer.Ordinal);
         HashSet<string> seen = new(StringComparer.Ordinal);
         foreach (JsonProperty property in element.EnumerateObject())
         {
             if (!seen.Add(property.Name))
                 throw new InvalidOperationException($"The {description} contains duplicate property '{property.Name}'.");
-            if (!allowed.Contains(property.Name))
+            if (!required.Contains(property.Name))
                 throw new InvalidOperationException($"The {description} contains unknown property '{property.Name}'.");
+        }
+
+        foreach (string property in required)
+        {
+            if (!seen.Contains(property))
+                throw new InvalidOperationException($"The {description} is missing required property '{property}'.");
         }
     }
 
     /// <summary>Get whether a string is a canonical 64-bit hexadecimal digest.</summary>
-    private static bool IsDigest(string value)
+    private static bool IsDigest(string? value)
     {
-        if (value.Length != 16)
+        if (value is null || value.Length != 16)
             return false;
 
         foreach (char character in value)
         {
             if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
                 return false;
+        }
+        return true;
+    }
+
+    /// <summary>Get whether a scenario ID matches the baseline schema's canonical dotted/dashed form.</summary>
+    private static bool IsScenarioId(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return false;
+
+        bool needsAlphanumeric = true;
+        foreach (char character in value)
+        {
+            bool isAlphanumeric = character is >= 'a' and <= 'z' or >= '0' and <= '9';
+            if (isAlphanumeric)
+                needsAlphanumeric = false;
+            else if ((character is '.' or '-') && !needsAlphanumeric)
+                needsAlphanumeric = true;
+            else
+                return false;
+        }
+        return !needsAlphanumeric;
+    }
+
+    /// <summary>Get whether a runtime patch is three dot-separated numeric components.</summary>
+    private static bool IsThreePartVersion(string value)
+    {
+        string[] parts = value.Split('.');
+        if (parts.Length != 3)
+            return false;
+
+        foreach (string part in parts)
+        {
+            if (part.Length == 0)
+                return false;
+            foreach (char character in part)
+            {
+                if (character is not (>= '0' and <= '9'))
+                    return false;
+            }
         }
         return true;
     }

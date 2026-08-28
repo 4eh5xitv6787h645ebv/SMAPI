@@ -1,6 +1,7 @@
 using System;
 using SMAPI.PerformanceBenchmarks.Framework;
-using StardewModdingAPI.Events;
+using StardewModdingAPI;
+using StardewModdingAPI.Framework;
 using StardewModdingAPI.Framework.Events;
 
 namespace SMAPI.PerformanceBenchmarks;
@@ -8,22 +9,31 @@ namespace SMAPI.PerformanceBenchmarks;
 /// <summary>Measure the cached callback objects used by managed-event dispatch.</summary>
 internal sealed class EventDispatchScenario : IPerformanceScenario
 {
-    private ManagedEventHandler<EventArgs>[] Handlers = Array.Empty<ManagedEventHandler<EventArgs>>();
+    private static readonly ManagedEventInvoker<int, EventArgs> InvokeHandler = static (ref int invocations, IModMetadata _, Action<EventArgs> callback) =>
+    {
+        invocations++;
+        callback(EventArgs.Empty);
+    };
+
+    private ManagedEvent<EventArgs>? Event;
     private int Invocations;
 
     /// <inheritdoc />
     public string Id => "event.cached-dispatch";
 
     /// <inheritdoc />
-    public string Description => "Invokes eight warmed managed-event callback wrappers without recreating delegates.";
+    public string Description => "Raises a warmed production managed event with eight cached handlers.";
 
     /// <inheritdoc />
     public void Setup()
     {
         EventHandler<EventArgs> handler = this.Handle;
-        this.Handlers = new ManagedEventHandler<EventArgs>[8];
-        for (int index = 0; index < this.Handlers.Length; index++)
-            this.Handlers[index] = new ManagedEventHandler<EventArgs>(handler, index, EventPriority.Normal, sourceMod: null!);
+        this.Event = new ManagedEvent<EventArgs>("Synthetic.PerformanceGate", new ModRegistry());
+        for (int index = 0; index < 8; index++)
+            this.Event.Add(handler, mod: null!);
+
+        int warmupInvocations = 0;
+        this.Event.Raise(ref warmupInvocations, EventDispatchScenario.InvokeHandler);
     }
 
     /// <inheritdoc />
@@ -31,20 +41,20 @@ internal sealed class EventDispatchScenario : IPerformanceScenario
     {
         this.Invocations = 0;
         for (int operation = 0; operation < operations; operation++)
-        {
-            foreach (ManagedEventHandler<EventArgs> handler in this.Handlers)
-                handler.Callback(EventArgs.Empty);
-        }
+            this.Event!.Raise(ref this.Invocations, EventDispatchScenario.InvokeHandler);
+
+        if (Context.HeuristicModsRunningCode.Count != 0)
+            throw new InvalidOperationException("Managed-event context was not cleared after dispatch.");
 
         ulong digest = ScenarioDigest.Add(ScenarioDigest.Offset, (ulong)this.Invocations);
-        digest = ScenarioDigest.Add(digest, (ulong)this.Handlers.Length);
+        digest = ScenarioDigest.Add(digest, this.Event!.HasListeners ? 1UL : 0UL);
         return digest;
     }
 
     /// <inheritdoc />
     public void Cleanup()
     {
-        this.Handlers = Array.Empty<ManagedEventHandler<EventArgs>>();
+        this.Event = null;
         this.Invocations = 0;
     }
 

@@ -137,34 +137,30 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
             {
                 foreach (TMXChunk chunk in sourceLayer.Data.Chunks)
                 {
-                    Location origin = new(chunk.X, chunk.Y);
-                    foreach (ParsedTile sourceTile in chunk.Tiles)
-                    {
-                        if (sourceTile.Gid != 0)
-                            tiles[origin.X, origin.Y] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
-                        ++origin.X;
-                        if (origin.X >= layer.LayerWidth)
-                        {
-                            origin.X = 0;
-                            ++origin.Y;
-                        }
-                    }
+                    LayerTileLoadState state = new(layer, index, tiles);
+                    OptimizedTmxLayerConversion.ForEachPopulated(
+                        chunk.Tiles,
+                        layer.LayerWidth,
+                        chunk.X,
+                        chunk.Y,
+                        OptimizedTmxFormat.GetRawGid,
+                        ref state,
+                        OptimizedTmxFormat.LoadLayerTile
+                    );
                 }
             }
             else if (sourceLayer.Data?.Tiles is { Count: > 0 })
             {
-                Location origin = Location.Origin;
-                foreach (ParsedTile sourceTile in sourceLayer.Data.Tiles)
-                {
-                    if (sourceTile.Gid != 0)
-                        tiles[origin.X, origin.Y] = OptimizedTmxFormat.LoadTile(layer, index, sourceTile.Gid);
-                    ++origin.X;
-                    if (origin.X >= layer.LayerWidth)
-                    {
-                        origin.X = 0;
-                        ++origin.Y;
-                    }
-                }
+                LayerTileLoadState state = new(layer, index, tiles);
+                OptimizedTmxLayerConversion.ForEachPopulated(
+                    sourceLayer.Data.Tiles,
+                    layer.LayerWidth,
+                    0,
+                    0,
+                    OptimizedTmxFormat.GetRawGid,
+                    ref state,
+                    OptimizedTmxFormat.LoadLayerTile
+                );
             }
 
             layer.SetOffset(new Location((int)Math.Floor(sourceLayer.Offsetx * this.TileSizeMultiplier.Width), (int)Math.Floor(sourceLayer.Offsety * this.TileSizeMultiplier.Height)));
@@ -231,24 +227,29 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
         if (rawGid == 0)
             return null;
 
-        DecodedTmxTileTransform transform = OptimizedTmxTileTransform.Decode(rawGid);
+        return OptimizedTmxFormat.LoadTile(layer, index, OptimizedTmxTileTransform.Decode(rawGid));
+    }
+
+    /// <summary>Convert one decoded populated tile using a map-level lookup index.</summary>
+    private static Tile LoadTile(Layer layer, MapTileIndex index, DecodedTmxTileTransform transform)
+    {
         uint gid = transform.Gid;
 
-        if (!index.TryGetRange(gid, out SheetRange range))
+        if (!index.TryResolve(gid, out ResolvedTmxTile<TileSheet, TMXFrame[]> resolved))
             throw new Exception($"Invalid tile gid: {gid}");
 
-        int tileIndex = (int)(gid - range.FirstGid);
         Tile result;
-        if (range.Animations?.TryGetValue(tileIndex, out TMXFrame[]? animation) is true)
+        if (resolved.IsAnimated)
         {
+            TMXFrame[] animation = resolved.Animation!;
             StaticTile[] frames = new StaticTile[animation.Length];
             for (int i = 0; i < animation.Length; i++)
-                frames[i] = new StaticTile(layer, range.TileSheet, BlendMode.Alpha, (int)animation[i].TileId);
+                frames[i] = new StaticTile(layer, resolved.TileSheet, BlendMode.Alpha, (int)animation[i].TileId);
 
             result = new AnimatedTile(layer, frames, animation[0].Duration);
         }
         else
-            result = new StaticTile(layer, range.TileSheet, BlendMode.Alpha, tileIndex);
+            result = new StaticTile(layer, resolved.TileSheet, BlendMode.Alpha, resolved.TileIndex);
 
         if (transform.Rotation != 0)
             result.SetRotationValue(transform.Rotation);
@@ -257,6 +258,18 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
             result.SetFlip(transform.Flip);
 
         return result;
+    }
+
+    /// <summary>Get a parsed tile's raw global ID.</summary>
+    private static uint GetRawGid(ParsedTile tile)
+    {
+        return tile.Gid;
+    }
+
+    /// <summary>Populate one decoded layer cell.</summary>
+    private static void LoadLayerTile(ref LayerTileLoadState state, int x, int y, DecodedTmxTileTransform transform)
+    {
+        state.Tiles[x, y] = OptimizedTmxFormat.LoadTile(state.Layer, state.Index, transform);
     }
 
     /// <summary>Order map properties using TMXTile's existing compatibility rules.</summary>
@@ -288,8 +301,8 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
     /// <summary>An indexed view of the tilesheets and animated tiles for one map conversion.</summary>
     private sealed class MapTileIndex
     {
-        /// <summary>The indexed target tilesheets.</summary>
-        private readonly SheetRange[] Ranges;
+        /// <summary>The game-independent indexed target tilesheets.</summary>
+        private readonly OptimizedTmxTileIndex<TileSheet, TMXFrame[]> Index;
 
         /// <summary>Construct an instance.</summary>
         public MapTileIndex(Map map, TMXMap sourceMap)
@@ -298,7 +311,7 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
             foreach (TMXTileset sourceSheet in sourceMap.Tilesets)
                 sourceByName.TryAdd(sourceSheet.Name, sourceSheet);
 
-            this.Ranges = new SheetRange[map.TileSheets.Count];
+            TmxTileRange<TileSheet, TMXFrame[]>[] ranges = new TmxTileRange<TileSheet, TMXFrame[]>[map.TileSheets.Count];
             for (int i = 0; i < map.TileSheets.Count; i++)
             {
                 TileSheet targetSheet = map.TileSheets[i];
@@ -318,27 +331,18 @@ internal sealed class OptimizedTmxFormat : TMXFormat, IMapFormat
                     }
                 }
 
-                this.Ranges[i] = new SheetRange(firstGid, lastGid, targetSheet, animations);
+                ranges[i] = new TmxTileRange<TileSheet, TMXFrame[]>(firstGid, lastGid, targetSheet, animations);
             }
+            this.Index = new OptimizedTmxTileIndex<TileSheet, TMXFrame[]>(ranges);
         }
 
-        /// <summary>Get the tilesheet range containing a global tile ID.</summary>
-        public bool TryGetRange(uint gid, out SheetRange result)
+        /// <summary>Resolve a global tile ID to its indexed tilesheet and animation metadata.</summary>
+        public bool TryResolve(uint gid, out ResolvedTmxTile<TileSheet, TMXFrame[]> result)
         {
-            foreach (SheetRange range in this.Ranges)
-            {
-                if (gid >= range.FirstGid && gid <= range.LastGid)
-                {
-                    result = range;
-                    return true;
-                }
-            }
-
-            result = default;
-            return false;
+            return this.Index.TryResolve(gid, out result);
         }
     }
 
-    /// <summary>An indexed target tilesheet and its animated tile definitions.</summary>
-    private readonly record struct SheetRange(uint FirstGid, uint LastGid, TileSheet TileSheet, Dictionary<int, TMXFrame[]>? Animations);
+    /// <summary>Mutable state passed through one game-independent layer traversal.</summary>
+    private readonly record struct LayerTileLoadState(Layer Layer, MapTileIndex Index, Tile?[,] Tiles);
 }

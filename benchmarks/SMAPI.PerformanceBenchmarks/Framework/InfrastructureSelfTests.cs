@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Nodes;
 
 namespace SMAPI.PerformanceBenchmarks.Framework;
 
@@ -46,7 +47,7 @@ internal static class InfrastructureSelfTests
         InfrastructureSelfTests.Require(BaselineComparer.CompareRuntime(new BaselineRuntime("net6.0", "6.0.36", "linux-x64"), runtime).Count == 0, "An exact runtime should pass.");
         InfrastructureSelfTests.Require(BaselineComparer.CompareRuntime(new BaselineRuntime("net6.0", "6.0.35", "linux-x64"), runtime).Count == 1, "A runtime patch mismatch should fail.");
 
-        const string baselineWithUnknownProperty = """
+        const string validBaselineJson = """
             {
               "schemaVersion": 1,
               "runtime": { "framework": "net6.0", "runtimeVersion": "6.0.36", "rid": "linux-x64" },
@@ -56,15 +57,67 @@ internal static class InfrastructureSelfTests
                   "warmupOperations": 1,
                   "expectedDigest": "000000000000002a",
                   "maxAllocatedBytesPerOperation": 0,
-                  "informationalMedianNanosecondsPerOperation": null,
-                  "unknown": true
+                  "informationalMedianNanosecondsPerOperation": null
                 }
               }
             }
             """;
+
+        const string baselineWithDuplicateScenarioId = """
+            {
+              "schemaVersion": 1,
+              "runtime": { "framework": "net6.0", "runtimeVersion": "6.0.36", "rid": "linux-x64" },
+              "scenarios": {
+                "self-test": {
+                  "operations": 1,
+                  "warmupOperations": 1,
+                  "expectedDigest": "000000000000002a",
+                  "maxAllocatedBytesPerOperation": 0,
+                  "informationalMedianNanosecondsPerOperation": null
+                },
+                "self-test": {
+                  "operations": 1,
+                  "warmupOperations": 1,
+                  "expectedDigest": "000000000000002a",
+                  "maxAllocatedBytesPerOperation": 0,
+                  "informationalMedianNanosecondsPerOperation": null
+                }
+              }
+            }
+            """;
+
+        InfrastructureSelfTests.Require(BaselineStore.Parse(validBaselineJson).Scenarios.Count == 1, "A complete baseline should parse.");
         InfrastructureSelfTests.RequireThrows(
-            () => BaselineStore.Parse(baselineWithUnknownProperty),
+            () => BaselineStore.Parse(validBaselineJson.Replace("\"informationalMedianNanosecondsPerOperation\": null", "\"informationalMedianNanosecondsPerOperation\": null, \"unknown\": true", StringComparison.Ordinal)),
             "An unknown baseline property should be rejected."
+        );
+        InfrastructureSelfTests.RequireThrows(
+            () => BaselineStore.Parse(baselineWithDuplicateScenarioId),
+            "A duplicate scenario ID should be rejected."
+        );
+
+        string[] requiredScenarioProperties =
+        [
+            "operations",
+            "warmupOperations",
+            "expectedDigest",
+            "maxAllocatedBytesPerOperation",
+            "informationalMedianNanosecondsPerOperation"
+        ];
+        foreach (string name in requiredScenarioProperties)
+        {
+            InfrastructureSelfTests.RequireThrows(
+                () => BaselineStore.Parse(InfrastructureSelfTests.RemoveProperty(validBaselineJson, "scenarios", "self-test", name)),
+                $"Missing required scenario property '{name}' should be rejected."
+            );
+        }
+        InfrastructureSelfTests.RequireThrows(
+            () => BaselineStore.Parse(InfrastructureSelfTests.RemoveProperty(validBaselineJson, "runtime", "rid")),
+            "A missing required runtime property should be rejected."
+        );
+        InfrastructureSelfTests.RequireThrows(
+            () => BaselineStore.Parse(InfrastructureSelfTests.RemoveProperty(validBaselineJson, "schemaVersion")),
+            "A missing required root property should be rejected."
         );
 
         Dictionary<string, ScenarioBaseline> continuationBaselines = new(StringComparer.Ordinal)
@@ -108,6 +161,17 @@ internal static class InfrastructureSelfTests
         }
 
         throw new InvalidOperationException($"Infrastructure self-test failed: {message}");
+    }
+
+    /// <summary>Remove one nested JSON property while preserving a valid document.</summary>
+    private static string RemoveProperty(string json, params string[] path)
+    {
+        JsonObject parent = JsonNode.Parse(json)!.AsObject();
+        for (int index = 0; index < path.Length - 1; index++)
+            parent = parent[path[index]]!.AsObject();
+        if (!parent.Remove(path[^1]))
+            throw new InvalidOperationException($"Infrastructure self-test fixture doesn't contain '{string.Join('.', path)}'.");
+        return parent.ToJsonString();
     }
 
     /// <summary>A fixed-result scenario for exercising runner behavior.</summary>

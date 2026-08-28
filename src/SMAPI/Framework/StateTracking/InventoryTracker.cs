@@ -18,6 +18,9 @@ internal sealed class InventoryTracker : IDisposable
     /// <summary>Whether each runtime item type uses the game's event-capable <see cref="Item.Stack"/> implementation.</summary>
     private static readonly ConcurrentDictionary<Type, bool> CanTrackStackWithEvents = new();
 
+    /// <summary>Read a tracked item's current stack size without allocating a delegate per reset.</summary>
+    private static readonly Func<Item, int> GetItemStackSize = static item => item.Stack;
+
     /// <summary>The custom item stack sizes as of the last reset.</summary>
     private readonly Dictionary<Item, int> StackSizes = new(new ObjectReferenceComparer<Item>());
 
@@ -57,6 +60,9 @@ internal sealed class InventoryTracker : IDisposable
     /// <summary>The shared handler registered for event-capable item stacks.</summary>
     private readonly FieldChange<NetInt, int> StackChangedHandler;
 
+    /// <summary>The cached stack-unsubscribe callback passed to the game-independent reset core.</summary>
+    private readonly Action<Item> UntrackStackHandler;
+
     /// <summary>Whether inventory changes are currently being tracked.</summary>
     private bool IsTrackingChanges;
 
@@ -81,16 +87,16 @@ internal sealed class InventoryTracker : IDisposable
         this.IncludeRemovedStackChanges = includeRemovedStackChanges;
         this.OnChanged = onChanged;
         this.StackChangedHandler = this.OnStackChanged;
+        this.UntrackStackHandler = this.UntrackStack;
     }
 
     /// <summary>Update the current values if needed.</summary>
     /// <param name="trackChanges">Whether to track changes needed for an inventory event.</param>
     public void Update(bool trackChanges)
     {
-        if (this.IsTrackingChanges == trackChanges)
+        if (!InventoryTrackerHotPath.TrySetTracking(ref this.IsTrackingChanges, trackChanges))
             return;
 
-        this.IsTrackingChanges = trackChanges;
         if (trackChanges)
         {
             // Establish a fresh unique-item baseline before subscribing, so changes from while tracking was
@@ -144,33 +150,18 @@ internal sealed class InventoryTracker : IDisposable
         if (!this.IsTrackingChanges)
             return;
 
-        // Update only stacks known to have changed. Newly added custom stacks may have changed again after their
-        // slot notification, but are intentionally represented only as additions in this reset window.
-        foreach (Item item in this.DirtyStacks)
-        {
-            if (this.StackSizes.ContainsKey(item))
-                this.StackSizes[item] = item.Stack;
-        }
-        foreach (Item item in this.Added)
-        {
-            if (this.StackSizes.ContainsKey(item))
-                this.StackSizes[item] = item.Stack;
-        }
-
         // Removed baseline items remain subscribed until reset. This preserves a quantity change which occurs
         // before removal, while still avoiding any scan of unchanged/current normal items.
-        foreach (Item item in this.Removed)
-        {
-            this.UntrackStack(item);
-            this.BaselineItems.Remove(item);
-        }
-        foreach (Item item in this.Added)
-            this.BaselineItems.Add(item);
-
-        this.EventStackSizes.Clear();
-        this.DirtyStacks.Clear();
-        this.Added.Clear();
-        this.Removed.Clear();
+        InventoryTrackerHotPath.Reset(
+            this.StackSizes,
+            this.EventStackSizes,
+            this.DirtyStacks,
+            this.Added,
+            this.Removed,
+            this.BaselineItems,
+            InventoryTracker.GetItemStackSize,
+            this.UntrackStackHandler
+        );
     }
 
     /// <summary>Get the inventory changes since the last reset, if anything changed.</summary>
@@ -181,18 +172,9 @@ internal sealed class InventoryTracker : IDisposable
         // Chests historically omit quantity changes for an item which is absent from the final inventory,
         // while player inventory snapshots include them. Delay suppression until snapshot creation so a
         // remove/re-add within the same window retains the original stack baseline for both owners.
-        if (!this.IncludeRemovedStackChanges)
-        {
-            foreach (Item item in this.Removed)
-            {
-                this.DirtyStacks.Remove(item);
-                this.EventStackSizes.Remove(item);
-            }
-        }
-
         // Besides avoiding unnecessary diff work, this preserves an allocation-free idle path despite the
         // enumerable-based compatibility API used to build nonempty snapshots.
-        if (!InventoryTrackerHotPath.HasChanges(this.IsTrackingChanges, this.Added.Count, this.Removed.Count, this.DirtyStacks.Count, this.EventStackSizes.Count))
+        if (!InventoryTrackerHotPath.PrepareDiff(this.IncludeRemovedStackChanges, this.IsTrackingChanges, this.Added, this.Removed, this.DirtyStacks, this.EventStackSizes))
         {
             changes = null;
             return false;
