@@ -61,6 +61,7 @@ internal enum TransactionJournalEventKind
     Applying,
     Intent,
     Applied,
+    RecoveryObservedApplied,
     RollingBack,
     RollbackIntent,
     RollbackApplied,
@@ -493,6 +494,7 @@ internal static class TransactionJournalStore
         bool prepared = false;
         bool applying = false;
         bool rollingBack = false;
+        bool recoveryObservedApplied = false;
         bool final = false;
         int nextIntent = 0;
         int? pendingIntent = null;
@@ -517,10 +519,11 @@ internal static class TransactionJournalStore
                 TransactionJournalEventKind.Applying => prepared && !applying && !rollingBack && item.OperationIndex is null,
                 TransactionJournalEventKind.Intent => applying && !rollingBack && pendingIntent is null && item.OperationIndex == nextIntent,
                 TransactionJournalEventKind.Applied => applying && !rollingBack && item.OperationIndex == pendingIntent,
+                TransactionJournalEventKind.RecoveryObservedApplied => applying && !rollingBack && !recoveryObservedApplied && item.OperationIndex == pendingIntent,
                 TransactionJournalEventKind.RollingBack => sequence > 0 && !rollingBack && item.OperationIndex is null,
                 TransactionJournalEventKind.RollbackIntent => rollingBack && pendingRollback is null && item.OperationIndex == nextRollback,
                 TransactionJournalEventKind.RollbackApplied => rollingBack && item.OperationIndex == nextRollback && (pendingRollback is null || item.OperationIndex == pendingRollback),
-                TransactionJournalEventKind.Committed => applying && !rollingBack && pendingIntent is null && nextIntent == operationCount && item.OperationIndex is null,
+                TransactionJournalEventKind.Committed => applying && !rollingBack && !recoveryObservedApplied && pendingIntent is null && nextIntent == operationCount && item.OperationIndex is null,
                 TransactionJournalEventKind.RolledBack => rollingBack && pendingRollback is null && nextRollback < 0 && item.OperationIndex is null,
                 _ => false
             };
@@ -543,6 +546,12 @@ internal static class TransactionJournalStore
                     applied.Add(item.OperationIndex!.Value);
                     pendingIntent = null;
                     nextIntent++;
+                    break;
+                case TransactionJournalEventKind.RecoveryObservedApplied:
+                    applied.Add(item.OperationIndex!.Value);
+                    pendingIntent = null;
+                    nextIntent++;
+                    recoveryObservedApplied = true;
                     break;
                 case TransactionJournalEventKind.RollingBack:
                     rollingBack = true;

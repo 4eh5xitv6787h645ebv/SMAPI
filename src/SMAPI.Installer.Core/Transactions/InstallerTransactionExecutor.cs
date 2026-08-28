@@ -1135,7 +1135,22 @@ internal sealed class InstallerTransactionExecutor
             throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A committed transaction can't be rolled back by crash recovery.");
         using LinuxAnchoredFile eventsFile = TransactionJournalStore.OpenEventsForAppend(transaction, replay);
         if (replay.Status is not (TransactionJournalEventKind.RollingBack or TransactionJournalEventKind.RollbackIntent or TransactionJournalEventKind.RollbackApplied))
+        {
+            foreach (int observedIndex in GetDurablyAppliedOrObservedOperationIndices(game, journal, replay)
+                .Except(replay.AppliedOperations)
+                .OrderBy(index => index))
+            {
+                replay = TransactionJournalStore.Append(
+                    transaction,
+                    eventsFile,
+                    journal,
+                    replay,
+                    TransactionJournalEventKind.RecoveryObservedApplied,
+                    observedIndex
+                );
+            }
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RollingBack);
+        }
 
         string transactionPrefix = $"{WorkspaceName}/{TransactionsName}/{journal.TransactionId:N}/";
         foreach (int index in replay.IntendedOperations.OrderByDescending(value => value))

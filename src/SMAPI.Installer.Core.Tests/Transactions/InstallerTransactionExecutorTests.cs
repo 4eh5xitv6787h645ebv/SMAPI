@@ -169,6 +169,40 @@ public sealed class InstallerTransactionExecutorTests
     }
 
     [Test]
+    public void Recover_AfterForwardAndRollbackJournalGaps_PreservesObservedChangedCountAcrossSecondCrash()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
+        });
+        InstallerTransactionExecutor forwardCrash = new(
+            faultInjector: new BeforeAppliedEventTermination()
+        );
+        Action interruptedForward = () => forwardCrash.Apply(game, payload, plan);
+        interruptedForward.Should().Throw<SimulatedProcessTerminationException>();
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+
+        InstallerTransactionExecutor rollbackCrash = new(
+            faultInjector: new RollbackBeforeAppliedEventTermination()
+        );
+        Action interruptedRollback = () => rollbackCrash.RecoverIncompleteTransactions(game);
+        interruptedRollback.Should().Throw<SimulatedProcessTerminationException>();
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
+
+        IReadOnlyList<TransactionResult> recovered = new InstallerTransactionExecutor()
+            .RecoverIncompleteTransactions(game);
+
+        recovered.Should().ContainSingle().Which.Should().Be(
+            new TransactionResult(plan.TransactionId, TransactionStatus.Recovered, 1)
+        );
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
+    }
+
+    [Test]
     public void Recover_WhenProcessStopsAfterMutation_RestoresOriginalExactly()
     {
         string game = this.CreateDirectory();
@@ -1101,6 +1135,14 @@ public sealed class InstallerTransactionExecutorTests
         public void AfterMutation(Guid transactionId, int operationIndex) { }
         public void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex)
             => throw new SimulatedProcessTerminationException("Injected termination before the applied event.");
+    }
+
+    private sealed class RollbackBeforeAppliedEventTermination : ITransactionFaultInjector
+    {
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex) { }
+        public void AfterRollbackMutationBeforeAppliedEvent(Guid transactionId, int operationIndex)
+            => throw new SimulatedProcessTerminationException("Injected termination before the rollback-applied event.");
     }
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
