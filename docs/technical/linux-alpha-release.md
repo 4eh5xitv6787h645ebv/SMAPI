@@ -99,11 +99,15 @@ SMAPI internal files. It leaves the bundled and custom mods in `Mods`; vanilla i
 
 To roll back to official SMAPI 4.5.2 or an earlier verified fork package:
 
-1. Copy `smapi-internal/config.user.json` somewhere outside the game folder if it exists.
+1. Copy `smapi-internal/config.user.json` and the current `ErrorLogs` folder (including
+   `HealthReports`) somewhere outside the game and app-data folders. Official SMAPI 4.5.2 still
+   removes the current `ErrorLogs` folder during its install pass; restore the reviewed backup
+   afterwards.
 2. Run this alpha's uninstaller first. The official 4.5.2 uninstaller does not know the fork-only
    net6/net10 host filenames and must not be used directly over the alpha.
 3. Verify and install the selected older package.
-4. Restore only compatible user configuration values if needed.
+4. Restore only compatible user configuration values if needed, and restore the reviewed log/report
+   backup if you need to retain it.
 5. Launch once and confirm the displayed SMAPI version.
 
 ## Manual installation path
