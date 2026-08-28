@@ -89,8 +89,12 @@ gh attestation verify "$manifest_name" -R 4eh5xitv6787h645ebv/SMAPI
 Both checksum subjects must report `OK`, and both attestations must identify this repository, the
 tagged `linux-alpha-release.yml` workflow, and the selected release commit. A pull-request build,
 `develop` build, manual source build, or pre-tag workflow-dispatch candidate is non-authoritative:
-it records its actual workflow identity and cannot mint an install manifest accepted as tagged
-release authority. Do not substitute one of those candidates for a published tagged quartet.
+the production workflow records its actual identity and does not invoke the release-manifest
+creation path. The tool's tag-context check prevents accidental candidate minting, but it is not a
+cryptographic provenance boundary and its environment can be reproduced by a local caller. Only
+successful verification of both GitHub attestations against this repository, tagged workflow, and
+selected commit establishes published release authority. Do not substitute an unattested local or
+candidate quartet for the published tagged assets.
 
 ## Install
 

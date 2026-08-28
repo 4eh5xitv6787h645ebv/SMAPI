@@ -115,11 +115,14 @@ The fork does not publish every `develop` commit and does not create bare numeri
 candidate, review, tag, attestation, publication, and clean-room verification sequence. The
 fork-specific version, tag, title, and package must all remain visibly unofficial and Linux-only.
 Pull-request and pre-tag workflow-dispatch packages are deliberately non-authoritative candidates:
-their metadata records the actual workflow ref, and they cannot mint an install manifest accepted
-as tagged release authority. Only an annotated-tag run can create the exact next-alpha quartet of
-finalized ZIP, external canonical install manifest, two-subject `SHA256SUMS`, and plural-artifact
-build metadata. The tag workflow verifies the complete quartet before upload and after each
-workflow-artifact download, then attests both the ZIP and manifest.
+their metadata records the actual workflow ref, and the production workflow does not invoke the
+release-manifest creation path for them. An annotated-tag run creates the exact next-alpha quartet
+of finalized ZIP, external canonical install manifest, two-subject `SHA256SUMS`, and
+plural-artifact build metadata. Its environment guard prevents accidental misuse but is not
+cryptographic provenance. The tag workflow verifies the complete quartet before upload and after
+each workflow-artifact download, then attests both the ZIP and manifest; verifying both GitHub
+attestations against the repository, tagged workflow, and selected commit establishes published
+release authority.
 
 ### Manual release on any platform
 > [!WARNING]  
@@ -149,10 +152,11 @@ To prepare the release:
 1. Run `pwsh build/scripts/prepare-install-package.ps1 VERSION_HERE --linux-only
    --game-path=/absolute/reference/path` to create the Linux package in the root `bin` folder. Use
    the documented [fork release identity](linux-alpha-release.md#release-identity). Personal local
-   builds are not public release candidates, don't have GitHub provenance, and cannot create a
-   companion manifest accepted as tagged release authority. The release-only package tool rejects
-   workflow identities other than the exact reviewed annotated-tag workflow; do not bypass that
-   boundary or relabel local candidate metadata.
+   builds are not public release candidates and don't have GitHub provenance. The release-only
+   package tool's environment guard rejects contexts other than the exact reviewed annotated-tag
+   workflow to prevent accidental misuse, but it is not a cryptographic boundary. Local builds
+   cannot produce the repository's required GitHub attestations; do not relabel or distribute them
+   as published tagged assets.
 
 ### Manual release On Windows
 > [!WARNING]  
