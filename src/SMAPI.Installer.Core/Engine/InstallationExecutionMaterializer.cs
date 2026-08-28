@@ -96,7 +96,8 @@ internal sealed class InstallationExecutionMaterializer
                 currentState.PointerSha256,
                 pointerSource,
                 Sha256Digest.Hash(pointerBytes),
-                PrivateFileMode
+                PrivateFileMode,
+                currentState.PointerSha256 is null ? null : PrivateFileMode
             );
 
             TransactionPlan transaction = TransactionPlan.CreateWithCoreState(
@@ -105,7 +106,16 @@ internal sealed class InstallationExecutionMaterializer
                 ordinaryOperations,
                 manifestOperation,
                 receiptOperation,
-                pointerOperation
+                pointerOperation,
+                preparation.Instructions
+                    .Where(instruction => instruction.Kind == PreparationInstructionKind.VerifyUnchanged)
+                    .Select(instruction => new TransactionFilePrecondition(
+                        instruction.Path.Value,
+                        instruction.ExpectedCurrentSha256?.Value
+                            ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "A retained path has no digest precondition."),
+                        instruction.ExpectedCurrentIdentity?.UnixMode
+                            ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "A retained path has no mode precondition.")
+                    ))
             );
             AssertAllInstructionPreconditions(lease.Game, preparation.Instructions);
             AssertRecoveryBindings(lease.Game, recovery.PathBindings);
@@ -240,7 +250,8 @@ internal sealed class InstallationExecutionMaterializer
                 operations.Add(new TransactionFileOperation(
                     TransactionOperationKind.RemoveFile,
                     instruction.Path.Value,
-                    instruction.ExpectedCurrentSha256?.Value
+                    instruction.ExpectedCurrentSha256?.Value,
+                    ExpectedExistingUnixMode: instruction.ExpectedCurrentIdentity?.UnixMode
                 ));
                 continue;
             }
@@ -260,7 +271,8 @@ internal sealed class InstallationExecutionMaterializer
                 instruction.ExpectedCurrentSha256,
                 staged,
                 instruction.ExpectedResultSha256,
-                instruction.ResultUnixMode.Value
+                instruction.ResultUnixMode.Value,
+                instruction.ExpectedCurrentIdentity?.UnixMode
             ));
         }
         return operations;
@@ -277,14 +289,16 @@ internal sealed class InstallationExecutionMaterializer
             ReceiptPreparationKind.RemoveAtomically => new TransactionFileOperation(
                 TransactionOperationKind.RemoveFile,
                 TransactionPlan.CoreManifestRelativePath,
-                instruction.ExpectedExistingManifestSha256?.Value
+                instruction.ExpectedExistingManifestSha256?.Value,
+                ExpectedExistingUnixMode: instruction.ExpectedExistingManifestSha256 is null ? null : PrivateFileMode
             ),
             ReceiptPreparationKind.WriteAtomically => WriteOperation(
                 TransactionPlan.CoreManifestRelativePath,
                 instruction.ExpectedExistingManifestSha256,
                 this.StageDocumentSource(instruction.Source, RecoverySnapshotContent.InstalledManifest, staging),
                 GetSourceDigest(instruction.Source),
-                PrivateFileMode
+                PrivateFileMode,
+                instruction.ExpectedExistingManifestSha256 is null ? null : PrivateFileMode
             ),
             _ => throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "The manifest transition kind isn't supported.")
         };
@@ -301,14 +315,16 @@ internal sealed class InstallationExecutionMaterializer
             ReceiptPreparationKind.RemoveAtomically => new TransactionFileOperation(
                 TransactionOperationKind.RemoveFile,
                 TransactionPlan.CoreReceiptRelativePath,
-                instruction.ExpectedExistingReceiptSha256?.Value
+                instruction.ExpectedExistingReceiptSha256?.Value,
+                ExpectedExistingUnixMode: instruction.ExpectedExistingReceiptSha256 is null ? null : PrivateFileMode
             ),
             ReceiptPreparationKind.WriteAtomically => WriteOperation(
                 TransactionPlan.CoreReceiptRelativePath,
                 instruction.ExpectedExistingReceiptSha256,
                 this.StageDocumentSource(instruction.Source, RecoverySnapshotContent.InstalledReceipt, staging),
                 GetSourceDigest(instruction.Source),
-                PrivateFileMode
+                PrivateFileMode,
+                instruction.ExpectedExistingReceiptSha256 is null ? null : PrivateFileMode
             ),
             _ => throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "The receipt transition kind isn't supported.")
         };
@@ -495,7 +511,8 @@ internal sealed class InstallationExecutionMaterializer
         Sha256Digest? expectedExisting,
         string payloadPath,
         Sha256Digest result,
-        int unixMode
+        int unixMode,
+        int? expectedExistingUnixMode = null
     )
     {
         return new TransactionFileOperation(
@@ -504,7 +521,8 @@ internal sealed class InstallationExecutionMaterializer
             expectedExisting?.Value,
             payloadPath,
             result.Value,
-            unixMode
+            unixMode,
+            expectedExistingUnixMode
         );
     }
 

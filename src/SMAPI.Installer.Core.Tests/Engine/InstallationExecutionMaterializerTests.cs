@@ -208,6 +208,80 @@ public sealed class InstallationExecutionMaterializerTests
         state.Pointer!.Action.Should().Be(InstallationAction.Install);
     }
 
+    [TestCase("StardewValley", InstallationAction.Repair, PlanConflictCode.ModifiedInstalledLauncher)]
+    [TestCase("StardewValley-original", InstallationAction.Uninstall, PlanConflictCode.AmbiguousLauncherBackup)]
+    public void Inspect_ModeOnlyLauncherCorruption_IsNonExecutable(
+        string path,
+        InstallationAction action,
+        PlanConflictCode expectedConflict
+    )
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        File.SetUnixFileMode(Path.Combine(game, path), (UnixFileMode)0x1a4);
+
+        using InspectedInstallationState inspection = action == InstallationAction.Repair
+            ? this.Inspect(engine, game, action, package)
+            : engine.InspectAsync(game, action).GetAwaiter().GetResult();
+
+        inspection.Plan.CanExecute.Should().BeFalse();
+        inspection.Plan.Conflicts.Should().Contain(conflict => conflict.Code == expectedConflict);
+    }
+
+    [Test]
+    public void Execute_RetainedModeDriftAtMutationBoundary_DoesNotAdvanceReceipt()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        LinuxInstallerEngine installer = new();
+        Execute(this.Inspect(installer, game, InstallationAction.Install, package), installer);
+        string runtime = Path.Combine(game, "StardewModdingAPI.dll");
+        InstallerTransactionExecutor executor = new(faultInjector: new CallbackFaultInjector(() =>
+            File.SetUnixFileMode(runtime, (UnixFileMode)0x1ed)
+        ));
+        LinuxInstallerEngine repair = new(executor);
+        using InspectedInstallationState inspection = this.Inspect(repair, game, InstallationAction.Repair, package);
+
+        Action execute = () => repair.ExecuteAsync(inspection, inspection.ConfirmationDigest).GetAwaiter().GetResult();
+
+        execute.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.ExistingFileMismatch);
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        state.Pointer!.Action.Should().Be(InstallationAction.Install);
+    }
+
+    [Test]
+    public void RecoveryHistory_AtCapacity_CanBeListedPrunedAndUsedAgain()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority package = this.CreatePackage("launcher one", "runtime one");
+        Execute(this.Inspect(engine, game, InstallationAction.Install, package), engine);
+        for (int index = 0; index < 63; index++)
+            Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+
+        RecoveryHistory full = engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+        full.Generations.Should().HaveCount(64);
+        full.Generations[0].IsCurrent.Should().BeTrue();
+        full.Generations.Skip(1).Should().OnlyContain(item => !item.IsCurrent);
+
+        engine.PruneRecoveryHistoryAsync(game, 8, full.HeadConfirmationDigest).GetAwaiter().GetResult()
+            .Should().Be(56);
+        RecoveryHistory retained = engine.ListRecoveriesAsync(game).GetAwaiter().GetResult();
+        retained.Generations.Should().HaveCount(8);
+        retained.Generations.Select(item => item.GenerationId).Should().Equal(
+            full.Generations.Take(8).Select(item => item.GenerationId)
+        );
+
+        Execute(engine.InspectAsync(game, InstallationAction.Backup).GetAwaiter().GetResult(), engine);
+        engine.ListRecoveriesAsync(game).GetAwaiter().GetResult().Generations.Should().HaveCount(9);
+    }
+
     private string CreateDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"smapi-materializer-tests-{Guid.NewGuid():N}");
@@ -298,5 +372,18 @@ public sealed class InstallationExecutionMaterializerTests
         public void AssertUsable() => this.Payload.GetCurrentRootIdentity().Should().Be(this.Payload.Identity);
 
         public void Dispose() => this.Payload.Dispose();
+    }
+
+    private sealed class CallbackFaultInjector : ITransactionFaultInjector
+    {
+        private readonly Action Callback;
+
+        public CallbackFaultInjector(Action callback)
+        {
+            this.Callback = callback;
+        }
+
+        public void BeforeMutation(Guid transactionId, int operationIndex) => this.Callback();
+        public void AfterMutation(Guid transactionId, int operationIndex) { }
     }
 }

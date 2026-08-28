@@ -371,6 +371,30 @@ internal sealed class AnchoredCoreStateAuthority
     }
 }
 
+/// <summary>Authenticated, non-sensitive metadata for one retained recovery generation.</summary>
+public sealed record RecoveryGenerationInfo(
+    Guid GenerationId,
+    InstallationAction Action,
+    bool IsCurrent,
+    bool IsUserCheckpoint
+);
+
+/// <summary>A bounded recovery catalog tied to the exact current pointer the user reviewed.</summary>
+public sealed class RecoveryHistory
+{
+    public Sha256Digest HeadConfirmationDigest { get; }
+    public IReadOnlyList<RecoveryGenerationInfo> Generations { get; }
+
+    internal RecoveryHistory(
+        Sha256Digest headConfirmationDigest,
+        IEnumerable<RecoveryGenerationInfo> generations
+    )
+    {
+        this.HeadConfirmationDigest = headConfirmationDigest;
+        this.Generations = generations.ToArray();
+    }
+}
+
 /// <summary>An opaque descriptor-anchored authority for one committed recovery generation.</summary>
 public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryContentAuthority
 {
@@ -501,6 +525,154 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             pointer = ReadPreviousPointer(game, pointer);
         }
         throw new OwnershipDocumentException("The selected recovery generation isn't present in the bounded committed chain.");
+    }
+
+    internal static RecoveryHistory ListHistory(
+        LinuxAnchoredFileSystem game,
+        string canonicalGameRoot,
+        GameRootIdentity gameRoot,
+        AnchoredCoreStateAuthority currentState
+    )
+    {
+        currentState.AssertUsable(game, gameRoot);
+        Sha256Digest headDigest = currentState.PointerSha256
+            ?? throw new OwnershipDocumentException("There is no committed recovery history to list.");
+        IReadOnlyList<CommittedRecoveryPointer> chain = ReadAuthenticatedChain(game, currentState);
+        List<RecoveryGenerationInfo> items = new(chain.Count);
+        for (int index = 0; index < chain.Count; index++)
+        {
+            CommittedRecoveryPointer pointer = chain[index];
+            using CommittedRecoveryHandle verified = Open(game, canonicalGameRoot, gameRoot, pointer, headDigest);
+            items.Add(new RecoveryGenerationInfo(
+                pointer.GenerationId,
+                pointer.Action,
+                index == 0,
+                pointer.Action == InstallationAction.Backup
+            ));
+        }
+        return new RecoveryHistory(headDigest, items);
+    }
+
+    internal static int PruneHistoryTail(
+        InstallerOperationLease lease,
+        AnchoredCoreStateAuthority currentState,
+        int retainNewest,
+        Sha256Digest confirmedHeadPointer
+    )
+    {
+        if (retainNewest < 1)
+            throw new ArgumentOutOfRangeException(nameof(retainNewest), "The current recovery generation must always be retained.");
+        currentState.AssertUsable(lease);
+        if (currentState.PointerSha256 != confirmedHeadPointer)
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The recovery history changed after prune confirmation.");
+        IReadOnlyList<CommittedRecoveryPointer> chain = ReadAuthenticatedChain(lease.Game, currentState);
+        CommittedRecoveryPointer[] remove = chain.Skip(retainNewest).Reverse().ToArray();
+        if (remove.Length == 0)
+            return 0;
+
+        foreach (CommittedRecoveryPointer pointer in remove)
+        {
+            using CommittedRecoveryHandle ignored = Open(
+                lease.Game,
+                lease.CanonicalGameRoot,
+                lease.RootIdentity,
+                pointer,
+                confirmedHeadPointer
+            );
+        }
+        lease.ReserveNextGeneration(lease.Generation);
+        foreach (CommittedRecoveryPointer pointer in remove)
+            DeleteGeneration(lease.Game, pointer.GenerationId);
+        return remove.Length;
+    }
+
+    private static IReadOnlyList<CommittedRecoveryPointer> ReadAuthenticatedChain(
+        LinuxAnchoredFileSystem game,
+        AnchoredCoreStateAuthority currentState
+    )
+    {
+        CommittedRecoveryPointer pointer = currentState.Pointer
+            ?? throw new OwnershipDocumentException("There is no committed recovery history.");
+        List<CommittedRecoveryPointer> chain = new();
+        HashSet<Guid> visited = new();
+        for (int depth = 0; depth < MaximumRecoveryChainDepth; depth++)
+        {
+            if (!visited.Add(pointer.GenerationId))
+                throw new OwnershipDocumentException("The committed recovery chain contains a cycle.");
+            string generationPath = $".smapi-installer/recovery/generations/{pointer.GenerationId:N}";
+            if (game.Stat(generationPath) is null)
+            {
+                if (depth == 0)
+                    throw new OwnershipDocumentException("The current committed recovery generation is missing.");
+                return chain;
+            }
+            chain.Add(pointer);
+            if (pointer.PreviousGenerationId is null)
+                return chain;
+            pointer = ReadPreviousPointer(game, pointer);
+        }
+        if (pointer.PreviousGenerationId is not null)
+            throw new OwnershipDocumentException("The committed recovery chain exceeds its depth limit.");
+        return chain;
+    }
+
+    private static void DeleteGeneration(LinuxAnchoredFileSystem game, Guid generationId)
+    {
+        string path = $".smapi-installer/recovery/generations/{generationId:N}";
+        LinuxFileIdentity generationIdentity = game.Stat(path)
+            ?? throw new OwnershipDocumentException("A pruned recovery generation disappeared.");
+        using (LinuxAnchoredFileSystem generation = game.OpenSubdirectory(path))
+        {
+            IReadOnlyList<string> rootEntries = generation.EnumerateEntryNames(maximumEntries: 5);
+            HashSet<string> allowed = new(StringComparer.Ordinal)
+            {
+                "snapshot.json",
+                "previous-receipt.json",
+                "previous-manifest.json",
+                "previous-pointer.json",
+                "files"
+            };
+            if (rootEntries.Any(name => !allowed.Contains(name)))
+                throw new OwnershipDocumentException("A recovery generation contains unknown state and wasn't pruned.");
+            if (rootEntries.Contains("files", StringComparer.Ordinal))
+            {
+                LinuxFileIdentity filesIdentity = generation.Stat("files")
+                    ?? throw new OwnershipDocumentException("Recovery content disappeared during pruning.");
+                using (LinuxAnchoredFileSystem files = generation.OpenSubdirectory("files"))
+                {
+                    IReadOnlyList<string> names = files.EnumerateEntryNames(maximumEntries: TransactionPlan.MaximumOperationCount);
+                    for (int index = 0; index < names.Count; index++)
+                    {
+                        string name = names[index];
+                        if (name != index.ToString("D8"))
+                            throw new OwnershipDocumentException("Recovery content indices aren't canonical during pruning.");
+                        LinuxFileIdentity identity = files.Stat(name)
+                            ?? throw new OwnershipDocumentException("Recovery content disappeared during pruning.");
+                        if (identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1 || identity.UnixMode != PrivateFileMode)
+                            throw new OwnershipDocumentException("Recovery content has unsafe metadata and wasn't pruned.");
+                        files.UnlinkFile(name, identity);
+                    }
+                }
+                LinuxFileIdentity emptiedFiles = generation.Stat("files")
+                    ?? throw new OwnershipDocumentException("The recovery content directory disappeared during pruning.");
+                if (!emptiedFiles.IsSameObject(filesIdentity))
+                    throw new OwnershipDocumentException("The recovery content directory changed during pruning.");
+                generation.RemoveEmptyDirectory("files", emptiedFiles);
+            }
+            foreach (string name in rootEntries.Where(name => name != "files"))
+            {
+                LinuxFileIdentity identity = generation.Stat(name)
+                    ?? throw new OwnershipDocumentException("A recovery document disappeared during pruning.");
+                if (identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1 || identity.UnixMode != PrivateFileMode)
+                    throw new OwnershipDocumentException("A recovery document has unsafe metadata and wasn't pruned.");
+                generation.UnlinkFile(name, identity);
+            }
+        }
+        LinuxFileIdentity emptiedGeneration = game.Stat(path)
+            ?? throw new OwnershipDocumentException("The recovery generation disappeared during pruning.");
+        if (!emptiedGeneration.IsSameObject(generationIdentity))
+            throw new OwnershipDocumentException("The recovery generation changed during pruning.");
+        game.RemoveEmptyDirectory(path, emptiedGeneration);
     }
 
     private static CommittedRecoveryHandle Open(
@@ -701,6 +873,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             || launcherBackup.Kind != RollbackEntryKind.Restore
             || launcherBackup.ExpectedCurrent != launcherBackup.Backup
             || launcherBackup.Backup?.Sha256 != previousReceipt.Launcher.OriginalLauncherSha256
+            || launcherBackup.Backup.UnixMode != previousReceipt.Launcher.OriginalLauncherUnixMode
         )
         {
             throw new OwnershipDocumentException("A committed user backup doesn't contain the authenticated original launcher.");

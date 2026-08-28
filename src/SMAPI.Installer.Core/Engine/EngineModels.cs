@@ -324,6 +324,7 @@ public sealed class FilePreparationInstruction
     public PreparationInstructionKind Kind { get; }
     public NormalizedRelativePath Path { get; }
     public Sha256Digest? ExpectedCurrentSha256 { get; }
+    public RecoveryFileIdentity? ExpectedCurrentIdentity { get; }
     public Sha256Digest? ExpectedResultSha256 { get; }
     public int? ResultUnixMode { get; }
     public long? ResultSizeBytes { get; }
@@ -340,13 +341,17 @@ public sealed class FilePreparationInstruction
         PreparationSource? source,
         int? resultUnixMode,
         long? resultSizeBytes = null,
-        RecoveryFileType? resultFileType = null
+        RecoveryFileType? resultFileType = null,
+        RecoveryFileIdentity? expectedCurrentIdentity = null
     )
     {
         this.PlanKind = operation.Kind;
         this.Kind = kind;
         this.Path = operation.Path;
         this.ExpectedCurrentSha256 = operation.ExpectedCurrentSha256;
+        if (expectedCurrentIdentity?.Sha256 != operation.ExpectedCurrentSha256)
+            throw new ArgumentException("The complete current identity doesn't match the planned current digest.", nameof(expectedCurrentIdentity));
+        this.ExpectedCurrentIdentity = expectedCurrentIdentity;
         this.ExpectedResultSha256 = operation.ResultSha256;
         this.Source = source;
         this.ResultUnixMode = resultUnixMode;

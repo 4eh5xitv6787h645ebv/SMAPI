@@ -318,7 +318,9 @@ internal sealed class InstallationPlanner
         if (path.Equals(LauncherBackupPath))
         {
             return request.Launcher.BackupLauncherSha256 == current.Sha256
-                && request.InstalledReceipt?.Launcher.OriginalLauncherSha256 == current.Sha256;
+                && request.Launcher.BackupLauncherUnixMode == current.UnixMode
+                && request.InstalledReceipt?.Launcher.OriginalLauncherSha256 == current.Sha256
+                && request.InstalledReceipt.Launcher.OriginalLauncherUnixMode == current.UnixMode;
         }
         InstallationReceiptEntry? installed = request.InstalledReceipt?.Entries.SingleOrDefault(entry => entry.Path.Equals(path));
         return installed is not null

@@ -239,6 +239,65 @@ public sealed class LinuxInstallerEngine
         }
     }
 
+    /// <summary>List the bounded authenticated recovery history without changing the game directory.</summary>
+    public Task<RecoveryHistory> ListRecoveriesAsync(
+        string gameRoot,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(() => this.ListRecoveries(gameRoot, cancellationToken), cancellationToken);
+
+    private RecoveryHistory ListRecoveries(string gameRoot, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
+        RecoveryHistory result = CommittedRecoveryHandle.ListHistory(
+            inspection.Game,
+            inspection.CanonicalGameRoot,
+            inspection.RootIdentity,
+            state
+        );
+        inspection.AssertStable();
+        return result;
+    }
+
+    /// <summary>
+    /// Explicitly prune the oldest authenticated recovery tail while retaining at least the current generation.
+    /// The confirmation digest must come from the exact <see cref="RecoveryHistory"/> the user reviewed.
+    /// </summary>
+    public Task<int> PruneRecoveryHistoryAsync(
+        string gameRoot,
+        int retainNewest,
+        Sha256Digest confirmedHeadPointer,
+        CancellationToken cancellationToken = default
+    )
+        => Task.Run(
+            () => this.PruneRecoveryHistory(gameRoot, retainNewest, confirmedHeadPointer, cancellationToken),
+            cancellationToken
+        );
+
+    private int PruneRecoveryHistory(
+        string gameRoot,
+        int retainNewest,
+        Sha256Digest confirmedHeadPointer,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(confirmedHeadPointer);
+        cancellationToken.ThrowIfCancellationRequested();
+        using InstallerOperationLease lease = InstallerOperationLease.Acquire(gameRoot);
+        if (this.Executor.RecoverLocked(lease).Count > 0)
+            throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "Crash recovery changed the recovery history; review it again before pruning.");
+        AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(lease);
+        cancellationToken.ThrowIfCancellationRequested();
+        return CommittedRecoveryHandle.PruneHistoryTail(
+            lease,
+            state,
+            retainNewest,
+            confirmedHeadPointer
+        );
+    }
+
     internal InspectedInstallationState InspectLocked(
         InstallerOperationLease lease,
         InstallationAction action,
@@ -367,9 +426,15 @@ internal static class InstallationStateInspector
             .Where(file => file is not null)
             .Cast<CurrentFile>()
             .ToArray();
-        Sha256Digest? launcherSha = currentFiles.SingleOrDefault(file => file.Path.Equals(LauncherPath))?.Sha256;
+        CurrentFile? currentLauncher = currentFiles.SingleOrDefault(file => file.Path.Equals(LauncherPath));
         CurrentFile? launcherBackup = ReadCurrentFile(game, LauncherBackupPath);
-        LauncherState launcher = LauncherState.Assess(launcherSha, launcherBackup?.Sha256, receipt?.Launcher);
+        LauncherState launcher = LauncherState.Assess(
+            currentLauncher?.Sha256,
+            launcherBackup?.Sha256,
+            receipt?.Launcher,
+            currentLauncher?.UnixMode,
+            launcherBackup?.UnixMode
+        );
         InstallationInventory inventory = InstallationInventory.Create(targetManifest, receipt, currentFiles);
         RollbackSnapshot? rollbackSnapshot = recovery?.Snapshot;
 

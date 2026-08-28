@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -9,6 +10,7 @@ using StardewModdingAPI.Installer.Core.Transactions;
 namespace StardewModdingAPI.Installer.Core.Tests.Transactions;
 
 [TestFixture]
+[SupportedOSPlatform("linux")]
 public sealed class InstallerTransactionExecutorTests
 {
     private readonly List<string> TemporaryDirectories = new();
@@ -540,6 +542,37 @@ public sealed class InstallerTransactionExecutorTests
 
         File.ReadAllText(Path.Combine(movedGame, "StardewModdingAPI.dll")).Should().Be("new");
         File.Exists(Path.Combine(outside, "StardewModdingAPI.dll")).Should().BeFalse();
+    }
+
+    [Test]
+    public void Apply_ModeOnlyDriftDuringIntent_IsRejectedBeforeMutation()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "smapi-internal/runtime", "old");
+        File.SetUnixFileMode(Path.Combine(game, "smapi-internal/runtime"), (UnixFileMode)0x1a4);
+        Write(payload, "runtime", "new");
+        TransactionFileOperation operation = new(
+            TransactionOperationKind.WriteFile,
+            "smapi-internal/runtime",
+            Hash("old"),
+            "runtime",
+            Hash("new"),
+            0x1a4,
+            0x1a4
+        );
+        CallbackFaultInjector chmod = new(before: (_, _) =>
+            File.SetUnixFileMode(Path.Combine(game, "smapi-internal/runtime"), (UnixFileMode)0x1ed)
+        );
+
+        Action apply = () => new InstallerTransactionExecutor(faultInjector: chmod).Apply(
+            game,
+            payload,
+            new TransactionPlan(Guid.NewGuid(), [operation])
+        );
+
+        apply.Should().Throw<InstallerTransactionException>().Which.Code.Should().Be(TransactionErrorCode.PathChanged);
+        File.ReadAllText(Path.Combine(game, "smapi-internal/runtime")).Should().Be("old");
     }
 
     [Test]

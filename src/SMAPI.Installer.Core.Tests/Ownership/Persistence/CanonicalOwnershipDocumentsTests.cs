@@ -119,7 +119,7 @@ public class CanonicalOwnershipDocumentsTests
     {
         PackageManifest manifest = CreateManifest();
         InstallationReceipt valid = OwnershipTestData.Receipt(manifest);
-        PackageManifestEntry launcher = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
+        PackageManifestEntry modeTarget = manifest.Entries.First(entry => entry.Kind != OwnedEntryKind.Launcher);
 
         InstallationReceipt wrongDigest = CopyReceipt(valid, manifestSha256: OwnershipTestData.Digest('9'));
         InstallationReceipt wrongMode = CopyReceipt(
@@ -127,7 +127,7 @@ public class CanonicalOwnershipDocumentsTests
             entries: valid.Entries.Select(entry => new InstallationReceiptEntry(
                 entry.Path,
                 entry.InstalledSha256,
-                entry.Path == launcher.Path ? entry.UnixMode - 1 : entry.UnixMode,
+                entry.Path == modeTarget.Path ? entry.UnixMode - 1 : entry.UnixMode,
                 entry.Kind
             ))
         );

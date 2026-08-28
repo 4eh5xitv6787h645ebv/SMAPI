@@ -232,6 +232,10 @@ internal sealed class InstallerTransactionExecutor
             if (!destinations.Add(relativePath) || !caseInsensitiveDestinations.Add(relativePath))
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction contains duplicate or case-colliding destinations.");
             ValidateSha256(operation.ExpectedExistingSha256, allowNull: true, nameof(operation.ExpectedExistingSha256));
+            if (operation.ExpectedExistingUnixMode is < 0 or > 0x1ff)
+                throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "An expected Unix mode is outside the supported permission bits.");
+            if (operation.ExpectedExistingSha256 is null && operation.ExpectedExistingUnixMode is not null)
+                throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "An absent destination can't have an expected Unix mode.");
 
             if (operation.Kind == TransactionOperationKind.WriteFile)
             {
@@ -252,6 +256,18 @@ internal sealed class InstallerTransactionExecutor
             }
             else if (operation.PayloadRelativePath is not null || operation.ExpectedResultSha256 is not null || operation.ResultUnixMode is not null)
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A remove operation can't include payload fields.");
+        }
+        HashSet<string> preconditions = new(StringComparer.Ordinal);
+        foreach (TransactionFilePrecondition precondition in plan.Preconditions)
+        {
+            string path = TransactionPath.NormalizeRelativePath(precondition.RelativePath, nameof(precondition.RelativePath));
+            if (
+                !preconditions.Add(path)
+                || destinations.Contains(path)
+                || precondition.ExpectedUnixMode is < 0 or > 0x1ff
+            )
+                throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction precondition isn't unique and safe.");
+            ValidateSha256(precondition.ExpectedSha256, allowNull: false, nameof(precondition.ExpectedSha256));
         }
     }
 
@@ -310,7 +326,13 @@ internal sealed class InstallerTransactionExecutor
         {
             TransactionFileOperation operation = plan.Operations[index];
             IReadOnlyList<string> missingParents = GetMissingParentDirectories(game, operation.RelativePath);
-            ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.ExistingFileMismatch);
+            ValidateExisting(
+                game,
+                operation.RelativePath,
+                operation.ExpectedExistingSha256,
+                operation.ExpectedExistingUnixMode,
+                TransactionErrorCode.ExistingFileMismatch
+            );
             journal.Entries.Add(new TransactionJournalEntry
             {
                 Index = index,
@@ -365,11 +387,35 @@ internal sealed class InstallerTransactionExecutor
 
     private void RevalidateAll(LinuxAnchoredFileSystem game, TransactionPlan plan)
     {
+        RevalidatePreconditions(game, plan.Preconditions);
         for (int index = 0; index < plan.Operations.Count; index++)
         {
             this.Progress.Report(new(TransactionStage.Revalidating, index, plan.Operations.Count));
             TransactionFileOperation operation = plan.Operations[index];
-            ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.ExistingFileMismatch);
+            ValidateExisting(
+                game,
+                operation.RelativePath,
+                operation.ExpectedExistingSha256,
+                operation.ExpectedExistingUnixMode,
+                TransactionErrorCode.ExistingFileMismatch
+            );
+        }
+    }
+
+    private static void RevalidatePreconditions(
+        LinuxAnchoredFileSystem game,
+        IReadOnlyList<TransactionFilePrecondition> preconditions
+    )
+    {
+        foreach (TransactionFilePrecondition precondition in preconditions)
+        {
+            ValidateExisting(
+                game,
+                precondition.RelativePath,
+                precondition.ExpectedSha256,
+                precondition.ExpectedUnixMode,
+                TransactionErrorCode.ExistingFileMismatch
+            );
         }
     }
 
@@ -388,14 +434,28 @@ internal sealed class InstallerTransactionExecutor
             this.Progress.Report(new(TransactionStage.Applying, index, plan.Operations.Count));
             TransactionFileOperation operation = plan.Operations[index];
             TransactionJournalEntry entry = journal.Entries[index];
-            LinuxFileIdentity? existing = ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.PathChanged);
+            LinuxFileIdentity? existing = ValidateExisting(
+                game,
+                operation.RelativePath,
+                operation.ExpectedExistingSha256,
+                operation.ExpectedExistingUnixMode,
+                TransactionErrorCode.PathChanged
+            );
             LinuxFileIdentity? staged = operation.Kind == TransactionOperationKind.WriteFile
                 ? ValidateFile(transaction, entry.StagedRelativePath!, operation.ExpectedResultSha256!, TransactionErrorCode.PayloadMismatch)
                 : null;
 
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Intent, index);
             this.FaultInjector.BeforeMutation(plan.TransactionId, index);
-            LinuxFileIdentity? immediatelyBefore = ValidateExisting(game, operation.RelativePath, operation.ExpectedExistingSha256, TransactionErrorCode.PathChanged);
+            if (index == 0)
+                RevalidatePreconditions(game, plan.Preconditions);
+            LinuxFileIdentity? immediatelyBefore = ValidateExisting(
+                game,
+                operation.RelativePath,
+                operation.ExpectedExistingSha256,
+                operation.ExpectedExistingUnixMode,
+                TransactionErrorCode.PathChanged
+            );
             if (existing != immediatelyBefore)
                 throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A destination identity changed immediately before mutation.");
 
@@ -422,6 +482,7 @@ internal sealed class InstallerTransactionExecutor
         LinuxAnchoredFileSystem fileSystem,
         string relativePath,
         string? expectedHash,
+        int? expectedUnixMode,
         TransactionErrorCode code
     )
     {
@@ -430,6 +491,8 @@ internal sealed class InstallerTransactionExecutor
             LinuxFileIdentity? identity = fileSystem.Stat(relativePath);
             if (expectedHash is null)
             {
+                if (expectedUnixMode is not null)
+                    throw new InstallerTransactionException(code, "An absent destination can't have an expected Unix mode.");
                 if (identity is not null)
                     throw new InstallerTransactionException(code, "A destination expected to be absent now exists.");
                 return null;
@@ -437,7 +500,11 @@ internal sealed class InstallerTransactionExecutor
             if (identity is null || identity.Kind != LinuxAnchoredEntryKind.RegularFile || identity.LinkCount != 1)
                 throw new InstallerTransactionException(code, "An existing destination isn't a single-link regular file.");
             using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead(relativePath);
-            if (opened.Identity != identity || fileSystem.ComputeSha256(opened) != expectedHash)
+            if (
+                opened.Identity != identity
+                || (expectedUnixMode is not null && identity.UnixMode != expectedUnixMode)
+                || fileSystem.ComputeSha256(opened) != expectedHash
+            )
                 throw new InstallerTransactionException(code, "An existing destination changed after planning.");
             return identity;
         }

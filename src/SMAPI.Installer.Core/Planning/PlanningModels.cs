@@ -218,26 +218,45 @@ public sealed class LauncherState
 {
     public Sha256Digest? CurrentLauncherSha256 { get; }
     public Sha256Digest? BackupLauncherSha256 { get; }
+    public int? CurrentLauncherUnixMode { get; }
+    public int? BackupLauncherUnixMode { get; }
     public LauncherReceipt? Receipt { get; }
     public LauncherClassification Classification { get; }
 
-    private LauncherState(Sha256Digest? current, Sha256Digest? backup, LauncherReceipt? receipt, LauncherClassification classification)
+    private LauncherState(
+        Sha256Digest? current,
+        Sha256Digest? backup,
+        int? currentUnixMode,
+        int? backupUnixMode,
+        LauncherReceipt? receipt,
+        LauncherClassification classification
+    )
     {
         this.CurrentLauncherSha256 = current;
         this.BackupLauncherSha256 = backup;
+        this.CurrentLauncherUnixMode = currentUnixMode;
+        this.BackupLauncherUnixMode = backupUnixMode;
         this.Receipt = receipt;
         this.Classification = classification;
     }
 
     /// <summary>Classify launcher observations without making ownership assumptions.</summary>
-    public static LauncherState Assess(Sha256Digest? current, Sha256Digest? backup, LauncherReceipt? receipt)
+    public static LauncherState Assess(
+        Sha256Digest? current,
+        Sha256Digest? backup,
+        LauncherReceipt? receipt,
+        int? currentUnixMode = null,
+        int? backupUnixMode = null
+    )
     {
         if (receipt == null)
         {
             if (backup is not null)
-                return new LauncherState(current, backup, null, LauncherClassification.AmbiguousBackup);
+                return new LauncherState(current, backup, currentUnixMode, backupUnixMode, null, LauncherClassification.AmbiguousBackup);
             return new LauncherState(
                 current,
+                null,
+                currentUnixMode,
                 null,
                 null,
                 current is not null ? LauncherClassification.FreshVanilla : LauncherClassification.MissingGameLauncher
@@ -245,14 +264,20 @@ public sealed class LauncherState
         }
 
         if (backup is null)
-            return new LauncherState(current, null, receipt, LauncherClassification.MissingOriginalBackup);
-        if (backup != receipt.OriginalLauncherSha256)
-            return new LauncherState(current, backup, receipt, LauncherClassification.AmbiguousBackup);
+            return new LauncherState(current, null, currentUnixMode, null, receipt, LauncherClassification.MissingOriginalBackup);
+        if (
+            backup != receipt.OriginalLauncherSha256
+            || (backupUnixMode is not null && backupUnixMode != receipt.OriginalLauncherUnixMode)
+        )
+            return new LauncherState(current, backup, currentUnixMode, backupUnixMode, receipt, LauncherClassification.AmbiguousBackup);
         if (current is null)
-            return new LauncherState(null, backup, receipt, LauncherClassification.InstalledLauncherMissing);
-        if (current == receipt.InstalledLauncherSha256)
-            return new LauncherState(current, backup, receipt, LauncherClassification.InstalledUnchanged);
-        return new LauncherState(current, backup, receipt, LauncherClassification.InstalledModified);
+            return new LauncherState(null, backup, null, backupUnixMode, receipt, LauncherClassification.InstalledLauncherMissing);
+        if (
+            current == receipt.InstalledLauncherSha256
+            && (currentUnixMode is null || currentUnixMode == receipt.InstalledLauncherUnixMode)
+        )
+            return new LauncherState(current, backup, currentUnixMode, backupUnixMode, receipt, LauncherClassification.InstalledUnchanged);
+        return new LauncherState(current, backup, currentUnixMode, backupUnixMode, receipt, LauncherClassification.InstalledModified);
     }
 }
 

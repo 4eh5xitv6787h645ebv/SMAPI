@@ -28,7 +28,15 @@ internal sealed record TransactionFileOperation(
     string? ExpectedExistingSha256,
     string? PayloadRelativePath = null,
     string? ExpectedResultSha256 = null,
-    int? ResultUnixMode = null
+    int? ResultUnixMode = null,
+    int? ExpectedExistingUnixMode = null
+);
+
+/// <summary>A non-mutating full-identity precondition revalidated after staging and before any mutation.</summary>
+internal sealed record TransactionFilePrecondition(
+    string RelativePath,
+    string ExpectedSha256,
+    int ExpectedUnixMode
 );
 
 /// <summary>An immutable set of ordered operations.</summary>
@@ -44,6 +52,7 @@ internal sealed class TransactionPlan
 
     /// <summary>The stable ordered operations.</summary>
     public IReadOnlyList<TransactionFileOperation> Operations { get; }
+    internal IReadOnlyList<TransactionFilePrecondition> Preconditions { get; }
 
     /// <summary>Whether the core engine authorized an exact receipt mutation inside a complete core-state transition.</summary>
     internal bool HasCoreAuthorizedReceiptMutation => this.CoreAuthorization?.HasReceiptMutation ?? false;
@@ -53,13 +62,14 @@ internal sealed class TransactionPlan
     /// <param name="transactionId">The unique transaction ID.</param>
     /// <param name="operations">The ordered operations.</param>
     public TransactionPlan(Guid transactionId, IEnumerable<TransactionFileOperation> operations)
-        : this(transactionId, operations, coreAuthorization: null)
+        : this(transactionId, operations, Array.Empty<TransactionFilePrecondition>(), coreAuthorization: null)
     {
     }
 
     private TransactionPlan(
         Guid transactionId,
         IEnumerable<TransactionFileOperation> operations,
+        IEnumerable<TransactionFilePrecondition> preconditions,
         CoreReservedMutationAuthorization? coreAuthorization
     )
     {
@@ -74,6 +84,10 @@ internal sealed class TransactionPlan
 
         this.TransactionId = transactionId;
         this.Operations = new ReadOnlyCollection<TransactionFileOperation>(array);
+        TransactionFilePrecondition[] required = preconditions?.ToArray() ?? throw new ArgumentNullException(nameof(preconditions));
+        if (required.Length > TransactionPlan.MaximumOperationCount)
+            throw new ArgumentException($"A transaction can't exceed {TransactionPlan.MaximumOperationCount} preconditions.", nameof(preconditions));
+        this.Preconditions = new ReadOnlyCollection<TransactionFilePrecondition>(required);
         this.CoreAuthorization = coreAuthorization;
     }
 
@@ -84,7 +98,8 @@ internal sealed class TransactionPlan
         IEnumerable<TransactionFileOperation> ordinaryOperations,
         TransactionFileOperation? manifestOperation,
         TransactionFileOperation? receiptOperation,
-        TransactionFileOperation pointerOperation
+        TransactionFileOperation pointerOperation,
+        IEnumerable<TransactionFilePrecondition>? preconditions = null
     )
     {
         ArgumentNullException.ThrowIfNull(recoveryOperations);
@@ -168,6 +183,7 @@ internal sealed class TransactionPlan
         return new TransactionPlan(
             transactionId,
             ordered,
+            preconditions ?? Array.Empty<TransactionFilePrecondition>(),
             coreAuthorization: authorization
         );
     }

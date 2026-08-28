@@ -35,7 +35,7 @@ public sealed class InstallationReceiptEntry
     }
 }
 
-/// <summary>The hashes needed to prove whether the installed and backed-up launchers are still known.</summary>
+/// <summary>The semantic identities needed to prove whether the installed and backed-up launchers are still known.</summary>
 public sealed record LauncherReceipt
 {
     /// <summary>The SMAPI launcher installed at <c>StardewValley</c>.</summary>
@@ -44,13 +44,30 @@ public sealed record LauncherReceipt
     /// <summary>The original launcher moved to <c>StardewValley-original</c>.</summary>
     public Sha256Digest OriginalLauncherSha256 { get; }
 
+    /// <summary>The expected executable mode for the installed SMAPI launcher.</summary>
+    public int InstalledLauncherUnixMode { get; }
+
+    /// <summary>The exact mode retained for the original launcher backup.</summary>
+    public int OriginalLauncherUnixMode { get; }
+
     /// <summary>Construct an immutable launcher receipt.</summary>
-    internal LauncherReceipt(Sha256Digest installedLauncherSha256, Sha256Digest originalLauncherSha256)
+    internal LauncherReceipt(
+        Sha256Digest installedLauncherSha256,
+        Sha256Digest originalLauncherSha256,
+        int installedLauncherUnixMode = 0x1ed,
+        int originalLauncherUnixMode = 0x1ed
+    )
     {
         ArgumentNullException.ThrowIfNull(installedLauncherSha256);
         ArgumentNullException.ThrowIfNull(originalLauncherSha256);
+        if (installedLauncherUnixMode is < 0 or > 0x1ff)
+            throw new ArgumentOutOfRangeException(nameof(installedLauncherUnixMode));
+        if (originalLauncherUnixMode is < 0 or > 0x1ff)
+            throw new ArgumentOutOfRangeException(nameof(originalLauncherUnixMode));
         this.InstalledLauncherSha256 = installedLauncherSha256;
         this.OriginalLauncherSha256 = originalLauncherSha256;
+        this.InstalledLauncherUnixMode = installedLauncherUnixMode;
+        this.OriginalLauncherUnixMode = originalLauncherUnixMode;
     }
 }
 
@@ -58,7 +75,7 @@ public sealed record LauncherReceipt
 public sealed class InstallationReceipt
 {
     /// <summary>The only currently supported receipt schema.</summary>
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     /// <summary>The receipt schema.</summary>
     public int SchemaVersion => InstallationReceipt.CurrentSchemaVersion;
@@ -104,6 +121,7 @@ public sealed class InstallationReceipt
             launcherEntries.Length != 1
             || launcherEntries[0].Path.Value != "StardewValley"
             || launcherEntries[0].InstalledSha256 != launcher.InstalledLauncherSha256
+            || launcherEntries[0].UnixMode != launcher.InstalledLauncherUnixMode
         )
         {
             throw new ArgumentException("The receipt must contain exactly one launcher matching its launcher receipt.", nameof(entries));
@@ -141,7 +159,9 @@ public sealed class InstallationReceipt
             writer.WriteEndArray();
             writer.WriteStartObject("launcher");
             writer.WriteString("installed_sha256", this.Launcher.InstalledLauncherSha256.Value);
+            writer.WriteNumber("installed_unix_mode", this.Launcher.InstalledLauncherUnixMode);
             writer.WriteString("original_sha256", this.Launcher.OriginalLauncherSha256.Value);
+            writer.WriteNumber("original_unix_mode", this.Launcher.OriginalLauncherUnixMode);
             writer.WriteEndObject();
             writer.WriteEndObject();
         }

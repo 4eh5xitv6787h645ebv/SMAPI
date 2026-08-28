@@ -178,7 +178,13 @@ internal sealed class InstallerExecutionCompiler
 
             case PlanOperationKind.Remove:
                 ValidateRemove(operation, request);
-                return new FilePreparationInstruction(operation, PreparationInstructionKind.RemoveTransactionDestination, null, null);
+                return new FilePreparationInstruction(
+                    operation,
+                    PreparationInstructionKind.RemoveTransactionDestination,
+                    null,
+                    null,
+                    expectedCurrentIdentity: GetObservedIdentity(observations, operation.Path)
+                );
 
             case PlanOperationKind.Backup:
                 return CompileBackup(operation, observations);
@@ -187,7 +193,13 @@ internal sealed class InstallerExecutionCompiler
             case PlanOperationKind.Preserve:
                 if (operation.ExpectedCurrentSha256 is null || operation.ExpectedCurrentSha256 != operation.ResultSha256)
                     throw Error(ExecutionCompilationError.InvalidOperationMapping, "A no-change operation doesn't preserve its exact observed digest.");
-                return new FilePreparationInstruction(operation, PreparationInstructionKind.VerifyUnchanged, null, null);
+                return new FilePreparationInstruction(
+                    operation,
+                    PreparationInstructionKind.VerifyUnchanged,
+                    null,
+                    null,
+                    expectedCurrentIdentity: GetObservedIdentity(observations, operation.Path)
+                );
 
             default:
                 throw Error(ExecutionCompilationError.InvalidOperationMapping, "The plan contains an unknown operation kind.");
@@ -219,7 +231,8 @@ internal sealed class InstallerExecutionCompiler
                 new CurrentGameLauncherSource(CurrentGameLauncherRole.CurrentLauncher, LauncherPath, launcher),
                 launcher.UnixMode,
                 launcher.SizeBytes,
-                launcher.FileType
+                launcher.FileType,
+                GetObservedIdentity(observations, operation.Path)
             );
         }
 
@@ -237,7 +250,8 @@ internal sealed class InstallerExecutionCompiler
             ),
             target.UnixMode,
             target.SizeBytes,
-            RecoveryFileType.RegularFile
+            RecoveryFileType.RegularFile,
+            GetObservedIdentity(observations, operation.Path)
         );
     }
 
@@ -262,7 +276,8 @@ internal sealed class InstallerExecutionCompiler
                 new CurrentGameLauncherSource(CurrentGameLauncherRole.OriginalLauncherBackup, LauncherBackupPath, original),
                 original.UnixMode,
                 original.SizeBytes,
-                original.FileType
+                original.FileType,
+                GetObservedIdentity(observations, operation.Path)
             );
         }
 
@@ -284,7 +299,8 @@ internal sealed class InstallerExecutionCompiler
                 ),
                 snapshotEntry.Backup!.UnixMode,
                 snapshotEntry.Backup.SizeBytes,
-                snapshotEntry.Backup.FileType
+                snapshotEntry.Backup.FileType,
+                GetObservedIdentity(observations, operation.Path)
             );
         }
 
@@ -316,7 +332,23 @@ internal sealed class InstallerExecutionCompiler
             ),
             _ => new CurrentGameFileSource(operation.Path, identity)
         };
-        return new FilePreparationInstruction(operation, PreparationInstructionKind.CaptureRecoveryFile, source, null);
+        return new FilePreparationInstruction(
+            operation,
+            PreparationInstructionKind.CaptureRecoveryFile,
+            source,
+            null,
+            expectedCurrentIdentity: identity
+        );
+    }
+
+    private static RecoveryFileIdentity? GetObservedIdentity(
+        IReadOnlyDictionary<string, RecoveryFileObservation> observations,
+        NormalizedRelativePath path
+    )
+    {
+        if (!observations.TryGetValue(path.Value, out RecoveryFileObservation? observation))
+            throw Error(ExecutionCompilationError.InvalidOperationMapping, $"'{path}' has no complete recovery observation.");
+        return observation.Identity;
     }
 
     private static void ValidateRemove(PlannedOperation operation, InstallationPlanningRequest request)
@@ -375,13 +407,18 @@ internal sealed class InstallerExecutionCompiler
                         ? plan.Operations.Single(operation => operation.Kind == PlanOperationKind.Create && operation.Path.Equals(LauncherBackupPath)).ResultSha256!
                         : request.InstalledReceipt?.Launcher.OriginalLauncherSha256
                             ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt update has no original-launcher identity.");
+                    int originalLauncherMode = request.Action == InstallationAction.Install
+                        ? request.RecoveryObservations.Single(observation => observation.Path.Equals(LauncherPath)).Identity?.UnixMode
+                            ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt install has no original-launcher mode identity.")
+                        : request.InstalledReceipt?.Launcher.OriginalLauncherUnixMode
+                            ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, "A receipt update has no original-launcher mode identity.");
                     PackageManifestEntry launcher = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
                     InstallationReceipt generated = new(
                         manifest.Release,
                         manifest.GetCanonicalDigest(),
                         transactionId.ToString("N"),
                         manifest.Entries.Select(entry => new InstallationReceiptEntry(entry.Path, entry.Sha256, entry.UnixMode, entry.Kind)),
-                        new LauncherReceipt(launcher.Sha256, originalLauncher)
+                        new LauncherReceipt(launcher.Sha256, originalLauncher, launcher.UnixMode, originalLauncherMode)
                     );
                     GeneratedCanonicalReceiptSource source = new(
                         generated,

@@ -54,10 +54,19 @@ internal static class CanonicalOwnershipDocuments
             InstallationReceiptEntry[] entries = ParseArray(root.GetProperty("entries"), limits, "receipt entries", ParseReceiptEntry);
 
             JsonElement launcherElement = root.GetProperty("launcher");
-            AssertExactObject(launcherElement, "launcher", "installed_sha256", "original_sha256");
+            AssertExactObject(
+                launcherElement,
+                "launcher",
+                "installed_sha256",
+                "installed_unix_mode",
+                "original_sha256",
+                "original_unix_mode"
+            );
             LauncherReceipt launcher = new(
                 ParseDigest(launcherElement.GetProperty("installed_sha256"), "launcher.installed_sha256"),
-                ParseDigest(launcherElement.GetProperty("original_sha256"), "launcher.original_sha256")
+                ParseDigest(launcherElement.GetProperty("original_sha256"), "launcher.original_sha256"),
+                GetInt32(launcherElement.GetProperty("installed_unix_mode"), "launcher.installed_unix_mode"),
+                GetInt32(launcherElement.GetProperty("original_unix_mode"), "launcher.original_unix_mode")
             );
             return new InstallationReceipt(release, manifestSha256, transactionId, entries, launcher);
         }, SerializeReceipt, "installation receipt");
