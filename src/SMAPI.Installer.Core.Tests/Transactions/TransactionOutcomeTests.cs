@@ -74,6 +74,17 @@ public sealed class TransactionOutcomeTests
         InstallerTransactionExecutor.GetErrorCode(wrapper).Should().Be(TransactionErrorCode.ConcurrentOperation);
     }
 
+    [Test]
+    public void ErrorClassification_AggregatePreservesLatestActionableFailurePrecedence()
+    {
+        AggregateException failures = new(
+            new LinuxNativeIOException("earlier recovery failure", 28),
+            new LinuxNativeIOException("later generation failure", 30)
+        );
+
+        InstallerTransactionExecutor.GetErrorCode(failures).Should().Be(TransactionErrorCode.ReadOnlyFileSystem);
+    }
+
     [TearDown]
     public void TearDown()
     {

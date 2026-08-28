@@ -397,6 +397,7 @@ internal sealed class InstallerTransactionExecutor
             UnauthorizedAccessException => TransactionErrorCode.PermissionDenied,
             IOException io => GetDirectIoErrorCode(io) ?? GetActionableIoErrorCode(io.InnerException),
             AggregateException aggregate => aggregate.InnerExceptions
+                .Reverse()
                 .Select(GetActionableIoErrorCode)
                 .FirstOrDefault(code => code is not null),
             _ => GetActionableIoErrorCode(exception.InnerException)
