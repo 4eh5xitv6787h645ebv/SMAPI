@@ -31,25 +31,25 @@ public sealed class InstallerTransactionExecutorTests
     {
         string game = this.CreateDirectory();
         string payload = this.CreateDirectory();
-        Write(game, "replace.txt", "old");
-        Write(game, "remove.txt", "remove me");
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(game, "steam_appid.txt", "remove me");
         Write(game, "unrelated.txt", "preserve me");
         Write(payload, "new/create.txt", "created");
         Write(payload, "new/replace.txt", "new");
 
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("created/deep/file.txt", null, "new/create.txt", Hash("created"), 0x1a4),
-            WriteOperation("replace.txt", Hash("old"), "new/replace.txt", Hash("new"), 0x1ed),
-            RemoveOperation("remove.txt", Hash("remove me"))
+            WriteOperation("smapi-internal/created/deep/file.txt", null, "new/create.txt", Hash("created"), 0x1a4),
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "new/replace.txt", Hash("new"), 0x1ed),
+            RemoveOperation("steam_appid.txt", Hash("remove me"))
         });
 
         TransactionResult result = new InstallerTransactionExecutor().Apply(game, payload, plan);
 
         result.Should().Be(new TransactionResult(plan.TransactionId, TransactionStatus.Committed, 3));
-        File.ReadAllText(Path.Combine(game, "created/deep/file.txt")).Should().Be("created");
-        File.ReadAllText(Path.Combine(game, "replace.txt")).Should().Be("new");
-        File.Exists(Path.Combine(game, "remove.txt")).Should().BeFalse();
+        File.ReadAllText(Path.Combine(game, "smapi-internal/created/deep/file.txt")).Should().Be("created");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+        File.Exists(Path.Combine(game, "steam_appid.txt")).Should().BeFalse();
         File.ReadAllText(Path.Combine(game, "unrelated.txt")).Should().Be("preserve me");
         File.ReadAllText(Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "journal.json"))
             .Should().Contain("\"status\": \"Committed\"");
@@ -60,18 +60,18 @@ public sealed class InstallerTransactionExecutorTests
     {
         string game = this.CreateDirectory();
         string payload = this.CreateDirectory();
-        Write(game, "managed.txt", "user changed");
+        Write(game, "StardewModdingAPI.dll", "user changed");
         Write(payload, "managed.txt", "release");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("managed.txt", Hash("expected old"), "managed.txt", Hash("release"))
+            WriteOperation("StardewModdingAPI.dll", Hash("expected old"), "managed.txt", Hash("release"))
         });
 
         Action action = () => new InstallerTransactionExecutor().Apply(game, payload, plan);
 
         action.Should().Throw<InstallerTransactionException>()
             .Which.Code.Should().Be(TransactionErrorCode.ExistingFileMismatch);
-        File.ReadAllText(Path.Combine(game, "managed.txt")).Should().Be("user changed");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("user changed");
     }
 
     [Test]
@@ -79,18 +79,18 @@ public sealed class InstallerTransactionExecutorTests
     {
         string game = this.CreateDirectory();
         string payload = this.CreateDirectory();
-        Write(game, "collision.txt", "unknown");
+        Write(game, "StardewModdingAPI.xml", "unknown");
         Write(payload, "collision.txt", "release");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("collision.txt", null, "collision.txt", Hash("release"))
+            WriteOperation("StardewModdingAPI.xml", null, "collision.txt", Hash("release"))
         });
 
         Action action = () => new InstallerTransactionExecutor().Apply(game, payload, plan);
 
         action.Should().Throw<InstallerTransactionException>()
             .Which.Code.Should().Be(TransactionErrorCode.ExistingFileMismatch);
-        File.ReadAllText(Path.Combine(game, "collision.txt")).Should().Be("unknown");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("unknown");
     }
 
     [Test]
@@ -98,22 +98,22 @@ public sealed class InstallerTransactionExecutorTests
     {
         string game = this.CreateDirectory();
         string payload = this.CreateDirectory();
-        Write(game, "first.txt", "first old");
-        Write(game, "second.txt", "second old");
+        Write(game, "StardewModdingAPI.dll", "first old");
+        Write(game, "StardewModdingAPI.xml", "second old");
         Write(payload, "first.txt", "first new");
         Write(payload, "second.txt", "second new");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("first.txt", Hash("first old"), "first.txt", Hash("first new")),
-            WriteOperation("second.txt", Hash("second old"), "second.txt", Hash("second new"))
+            WriteOperation("StardewModdingAPI.dll", Hash("first old"), "first.txt", Hash("first new")),
+            WriteOperation("StardewModdingAPI.xml", Hash("second old"), "second.txt", Hash("second new"))
         });
 
         InstallerTransactionExecutor executor = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: false));
         Action action = () => executor.Apply(game, payload, plan);
 
         action.Should().Throw<InvalidOperationException>();
-        File.ReadAllText(Path.Combine(game, "first.txt")).Should().Be("first old");
-        File.ReadAllText(Path.Combine(game, "second.txt")).Should().Be("second old");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("first old");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second old");
         File.ReadAllText(Path.Combine(game, ".smapi-installer/transactions", plan.TransactionId.ToString("N"), "journal.json"))
             .Should().Contain("\"status\": \"RolledBack\"");
     }
@@ -123,11 +123,11 @@ public sealed class InstallerTransactionExecutorTests
     {
         string game = this.CreateDirectory();
         string payload = this.CreateDirectory();
-        Write(game, "managed.txt", "old");
+        Write(game, "StardewModdingAPI.dll", "old");
         Write(payload, "managed.txt", "new");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("managed.txt", Hash("old"), "managed.txt", Hash("new"))
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
         });
         InstallerTransactionExecutor crashing = new(faultInjector: new ThrowingFaultInjector(beforeOperation: 0, simulateTermination: true));
 
@@ -137,7 +137,7 @@ public sealed class InstallerTransactionExecutorTests
         IReadOnlyList<TransactionResult> recovered = new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
 
         recovered.Should().ContainSingle().Which.Status.Should().Be(TransactionStatus.Recovered);
-        File.ReadAllText(Path.Combine(game, "managed.txt")).Should().Be("old");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
     }
 
     [Test]
@@ -145,22 +145,22 @@ public sealed class InstallerTransactionExecutorTests
     {
         string game = this.CreateDirectory();
         string payload = this.CreateDirectory();
-        Write(game, "managed.txt", "old bytes");
+        Write(game, "StardewModdingAPI.dll", "old bytes");
         Write(payload, "managed.txt", "new bytes");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("managed.txt", Hash("old bytes"), "managed.txt", Hash("new bytes"))
+            WriteOperation("StardewModdingAPI.dll", Hash("old bytes"), "managed.txt", Hash("new bytes"))
         });
         InstallerTransactionExecutor crashing = new(faultInjector: new ThrowingFaultInjector(afterOperation: 0, simulateTermination: true));
 
         Action interrupted = () => crashing.Apply(game, payload, plan);
         interrupted.Should().Throw<SimulatedProcessTerminationException>();
-        File.ReadAllText(Path.Combine(game, "managed.txt")).Should().Be("new bytes");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new bytes");
 
         IReadOnlyList<TransactionResult> recovered = new InstallerTransactionExecutor().RecoverIncompleteTransactions(game);
 
         recovered.Should().ContainSingle().Which.Status.Should().Be(TransactionStatus.Recovered);
-        File.ReadAllText(Path.Combine(game, "managed.txt")).Should().Be("old bytes");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old bytes");
         new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().BeEmpty();
     }
 
@@ -172,10 +172,10 @@ public sealed class InstallerTransactionExecutorTests
         string payload = this.CreateDirectory();
         string outside = this.CreateDirectory();
         Write(payload, "managed.txt", "new");
-        Directory.CreateSymbolicLink(Path.Combine(game, "linked"), outside);
+        Directory.CreateSymbolicLink(Path.Combine(game, "smapi-internal"), outside);
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("linked/managed.txt", null, "managed.txt", Hash("new"))
+            WriteOperation("smapi-internal/managed.txt", null, "managed.txt", Hash("new"))
         });
 
         Action action = () => new InstallerTransactionExecutor().Apply(game, payload, plan);
@@ -193,8 +193,8 @@ public sealed class InstallerTransactionExecutorTests
         Write(payload, "one.txt", "one");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("managed.txt", null, "one.txt", Hash("one")),
-            WriteOperation("MANAGED.txt", null, "one.txt", Hash("one"))
+            WriteOperation("smapi-internal/managed.txt", null, "one.txt", Hash("one")),
+            WriteOperation("SMAPI-INTERNAL/managed.txt", null, "one.txt", Hash("one"))
         });
 
         Action action = () => new InstallerTransactionExecutor().Apply(game, payload, plan);
@@ -212,14 +212,14 @@ public sealed class InstallerTransactionExecutorTests
         Write(payload, "managed.txt", "new");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("managed.txt", null, "managed.txt", Hash("new"))
+            WriteOperation("StardewModdingAPI.dll", null, "managed.txt", Hash("new"))
         });
 
         Action action = () => new InstallerTransactionExecutor().Apply(game, payload, plan);
 
         action.Should().Throw<InstallerTransactionException>()
             .Which.Code.Should().Be(TransactionErrorCode.WorkspaceConflict);
-        File.Exists(Path.Combine(game, "managed.txt")).Should().BeFalse();
+        File.Exists(Path.Combine(game, "StardewModdingAPI.dll")).Should().BeFalse();
     }
 
     [Test]
@@ -230,7 +230,7 @@ public sealed class InstallerTransactionExecutorTests
         Write(payload, "managed.txt", "new");
         TransactionPlan plan = new(Guid.NewGuid(), new[]
         {
-            WriteOperation("managed.txt", null, "managed.txt", Hash("new"))
+            WriteOperation("StardewModdingAPI.dll", null, "managed.txt", Hash("new"))
         });
         RecordingProgress progress = new();
 

@@ -46,6 +46,20 @@ public static class OwnedNamespacePolicy
         "StardewModdingAPI-net6.deps.json"
     };
 
+    /// <summary>Get whether a path is in the complete compiled transaction destination allowlist.</summary>
+    /// <remarks>This is intentionally independent of package or receipt input. Transaction execution must fail closed even if a caller bypasses the planner.</remarks>
+    public static bool IsAllowedTransactionDestination(NormalizedRelativePath path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        string value = path.Value;
+        return value is "StardewValley" or "StardewValley-original"
+            || OwnedNamespacePolicy.RuntimeFiles.Contains(value)
+            || OwnedNamespacePolicy.GeneratedFiles.Contains(value)
+            || (value.StartsWith("smapi-internal/", StringComparison.Ordinal) && value != "smapi-internal/config.user.json")
+            || value.StartsWith("Mods/ConsoleCommands/", StringComparison.Ordinal)
+            || value.StartsWith("Mods/SaveBackup/", StringComparison.Ordinal);
+    }
+
     /// <summary>Validate that a path belongs to the exact compiled namespace for its declared kind.</summary>
     public static void AssertAllowed(NormalizedRelativePath path, OwnedEntryKind kind)
     {

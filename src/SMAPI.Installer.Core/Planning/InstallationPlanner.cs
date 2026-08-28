@@ -326,7 +326,7 @@ public sealed class InstallationPlanner
         switch (launcher.Classification)
         {
             case LauncherClassification.FreshVanilla when isFreshInstall:
-                operations.Add(new PlannedOperation(PlanOperationKind.Backup, InstallationPlanner.LauncherPath, launcher.CurrentLauncherSha256, launcher.CurrentLauncherSha256));
+                operations.Add(new PlannedOperation(PlanOperationKind.Create, InstallationPlanner.LauncherBackupPath, null, launcher.CurrentLauncherSha256));
                 operations.Add(new PlannedOperation(PlanOperationKind.Replace, InstallationPlanner.LauncherPath, launcher.CurrentLauncherSha256, target.Sha256));
                 break;
             case LauncherClassification.InstalledUnchanged when !isFreshInstall:
@@ -369,6 +369,12 @@ public sealed class InstallationPlanner
                     InstallationPlanner.LauncherPath,
                     launcher.CurrentLauncherSha256,
                     launcher.BackupLauncherSha256
+                ));
+                operations.Add(new PlannedOperation(
+                    PlanOperationKind.Remove,
+                    InstallationPlanner.LauncherBackupPath,
+                    launcher.BackupLauncherSha256,
+                    null
                 ));
                 break;
             case LauncherClassification.InstalledModified:

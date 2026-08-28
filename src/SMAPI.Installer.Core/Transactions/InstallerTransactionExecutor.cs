@@ -1,3 +1,5 @@
+using StardewModdingAPI.Installer.Core.Ownership;
+
 namespace StardewModdingAPI.Installer.Core.Transactions;
 
 /// <summary>Applies immutable file plans with a durable journal and exact rollback.</summary>
@@ -92,6 +94,8 @@ public sealed class InstallerTransactionExecutor
         foreach (TransactionFileOperation operation in plan.Operations)
         {
             string relativePath = TransactionPath.NormalizeRelativePath(operation.RelativePath, nameof(operation.RelativePath));
+            if (!OwnedNamespacePolicy.IsAllowedTransactionDestination(NormalizedRelativePath.Parse(relativePath)))
+                throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction destination isn't in the compiled installer-owned allowlist.");
             if (!destinations.Add(relativePath) || !caseInsensitiveDestinations.Add(relativePath))
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "A transaction contains duplicate or case-colliding destinations.");
             ValidateSha256(operation.ExpectedExistingSha256, allowNull: true, nameof(operation.ExpectedExistingSha256));

@@ -28,8 +28,8 @@ public class InstallationPlannerTests
         first.CanExecute.Should().BeTrue();
         first.Operations.Select(operation => (operation.Path.Value, operation.Kind)).Should().Equal(
             ("StardewModdingAPI", PlanOperationKind.Create),
-            ("StardewValley", PlanOperationKind.Backup),
-            ("StardewValley", PlanOperationKind.Replace)
+            ("StardewValley", PlanOperationKind.Replace),
+            ("StardewValley-original", PlanOperationKind.Create)
         );
         first.ToCanonicalJson().Should().Be(second.ToCanonicalJson());
         first.GetCanonicalDigest().Should().Be(second.GetCanonicalDigest());
@@ -203,6 +203,7 @@ public class InstallationPlannerTests
         plan.CanExecute.Should().BeTrue();
         plan.Operations.Should().Contain(operation => operation.Path.Equals(runtime.Path) && operation.Kind == PlanOperationKind.Remove);
         plan.Operations.Should().Contain(operation => operation.Path.Value == "StardewValley" && operation.Kind == PlanOperationKind.Restore && operation.ResultSha256 == receipt.Launcher.OriginalLauncherSha256);
+        plan.Operations.Should().Contain(operation => operation.Path.Value == "StardewValley-original" && operation.Kind == PlanOperationKind.Remove && operation.ExpectedCurrentSha256 == receipt.Launcher.OriginalLauncherSha256);
         plan.Operations.Should().Contain(operation => operation.Path.Equals(unrelatedPath) && operation.Kind == PlanOperationKind.Preserve);
     }
 
