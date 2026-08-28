@@ -31,9 +31,7 @@ claimed.
 
 - Native Linux x86_64 Stardew Valley 1.6.14 or later. Android/mobile is not supported.
 - A normal desktop user account. **Never run the installer with `sudo` or as root.**
-- GNU Bash.
-- GNU coreutils (`stat` and `timeout`) and GNU diffutils (`cmp`). The runtime dispatcher requires
-  `stat` for both runtime paths; its default game-runtime path also requires `cmp` and `timeout`.
+- GNU Bash; the published alpha.1 launcher and runtime dispatcher are Bash scripts.
 - The game must be closed.
 - Back up saves, `Mods`, and any existing `smapi-internal/config.user.json` before changing loaders.
 - Download only from this repository's
@@ -42,6 +40,12 @@ claimed.
 The alpha has no graphical updater. The console installer changes the `StardewValley` launcher,
 preserves the vanilla launcher as `StardewValley-original`, and installs two Linux runtime hosts.
 Rollback is a deliberate uninstall-and-reinstall procedure, not an atomic snapshot.
+
+**Unreleased next-alpha/source-build note:** PR #177 changes the runtime dispatcher to validation-only
+behavior which has not shipped in alpha.1. Builds containing that change additionally require GNU
+coreutils (`stat` and `timeout`) and GNU diffutils (`cmp`). The published alpha.1 dispatcher does not
+perform those capability checks and still creates or refreshes its net6 dependency metadata at
+launch when needed.
 
 ## Verify before extracting or running
 
@@ -122,12 +126,20 @@ backup rules. If terminal automation cannot run it, `internal/linux/install.dat`
 1. Extract `install.dat` into a staging directory.
 2. Back up `StardewValley` as `StardewValley-original` without overwriting an existing backup.
 3. Copy the staged payload into the game directory without deleting unrelated files.
-4. Copy `Stardew Valley.deps.json` to `StardewModdingAPI-net6.deps.json`, preserving both its exact
-   bytes and Unix mode: `cp --preserve=mode -- "Stardew Valley.deps.json" "StardewModdingAPI-net6.deps.json"`.
+4. Copy `Stardew Valley.deps.json` to `StardewModdingAPI-net6.deps.json`.
 5. Rename staged `unix-launcher.sh` to `StardewValley`.
 6. Mark `StardewValley`, `StardewModdingAPI`, both `StardewModdingAPI-net*` hosts, and every
    private-runtime `createdump` executable as mode 755. The private app-relative runtime contains
    `host/fxr` and `shared/Microsoft.NETCore.App`; it intentionally does not bundle the `dotnet` CLI.
+
+For an unreleased next-alpha/source build containing PR #177 only, step 4 must preserve both exact
+bytes and Unix mode:
+
+```bash
+cp --preserve=mode -- "Stardew Valley.deps.json" "StardewModdingAPI-net6.deps.json"
+```
+
+That stricter validation-only behavior is not part of the published alpha.1 artifact.
 
 Manual removal must follow the exact file manifest in the installer source. Do not recursively
 delete the game folder, `Mods`, saves, `ErrorLogs`, or `HealthReports`.
@@ -141,10 +153,12 @@ the private benchmark modpack or save.
 
 The published performance comparison describes one controlled workstation and workload. It is not
 a universal FPS, power, CPU-use, or latency claim. There is no GUI/updater yet, and the current
-rollback flow is not atomic. The read-only runtime dispatcher rechecks path identities to catch
-ordinary concurrent changes during validation, but same-user adversarial path replacement between
-validation and process execution is outside this nonprivileged launcher's threat boundary. See the
-[comparison](../upstream-comparison.md),
+rollback flow is not atomic. The published alpha.1 dispatcher is not validation-only: its net6 path
+may create or refresh dependency metadata before launch. The unreleased PR #177 source-build
+dispatcher removes that mutation and rechecks path identities to catch ordinary concurrent changes
+during validation, but same-user adversarial path replacement between validation and process
+execution remains outside that nonprivileged launcher's threat boundary. Those statements describe
+unreleased next-alpha/source-build behavior, not alpha.1. See the [comparison](../upstream-comparison.md),
 [validation record](linux-alpha-release-validation.md), and
 [issue tracker](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues).
 
