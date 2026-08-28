@@ -156,6 +156,21 @@ jobs:
                     --no-build
                     -- RunConfiguration.TreatNoTestsAsError=true
 
+            -   name: Run Linux install-manifest builder tests
+                run: >-
+                    dotnet test src/SMAPI.Installer.Core.Tests/SMAPI.Installer.Core.Tests.csproj
+                    --configuration Release
+                    --no-build
+                    --filter FullyQualifiedName~LinuxInstallManifestBuilderTests
+                    -- RunConfiguration.TreatNoTestsAsError=true
+
+            -   name: Run release-asset quartet tests
+                run: >-
+                    dotnet test src/SMAPI.Installer.PackageTool.Tests/SMAPI.Installer.PackageTool.Tests.csproj
+                    --configuration Release
+                    --no-build
+                    -- RunConfiguration.TreatNoTestsAsError=true
+
             -   name: Build Linux-only installer package
                 shell: pwsh
                 env:
@@ -166,7 +181,7 @@ jobs:
                     --linux-only
                     "--game-path=$env:RUNNER_TEMP/StardewValley"
 
-            -   name: Test package and generate integrity metadata
+            -   name: Test package and generate qualified assets
                 shell: bash
                 env:
                     RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
@@ -181,55 +196,84 @@ jobs:
                     build/scripts/test-linux-installer-lifecycle.sh "$package_path" "$RELEASE_VERSION" "$RUNNER_TEMP/StardewValley"
                     git diff --exit-code
 
-                    mkdir -p artifacts/release
-                    cp "$package_path" artifacts/release/
-                    (
-                        cd artifacts/release
-                        sha256sum "$package_name" > SHA256SUMS
-                    )
-                    package_sha256="$(cut -d ' ' -f 1 artifacts/release/SHA256SUMS)"
-                    package_size="$(stat -c %s "$package_path")"
-                    dotnet_info="$(dotnet --info)"
+                    if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+                        expected_workflow="$GITHUB_REPOSITORY/.github/workflows/linux-alpha-release.yml@refs/tags/$RELEASE_TAG"
+                        if [[ "$GITHUB_WORKFLOW_REF" != "$expected_workflow" ]]; then
+                            echo "The tag build isn't running from the exact reviewed release workflow ref." >&2
+                            exit 1
+                        fi
+                        dotnet_info_file="$RUNNER_TEMP/linux-alpha-dotnet-info.txt"
+                        dotnet --info > "$dotnet_info_file"
+                        dotnet run \
+                            --project build/SMAPI.Installer.PackageTool/SMAPI.Installer.PackageTool.csproj \
+                            --configuration Release \
+                            -- \
+                            create \
+                            --asset-directory artifacts/release \
+                            --tag "$RELEASE_TAG" \
+                            --source-commit "$RELEASE_COMMIT" \
+                            --source-tree "$SOURCE_TREE" \
+                            --package "$package_path" \
+                            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+                            --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+                            --runner-image "$ImageOS-$ImageVersion" \
+                            --runner-arch "$RUNNER_ARCH" \
+                            --reference-assemblies-commit "$REFERENCE_ASSEMBLIES_COMMIT" \
+                            --timestamp-utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+                            --dotnet-info-file "$dotnet_info_file"
+                    else
+                        # Pull requests and pre-tag dispatches remain non-authoritative candidates. Record their
+                        # actual workflow ref and don't mint a companion accepted as release authority.
+                        mkdir -p artifacts/release
+                        cp -- "$package_path" artifacts/release/
+                        (
+                            cd artifacts/release
+                            sha256sum -- "$package_name" > SHA256SUMS
+                        )
+                        package_sha256="$(cut -d ' ' -f 1 artifacts/release/SHA256SUMS)"
+                        package_size="$(stat -c %s "$package_path")"
+                        dotnet_info="$(dotnet --info)"
 
-                    jq -n \
-                        --arg schema_version "1" \
-                        --arg release_version "$RELEASE_VERSION" \
-                        --arg release_tag "$RELEASE_TAG" \
-                        --arg source_repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-                        --arg source_commit "$RELEASE_COMMIT" \
-                        --arg source_tree "$SOURCE_TREE" \
-                        --arg workflow "$GITHUB_WORKFLOW_REF" \
-                        --arg workflow_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
-                        --arg runner_image "$ImageOS-$ImageVersion" \
-                        --arg runner_arch "$RUNNER_ARCH" \
-                        --arg reference_assemblies_commit "$REFERENCE_ASSEMBLIES_COMMIT" \
-                        --arg package "$package_name" \
-                        --arg package_sha256 "$package_sha256" \
-                        --argjson package_size "$package_size" \
-                        --arg build_configuration "Release" \
-                        --arg runtime_identifier "linux-x64" \
-                        --arg build_timestamp_utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-                        --arg dotnet_info "$dotnet_info" \
-                        '{
-                            schema_version: ($schema_version | tonumber),
-                            release: {version: $release_version, tag: $release_tag},
-                            source: {repository: $source_repository, commit: $source_commit, tree: $source_tree},
-                            build: {
-                                workflow: $workflow,
-                                run: $workflow_run,
-                                runner_image: $runner_image,
-                                runner_arch: $runner_arch,
-                                reference_assemblies_commit: $reference_assemblies_commit,
-                                configuration: $build_configuration,
-                                runtime_identifier: $runtime_identifier,
-                                timestamp_utc: $build_timestamp_utc,
-                                dotnet_info: $dotnet_info
-                            },
-                            artifact: {name: $package, size_bytes: $package_size, sha256: $package_sha256},
-                            reproducibility: "Inputs and provenance are recorded; byte-for-byte reproducibility is not claimed."
-                        }' > artifacts/release/build-metadata.json
-                    jq -e . artifacts/release/build-metadata.json >/dev/null
-                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+                        jq -n \
+                            --arg schema_version "1" \
+                            --arg release_version "$RELEASE_VERSION" \
+                            --arg release_tag "$RELEASE_TAG" \
+                            --arg source_repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+                            --arg source_commit "$RELEASE_COMMIT" \
+                            --arg source_tree "$SOURCE_TREE" \
+                            --arg workflow "$GITHUB_WORKFLOW_REF" \
+                            --arg workflow_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+                            --arg runner_image "$ImageOS-$ImageVersion" \
+                            --arg runner_arch "$RUNNER_ARCH" \
+                            --arg reference_assemblies_commit "$REFERENCE_ASSEMBLIES_COMMIT" \
+                            --arg package "$package_name" \
+                            --arg package_sha256 "$package_sha256" \
+                            --argjson package_size "$package_size" \
+                            --arg build_configuration "Release" \
+                            --arg runtime_identifier "linux-x64" \
+                            --arg build_timestamp_utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+                            --arg dotnet_info "$dotnet_info" \
+                            '{
+                                schema_version: ($schema_version | tonumber),
+                                release: {version: $release_version, tag: $release_tag},
+                                source: {repository: $source_repository, commit: $source_commit, tree: $source_tree},
+                                build: {
+                                    workflow: $workflow,
+                                    run: $workflow_run,
+                                    runner_image: $runner_image,
+                                    runner_arch: $runner_arch,
+                                    reference_assemblies_commit: $reference_assemblies_commit,
+                                    configuration: $build_configuration,
+                                    runtime_identifier: $runtime_identifier,
+                                    timestamp_utc: $build_timestamp_utc,
+                                    dotnet_info: $dotnet_info
+                                },
+                                artifact: {name: $package, size_bytes: $package_size, sha256: $package_sha256},
+                                reproducibility: "Inputs and provenance are recorded; byte-for-byte reproducibility is not claimed."
+                            }' > artifacts/release/build-metadata.json
+                        jq -e . artifacts/release/build-metadata.json >/dev/null
+                        (cd artifacts/release && sha256sum --check --strict SHA256SUMS)
+                    fi
 
             -   name: Upload qualified release assets
                 uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -245,7 +289,7 @@ jobs:
         if: github.event_name != 'pull_request'
         needs: qualify-and-package
         runs-on: ubuntu-24.04
-        timeout-minutes: 10
+        timeout-minutes: 20
         permissions:
             contents: read
             id-token: write
@@ -258,13 +302,45 @@ jobs:
                     name: linux-alpha-release-${{ needs.qualify-and-package.outputs.release_commit }}
                     path: artifacts/release
 
+            -   name: Checkout exact release source
+                if: github.event_name == 'push'
+                uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+                with:
+                    persist-credentials: false
+                    ref: ${{ needs.qualify-and-package.outputs.release_commit }}
+                    path: source
+
+            -   name: Install pinned .NET SDKs
+                if: github.event_name == 'push'
+                uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+                with:
+                    dotnet-version: |
+                        10.0.108
+                        6.0.428
+
             -   name: Verify downloaded release assets
                 shell: bash
+                env:
+                    RELEASE_COMMIT: ${{ needs.qualify-and-package.outputs.release_commit }}
+                    RELEASE_TAG: ${{ needs.qualify-and-package.outputs.release_tag }}
+                    SOURCE_TREE: ${{ needs.qualify-and-package.outputs.source_tree }}
                 run: |
                     set -euo pipefail
-                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+                    if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+                        dotnet run \
+                            --project source/build/SMAPI.Installer.PackageTool/SMAPI.Installer.PackageTool.csproj \
+                            --configuration Release \
+                            -- \
+                            verify-release \
+                            --asset-directory artifacts/release \
+                            --tag "$RELEASE_TAG" \
+                            --source-commit "$RELEASE_COMMIT" \
+                            --source-tree "$SOURCE_TREE"
+                    else
+                        (cd artifacts/release && sha256sum --check --strict SHA256SUMS)
+                    fi
 
-            -   name: Generate GitHub artifact attestation
+            -   name: Attest every checksummed release subject
                 uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
                 with:
                     subject-checksums: artifacts/release/SHA256SUMS
@@ -276,7 +352,7 @@ jobs:
             - qualify-and-package
             - attest
         runs-on: ubuntu-24.04
-        timeout-minutes: 10
+        timeout-minutes: 20
         permissions:
             contents: write
         steps:
@@ -286,11 +362,37 @@ jobs:
                     name: linux-alpha-release-${{ needs.qualify-and-package.outputs.release_commit }}
                     path: artifacts/release
 
+            -   name: Checkout exact release source
+                uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+                with:
+                    persist-credentials: false
+                    ref: ${{ needs.qualify-and-package.outputs.release_commit }}
+                    path: source
+
+            -   name: Install pinned .NET SDKs
+                uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+                with:
+                    dotnet-version: |
+                        10.0.108
+                        6.0.428
+
             -   name: Verify downloaded release assets
                 shell: bash
+                env:
+                    RELEASE_COMMIT: ${{ needs.qualify-and-package.outputs.release_commit }}
+                    RELEASE_TAG: ${{ needs.qualify-and-package.outputs.release_tag }}
+                    SOURCE_TREE: ${{ needs.qualify-and-package.outputs.source_tree }}
                 run: |
                     set -euo pipefail
-                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+                    dotnet run \
+                        --project source/build/SMAPI.Installer.PackageTool/SMAPI.Installer.PackageTool.csproj \
+                        --configuration Release \
+                        -- \
+                        verify-release \
+                        --asset-directory artifacts/release \
+                        --tag "$RELEASE_TAG" \
+                        --source-commit "$RELEASE_COMMIT" \
+                        --source-tree "$SOURCE_TREE"
 
             -   name: Publish immutable-identity prerelease
                 shell: bash
@@ -307,7 +409,13 @@ jobs:
                     fi
 
                     package_name="SMAPI-$RELEASE_VERSION-linux-x64-installer.zip"
-                    package_sha256="$(cut -d ' ' -f 1 artifacts/release/SHA256SUMS)"
+                    manifest_name="SMAPI-$RELEASE_VERSION-linux-x64-install-manifest.json"
+                    package_sha256="$(awk -v name="$package_name" '$2 == name { print $1 }' artifacts/release/SHA256SUMS)"
+                    manifest_sha256="$(awk -v name="$manifest_name" '$2 == name { print $1 }' artifacts/release/SHA256SUMS)"
+                    if [[ ! "$package_sha256" =~ ^[0-9a-f]{64}$ || ! "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+                        echo "The verified checksums don't contain exactly named package and manifest subjects." >&2
+                        exit 1
+                    fi
                     if [[ ! "$RELEASE_TAG" =~ ^fork-4eh5xitv6787h645ebv-linux-v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([1-9][0-9]*)$ ]]; then
                         echo "The validated release tag has an unexpected format: $RELEASE_TAG" >&2
                         exit 1
@@ -326,8 +434,9 @@ jobs:
                         echo "## Download integrity"
                         echo
                         echo "\`$package_sha256  $package_name\`"
+                        echo "\`$manifest_sha256  $manifest_name\`"
                         echo
-                        echo "Download \`SHA256SUMS\` and run \`sha256sum --check SHA256SUMS\`. Then verify GitHub provenance with \`gh attestation verify '$package_name' -R '$GITHUB_REPOSITORY'\`."
+                        echo "Download the installer ZIP, its install manifest, \`SHA256SUMS\`, and \`build-metadata.json\` into one empty directory. Run \`sha256sum --check --strict SHA256SUMS\`. Then verify both attested subjects with \`gh attestation verify '$package_name' -R '$GITHUB_REPOSITORY'\` and \`gh attestation verify '$manifest_name' -R '$GITHUB_REPOSITORY'\`."
                         echo
                         echo "## Install, upgrade, and rollback"
                         echo
@@ -341,7 +450,10 @@ jobs:
                     } > "$notes"
 
                     gh release create "$RELEASE_TAG" \
-                        artifacts/release/* \
+                        "artifacts/release/$package_name" \
+                        "artifacts/release/$manifest_name" \
+                        artifacts/release/SHA256SUMS \
+                        artifacts/release/build-metadata.json \
                         --repo "$GITHUB_REPOSITORY" \
                         --verify-tag \
                         --target "$RELEASE_COMMIT" \
