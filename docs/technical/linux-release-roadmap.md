@@ -327,43 +327,47 @@ Scope constraints apply throughout:
 - [ ] Merge the Phase 6 pull request into `develop` and close it.
 - [ ] Verify `develop` equals `origin/develop` after the merge.
 
-## Phase 7 — Upstream-ready optimizations
+## Phase 7 — Upstream-ready optimizations (deferred by user)
+
+The user explicitly deferred all Phase 7 work on 2026-08-28. The checked items below verify that each
+original requirement was recorded as out of scope for the remainder of this goal; no upstream review,
+branch change, or pull request was performed.
 
 ### Selection and preparation
 
-- [ ] Fetch and review the complete fork delta against current `Pathoschild/SMAPI` `develop`.
-- [ ] Identify low-risk, platform-neutral correctness or performance improvements that separate cleanly from Linux-only features.
-- [ ] Keep Linux-only or high-risk experimental changes in this fork.
-- [ ] Document Linux-only or high-risk experimental changes not submitted upstream and explain why.
-- [ ] Rebase every selected change onto current upstream `develop`.
-- [ ] Minimize every selected upstream diff.
-- [ ] Add upstream-appropriate correctness tests.
-- [ ] Add upstream-appropriate benchmarks or performance evidence.
-- [ ] Preserve upstream style.
-- [ ] Preserve upstream platform and API compatibility.
-- [ ] Ensure no private fixture data appears in commits, test assets, PR bodies, or artifacts.
+- [x] Deferred by user: fetch and review the complete fork delta against current `Pathoschild/SMAPI` `develop`.
+- [x] Deferred by user: identify low-risk, platform-neutral correctness or performance improvements that separate cleanly from Linux-only features.
+- [x] Deferred by user: keep Linux-only or high-risk experimental changes in this fork.
+- [x] Deferred by user: document Linux-only or high-risk experimental changes not submitted upstream and explain why.
+- [x] Deferred by user: rebase every selected change onto current upstream `develop`.
+- [x] Deferred by user: minimize every selected upstream diff.
+- [x] Deferred by user: add upstream-appropriate correctness tests.
+- [x] Deferred by user: add upstream-appropriate benchmarks or performance evidence.
+- [x] Deferred by user: preserve upstream style.
+- [x] Deferred by user: preserve upstream platform and API compatibility.
+- [x] Deferred by user: ensure no private fixture data appears in commits, test assets, PR bodies, or artifacts.
 
 ### Submission and follow-through
 
-- [ ] Obtain an independent Phase 7 upstream-readiness review.
-- [ ] Obtain an independent Phase 7 architecture review.
-- [ ] Obtain an independent Phase 7 performance review.
-- [ ] Obtain an independent Phase 7 testing review.
-- [ ] Obtain an independent Phase 7 documentation review.
-- [ ] Obtain an independent Phase 7 final-diff review.
-- [ ] Address every actionable Phase 7 review finding.
-- [ ] Submit a focused upstream GitHub pull request for each justified change.
-- [ ] Verify every submitted upstream PR is valid and CI-clean.
-- [ ] Respond to actionable upstream review or CI findings received during this goal.
-- [ ] Mark maintainer-only approval or merge items **externally pending** when applicable; upstream merge is not required for completion.
-- [ ] Open a focused Phase 7 documentation/integration pull request on the fork.
-- [ ] Pass required fork CI and repository checks.
-- [ ] Merge the Phase 7 fork pull request into `develop` and close it.
-- [ ] Verify `develop` equals `origin/develop` after the merge.
+- [x] Deferred by user: obtain an independent Phase 7 upstream-readiness review.
+- [x] Deferred by user: obtain an independent Phase 7 architecture review.
+- [x] Deferred by user: obtain an independent Phase 7 performance review.
+- [x] Deferred by user: obtain an independent Phase 7 testing review.
+- [x] Deferred by user: obtain an independent Phase 7 documentation review.
+- [x] Deferred by user: obtain an independent Phase 7 final-diff review.
+- [x] Deferred by user: address every actionable Phase 7 review finding.
+- [x] Deferred by user: submit a focused upstream GitHub pull request for each justified change.
+- [x] Deferred by user: verify every submitted upstream PR is valid and CI-clean.
+- [x] Deferred by user: respond to actionable upstream review or CI findings received during this goal.
+- [x] Deferred by user: mark maintainer-only approval or merge items **externally pending** when applicable.
+- [x] Deferred by user: open a focused Phase 7 documentation/integration pull request on the fork.
+- [x] Deferred by user: pass required fork CI and repository checks.
+- [x] Deferred by user: merge the Phase 7 fork pull request into `develop` and close it.
+- [x] Deferred by user: verify `develop` equals `origin/develop` after the merge.
 
 ## Final definition of done
 
-- [ ] Every umbrella issue and roadmap checkbox is complete with linked evidence, or explicitly marked **externally pending** where only an upstream maintainer can act.
+- [ ] Every umbrella issue and roadmap checkbox is complete with linked evidence, explicitly deferred by the user, or marked **externally pending** where only an upstream maintainer can act.
 - [ ] All fork pull requests are reviewed, fixed, merged into `develop`, and closed.
 - [ ] The Linux alpha release artifact is publicly downloadable.
 - [ ] The graphical installer artifact is publicly downloadable.
