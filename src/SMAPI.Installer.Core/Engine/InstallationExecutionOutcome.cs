@@ -51,5 +51,6 @@ public sealed record InstallationExecutionOutcome
     }
 
     public bool RequiresFreshInspection => this.Status is not (InstallationExecutionStatus.Succeeded or InstallationExecutionStatus.SucceededWithCleanupWarning);
-    public bool RequiresRecovery => this.Transaction?.RequiresRecovery ?? false;
+    public bool RequiresRecovery => this.Status == InstallationExecutionStatus.InterruptedRecoveryRequired
+        || (this.Transaction?.RequiresRecovery ?? false);
 }

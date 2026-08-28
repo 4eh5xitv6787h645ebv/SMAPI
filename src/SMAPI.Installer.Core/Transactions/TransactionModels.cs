@@ -337,6 +337,15 @@ public interface ITransactionFaultInjector
     /// <summary>Called after filesystem mutation but before its applied journal event is appended.</summary>
     void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex) { }
 
+    /// <summary>Called after full-store recovery preflight and immediately before one published transaction is revalidated.</summary>
+    void BeforeRecoveringTransaction(Guid transactionId) { }
+
+    /// <summary>Called after a rollback mutation but before its rollback-applied journal event is appended.</summary>
+    void AfterRollbackMutationBeforeAppliedEvent(Guid transactionId, int operationIndex) { }
+
+    /// <summary>Called after a recovered transaction has a durable rolled-back event but before best-effort payload cleanup.</summary>
+    void AfterRecoveryRollbackBeforeCleanup(Guid transactionId) { }
+
     /// <summary>Called after the committed event is durable but before best-effort final-store cleanup.</summary>
     void AfterDurableCommit(Guid transactionId) { }
 }
@@ -373,6 +382,15 @@ public sealed class NullTransactionInstrumentation : ITransactionProgressSink, I
 
     /// <inheritdoc />
     public void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex) { }
+
+    /// <inheritdoc />
+    public void BeforeRecoveringTransaction(Guid transactionId) { }
+
+    /// <inheritdoc />
+    public void AfterRollbackMutationBeforeAppliedEvent(Guid transactionId, int operationIndex) { }
+
+    /// <inheritdoc />
+    public void AfterRecoveryRollbackBeforeCleanup(Guid transactionId) { }
 }
 
 /// <summary>A test-only signal which represents abrupt process termination and intentionally bypasses in-process rollback.</summary>

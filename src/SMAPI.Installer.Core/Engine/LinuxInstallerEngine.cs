@@ -170,7 +170,9 @@ public sealed class LinuxInstallerEngine
     /// </summary>
     /// <remarks>
     /// Cancellation is honored before recovery begins. Once recovery starts it runs to a safe durable conclusion.
-    /// The caller must discard every prior inspection and inspect again after this method succeeds.
+    /// The caller must discard every prior inspection after this method returns or throws
+    /// <see cref="InterruptedOperationRecoveryException"/>. That typed exception preserves any exact recoveries which
+    /// completed before a later recovery or cleanup boundary failed.
     /// </remarks>
     public Task<InterruptedOperationRecoveryResult> RecoverInterruptedOperationAsync(
         string gameRoot,
@@ -191,7 +193,48 @@ public sealed class LinuxInstallerEngine
         GameRootIdentity gameRootIdentity = lease.RootIdentity;
         ulong previousGeneration = lease.Generation;
         this.Progress.Report(new(TransactionStage.Recovering, 0, null));
-        IReadOnlyList<TransactionResult> recovered = this.Executor.RecoverLocked(lease);
+        IReadOnlyList<TransactionResult> recovered;
+        try
+        {
+            recovered = this.Executor.RecoverLocked(lease);
+        }
+        catch (TransactionRecoveryAttemptException exception)
+        {
+            ulong? failureCurrentGeneration;
+            try
+            {
+                (_, failureCurrentGeneration) = InstallerOperationLease.ReadGeneration(lease.Workspace);
+            }
+            catch (Exception generationObservationFailure) when (
+                generationObservationFailure is IOException or UnauthorizedAccessException or InstallerTransactionException
+            )
+            {
+                failureCurrentGeneration = null;
+            }
+            bool? failureNamedRootStillSelected;
+            try
+            {
+                using LinuxAnchoredFileSystem currentlyNamedRoot = new(gameRootIdentity.CanonicalPath);
+                failureNamedRootStillSelected = gameRootIdentity.Matches(currentlyNamedRoot.Identity);
+            }
+            catch (Exception namedRootObservationFailure) when (
+                namedRootObservationFailure is IOException or UnauthorizedAccessException or InstallerTransactionException
+            )
+            {
+                failureNamedRootStillSelected = null;
+            }
+            TransactionErrorCode code = InstallerTransactionExecutor.GetErrorCode(exception);
+            throw new InterruptedOperationRecoveryException(
+                gameRootIdentity,
+                previousGeneration,
+                failureCurrentGeneration,
+                failureNamedRootStillSelected,
+                exception.RecoveredTransactions,
+                code,
+                InstallerTransactionExecutor.SafeMessage(code) ?? "Interrupted-operation recovery did not reach a safe completed result.",
+                exception
+            );
+        }
         if (lease.Generation == previousGeneration)
             lease.ReserveNextGeneration(previousGeneration);
         else if (recovered.Count == 0 || lease.Generation <= previousGeneration)
@@ -508,6 +551,19 @@ public sealed class LinuxInstallerEngine
         {
             return new(action, InstallationExecutionStatus.CancelledBeforeMutation, null, Array.Empty<TransactionResult>(), null, "The operation was cancelled before mutation.", sanitizedLogPath);
         }
+        catch (TransactionRecoveryAttemptException exception)
+        {
+            TransactionErrorCode code = InstallerTransactionExecutor.GetErrorCode(exception);
+            return new(
+                action,
+                InstallationExecutionStatus.InterruptedRecoveryRequired,
+                null,
+                exception.RecoveredTransactions,
+                code,
+                InstallerTransactionExecutor.SafeMessage(code),
+                sanitizedLogPath
+            );
+        }
         catch (Exception exception)
         {
             TransactionErrorCode code = InstallerTransactionExecutor.GetErrorCode(exception);
@@ -749,21 +805,14 @@ public sealed class LinuxInstallerEngine
         }
         catch (OperationCanceledException)
         {
-            return new(RecoveryPruneOutcomeStatus.CancelledBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), GetPreexistingPendingCleanup(plan), false, null, "Recovery pruning was cancelled before publication.");
+            return new(RecoveryPruneOutcomeStatus.CancelledBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, null, "Recovery pruning was cancelled before exact history revalidation. List recoveries and inspect pruning again.");
         }
         catch (Exception exception)
         {
             TransactionErrorCode code = InstallerTransactionExecutor.GetErrorCode(exception);
-            Guid[] pending = GetPreexistingPendingCleanup(plan);
-            RecoveryPruneOutcomeStatus status = pending.Length > 0
-                ? RecoveryPruneOutcomeStatus.FailedWithCleanupPending
-                : RecoveryPruneOutcomeStatus.FailedBeforePublication;
-            return new(status, Array.Empty<Guid>(), Array.Empty<Guid>(), pending, false, code, InstallerTransactionExecutor.SafeMessage(code));
+            return new(RecoveryPruneOutcomeStatus.FailedBeforePublication, Array.Empty<Guid>(), Array.Empty<Guid>(), Array.Empty<Guid>(), false, code, "The recovery history couldn't be revalidated. List recoveries and inspect pruning again.");
         }
     }
-
-    private static Guid[] GetPreexistingPendingCleanup(RecoveryPrunePlan plan)
-        => plan.CleanupGenerationIds.Except(plan.RemovedGenerationIds).ToArray();
 
     internal InspectedInstallationState InspectLocked(
         InstallerOperationLease lease,

@@ -62,6 +62,7 @@ internal enum TransactionJournalEventKind
     Intent,
     Applied,
     RollingBack,
+    RollbackIntent,
     RollbackApplied,
     Committed,
     RolledBack
@@ -86,6 +87,7 @@ internal sealed class TransactionJournalReplay
     public int ValidByteLength { get; }
     public HashSet<int> IntendedOperations { get; }
     public HashSet<int> AppliedOperations { get; }
+    public HashSet<int> RollbackIntendedOperations { get; }
     public HashSet<int> RolledBackOperations { get; }
 
     public TransactionJournalReplay(
@@ -93,6 +95,7 @@ internal sealed class TransactionJournalReplay
         int validByteLength,
         HashSet<int> intendedOperations,
         HashSet<int> appliedOperations,
+        HashSet<int> rollbackIntendedOperations,
         HashSet<int> rolledBackOperations
     )
     {
@@ -100,6 +103,7 @@ internal sealed class TransactionJournalReplay
         this.ValidByteLength = validByteLength;
         this.IntendedOperations = intendedOperations;
         this.AppliedOperations = appliedOperations;
+        this.RollbackIntendedOperations = rollbackIntendedOperations;
         this.RolledBackOperations = rolledBackOperations;
     }
 }
@@ -230,8 +234,8 @@ internal static class TransactionJournalStore
             validLength = newline + 1;
             start = newline + 1;
         }
-        ValidateEventSequence(eventsList, planDigest, journal.Entries.Count, out HashSet<int> intended, out HashSet<int> applied, out HashSet<int> rolledBack);
-        return new TransactionJournalReplay(eventsList, validLength, intended, applied, rolledBack);
+        ValidateEventSequence(eventsList, planDigest, journal.Entries.Count, out HashSet<int> intended, out HashSet<int> applied, out HashSet<int> rollbackIntended, out HashSet<int> rolledBack);
+        return new TransactionJournalReplay(eventsList, validLength, intended, applied, rollbackIntended, rolledBack);
     }
 
     public static TransactionJournalReplay Append(
@@ -268,8 +272,8 @@ internal static class TransactionJournalStore
         line[^1] = (byte)'\n';
         transaction.AppendAndFsync(eventsFile, EventsFileName, line, replay.ValidByteLength, MaximumJournalBytes);
         List<TransactionJournalEvent> all = replay.Events.Append(completed).ToList();
-        ValidateEventSequence(all, planDigest, journal.Entries.Count, out HashSet<int> intended, out HashSet<int> applied, out HashSet<int> rolledBack);
-        return new TransactionJournalReplay(all, checked(replay.ValidByteLength + line.Length), intended, applied, rolledBack);
+        ValidateEventSequence(all, planDigest, journal.Entries.Count, out HashSet<int> intended, out HashSet<int> applied, out HashSet<int> rollbackIntended, out HashSet<int> rolledBack);
+        return new TransactionJournalReplay(all, checked(replay.ValidByteLength + line.Length), intended, applied, rollbackIntended, rolledBack);
     }
 
     public static LinuxAnchoredFile OpenEventsForAppend(LinuxAnchoredFileSystem transaction, TransactionJournalReplay replay)
@@ -477,11 +481,13 @@ internal static class TransactionJournalStore
         int operationCount,
         out HashSet<int> intended,
         out HashSet<int> applied,
+        out HashSet<int> rollbackIntended,
         out HashSet<int> rolledBack
     )
     {
         intended = new();
         applied = new();
+        rollbackIntended = new();
         rolledBack = new();
         string? previous = null;
         bool prepared = false;
@@ -491,6 +497,7 @@ internal static class TransactionJournalStore
         int nextIntent = 0;
         int? pendingIntent = null;
         int nextRollback = -1;
+        int? pendingRollback = null;
         for (int sequence = 0; sequence < events.Count; sequence++)
         {
             TransactionJournalEvent item = events[sequence];
@@ -511,9 +518,10 @@ internal static class TransactionJournalStore
                 TransactionJournalEventKind.Intent => applying && !rollingBack && pendingIntent is null && item.OperationIndex == nextIntent,
                 TransactionJournalEventKind.Applied => applying && !rollingBack && item.OperationIndex == pendingIntent,
                 TransactionJournalEventKind.RollingBack => sequence > 0 && !rollingBack && item.OperationIndex is null,
-                TransactionJournalEventKind.RollbackApplied => rollingBack && item.OperationIndex == nextRollback,
+                TransactionJournalEventKind.RollbackIntent => rollingBack && pendingRollback is null && item.OperationIndex == nextRollback,
+                TransactionJournalEventKind.RollbackApplied => rollingBack && item.OperationIndex == nextRollback && (pendingRollback is null || item.OperationIndex == pendingRollback),
                 TransactionJournalEventKind.Committed => applying && !rollingBack && pendingIntent is null && nextIntent == operationCount && item.OperationIndex is null,
-                TransactionJournalEventKind.RolledBack => rollingBack && nextRollback < 0 && item.OperationIndex is null,
+                TransactionJournalEventKind.RolledBack => rollingBack && pendingRollback is null && nextRollback < 0 && item.OperationIndex is null,
                 _ => false
             };
             if (!valid)
@@ -540,8 +548,13 @@ internal static class TransactionJournalStore
                     rollingBack = true;
                     nextRollback = intended.Count == 0 ? -1 : intended.Max();
                     break;
+                case TransactionJournalEventKind.RollbackIntent:
+                    pendingRollback = item.OperationIndex;
+                    rollbackIntended.Add(item.OperationIndex!.Value);
+                    break;
                 case TransactionJournalEventKind.RollbackApplied:
                     rolledBack.Add(item.OperationIndex!.Value);
+                    pendingRollback = null;
                     nextRollback--;
                     break;
                 case TransactionJournalEventKind.Committed:

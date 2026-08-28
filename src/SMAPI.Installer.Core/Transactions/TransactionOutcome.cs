@@ -64,3 +64,20 @@ public sealed record TransactionExecutionOutcome
 }
 
 internal sealed record TransactionExecutionAttempt(TransactionExecutionOutcome Outcome, Exception? Failure);
+
+/// <summary>Preserves exact completed recovery results when a later recovery or cleanup boundary fails.</summary>
+internal sealed class TransactionRecoveryAttemptException : Exception
+{
+    public IReadOnlyList<TransactionResult> RecoveredTransactions { get; }
+
+    public TransactionRecoveryAttemptException(
+        IEnumerable<TransactionResult> recoveredTransactions,
+        Exception failure
+    )
+        : base("Interrupted transaction recovery stopped before every recovery and cleanup boundary completed.", failure)
+    {
+        ArgumentNullException.ThrowIfNull(recoveredTransactions);
+        ArgumentNullException.ThrowIfNull(failure);
+        this.RecoveredTransactions = new ReadOnlyCollection<TransactionResult>(recoveredTransactions.ToArray());
+    }
+}

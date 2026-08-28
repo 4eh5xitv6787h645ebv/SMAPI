@@ -208,6 +208,62 @@ public sealed class LinuxInstallerEngineRecoveryTests
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("original");
     }
 
+    [Test]
+    public async Task RecoverInterruptedOperation_WhenLaterTransactionChangesAfterFullPreflight_PreservesEarlierExactRecovery()
+    {
+        (string game, TransactionPlan first, TransactionPlan second) = this.CreateTwoInterruptedReplacements();
+        string laterBackup = Path.Combine(
+            game,
+            ".smapi-installer",
+            "transactions",
+            second.TransactionId.ToString("N"),
+            "backups",
+            "00000000"
+        );
+        InstallerTransactionExecutor executor = new(
+            faultInjector: new MutateLaterTransactionAfterPreflight(first.TransactionId, laterBackup)
+        );
+        LinuxInstallerEngine engine = new(executor);
+
+        Func<Task> recover = () => engine.RecoverInterruptedOperationAsync(game);
+
+        InterruptedOperationRecoveryException failure = (await recover.Should()
+            .ThrowAsync<InterruptedOperationRecoveryException>()).Which;
+        failure.RecoveredTransactions.Should().ContainSingle().Which.Should().Be(
+            new TransactionResult(first.TransactionId, TransactionStatus.Recovered, 1)
+        );
+        failure.RecoveredTransactions.Should().NotContain(item => item.TransactionId == second.TransactionId);
+        failure.RecoveredAny.Should().BeTrue();
+        failure.RequiresRecovery.Should().BeTrue();
+        failure.RequiresFreshInspection.Should().BeTrue();
+        failure.OperationGenerationAdvanced.Should().BeTrue();
+        failure.NamedRootStillSelected.Should().BeTrue();
+        failure.ErrorCode.Should().Be(TransactionErrorCode.RecoveryFailed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("first old");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second new");
+    }
+
+    [Test]
+    public async Task RecoverInterruptedOperation_WhenCleanupFailsAfterDurableRollback_PreservesExactRecoveryResult()
+    {
+        (string game, _, TransactionPlan plan) = this.CreateInterruptedReplacement();
+        InstallerTransactionExecutor executor = new(
+            faultInjector: new RecoveryCleanupFailure(game, plan.TransactionId)
+        );
+        LinuxInstallerEngine engine = new(executor);
+
+        Func<Task> recover = () => engine.RecoverInterruptedOperationAsync(game);
+
+        InterruptedOperationRecoveryException failure = (await recover.Should()
+            .ThrowAsync<InterruptedOperationRecoveryException>()).Which;
+        failure.RecoveredTransactions.Should().ContainSingle().Which.Should().Be(
+            new TransactionResult(plan.TransactionId, TransactionStatus.Recovered, 1)
+        );
+        failure.OperationGenerationAdvanced.Should().BeTrue();
+        failure.ErrorCode.Should().Be(TransactionErrorCode.IoFailure);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("original");
+    }
+
     private (string Game, string Payload, TransactionPlan Plan) CreateInterruptedReplacement()
     {
         string game = this.CreateDirectory();
@@ -223,6 +279,36 @@ public sealed class LinuxInstallerEngineRecoveryTests
         ).Apply(game, payload, plan);
         interrupt.Should().Throw<SimulatedProcessTerminationException>();
         return (game, payload, plan);
+    }
+
+    private (string Game, TransactionPlan First, TransactionPlan Second) CreateTwoInterruptedReplacements()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "first old");
+        Write(game, "StardewModdingAPI.xml", "second old");
+        Write(payload, "first", "first new");
+        Write(payload, "second", "second new");
+        TransactionPlan first = new(Guid.ParseExact("11111111111111111111111111111111", "N"), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("first old"), "first", Hash("first new"))
+        });
+        TransactionPlan second = new(Guid.ParseExact("ffffffffffffffffffffffffffffffff", "N"), new[]
+        {
+            WriteOperation("StardewModdingAPI.xml", Hash("second old"), "second", Hash("second new"))
+        });
+        InstallerTransactionExecutor crashing = new(
+            faultInjector: new MutationTerminationFaultInjector(afterOperation: 0)
+        );
+        Action firstCrash = () => crashing.Apply(game, payload, first);
+        firstCrash.Should().Throw<SimulatedProcessTerminationException>();
+        string transactions = Path.Combine(game, ".smapi-installer", "transactions");
+        string held = Path.Combine(game, "held-first-transaction");
+        Directory.Move(Path.Combine(transactions, first.TransactionId.ToString("N")), held);
+        Action secondCrash = () => crashing.Apply(game, payload, second);
+        secondCrash.Should().Throw<SimulatedProcessTerminationException>();
+        Directory.Move(held, Path.Combine(transactions, first.TransactionId.ToString("N")));
+        return (game, first, second);
     }
 
     private string CreateDirectory()
@@ -286,6 +372,53 @@ public sealed class LinuxInstallerEngineRecoveryTests
 
         public void BeforeMutation(Guid transactionId, int operationIndex) { }
         public void AfterMutation(Guid transactionId, int operationIndex) { }
+    }
+
+    private sealed class MutateLaterTransactionAfterPreflight : ITransactionFaultInjector
+    {
+        private readonly Guid FirstTransactionId;
+        private readonly string LaterBackupPath;
+        private bool Mutated;
+
+        public MutateLaterTransactionAfterPreflight(Guid firstTransactionId, string laterBackupPath)
+        {
+            this.FirstTransactionId = firstTransactionId;
+            this.LaterBackupPath = laterBackupPath;
+        }
+
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex) { }
+        public void BeforeRecoveringTransaction(Guid transactionId)
+        {
+            if (transactionId == this.FirstTransactionId && !this.Mutated)
+            {
+                this.Mutated = true;
+                File.WriteAllText(this.LaterBackupPath, "changed after full-store preflight");
+            }
+        }
+    }
+
+    private sealed class RecoveryCleanupFailure : ITransactionFaultInjector
+    {
+        private readonly string GameRoot;
+        private readonly Guid ExpectedTransactionId;
+
+        public RecoveryCleanupFailure(string gameRoot, Guid expectedTransactionId)
+        {
+            this.GameRoot = gameRoot;
+            this.ExpectedTransactionId = expectedTransactionId;
+        }
+
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex) { }
+        public void AfterRecoveryRollbackBeforeCleanup(Guid transactionId)
+        {
+            transactionId.Should().Be(this.ExpectedTransactionId);
+            File.WriteAllText(
+                Path.Combine(this.GameRoot, ".smapi-installer", "transactions", transactionId.ToString("N"), "unknown-state"),
+                "block cleanup"
+            );
+        }
     }
 
     private sealed class RecordingProgress : ITransactionProgressSink

@@ -172,6 +172,31 @@ public sealed class TransactionOutcomeTests
     }
 
     [Test]
+    public void DetailedOutcome_RollbackMutationBeforeAppliedEventStillReportsExactRestoredPath()
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "new", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            Write("StardewModdingAPI.dll", Hash("old"), "new", "new")
+        });
+        InstallerTransactionExecutor executor = new(
+            faultInjector: new RollbackAppliedEventGapFailure()
+        );
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, executor);
+
+        outcome.Status.Should().Be(TransactionOutcomeStatus.RollbackFailedRecoveryRequired);
+        outcome.ChangedPaths.Should().ContainSingle().Which.RelativePath.Should().Be("StardewModdingAPI.dll");
+        outcome.RolledBackPaths.Should().ContainSingle().Which.RelativePath.Should().Be("StardewModdingAPI.dll");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
+        new InstallerTransactionExecutor().RecoverIncompleteTransactions(game).Should().ContainSingle()
+            .Which.Should().Be(new TransactionResult(plan.TransactionId, TransactionStatus.Recovered, 1));
+    }
+
+    [Test]
     public void PublicOutcomeCollectionsAreSnapshotsAndReadOnly()
     {
         TransactionPathChange[] changed = [new("managed", TransactionOperationKind.WriteFile)];
@@ -179,6 +204,7 @@ public sealed class TransactionOutcomeTests
         TransactionExecutionOutcome transaction = new(Guid.NewGuid(), TransactionOutcomeStatus.FailedAndRolledBack, TransactionStatus.RolledBack, changed, rolledBack, TransactionCancellationDisposition.None, TransactionErrorCode.IoFailure, "safe");
         TransactionResult[] recovered = [new(Guid.NewGuid(), TransactionStatus.Recovered, 1)];
         InstallationExecutionOutcome installation = new(InstallationAction.Repair, InstallationExecutionStatus.FailedAndRolledBack, transaction, recovered, TransactionErrorCode.IoFailure, "safe");
+        InstallationExecutionOutcome partialRecovery = new(InstallationAction.Repair, InstallationExecutionStatus.InterruptedRecoveryRequired, null, recovered, TransactionErrorCode.RecoveryFailed, "safe");
         Guid[] logical = [Guid.NewGuid()];
         Guid[] physical = [Guid.NewGuid()];
         Guid[] pending = [Guid.NewGuid()];
@@ -195,6 +221,7 @@ public sealed class TransactionOutcomeTests
         transaction.RolledBackPaths.Single().RelativePath.Should().Be("managed");
         installation.ChangedPaths.Single().RelativePath.Should().Be("managed");
         installation.RecoveredTransactions.Single().ChangedPathCount.Should().Be(1);
+        partialRecovery.RequiresRecovery.Should().BeTrue();
         prune.LogicallyRemovedGenerationIds.Should().NotContain(Guid.Empty);
         prune.PhysicallyCleanedGenerationIds.Should().NotContain(Guid.Empty);
         prune.PendingCleanupGenerationIds.Should().NotContain(Guid.Empty);
@@ -335,5 +362,14 @@ public sealed class TransactionOutcomeTests
         public void AfterMutation(Guid transactionId, int operationIndex) { }
         public void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex)
             => throw new SimulatedProcessTerminationException("before applied event");
+    }
+
+    private sealed class RollbackAppliedEventGapFailure : ITransactionFaultInjector
+    {
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex)
+            => throw new IOException("start rollback after the applied event");
+        public void AfterRollbackMutationBeforeAppliedEvent(Guid transactionId, int operationIndex)
+            => throw new SimulatedProcessTerminationException("rollback mutation completed before its applied event");
     }
 }

@@ -301,7 +301,7 @@ public sealed class CommittedRecoveryStateTests
     }
 
     [Test]
-    public void PruneOutcome_PreCancelledCleanupOnlyPlanStillReportsEveryAuthenticatedPendingGeneration()
+    public void PruneOutcome_PreCancelledCleanupOnlyPlanDoesNotAssertPendingBeforeExactRevalidation()
     {
         (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
         using (package)
@@ -321,9 +321,10 @@ public sealed class CommittedRecoveryStateTests
             RecoveryPruneOutcome outcome = normal.ExecuteRecoveryPruneWithOutcomeAsync(cleanup, cleanup.ConfirmationDigest, source.Token).GetAwaiter().GetResult();
 
             outcome.Status.Should().Be(RecoveryPruneOutcomeStatus.CancelledBeforePublication);
-            outcome.PendingCleanupGenerationIds.Should().BeEquivalentTo(cleanup.CleanupGenerationIds);
+            outcome.PendingCleanupGenerationIds.Should().BeEmpty();
             outcome.PhysicallyCleanedGenerationIds.Should().BeEmpty();
-            outcome.RequiresCleanup.Should().BeTrue();
+            outcome.RequiresCleanup.Should().BeFalse();
+            outcome.SafeMessage.Should().Contain("List recoveries");
         }
     }
 
@@ -351,6 +352,34 @@ public sealed class CommittedRecoveryStateTests
             outcome.PendingCleanupGenerationIds.Should().BeEquivalentTo(cleanup.CleanupGenerationIds);
             outcome.PendingCleanupGenerationIds.Should().Contain(fault.GenerationId!.Value);
             outcome.RequiresCleanup.Should().BeTrue();
+        }
+    }
+
+    [Test]
+    public void PruneOutcome_StaleCleanupPlanAfterSuccessfulCleanupDoesNotAssertOldPendingIds()
+    {
+        (string game, LinuxInstallerEngine normal, FilePackageAuthority package) = this.CreateRecoveryHistory(3);
+        using (package)
+        {
+            RecoveryPrunePlan initial = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            LinuxInstallerEngine publishing = new(
+                new InstallerTransactionExecutor(),
+                new BoundaryTerminationFaultInjector(RecoveryPruneBoundary.AfterPointerPublish)
+            );
+            publishing.ExecuteRecoveryPruneWithOutcomeAsync(initial, initial.ConfirmationDigest).GetAwaiter().GetResult().Status
+                .Should().Be(RecoveryPruneOutcomeStatus.Interrupted);
+            RecoveryPrunePlan cleanup = normal.InspectRecoveryPruneAsync(game, 1).GetAwaiter().GetResult();
+            normal.ExecuteRecoveryPruneWithOutcomeAsync(cleanup, cleanup.ConfirmationDigest).GetAwaiter().GetResult().Status
+                .Should().Be(RecoveryPruneOutcomeStatus.Succeeded);
+
+            RecoveryPruneOutcome stale = normal.ExecuteRecoveryPruneWithOutcomeAsync(cleanup, cleanup.ConfirmationDigest).GetAwaiter().GetResult();
+
+            stale.Status.Should().Be(RecoveryPruneOutcomeStatus.FailedBeforePublication);
+            stale.LogicallyRemovedGenerationIds.Should().BeEmpty();
+            stale.PhysicallyCleanedGenerationIds.Should().BeEmpty();
+            stale.PendingCleanupGenerationIds.Should().BeEmpty();
+            stale.RequiresCleanup.Should().BeFalse();
+            stale.SafeMessage.Should().Contain("List recoveries");
         }
     }
 

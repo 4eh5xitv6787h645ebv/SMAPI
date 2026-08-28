@@ -1151,6 +1151,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         List<Guid> physicallyCleaned = new();
         bool logicalStatePublished = false;
         bool auxiliaryCleanupPending = false;
+        bool exactPlanAuthenticated = false;
         try
         {
             lease.AssertRootAndGeneration(plan.GameRoot, plan.OperationGeneration);
@@ -1166,6 +1167,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             );
             if (exact.ConfirmationDigest != plan.ConfirmationDigest)
                 throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "The exact recovery history changed after prune inspection.");
+            exactPlanAuthenticated = true;
             RecoveryHistoryState state = ReadHistoryState(lease.Game, currentState, cancellationToken);
             int logicalRemovalCount = plan.RemovedGenerationIds.Count;
             RecoveryRetentionRecord? publication = null;
@@ -1254,12 +1256,15 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         {
             Guid[] logical = logicalStatePublished ? plan.RemovedGenerationIds.ToArray() : Array.Empty<Guid>();
             HashSet<Guid> newlyRemoved = plan.RemovedGenerationIds.ToHashSet();
-            Guid[] pending = plan.CleanupGenerationIds
-                .Where(generationId =>
-                    !physicallyCleaned.Contains(generationId)
-                    && (logicalStatePublished || !newlyRemoved.Contains(generationId))
-                )
-                .ToArray();
+            Guid[] pending = exactPlanAuthenticated
+                ? plan.CleanupGenerationIds
+                    .Where(generationId =>
+                        !physicallyCleaned.Contains(generationId)
+                        && (logicalStatePublished || !newlyRemoved.Contains(generationId))
+                    )
+                    .ToArray()
+                : Array.Empty<Guid>();
+            auxiliaryCleanupPending &= exactPlanAuthenticated;
             RecoveryPruneOutcomeStatus status = exception switch
             {
                 OperationCanceledException when logicalStatePublished || physicallyCleaned.Count > 0 => RecoveryPruneOutcomeStatus.CancelledWithCleanupPending,

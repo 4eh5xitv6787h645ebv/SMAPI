@@ -222,7 +222,10 @@ internal sealed class InstallerTransactionExecutor
         {
             eventsFile.Dispose();
             replay = TransactionJournalStore.ReadEvents(transaction, journal);
-            IReadOnlyList<TransactionPathChange> changed = GetAppliedChanges(plan, replay);
+            IReadOnlyList<TransactionPathChange> changed = GetDurablyAppliedOrObservedOperationIndices(game, journal, replay)
+                .OrderBy(index => index)
+                .Select(index => new TransactionPathChange(plan.Operations[index].RelativePath, plan.Operations[index].Kind))
+                .ToArray();
             try
             {
                 this.RollBackJournal(game, transaction, journal);
@@ -236,7 +239,7 @@ internal sealed class InstallerTransactionExecutor
                     try
                     {
                         TransactionJournalReplay rollbackReplay = TransactionJournalStore.ReadEvents(transaction, journal);
-                        rolledBack = GetRolledBackChanges(plan, rollbackReplay);
+                        rolledBack = GetRolledBackChanges(game, plan, journal, rollbackReplay, changed);
                     }
                     catch
                     {
@@ -337,17 +340,21 @@ internal sealed class InstallerTransactionExecutor
         );
     }
 
-    private static IReadOnlyList<TransactionPathChange> GetAppliedChanges(TransactionPlan plan, TransactionJournalReplay replay)
-        => replay.AppliedOperations
+    private static IReadOnlyList<TransactionPathChange> GetRolledBackChanges(
+        LinuxAnchoredFileSystem game,
+        TransactionPlan plan,
+        TransactionJournal journal,
+        TransactionJournalReplay replay,
+        IReadOnlyList<TransactionPathChange> changed
+    )
+    {
+        HashSet<string> changedPaths = changed.Select(item => item.RelativePath).ToHashSet(StringComparer.Ordinal);
+        return GetDurablyRolledBackOrObservedOperationIndices(game, journal, replay)
             .OrderBy(index => index)
             .Select(index => new TransactionPathChange(plan.Operations[index].RelativePath, plan.Operations[index].Kind))
+            .Where(item => changedPaths.Contains(item.RelativePath))
             .ToArray();
-
-    private static IReadOnlyList<TransactionPathChange> GetRolledBackChanges(TransactionPlan plan, TransactionJournalReplay replay)
-        => replay.RolledBackOperations
-            .OrderBy(index => index)
-            .Select(index => new TransactionPathChange(plan.Operations[index].RelativePath, plan.Operations[index].Kind))
-            .ToArray();
+    }
 
     private static TransactionExecutionOutcome FailureOutcome(
         Guid transactionId,
@@ -358,7 +365,13 @@ internal sealed class InstallerTransactionExecutor
         => new(transactionId, status, null, Array.Empty<TransactionPathChange>(), Array.Empty<TransactionPathChange>(), cancellation, code, SafeMessage(code));
 
     internal static TransactionErrorCode GetErrorCode(Exception exception)
-        => exception is InstallerTransactionException transaction ? transaction.Code : TransactionErrorCode.IoFailure;
+        => exception switch
+        {
+            InstallerTransactionException transaction => transaction.Code,
+            TransactionRecoveryAttemptException recovery when recovery.InnerException is not null => GetErrorCode(recovery.InnerException),
+            AggregateException aggregate when aggregate.InnerExceptions.Count > 0 => GetErrorCode(aggregate.InnerExceptions[^1]),
+            _ => TransactionErrorCode.IoFailure
+        };
 
     internal static string? SafeMessage(TransactionErrorCode? code)
         => code switch
@@ -382,26 +395,100 @@ internal sealed class InstallerTransactionExecutor
         using InstallerOperationLease lease = InstallerOperationLease.Acquire(canonicalGameRoot);
         LinuxAnchoredFileSystem game = lease.Game;
         LinuxAnchoredFileSystem workspace = lease.Workspace;
-        IReadOnlyList<TransactionResult> results = this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
-        if (results.Count > 0)
-            lease.ReserveNextGeneration(lease.Generation);
-        this.TrimFinalTransactions(game, workspace, canonicalGameRoot);
-        return results;
+        ulong recoveryStartGeneration = lease.Generation;
+        IReadOnlyList<TransactionResult> results;
+        try
+        {
+            results = this.RecoverIncompleteTransactionsLocked(game, workspace, canonicalGameRoot);
+        }
+        catch (TransactionRecoveryAttemptException exception)
+        {
+            this.InvalidateFailedRecoveryGeneration(lease, recoveryStartGeneration, exception);
+            ExceptionDispatchInfo.Capture(exception.InnerException ?? exception).Throw();
+            throw;
+        }
+        catch (Exception exception)
+        {
+            TransactionRecoveryAttemptException recoveryFailure = new(Array.Empty<TransactionResult>(), exception);
+            this.InvalidateFailedRecoveryGeneration(lease, recoveryStartGeneration, recoveryFailure);
+            ExceptionDispatchInfo.Capture(exception).Throw();
+            throw;
+        }
+        try
+        {
+            if (results.Count > 0)
+                lease.ReserveNextGeneration(lease.Generation);
+            this.TrimFinalTransactions(game, workspace, canonicalGameRoot);
+            return results;
+        }
+        catch (Exception exception)
+        {
+            TransactionRecoveryAttemptException recoveryFailure = new(results, exception);
+            this.InvalidateFailedRecoveryGeneration(lease, recoveryStartGeneration, recoveryFailure);
+            ExceptionDispatchInfo.Capture(exception).Throw();
+            throw;
+        }
     }
 
     /// <summary>Recover under an already-held operation lease and invalidate its prior generation when needed.</summary>
     internal IReadOnlyList<TransactionResult> RecoverLocked(InstallerOperationLease lease)
     {
         ArgumentNullException.ThrowIfNull(lease);
-        IReadOnlyList<TransactionResult> results = this.RecoverIncompleteTransactionsLocked(
-            lease.Game,
-            lease.Workspace,
-            lease.CanonicalGameRoot
-        );
-        if (results.Count > 0)
-            lease.ReserveNextGeneration(lease.Generation);
-        this.TrimFinalTransactions(lease.Game, lease.Workspace, lease.CanonicalGameRoot);
-        return results;
+        ulong recoveryStartGeneration = lease.Generation;
+        IReadOnlyList<TransactionResult> results;
+        try
+        {
+            results = this.RecoverIncompleteTransactionsLocked(
+                lease.Game,
+                lease.Workspace,
+                lease.CanonicalGameRoot
+            );
+        }
+        catch (TransactionRecoveryAttemptException exception)
+        {
+            this.InvalidateFailedRecoveryGeneration(lease, recoveryStartGeneration, exception);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            TransactionRecoveryAttemptException recoveryFailure = new(Array.Empty<TransactionResult>(), exception);
+            this.InvalidateFailedRecoveryGeneration(lease, recoveryStartGeneration, recoveryFailure);
+            throw recoveryFailure;
+        }
+        try
+        {
+            if (results.Count > 0)
+                lease.ReserveNextGeneration(lease.Generation);
+            this.TrimFinalTransactions(lease.Game, lease.Workspace, lease.CanonicalGameRoot);
+            return results;
+        }
+        catch (Exception exception)
+        {
+            TransactionRecoveryAttemptException recoveryFailure = new(results, exception);
+            this.InvalidateFailedRecoveryGeneration(lease, recoveryStartGeneration, recoveryFailure);
+            throw recoveryFailure;
+        }
+    }
+
+    private void InvalidateFailedRecoveryGeneration(
+        InstallerOperationLease lease,
+        ulong recoveryStartGeneration,
+        TransactionRecoveryAttemptException recoveryFailure
+    )
+    {
+        if (lease.Generation != recoveryStartGeneration)
+            return;
+        try
+        {
+            lease.ReserveNextGeneration(recoveryStartGeneration);
+        }
+        catch (Exception generationFailure)
+        {
+            throw new TransactionRecoveryAttemptException(
+                recoveryFailure.RecoveredTransactions,
+                new AggregateException(recoveryFailure, generationFailure)
+            );
+        }
     }
 
     private static void ValidatePlan(TransactionPlan plan)
@@ -792,36 +879,51 @@ internal sealed class InstallerTransactionExecutor
             this.PreflightRecoveryStoreEntry(game, transactions, canonicalGameRoot, name);
 
         List<TransactionResult> results = new();
-        foreach (string name in names)
+        try
         {
-            LinuxFileIdentity? identity = transactions.Stat(name);
-            if (name.StartsWith("preparing-", StringComparison.Ordinal))
+            foreach (string name in names)
             {
-                if (
-                    identity?.Kind != LinuxAnchoredEntryKind.Directory
-                    || !Guid.TryParseExact(name["preparing-".Length..], "N", out _)
-                )
-                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe preparation workspace requires manual inspection.");
-                CleanupUnpublishedTransaction(transactions, name, identity);
-                continue;
-            }
-            if (identity?.Kind != LinuxAnchoredEntryKind.Directory || !Guid.TryParseExact(name, "N", out Guid transactionId))
-                throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe or unrecognized transaction workspace requires manual inspection.");
-            using LinuxAnchoredFileSystem transaction = transactions.OpenSubdirectory(name);
-            TransactionJournal journal = TransactionJournalStore.ReadPlan(transaction, transactionId, canonicalGameRoot, game.Identity);
-            TransactionJournalReplay replay = TransactionJournalStore.ReadEvents(transaction, journal);
-            if (replay.Status is TransactionJournalEventKind.Committed or TransactionJournalEventKind.RolledBack)
-            {
+                LinuxFileIdentity? identity = transactions.Stat(name);
+                if (name.StartsWith("preparing-", StringComparison.Ordinal))
+                {
+                    if (
+                        identity?.Kind != LinuxAnchoredEntryKind.Directory
+                        || !Guid.TryParseExact(name["preparing-".Length..], "N", out _)
+                    )
+                        throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe preparation workspace requires manual inspection.");
+                    CleanupUnpublishedTransaction(transactions, name, identity);
+                    continue;
+                }
+                if (identity?.Kind != LinuxAnchoredEntryKind.Directory || !Guid.TryParseExact(name, "N", out Guid transactionId))
+                    throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "An unsafe or unrecognized transaction workspace requires manual inspection.");
+                this.FaultInjector.BeforeRecoveringTransaction(transactionId);
+                using LinuxAnchoredFileSystem transaction = transactions.OpenSubdirectory(name);
+                TransactionJournal journal = TransactionJournalStore.ReadPlan(transaction, transactionId, canonicalGameRoot, game.Identity);
+                TransactionJournalReplay replay = TransactionJournalStore.ReadEvents(transaction, journal);
+                PreflightUnpublishedTransaction(transaction);
+                if (replay.Status is TransactionJournalEventKind.Committed or TransactionJournalEventKind.RolledBack)
+                {
+                    CleanupFinalTransaction(transaction);
+                    continue;
+                }
+                PreflightRollbackJournal(game, journal, replay);
+                this.Progress.Report(new(TransactionStage.Recovering, 0, journal.Entries.Count));
+                int changed = GetDurablyAppliedOrObservedOperationIndices(game, journal, replay).Count;
+                this.RollBackJournal(game, transaction, journal);
+                results.Add(new(transactionId, TransactionStatus.Recovered, changed));
+                this.FaultInjector.AfterRecoveryRollbackBeforeCleanup(transactionId);
                 CleanupFinalTransaction(transaction);
-                continue;
             }
-            this.Progress.Report(new(TransactionStage.Recovering, 0, journal.Entries.Count));
-            int changed = GetDurablyAppliedOrObservedOperationIndices(game, journal, replay).Count;
-            this.RollBackJournal(game, transaction, journal);
-            CleanupFinalTransaction(transaction);
-            results.Add(new(transactionId, TransactionStatus.Recovered, changed));
+            return results;
         }
-        return results;
+        catch (TransactionRecoveryAttemptException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new TransactionRecoveryAttemptException(results, exception);
+        }
     }
 
     private void PreflightRecoveryStoreEntry(
@@ -938,6 +1040,54 @@ internal sealed class InstallerTransactionExecutor
         return changed;
     }
 
+    private static HashSet<int> GetDurablyRolledBackOrObservedOperationIndices(
+        LinuxAnchoredFileSystem game,
+        TransactionJournal journal,
+        TransactionJournalReplay replay
+    )
+    {
+        HashSet<int> rolledBack = new(replay.RolledBackOperations);
+        string transactionPrefix = $"{WorkspaceName}/{TransactionsName}/{journal.TransactionId:N}/";
+        foreach (int index in replay.RollbackIntendedOperations)
+        {
+            if (rolledBack.Contains(index))
+                continue;
+            TransactionJournalEntry entry = journal.Entries[index];
+            string backupPath = transactionPrefix + entry.BackupRelativePath;
+            if (game.Stat(backupPath) is not null)
+                continue;
+            LinuxFileIdentity? current = game.Stat(entry.RelativePath);
+            if (
+                entry.HadOriginal
+                    ? current is not null
+                        && entry.ExpectedExistingSha256 is not null
+                        && IsExactFile(game, entry.RelativePath, entry.ExpectedExistingSha256)
+                    : current is null
+            )
+            {
+                rolledBack.Add(index);
+            }
+        }
+        return rolledBack;
+    }
+
+    private static bool IsExactFile(
+        LinuxAnchoredFileSystem game,
+        string relativePath,
+        string expectedSha256
+    )
+    {
+        try
+        {
+            ValidateFile(game, relativePath, expectedSha256, TransactionErrorCode.RecoveryFailed);
+            return true;
+        }
+        catch (Exception exception) when (exception is InstallerTransactionException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     private static void PreflightUnpublishedTransaction(LinuxAnchoredFileSystem preparation)
     {
         HashSet<string> known = new(StringComparer.Ordinal)
@@ -984,7 +1134,7 @@ internal sealed class InstallerTransactionExecutor
         if (replay.Status == TransactionJournalEventKind.Committed)
             throw new InstallerTransactionException(TransactionErrorCode.RecoveryFailed, "A committed transaction can't be rolled back by crash recovery.");
         using LinuxAnchoredFile eventsFile = TransactionJournalStore.OpenEventsForAppend(transaction, replay);
-        if (replay.Status != TransactionJournalEventKind.RollingBack && replay.Status != TransactionJournalEventKind.RollbackApplied)
+        if (replay.Status is not (TransactionJournalEventKind.RollingBack or TransactionJournalEventKind.RollbackIntent or TransactionJournalEventKind.RollbackApplied))
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RollingBack);
 
         string transactionPrefix = $"{WorkspaceName}/{TransactionsName}/{journal.TransactionId:N}/";
@@ -997,6 +1147,9 @@ internal sealed class InstallerTransactionExecutor
             string backupPath = transactionPrefix + entry.BackupRelativePath;
             LinuxFileIdentity? current = game.Stat(entry.RelativePath);
             LinuxFileIdentity? backup = game.Stat(backupPath);
+            if (!replay.RollbackIntendedOperations.Contains(index))
+                replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RollbackIntent, index);
+            bool rollbackMutated = false;
 
             if (entry.HadOriginal)
             {
@@ -1015,8 +1168,10 @@ internal sealed class InstallerTransactionExecutor
                             throw RecoveryError("An unexpected file blocks exact rollback.");
                         LinuxFileIdentity verifiedResult = ValidateFile(game, entry.RelativePath, entry.ExpectedResultSha256, TransactionErrorCode.RecoveryFailed);
                         game.UnlinkFile(entry.RelativePath, verifiedResult);
+                        rollbackMutated = true;
                     }
                     game.RenameFileNoReplace(backupPath, entry.RelativePath, verifiedBackup);
+                    rollbackMutated = true;
                 }
             }
             else
@@ -1029,6 +1184,7 @@ internal sealed class InstallerTransactionExecutor
                         throw RecoveryError("An unexpected result blocks exact rollback.");
                     LinuxFileIdentity verifiedResult = ValidateFile(game, entry.RelativePath, entry.ExpectedResultSha256, TransactionErrorCode.RecoveryFailed);
                     game.UnlinkFile(entry.RelativePath, verifiedResult);
+                    rollbackMutated = true;
                 }
             }
 
@@ -1041,8 +1197,13 @@ internal sealed class InstallerTransactionExecutor
                     throw RecoveryError("A transaction-created parent changed type during rollback.");
                 using LinuxAnchoredFileSystem opened = game.OpenSubdirectory(directory);
                 if (opened.EnumerateEntryNames().Count == 0)
+                {
                     game.RemoveEmptyDirectory(directory, directoryIdentity);
+                    rollbackMutated = true;
+                }
             }
+            if (rollbackMutated)
+                this.FaultInjector.AfterRollbackMutationBeforeAppliedEvent(journal.TransactionId, index);
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RollbackApplied, index);
         }
         TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.RolledBack);
