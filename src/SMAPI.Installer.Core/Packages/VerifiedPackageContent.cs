@@ -12,11 +12,15 @@ internal interface IVerifiedPackageContentAuthority
 {
     PackageManifest Manifest { get; }
     Sha256Digest ManifestSha256 { get; }
-    LinuxAnchoredFile OpenFile(PackageManifestEntry expected);
+    LinuxAnchoredFile OpenFile(PackageManifestEntry expected, CancellationToken cancellationToken = default);
     void AssertUsable();
 }
 
 /// <summary>An opaque, descriptor-anchored extraction of every file in a verified install manifest.</summary>
+/// <remarks>
+/// The caller owns this handle. Installer inspections and executions borrow it without disposing it, so it must
+/// remain alive until execution finishes; the caller may then reuse or dispose it.
+/// </remarks>
 public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable, IVerifiedPackageContentAuthority
 {
     private readonly string StagingRoot;
@@ -43,7 +47,10 @@ public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable, IVer
         this.Payload = payload;
     }
 
-    LinuxAnchoredFile IVerifiedPackageContentAuthority.OpenFile(PackageManifestEntry expected)
+    LinuxAnchoredFile IVerifiedPackageContentAuthority.OpenFile(
+        PackageManifestEntry expected,
+        CancellationToken cancellationToken
+    )
     {
         if (this.Disposed)
             throw new ObjectDisposedException(nameof(VerifiedPackageContent));
@@ -53,7 +60,7 @@ public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable, IVer
             if (
                 file.Identity.Size != expected.SizeBytes
                 || file.Identity.UnixMode != expected.UnixMode
-                || this.Payload.ComputeSha256(file) != expected.Sha256.Value
+                || this.Payload.ComputeSha256(file, cancellationToken) != expected.Sha256.Value
             )
             {
                 throw new PackageSecurityException("A retained verified payload file changed before use.");
@@ -143,11 +150,12 @@ public sealed class VerifiedPackageContentFactory
             payload = new LinuxAnchoredFileSystem(payloadDestination);
             foreach (PackageManifestEntry entry in authority.Manifest.Entries)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 using LinuxAnchoredFile verified = payload.OpenRegularFileForRead(entry.Path.Value);
                 if (
                     verified.Identity.Size != entry.SizeBytes
                     || verified.Identity.UnixMode != entry.UnixMode
-                    || payload.ComputeSha256(verified) != entry.Sha256.Value
+                    || payload.ComputeSha256(verified, cancellationToken) != entry.Sha256.Value
                 )
                 {
                     throw new PackageSecurityException("The anchored installer payload doesn't match its verified manifest.");

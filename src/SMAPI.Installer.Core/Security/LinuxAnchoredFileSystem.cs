@@ -282,10 +282,16 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     }
 
     /// <summary>Copy an already-open regular file to a new anchored path and durably verify the bytes.</summary>
-    public LinuxFileIdentity CopyFile(LinuxAnchoredFile source, string destinationRelativePath, int unixMode)
+    public LinuxFileIdentity CopyFile(
+        LinuxAnchoredFile source,
+        string destinationRelativePath,
+        int unixMode,
+        CancellationToken cancellationToken = default
+    )
     {
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(source);
+        cancellationToken.ThrowIfCancellationRequested();
         source.AssertOpen();
         LinuxFileIdentity sourceBefore = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
         if (sourceBefore != source.Identity)
@@ -298,6 +304,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             long offset = 0;
             while (true)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 int count = RandomAccess.Read(source.Handle, buffer, offset);
                 if (count == 0)
                     break;
@@ -328,16 +335,20 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         LinuxFileIdentity destinationAfter = GetHandleIdentity(destination.Handle, requireSingleLinkRegularFile: true);
         if (sourceAfter != sourceBefore)
             throw new IOException("The source identity changed while it was copied.");
-        if (destinationAfter.Size != sourceAfter.Size || this.ComputeSha256(source) != this.ComputeSha256(destination))
+        if (
+            destinationAfter.Size != sourceAfter.Size
+            || this.ComputeSha256(source, cancellationToken) != this.ComputeSha256(destination, cancellationToken)
+        )
             throw new IOException("The anchored copy failed byte-for-byte verification.");
         return destinationAfter;
     }
 
     /// <summary>Compute SHA-256 from an already-open stable single-link regular-file handle.</summary>
-    public string ComputeSha256(LinuxAnchoredFile file)
+    public string ComputeSha256(LinuxAnchoredFile file, CancellationToken cancellationToken = default)
     {
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(file);
+        cancellationToken.ThrowIfCancellationRequested();
         file.AssertOpen();
         LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
         if (before != file.Identity && !before.IsSameObject(file.Identity))
@@ -350,6 +361,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             long offset = 0;
             while (true)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 int count = RandomAccess.Read(file.Handle, buffer, offset);
                 if (count == 0)
                     break;

@@ -20,7 +20,7 @@ internal sealed class InstallerTransactionExecutor
     /// <summary>Construct an instance.</summary>
     public InstallerTransactionExecutor(ITransactionProgressSink? progress = null, ITransactionFaultInjector? faultInjector = null)
     {
-        this.Progress = progress ?? NullTransactionInstrumentation.Instance;
+        this.Progress = new NonThrowingTransactionProgressSink(progress);
         this.FaultInjector = faultInjector ?? NullTransactionInstrumentation.Instance;
     }
 
@@ -146,7 +146,7 @@ internal sealed class InstallerTransactionExecutor
             this.StagePayload(payload, transaction, plan, cancellationToken);
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Prepared);
             cancellationToken.ThrowIfCancellationRequested();
-            this.RevalidateAll(game, plan);
+            this.RevalidateAll(game, plan, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Applying);
             replay = this.ApplyMutations(game, transaction, plan, journal, replay, eventsFile);
@@ -364,13 +364,16 @@ internal sealed class InstallerTransactionExecutor
             try
             {
                 using LinuxAnchoredFile source = payload.OpenRegularFileForRead(operation.PayloadRelativePath!);
-                string actualHash = payload.ComputeSha256(source);
+                string actualHash = payload.ComputeSha256(source, cancellationToken);
                 if (!string.Equals(actualHash, operation.ExpectedResultSha256, StringComparison.Ordinal))
                     throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A payload entry doesn't match its expected digest.");
                 int mode = operation.ResultUnixMode ?? source.Identity.UnixMode;
-                LinuxFileIdentity staged = transaction.CopyFile(source, $"staged/{index:D8}", mode);
+                LinuxFileIdentity staged = transaction.CopyFile(source, $"staged/{index:D8}", mode, cancellationToken);
                 using LinuxAnchoredFile stagedFile = transaction.OpenRegularFileForRead($"staged/{index:D8}");
-                if (staged != stagedFile.Identity || transaction.ComputeSha256(stagedFile) != operation.ExpectedResultSha256)
+                if (
+                    staged != stagedFile.Identity
+                    || transaction.ComputeSha256(stagedFile, cancellationToken) != operation.ExpectedResultSha256
+                )
                     throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A staged payload entry failed verification.");
             }
             catch (InstallerTransactionException)
@@ -385,11 +388,16 @@ internal sealed class InstallerTransactionExecutor
         transaction.FsyncDirectory("staged");
     }
 
-    private void RevalidateAll(LinuxAnchoredFileSystem game, TransactionPlan plan)
+    private void RevalidateAll(
+        LinuxAnchoredFileSystem game,
+        TransactionPlan plan,
+        CancellationToken cancellationToken
+    )
     {
-        RevalidatePreconditions(game, plan.Preconditions);
+        RevalidatePreconditions(game, plan.Preconditions, cancellationToken);
         for (int index = 0; index < plan.Operations.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             this.Progress.Report(new(TransactionStage.Revalidating, index, plan.Operations.Count));
             TransactionFileOperation operation = plan.Operations[index];
             ValidateExisting(
@@ -397,24 +405,28 @@ internal sealed class InstallerTransactionExecutor
                 operation.RelativePath,
                 operation.ExpectedExistingSha256,
                 operation.ExpectedExistingUnixMode,
-                TransactionErrorCode.ExistingFileMismatch
+                TransactionErrorCode.ExistingFileMismatch,
+                cancellationToken
             );
         }
     }
 
     private static void RevalidatePreconditions(
         LinuxAnchoredFileSystem game,
-        IReadOnlyList<TransactionFilePrecondition> preconditions
+        IReadOnlyList<TransactionFilePrecondition> preconditions,
+        CancellationToken cancellationToken = default
     )
     {
         foreach (TransactionFilePrecondition precondition in preconditions)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ValidateExisting(
                 game,
                 precondition.RelativePath,
                 precondition.ExpectedSha256,
                 precondition.ExpectedUnixMode,
-                TransactionErrorCode.ExistingFileMismatch
+                TransactionErrorCode.ExistingFileMismatch,
+                cancellationToken
             );
         }
     }
@@ -483,7 +495,8 @@ internal sealed class InstallerTransactionExecutor
         string relativePath,
         string? expectedHash,
         int? expectedUnixMode,
-        TransactionErrorCode code
+        TransactionErrorCode code,
+        CancellationToken cancellationToken = default
     )
     {
         try
@@ -503,7 +516,7 @@ internal sealed class InstallerTransactionExecutor
             if (
                 opened.Identity != identity
                 || (expectedUnixMode is not null && identity.UnixMode != expectedUnixMode)
-                || fileSystem.ComputeSha256(opened) != expectedHash
+                || fileSystem.ComputeSha256(opened, cancellationToken) != expectedHash
             )
                 throw new InstallerTransactionException(code, "An existing destination changed after planning.");
             return identity;

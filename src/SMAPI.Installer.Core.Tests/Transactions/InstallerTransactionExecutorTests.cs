@@ -428,6 +428,49 @@ public sealed class InstallerTransactionExecutorTests
         progress.Items.Should().NotBeEmpty();
         progress.Items.Should().OnlyContain(item => item.CompletedOperations >= 0 && item.CompletedOperations <= item.TotalOperations && item.TotalOperations == 1);
         progress.Items.Last().Should().Be(new TransactionProgress(TransactionStage.Completed, 1, 1));
+        progress.Items.Where(item => item.Stage is TransactionStage.Staging or TransactionStage.Revalidating)
+            .Should().OnlyContain(item => item.CanCancel);
+        progress.Items.Where(item => item.Stage is TransactionStage.Applying or TransactionStage.Verifying or TransactionStage.Committing or TransactionStage.Completed)
+            .Should().OnlyContain(item => !item.CanCancel);
+    }
+
+    [Test]
+    public void Apply_WhenProgressObserverAlwaysThrows_StillCommits()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", null, "managed.txt", Hash("new"))
+        });
+
+        TransactionResult result = new InstallerTransactionExecutor(new ThrowingProgress()).Apply(game, payload, plan);
+
+        result.Status.Should().Be(TransactionStatus.Committed);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+    }
+
+    [Test]
+    public void Apply_WhenProgressObserverThrowsDuringRollback_DoesNotInterruptRollback()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "managed.txt", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            WriteOperation("StardewModdingAPI.dll", Hash("old"), "managed.txt", Hash("new"))
+        });
+        InstallerTransactionExecutor executor = new(
+            new ThrowingProgress(),
+            new ThrowingFaultInjector(afterOperation: 0, simulateTermination: false)
+        );
+
+        Action apply = () => executor.Apply(game, payload, plan);
+
+        apply.Should().Throw<InvalidOperationException>().WithMessage("Injected transaction failure.");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
     }
 
     [Test]
@@ -915,6 +958,11 @@ public sealed class InstallerTransactionExecutorTests
         public List<TransactionProgress> Items { get; } = new();
 
         public void Report(TransactionProgress progress) => this.Items.Add(progress);
+    }
+
+    private sealed class ThrowingProgress : ITransactionProgressSink
+    {
+        public void Report(TransactionProgress progress) => throw new InvalidOperationException("Observer failure.");
     }
 
     private sealed class ThrowingFaultInjector : ITransactionFaultInjector

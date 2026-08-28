@@ -266,13 +266,44 @@ public enum TransactionStage
 }
 
 /// <summary>A bounded transaction progress update.</summary>
-public sealed record TransactionProgress(TransactionStage Stage, int CompletedOperations, int TotalOperations);
+public sealed record TransactionProgress(TransactionStage Stage, int CompletedOperations, int TotalOperations)
+{
+    /// <summary>Whether an ordinary cancellation request can still stop this operation before mutation.</summary>
+    public bool CanCancel => this.Stage is TransactionStage.AcquiringLock or TransactionStage.Staging or TransactionStage.Revalidating;
+}
 
 /// <summary>Receives transaction progress updates.</summary>
 public interface ITransactionProgressSink
 {
     /// <summary>Report a progress update.</summary>
+    /// <remarks>
+    /// Implementations must return promptly and must not perform transaction work. Exceptions are isolated by the
+    /// installer and never change commit, rollback, or recovery outcomes.
+    /// </remarks>
     void Report(TransactionProgress progress);
+}
+
+/// <summary>Prevents an untrusted progress observer from affecting installer correctness.</summary>
+internal sealed class NonThrowingTransactionProgressSink : ITransactionProgressSink
+{
+    private readonly ITransactionProgressSink Inner;
+
+    public NonThrowingTransactionProgressSink(ITransactionProgressSink? inner)
+    {
+        this.Inner = inner ?? NullTransactionInstrumentation.Instance;
+    }
+
+    public void Report(TransactionProgress progress)
+    {
+        try
+        {
+            this.Inner.Report(progress);
+        }
+        catch (Exception)
+        {
+            // Progress is advisory. Observer failures must never alter durable installer state.
+        }
+    }
 }
 
 /// <summary>Provides deterministic fault-injection boundaries for recovery testing.</summary>

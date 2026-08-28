@@ -30,6 +30,7 @@ internal sealed class InstallationExecutionMaterializer
         ArgumentNullException.ThrowIfNull(lease);
         ArgumentNullException.ThrowIfNull(preparation);
         ArgumentNullException.ThrowIfNull(currentState);
+        cancellationToken.ThrowIfCancellationRequested();
         BoundInstallationPlan binding = preparation.Binding;
         lease.AssertRootAndGeneration(binding.GameRoot, binding.OperationGeneration);
         currentState.AssertUsable(lease);
@@ -37,26 +38,28 @@ internal sealed class InstallationExecutionMaterializer
         AssertRecoveryGenerationCapacity(lease.Game);
         RecoverySnapshotPreparation recovery = preparation.RecoverySnapshot
             ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "Every executable action must produce a recovery generation.");
-        AssertAllInstructionPreconditions(lease.Game, preparation.Instructions);
-        AssertRecoveryBindings(lease.Game, recovery.PathBindings);
+        AssertAllInstructionPreconditions(lease.Game, preparation.Instructions, cancellationToken);
+        AssertRecoveryBindings(lease.Game, recovery.PathBindings, cancellationToken);
 
         string stagingRoot = PrivatePackageStaging.CreateDirectory();
         LinuxAnchoredFileSystem? payload = null;
         try
         {
             payload = new LinuxAnchoredFileSystem(stagingRoot);
-            StagingContext staging = new(payload);
+            StagingContext staging = new(payload, cancellationToken);
             List<TransactionFileOperation> recoveryOperations = this.StageRecoveryGeneration(
                 lease,
                 preparation,
                 currentState,
                 recovery,
-                staging
+                staging,
+                cancellationToken
             );
             List<TransactionFileOperation> ordinaryOperations = this.StageOrdinaryOperations(
                 lease,
                 preparation.Instructions,
-                staging
+                staging,
+                cancellationToken
             );
             TransactionFileOperation? manifestOperation = this.StageManifestOperation(preparation.Manifest, staging);
             TransactionFileOperation? receiptOperation = this.StageReceiptOperation(preparation.Receipt, staging);
@@ -117,8 +120,8 @@ internal sealed class InstallationExecutionMaterializer
                             ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "A retained path has no mode precondition.")
                     ))
             );
-            AssertAllInstructionPreconditions(lease.Game, preparation.Instructions);
-            AssertRecoveryBindings(lease.Game, recovery.PathBindings);
+            AssertAllInstructionPreconditions(lease.Game, preparation.Instructions, cancellationToken);
+            AssertRecoveryBindings(lease.Game, recovery.PathBindings, cancellationToken);
             currentState.AssertUsable(lease);
             lease.AssertRootAndGeneration(binding.GameRoot, binding.OperationGeneration);
             return this.Executor.ApplyLocked(
@@ -172,7 +175,8 @@ internal sealed class InstallationExecutionMaterializer
         InstallationExecutionPreparation preparation,
         AnchoredCoreStateAuthority currentState,
         RecoverySnapshotPreparation recovery,
-        StagingContext staging
+        StagingContext staging,
+        CancellationToken cancellationToken
     )
     {
         string prefix = $".smapi-installer/recovery/generations/{preparation.TransactionId:N}";
@@ -219,10 +223,11 @@ internal sealed class InstallationExecutionMaterializer
         int contentIndex = 0;
         foreach (RecoveryPathBinding pathBinding in recovery.PathBindings.Where(binding => binding.RequiresContentCapture))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             RecoveryFileIdentity identity = pathBinding.PriorIdentity
                 ?? throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, "A recovery capture path has no prior identity.");
             using LinuxAnchoredFile source = lease.Game.OpenRegularFileForRead(pathBinding.Path.Value);
-            AssertSource(lease.Game, source, identity, enforceSourceMode: true);
+            AssertSource(lease.Game, source, identity, enforceSourceMode: true, cancellationToken: cancellationToken);
             string staged = staging.StageFile(source, identity.Sha256, identity.SizeBytes);
             operations.Add(WriteOperation(
                 $"{prefix}/files/{contentIndex:D8}",
@@ -239,12 +244,14 @@ internal sealed class InstallationExecutionMaterializer
     private List<TransactionFileOperation> StageOrdinaryOperations(
         InstallerOperationLease lease,
         IReadOnlyList<FilePreparationInstruction> instructions,
-        StagingContext staging
+        StagingContext staging,
+        CancellationToken cancellationToken
     )
     {
         List<TransactionFileOperation> operations = new();
         foreach (FilePreparationInstruction instruction in instructions.Where(instruction => instruction.IsTransactionDestination))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (instruction.Kind == PreparationInstructionKind.RemoveTransactionDestination)
             {
                 operations.Add(new TransactionFileOperation(
@@ -265,7 +272,14 @@ internal sealed class InstallationExecutionMaterializer
             {
                 throw new ExecutionCompilationException(ExecutionCompilationError.InvalidOperationMapping, $"Write '{instruction.Path}' isn't completely materializable.");
             }
-            string staged = this.StageSource(lease, instruction.Source, instruction.ExpectedResultSha256, instruction.ResultSizeBytes.Value, staging);
+            string staged = this.StageSource(
+                lease,
+                instruction.Source,
+                instruction.ExpectedResultSha256,
+                instruction.ResultSizeBytes.Value,
+                staging,
+                cancellationToken
+            );
             operations.Add(WriteOperation(
                 instruction.Path.Value,
                 instruction.ExpectedCurrentSha256,
@@ -335,7 +349,8 @@ internal sealed class InstallationExecutionMaterializer
         PreparationSource source,
         Sha256Digest expectedSha256,
         long expectedSize,
-        StagingContext staging
+        StagingContext staging,
+        CancellationToken cancellationToken
     )
     {
         LinuxAnchoredFile opened;
@@ -345,7 +360,10 @@ internal sealed class InstallationExecutionMaterializer
         switch (source)
         {
             case VerifiedPackageFileSource package:
-                opened = package.Authority.OpenFile(package.Authority.Manifest.Entries.Single(entry => entry.Path.Equals(package.PackagePath)));
+                opened = package.Authority.OpenFile(
+                    package.Authority.Manifest.Entries.Single(entry => entry.Path.Equals(package.PackagePath)),
+                    cancellationToken
+                );
                 break;
             case CurrentGameLauncherSource currentLauncher:
                 opened = lease.Game.OpenRegularFileForRead(currentLauncher.SourcePath.Value);
@@ -375,7 +393,7 @@ internal sealed class InstallationExecutionMaterializer
         using (opened)
         {
             if (sourceRoot is not null && expectedIdentity is not null)
-                AssertSource(sourceRoot, opened, expectedIdentity, enforceMode);
+                AssertSource(sourceRoot, opened, expectedIdentity, enforceMode, cancellationToken);
             return staging.StageFile(opened, expectedSha256, expectedSize);
         }
     }
@@ -420,11 +438,13 @@ internal sealed class InstallationExecutionMaterializer
 
     private static void AssertAllInstructionPreconditions(
         LinuxAnchoredFileSystem game,
-        IReadOnlyList<FilePreparationInstruction> instructions
+        IReadOnlyList<FilePreparationInstruction> instructions,
+        CancellationToken cancellationToken
     )
     {
         foreach (FilePreparationInstruction instruction in instructions)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             LinuxFileIdentity? current = game.Stat(instruction.Path.Value);
             if (instruction.ExpectedCurrentSha256 is null)
             {
@@ -435,18 +455,23 @@ internal sealed class InstallationExecutionMaterializer
             if (current is null || current.Kind != LinuxAnchoredEntryKind.RegularFile || current.LinkCount != 1)
                 throw new InstallerTransactionException(TransactionErrorCode.ExistingFileMismatch, $"'{instruction.Path}' changed type or disappeared after planning.");
             using LinuxAnchoredFile file = game.OpenRegularFileForRead(instruction.Path.Value);
-            if (file.Identity != current || Sha256Digest.Parse(game.ComputeSha256(file)) != instruction.ExpectedCurrentSha256)
+            if (
+                file.Identity != current
+                || Sha256Digest.Parse(game.ComputeSha256(file, cancellationToken)) != instruction.ExpectedCurrentSha256
+            )
                 throw new InstallerTransactionException(TransactionErrorCode.ExistingFileMismatch, $"'{instruction.Path}' changed after planning.");
         }
     }
 
     private static void AssertRecoveryBindings(
         LinuxAnchoredFileSystem game,
-        IReadOnlyList<RecoveryPathBinding> bindings
+        IReadOnlyList<RecoveryPathBinding> bindings,
+        CancellationToken cancellationToken
     )
     {
         foreach (RecoveryPathBinding binding in bindings)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             LinuxFileIdentity? current = game.Stat(binding.Path.Value);
             if (binding.PriorIdentity is null)
             {
@@ -457,7 +482,7 @@ internal sealed class InstallationExecutionMaterializer
             if (current is null)
                 throw new InstallerTransactionException(TransactionErrorCode.PathChanged, $"Recovery path '{binding.Path}' disappeared after inspection.");
             using LinuxAnchoredFile file = game.OpenRegularFileForRead(binding.Path.Value);
-            AssertSource(game, file, binding.PriorIdentity, enforceSourceMode: true);
+            AssertSource(game, file, binding.PriorIdentity, enforceSourceMode: true, cancellationToken: cancellationToken);
         }
     }
 
@@ -465,7 +490,8 @@ internal sealed class InstallationExecutionMaterializer
         LinuxAnchoredFileSystem sourceRoot,
         LinuxAnchoredFile source,
         RecoveryFileIdentity expected,
-        bool enforceSourceMode
+        bool enforceSourceMode,
+        CancellationToken cancellationToken
     )
     {
         if (
@@ -473,7 +499,7 @@ internal sealed class InstallationExecutionMaterializer
             || source.Identity.LinkCount != 1
             || source.Identity.Size != expected.SizeBytes
             || (enforceSourceMode && source.Identity.UnixMode != expected.UnixMode)
-            || Sha256Digest.Parse(sourceRoot.ComputeSha256(source)) != expected.Sha256
+            || Sha256Digest.Parse(sourceRoot.ComputeSha256(source, cancellationToken)) != expected.Sha256
         )
         {
             throw new InstallerTransactionException(TransactionErrorCode.PathChanged, "A materialization source changed after planning.");
@@ -529,17 +555,20 @@ internal sealed class InstallationExecutionMaterializer
     private sealed class StagingContext
     {
         private readonly LinuxAnchoredFileSystem Payload;
+        private readonly CancellationToken CancellationToken;
         private int NextIndex;
         private long StagedBytes;
 
-        public StagingContext(LinuxAnchoredFileSystem payload)
+        public StagingContext(LinuxAnchoredFileSystem payload, CancellationToken cancellationToken)
         {
             this.Payload = payload;
+            this.CancellationToken = cancellationToken;
         }
 
         public string StageBytes(byte[] bytes)
         {
             ArgumentNullException.ThrowIfNull(bytes);
+            this.CancellationToken.ThrowIfCancellationRequested();
             this.AddBytes(bytes.LongLength);
             string name = this.GetNextName();
             using LinuxAnchoredFile file = this.Payload.CreateNewFile(name, PrivateFileMode);
@@ -553,12 +582,12 @@ internal sealed class InstallationExecutionMaterializer
                 throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A materialization source has an unexpected size.");
             this.AddBytes(expectedSize);
             string name = this.GetNextName();
-            LinuxFileIdentity copied = this.Payload.CopyFile(source, name, PrivateFileMode);
+            LinuxFileIdentity copied = this.Payload.CopyFile(source, name, PrivateFileMode, this.CancellationToken);
             using LinuxAnchoredFile verified = this.Payload.OpenRegularFileForRead(name);
             if (
                 verified.Identity != copied
                 || verified.Identity.Size != expectedSize
-                || Sha256Digest.Parse(this.Payload.ComputeSha256(verified)) != expectedSha256
+                || Sha256Digest.Parse(this.Payload.ComputeSha256(verified, this.CancellationToken)) != expectedSha256
             )
             {
                 throw new InstallerTransactionException(TransactionErrorCode.PayloadMismatch, "A staged materialization source failed exact verification.");

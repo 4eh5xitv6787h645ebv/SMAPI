@@ -603,7 +603,7 @@ public class InstallerExecutionCompilerTests
             this.Manifest = manifest;
         }
 
-        public LinuxAnchoredFile OpenFile(PackageManifestEntry expected)
+        public LinuxAnchoredFile OpenFile(PackageManifestEntry expected, CancellationToken cancellationToken = default)
         {
             throw new NotSupportedException("The pure compiler tests never materialize package bytes.");
         }

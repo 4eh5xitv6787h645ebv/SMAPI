@@ -126,6 +126,34 @@ public sealed class LinuxAnchoredFileSystemTests
     }
 
     [Test]
+    public void ComputeSha256_CancelledBeforeRead_StopsPromptly()
+    {
+        File.WriteAllText(Path.Combine(this.RootPath, "payload.bin"), "trusted bytes");
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead("payload.bin");
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        Action hash = () => fileSystem.ComputeSha256(opened, cancellation.Token);
+
+        hash.Should().Throw<OperationCanceledException>();
+    }
+
+    [Test]
+    public void ComputeSha256_CancelledDuringLargeFile_StopsBeforeCompletion()
+    {
+        using (FileStream sparse = File.Create(Path.Combine(this.RootPath, "large.bin")))
+            sparse.SetLength(512L * 1024 * 1024);
+        using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
+        using LinuxAnchoredFile opened = fileSystem.OpenRegularFileForRead("large.bin");
+        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(5));
+
+        Action hash = () => fileSystem.ComputeSha256(opened, cancellation.Token);
+
+        hash.Should().Throw<OperationCanceledException>();
+    }
+
+    [Test]
     public void AppendAndFsync_LeafReplacedAfterOpen_RejectsWithoutWritingReplacement()
     {
         string path = Path.Combine(this.RootPath, "log");
@@ -185,6 +213,42 @@ public sealed class LinuxAnchoredFileSystemTests
         result.Kind.Should().Be(LinuxAnchoredEntryKind.RegularFile);
         result.LinkCount.Should().Be(1);
         result.UnixMode.Should().Be(0x180);
+    }
+
+    [Test]
+    public void CopyFile_CancelledBeforeCopy_DoesNotCreateDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "trusted payload");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        Action copy = () => destinationFileSystem.CopyFile(source, "payload", 0x180, cancellation.Token);
+
+        copy.Should().Throw<OperationCanceledException>();
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFile_CancelledDuringLargeCopy_RemovesPartialDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        using (FileStream sparse = File.Create(Path.Combine(sourceRoot, "large.bin")))
+            sparse.SetLength(512L * 1024 * 1024);
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("large.bin");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(5));
+
+        Action copy = () => destinationFileSystem.CopyFile(source, "large.bin", 0x180, cancellation.Token);
+
+        copy.Should().Throw<OperationCanceledException>();
+        File.Exists(Path.Combine(this.RootPath, "large.bin")).Should().BeFalse();
     }
 
     [Test]

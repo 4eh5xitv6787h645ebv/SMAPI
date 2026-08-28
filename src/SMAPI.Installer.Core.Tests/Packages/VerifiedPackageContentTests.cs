@@ -127,6 +127,55 @@ public sealed class VerifiedPackageContentTests
     }
 
     [Test]
+    public async Task PublicInspection_DisposeDoesNotTakePackageOwnership()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "borrowed-package-game");
+        Directory.CreateDirectory(game);
+        await File.WriteAllTextAsync(Path.Combine(game, "StardewValley"), "vanilla launcher");
+        File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)493);
+        LinuxInstallerEngine engine = new();
+        InspectedInstallationState first = await engine.InspectAsync(game, InstallationAction.Install, content);
+
+        first.Dispose();
+        using InspectedInstallationState second = await engine.InspectAsync(game, InstallationAction.Install, content);
+
+        second.Plan.CanExecute.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task PublicExecution_DisposedBorrowedPackageRejectsBeforeMutation()
+    {
+        Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
+        {
+            ["unix-launcher.sh"] = ("#!/bin/sh\nexec smapi\n"u8.ToArray(), 493),
+            ["smapi-internal/a.dll"] = ("verified assembly"u8.ToArray(), 420)
+        };
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(files);
+        VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+        string game = Path.Combine(this.TempRoot, "disposed-package-game");
+        Directory.CreateDirectory(game);
+        string launcher = Path.Combine(game, "StardewValley");
+        await File.WriteAllTextAsync(launcher, "vanilla launcher");
+        File.SetUnixFileMode(launcher, (UnixFileMode)493);
+        LinuxInstallerEngine engine = new();
+        using InspectedInstallationState inspection = await engine.InspectAsync(game, InstallationAction.Install, content);
+        await content.DisposeAsync();
+
+        Func<Task> execute = () => engine.ExecuteAsync(inspection, inspection.ConfirmationDigest);
+
+        await execute.Should().ThrowAsync<ObjectDisposedException>();
+        Directory.Exists(Path.Combine(game, ".smapi-installer")).Should().BeFalse();
+        (await File.ReadAllTextAsync(launcher)).Should().Be("vanilla launcher");
+    }
+
+    [Test]
     public async Task PublicFacade_VerifiedInstallAndApprovedRepair_UsesExactPackageBytes()
     {
         Dictionary<string, (byte[] Bytes, int Mode)> files = new(StringComparer.Ordinal)
