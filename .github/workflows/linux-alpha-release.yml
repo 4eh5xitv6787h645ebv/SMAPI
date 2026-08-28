@@ -1,0 +1,350 @@
+name: Linux alpha release qualification
+
+on:
+    pull_request:
+        branches:
+            - develop
+    workflow_dispatch:
+        inputs:
+            release_commit:
+                description: Exact 40-character commit on develop to build
+                required: true
+                type: string
+            release_version:
+                description: Exact committed fork version
+                required: true
+                type: string
+            release_tag:
+                description: Reserved fork tag for this version (the tag may be created later)
+                required: true
+                type: string
+    push:
+        tags:
+            - "fork-4eh5xitv6787h645ebv-linux-v*-alpha.*"
+
+concurrency:
+    group: linux-alpha-release-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release_commit || github.sha }}
+    cancel-in-progress: false
+
+permissions:
+    contents: read
+
+env:
+    DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    DOTNET_NOLOGO: "1"
+    REFERENCE_ASSEMBLIES_COMMIT: 0141355fecb8536715ecff22f99374b5e632cbed
+
+jobs:
+    qualify-and-package:
+        name: Linux alpha release qualification
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+        outputs:
+            release_commit: ${{ steps.release.outputs.release_commit }}
+            release_tag: ${{ steps.release.outputs.release_tag }}
+            release_version: ${{ steps.release.outputs.release_version }}
+            source_tree: ${{ steps.release.outputs.source_tree }}
+        steps:
+            -   name: Checkout exact source commit
+                uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+                with:
+                    fetch-depth: 0
+                    persist-credentials: false
+                    ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_commit || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+
+            -   name: Validate exact commit and release identity
+                id: release
+                shell: bash
+                env:
+                    DISPATCH_COMMIT: ${{ inputs.release_commit }}
+                    DISPATCH_TAG: ${{ inputs.release_tag }}
+                    DISPATCH_VERSION: ${{ inputs.release_version }}
+                run: |
+                    set -euo pipefail
+                    actual_commit="$(git rev-parse HEAD)"
+                    source_tree="$(git show -s --format=%T HEAD)"
+                    source_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' build/common.targets)"
+
+                    if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+                        [[ "$actual_commit" == "$DISPATCH_COMMIT" ]]
+                        [[ "$source_version" == "$DISPATCH_VERSION" ]]
+                        release_tag="$DISPATCH_TAG"
+                    elif [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+                        release_tag="$GITHUB_REF_NAME"
+                    else
+                        if [[ ! "$source_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-unofficial\.4eh5xitv6787h645ebv\.linux\.alpha\.([1-9][0-9]*)$ ]]; then
+                            echo "The committed version isn't a valid Linux fork alpha: $source_version" >&2
+                            exit 1
+                        fi
+                        release_tag="fork-4eh5xitv6787h645ebv-linux-v${BASH_REMATCH[1]}-alpha.${BASH_REMATCH[2]}"
+                    fi
+
+                    build/scripts/validate-linux-release-inputs.sh "$source_version" "$release_tag" "$actual_commit"
+
+                    if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+                        git fetch --no-tags origin develop
+                        git merge-base --is-ancestor "$actual_commit" origin/develop
+                    fi
+                    if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+                        if [[ "$(git cat-file -t "$GITHUB_REF")" != "tag" ]]; then
+                            echo "Release tags must be annotated tag objects; lightweight tags are refused." >&2
+                            exit 1
+                        fi
+                        [[ "$(git rev-parse "$GITHUB_REF^{commit}")" == "$actual_commit" ]]
+                    fi
+
+                    {
+                        echo "release_commit=$actual_commit"
+                        echo "release_tag=$release_tag"
+                        echo "release_version=$source_version"
+                        echo "source_tree=$source_tree"
+                    } >> "$GITHUB_OUTPUT"
+
+            -   name: Install pinned .NET SDKs
+                uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+                with:
+                    dotnet-version: |
+                        10.0.108
+                        6.0.428
+
+            -   name: Checkout pinned game reference assemblies
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    git init "$RUNNER_TEMP/StardewValley"
+                    git -C "$RUNNER_TEMP/StardewValley" fetch --depth 1 https://github.com/StardewModders/mod-reference-assemblies.git "$REFERENCE_ASSEMBLIES_COMMIT"
+                    git -C "$RUNNER_TEMP/StardewValley" checkout --detach FETCH_HEAD
+                    [[ "$(git -C "$RUNNER_TEMP/StardewValley" rev-parse HEAD)" == "$REFERENCE_ASSEMBLIES_COMMIT" ]]
+
+            -   name: Validate release scripts and formatting
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    build/scripts/test-linux-release-inputs.sh
+                    build/scripts/test-finalize-install-package-inputs.sh
+                    bash -n build/scripts/finalize-install-package.sh
+                    bash -n src/SMAPI.Installer/assets/smapi-runtime-dispatcher.sh
+                    bash -n src/SMAPI.Installer/assets/unix-launcher.sh
+                    dotnet restore src/SMAPI.slnx \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
+                    dotnet format whitespace src/SMAPI.Installer/SMAPI.Installer.csproj --verify-no-changes --no-restore \
+                        --include src/SMAPI.Installer/InteractiveInstaller.cs src/SMAPI.Installer/Program.cs
+                    git diff --check
+
+            -   name: Build all projects in Release mode
+                run: >-
+                    dotnet build src/SMAPI.slnx
+                    --configuration Release
+                    --no-restore
+                    -p:GamePath="$RUNNER_TEMP/StardewValley"
+                    -p:CopyToGameFolder=false
+                    -p:AllowMissingPrunePackageData=true
+
+            -   name: Run fixture-free Linux runtime-dispatcher tests
+                run: >-
+                    dotnet test src/SMAPI.RuntimeDispatcher.Tests/SMAPI.RuntimeDispatcher.Tests.csproj
+                    --configuration Release
+                    --no-build
+                    -- RunConfiguration.TreatNoTestsAsError=true
+
+            -   name: Run fixture-free analyzer tests
+                run: >-
+                    dotnet test src/SMAPI.ModBuildConfig.Analyzer.Tests/SMAPI.ModBuildConfig.Analyzer.Tests.csproj
+                    --configuration Release
+                    --no-build
+                    -- RunConfiguration.TreatNoTestsAsError=true
+
+            -   name: Build Linux-only installer package
+                shell: pwsh
+                env:
+                    RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+                run: >-
+                    ./build/scripts/prepare-install-package.ps1
+                    "$env:RELEASE_VERSION"
+                    --linux-only
+                    "--game-path=$env:RUNNER_TEMP/StardewValley"
+
+            -   name: Test package and generate integrity metadata
+                shell: bash
+                env:
+                    RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
+                    RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+                    RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+                    SOURCE_TREE: ${{ steps.release.outputs.source_tree }}
+                run: |
+                    set -euo pipefail
+                    package_name="SMAPI-$RELEASE_VERSION-linux-x64-installer.zip"
+                    package_path="bin/$package_name"
+                    build/scripts/test-linux-release-package.sh "$package_path" "$RELEASE_VERSION"
+                    build/scripts/test-linux-installer-lifecycle.sh "$package_path" "$RELEASE_VERSION" "$RUNNER_TEMP/StardewValley"
+                    git diff --exit-code
+
+                    mkdir -p artifacts/release
+                    cp "$package_path" artifacts/release/
+                    (
+                        cd artifacts/release
+                        sha256sum "$package_name" > SHA256SUMS
+                    )
+                    package_sha256="$(cut -d ' ' -f 1 artifacts/release/SHA256SUMS)"
+                    package_size="$(stat -c %s "$package_path")"
+                    dotnet_info="$(dotnet --info)"
+
+                    jq -n \
+                        --arg schema_version "1" \
+                        --arg release_version "$RELEASE_VERSION" \
+                        --arg release_tag "$RELEASE_TAG" \
+                        --arg source_repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+                        --arg source_commit "$RELEASE_COMMIT" \
+                        --arg source_tree "$SOURCE_TREE" \
+                        --arg workflow "$GITHUB_WORKFLOW_REF" \
+                        --arg workflow_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+                        --arg runner_image "$ImageOS-$ImageVersion" \
+                        --arg runner_arch "$RUNNER_ARCH" \
+                        --arg reference_assemblies_commit "$REFERENCE_ASSEMBLIES_COMMIT" \
+                        --arg package "$package_name" \
+                        --arg package_sha256 "$package_sha256" \
+                        --argjson package_size "$package_size" \
+                        --arg build_configuration "Release" \
+                        --arg runtime_identifier "linux-x64" \
+                        --arg build_timestamp_utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+                        --arg dotnet_info "$dotnet_info" \
+                        '{
+                            schema_version: ($schema_version | tonumber),
+                            release: {version: $release_version, tag: $release_tag},
+                            source: {repository: $source_repository, commit: $source_commit, tree: $source_tree},
+                            build: {
+                                workflow: $workflow,
+                                run: $workflow_run,
+                                runner_image: $runner_image,
+                                runner_arch: $runner_arch,
+                                reference_assemblies_commit: $reference_assemblies_commit,
+                                configuration: $build_configuration,
+                                runtime_identifier: $runtime_identifier,
+                                timestamp_utc: $build_timestamp_utc,
+                                dotnet_info: $dotnet_info
+                            },
+                            artifact: {name: $package, size_bytes: $package_size, sha256: $package_sha256},
+                            reproducibility: "Inputs and provenance are recorded; byte-for-byte reproducibility is not claimed."
+                        }' > artifacts/release/build-metadata.json
+                    jq -e . artifacts/release/build-metadata.json >/dev/null
+                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+
+            -   name: Upload qualified release assets
+                uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+                with:
+                    name: linux-alpha-release-${{ steps.release.outputs.release_commit }}
+                    path: artifacts/release
+                    if-no-files-found: error
+                    retention-days: 30
+                    compression-level: 0
+
+    attest:
+        name: Attest Linux alpha package
+        if: github.event_name != 'pull_request'
+        needs: qualify-and-package
+        runs-on: ubuntu-24.04
+        timeout-minutes: 10
+        permissions:
+            contents: read
+            id-token: write
+            attestations: write
+            artifact-metadata: write
+        steps:
+            -   name: Download qualified release assets
+                uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+                with:
+                    name: linux-alpha-release-${{ needs.qualify-and-package.outputs.release_commit }}
+                    path: artifacts/release
+
+            -   name: Verify downloaded release assets
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+
+            -   name: Generate GitHub artifact attestation
+                uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+                with:
+                    subject-checksums: artifacts/release/SHA256SUMS
+
+    publish-prerelease:
+        name: Publish experimental GitHub prerelease
+        if: github.event_name == 'push'
+        needs:
+            - qualify-and-package
+            - attest
+        runs-on: ubuntu-24.04
+        timeout-minutes: 10
+        permissions:
+            contents: write
+        steps:
+            -   name: Download qualified release assets
+                uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+                with:
+                    name: linux-alpha-release-${{ needs.qualify-and-package.outputs.release_commit }}
+                    path: artifacts/release
+
+            -   name: Verify downloaded release assets
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    (cd artifacts/release && sha256sum --check SHA256SUMS)
+
+            -   name: Publish immutable-identity prerelease
+                shell: bash
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                    RELEASE_COMMIT: ${{ needs.qualify-and-package.outputs.release_commit }}
+                    RELEASE_TAG: ${{ needs.qualify-and-package.outputs.release_tag }}
+                    RELEASE_VERSION: ${{ needs.qualify-and-package.outputs.release_version }}
+                run: |
+                    set -euo pipefail
+                    if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                        echo "Release '$RELEASE_TAG' already exists; refusing to replace it." >&2
+                        exit 1
+                    fi
+
+                    package_name="SMAPI-$RELEASE_VERSION-linux-x64-installer.zip"
+                    package_sha256="$(cut -d ' ' -f 1 artifacts/release/SHA256SUMS)"
+                    if [[ ! "$RELEASE_TAG" =~ ^fork-4eh5xitv6787h645ebv-linux-v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([1-9][0-9]*)$ ]]; then
+                        echo "The validated release tag has an unexpected format: $RELEASE_TAG" >&2
+                        exit 1
+                    fi
+                    release_title="Experimental SMAPI Linux Fork ${BASH_REMATCH[1]} alpha ${BASH_REMATCH[2]}"
+                    notes="$RUNNER_TEMP/release-notes.md"
+                    {
+                        echo "# Experimental unofficial Linux desktop alpha"
+                        echo
+                        echo "This is an **unofficial experimental fork**, not an official SMAPI release. It supports native Linux x86_64 and Stardew Valley 1.6.14 or later. Normal installation must run as the desktop user, never with sudo or as root."
+                        echo
+                        echo "Exact source commit: \`$RELEASE_COMMIT\`  "
+                        echo "Embedded version: \`$RELEASE_VERSION\`  "
+                        echo "Official base: SMAPI 4.5.2"
+                        echo
+                        echo "## Download integrity"
+                        echo
+                        echo "\`$package_sha256  $package_name\`"
+                        echo
+                        echo "Download \`SHA256SUMS\` and run \`sha256sum --check SHA256SUMS\`. Then verify GitHub provenance with \`gh attestation verify '$package_name' -R '$GITHUB_REPOSITORY'\`."
+                        echo
+                        echo "## Install, upgrade, and rollback"
+                        echo
+                        echo "Close the game, back up saves and Mods, verify the download, extract it, and run \`install on Linux.sh\`. To upgrade, verify and run the newer package. To roll back, first use this alpha's installer to uninstall its fork-only files, then install a previously verified fork package or official SMAPI 4.5.2. See the [Linux alpha guide](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release.html)."
+                        echo
+                        echo "## Known limitations"
+                        echo
+                        echo "There is no graphical updater yet. The installer changes the game launcher and rollback is not atomic. Performance results describe one controlled machine/workload and are not universal FPS, power, or latency claims. Diagnostics can contain mod and system identifiers; reports stay local unless you choose to share them."
+                        echo
+                        echo "See the [comparison](https://4eh5xitv6787h645ebv.github.io/SMAPI/upstream-comparison.html), [validation record](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release-validation.html), [documentation](https://4eh5xitv6787h645ebv.github.io/SMAPI/), and [fork issue tracker](https://github.com/$GITHUB_REPOSITORY/issues)."
+                    } > "$notes"
+
+                    gh release create "$RELEASE_TAG" \
+                        artifacts/release/* \
+                        --repo "$GITHUB_REPOSITORY" \
+                        --verify-tag \
+                        --target "$RELEASE_COMMIT" \
+                        --title "$release_title" \
+                        --notes-file "$notes" \
+                        --prerelease

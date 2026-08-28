@@ -3,7 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
-using System.Threading;
+using System.Runtime.InteropServices;
 
 namespace StardewModdingApi.Installer;
 
@@ -28,18 +28,26 @@ internal class Program
     *********/
     /// <summary>Run the install or uninstall script.</summary>
     /// <param name="args">The command line arguments.</param>
-    public static void Main(string[] args)
+    public static int Main(string[] args)
     {
+        // A normal Linux installation must never need elevated privileges. Refuse them before
+        // extracting or touching any files, including when the binary is invoked directly.
+        if (OperatingSystem.IsLinux() && Program.GetEffectiveUserId() == 0)
+        {
+            Console.Error.WriteLine("The SMAPI installer must not be run as root or with sudo. Run it as your normal desktop user instead.");
+            return 2;
+        }
+
         // find install bundle
         FileInfo zipFile = new(Path.Combine(Program.InstallerPath, "install.dat"));
         if (!zipFile.Exists)
         {
             Console.WriteLine($"Oops! Some of the installer files are missing; try re-downloading the installer. (Missing file: {zipFile.FullName})");
-            Console.ReadLine();
-            return;
+            return 2;
         }
 
         string? error = null;
+        int exitCode = 0;
         try
         {
             // unzip bundle into temp folder
@@ -52,7 +60,8 @@ internal class Program
             try
             {
                 var installer = new InteractiveInstaller(bundleDir.FullName);
-                installer.Run(args);
+                if (!installer.Run(args))
+                    exitCode = 2;
             }
             finally
             {
@@ -62,6 +71,7 @@ internal class Program
         catch (Exception ex)
         {
             error = $"The installer failed with an unexpected exception.\nIf you need help fixing this error, see https://smapi.io/help\n\n{ex}";
+            exitCode = 1;
         }
         finally
         {
@@ -69,12 +79,18 @@ internal class Program
         }
 
         if (error != null)
-            Program.PrintErrorAndExit(error);
+            Program.PrintError(error, allowUserInput: Array.IndexOf(args, "--no-prompt") < 0);
+
+        return exitCode;
     }
 
     /*********
     ** Private methods
     *********/
+    /// <summary>Get the effective Unix user ID.</summary>
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
     /// <summary>Method called when assembly resolution fails, which may return a manually resolved assembly.</summary>
     /// <param name="sender">The event sender.</param>
     /// <param name="e">The event arguments.</param>
@@ -111,17 +127,18 @@ internal class Program
         }
     }
 
-    /// <summary>Write an error directly to the console and exit.</summary>
+    /// <summary>Write an error directly to the console and optionally wait so an interactive user can read it.</summary>
     /// <param name="message">The error message to display.</param>
-    private static void PrintErrorAndExit(string message)
+    private static void PrintError(string message, bool allowUserInput)
     {
         Console.ForegroundColor = ConsoleColor.Red;
         Console.WriteLine(message);
         Console.ResetColor();
 
-        Console.WriteLine("Game has ended. Press any key to exit.");
-        Thread.Sleep(100);
-        Console.ReadKey();
-        Environment.Exit(0);
+        if (allowUserInput)
+        {
+            Console.WriteLine("Press any key to exit.");
+            Console.ReadKey();
+        }
     }
 }

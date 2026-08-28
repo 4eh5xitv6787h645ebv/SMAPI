@@ -84,8 +84,8 @@ internal class InteractiveInstaller
         yield return GetInstallPath("StardewModdingAPI.Toolkit.CoreInterfaces.xml"); // moved in 2.8
         yield return GetInstallPath("StardewModdingAPI-x64.exe");         // before 3.13
 
-        // old log files
-        yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StardewValley", "ErrorLogs");
+        // Don't remove the current ErrorLogs folder here. It contains user-owned logs and local
+        // diagnostic reports, and has been the active SMAPI log path for many years.
     }
 
     /// <summary>Handles writing text to the console.</summary>
@@ -122,7 +122,7 @@ internal class InteractiveInstaller
     ///     5. Copy the bundled mods into the 'Mods' directory (deleting any existing versions).
     ///     6. Move any mods from app data into game's mods directory.
     /// </remarks>
-    public void Run(string[] args)
+    public bool Run(string[] args)
     {
         /*********
         ** Step 1: initial setup
@@ -148,20 +148,29 @@ internal class InteractiveInstaller
         {
             this.PrintError("You can't specify both --install and --uninstall command-line flags.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
         if (!allowUserInput && !installArg && !uninstallArg)
         {
             this.PrintError("You must specify --install or --uninstall when running with --no-prompt.");
-            return;
+            return false;
         }
 
         // get game path from CLI
         string? gamePathArg = null;
         {
-            int pathIndex = Array.LastIndexOf(args, "--game-path") + 1;
-            if (pathIndex >= 1 && args.Length >= pathIndex)
+            int flagIndex = Array.LastIndexOf(args, "--game-path");
+            if (flagIndex >= 0)
+            {
+                int pathIndex = flagIndex + 1;
+                if (pathIndex >= args.Length || args[pathIndex].StartsWith("--", StringComparison.Ordinal))
+                {
+                    this.PrintError("The --game-path option must be followed by a folder path.");
+                    this.AwaitConfirmation(allowUserInput);
+                    return false;
+                }
                 gamePathArg = args[pathIndex];
+            }
         }
 
         /****
@@ -172,14 +181,14 @@ internal class InteractiveInstaller
         {
             this.PrintError($"This is the installer for Windows. Run the 'install on {context.Platform}.{(context.Platform == Platform.Mac ? "command" : "sh")}' file instead.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
 #else
         if (context.IsWindows)
         {
             this.PrintError($"This is the installer for Linux/macOS. Run the 'install on Windows.exe' file instead.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
 #endif
 
@@ -254,7 +263,7 @@ internal class InteractiveInstaller
             {
                 this.PrintError("Failed finding your game path.");
                 this.AwaitConfirmation(allowUserInput);
-                return;
+                return false;
             }
 
             // get folders
@@ -271,8 +280,13 @@ internal class InteractiveInstaller
         {
             this.PrintError("The detected game install path doesn't contain a Stardew Valley executable.");
             this.AwaitConfirmation(allowUserInput);
-            return;
+            return false;
         }
+
+        // Don't scan, delete, or copy through a linked Mods directory. A linked game directory
+        // itself is allowed because that's the root the user selected, but links below it can
+        // redirect installer writes into unrelated locations.
+        this.AssertPathIsConfined(paths.ModsPath, paths.GamePath, allowFinalLink: false);
         Console.Clear();
 
 
@@ -348,7 +362,7 @@ internal class InteractiveInstaller
             if (context.IsUnix && File.Exists(paths.BackupLaunchScriptPath))
             {
                 this.PrintDebug("Removing SMAPI launcher...");
-                this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput);
+                this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput, paths.GamePath);
                 File.Move(paths.BackupLaunchScriptPath, paths.VanillaLaunchScriptPath);
             }
 
@@ -360,7 +374,7 @@ internal class InteractiveInstaller
             {
                 this.PrintDebug(action == ScriptAction.Install ? "Removing previous SMAPI files..." : "Removing SMAPI files...");
                 foreach (string path in removePaths)
-                    this.InteractivelyDelete(path, allowUserInput);
+                    this.InteractivelyDelete(path, allowUserInput, paths.GamePath);
             }
 
             // move global save data folder (changed in 3.2)
@@ -371,8 +385,10 @@ internal class InteractiveInstaller
 
                 if (oldDir.Exists)
                 {
+                    this.AssertPathIsConfined(oldDir.FullName, dataPath, allowFinalLink: false);
+                    this.AssertPathIsConfined(newDir.FullName, dataPath, allowFinalLink: false);
                     if (newDir.Exists)
-                        this.InteractivelyDelete(oldDir.FullName, allowUserInput);
+                        this.InteractivelyDelete(oldDir.FullName, allowUserInput, dataPath);
                     else
                         oldDir.MoveTo(newDir.FullName);
                 }
@@ -390,8 +406,8 @@ internal class InteractiveInstaller
                     if (!this.ShouldCopy(sourceEntry))
                         continue;
 
-                    this.InteractivelyDelete(Path.Combine(paths.GameDir.FullName, sourceEntry.Name), allowUserInput);
-                    this.RecursiveCopy(sourceEntry, paths.GameDir);
+                    this.InteractivelyDelete(Path.Combine(paths.GameDir.FullName, sourceEntry.Name), allowUserInput, paths.GamePath);
+                    this.RecursiveCopy(sourceEntry, paths.GameDir, paths.GamePath);
                 }
 
                 // replace mod launcher (if possible)
@@ -405,7 +421,7 @@ internal class InteractiveInstaller
                         if (!File.Exists(paths.BackupLaunchScriptPath))
                             File.Move(paths.VanillaLaunchScriptPath, paths.BackupLaunchScriptPath);
                         else
-                            this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput);
+                            this.InteractivelyDelete(paths.VanillaLaunchScriptPath, allowUserInput, paths.GamePath);
                     }
 
                     // add new launcher
@@ -525,8 +541,8 @@ internal class InteractiveInstaller
                                 );
                             }
 
-                            this.InteractivelyDelete(targetDir.FullName, allowUserInput);
-                            this.RecursiveCopy(fromDir, parentDir, filter: this.ShouldCopy);
+                            this.InteractivelyDelete(targetDir.FullName, allowUserInput, paths.GamePath);
+                            this.RecursiveCopy(fromDir, parentDir, paths.GamePath, filter: this.ShouldCopy);
                         }
 
                         // else add it to default location
@@ -537,9 +553,9 @@ internal class InteractiveInstaller
                             this.PrintDebug($"   adding {modName}...");
 
                             if (targetDir.Exists)
-                                this.InteractivelyDelete(targetDir.FullName, allowUserInput);
+                                this.InteractivelyDelete(targetDir.FullName, allowUserInput, paths.GamePath);
 
-                            this.RecursiveCopy(fromDir, parentDir, filter: this.ShouldCopy);
+                            this.RecursiveCopy(fromDir, parentDir, paths.GamePath, filter: this.ShouldCopy);
                         }
                     }
                 }
@@ -582,6 +598,7 @@ internal class InteractiveInstaller
         }
 
         this.AwaitConfirmation(allowUserInput);
+        return true;
     }
 
 
@@ -677,32 +694,79 @@ internal class InteractiveInstaller
     /// <summary>Interactively delete a file or folder path, and block until deletion completes.</summary>
     /// <param name="path">The file or folder path.</param>
     /// <param name="allowUserInput">Whether the installer can ask for user input from the terminal.</param>
-    private void InteractivelyDelete(string path, bool allowUserInput)
+    /// <param name="allowedRootPath">The trusted root which must lexically contain the path, with no linked parent below that root.</param>
+    private void InteractivelyDelete(string path, bool allowUserInput, string allowedRootPath)
     {
         while (true)
         {
             try
             {
+                this.AssertPathIsConfined(path, allowedRootPath, allowFinalLink: true);
                 FileUtilities.ForceDelete(Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path));
                 break;
             }
             catch (Exception ex)
             {
                 this.PrintError($"Oops! The installer couldn't delete {path}: [{ex.GetType().Name}] {ex.Message}.");
+                if (!allowUserInput)
+                    throw new IOException($"The installer couldn't delete '{path}' in non-interactive mode.", ex);
+
                 this.PrintError("Try rebooting your computer and then run the installer again. If that doesn't work, try deleting it yourself then press any key to retry.");
                 this.AwaitConfirmation(allowUserInput);
             }
         }
     }
 
+    /// <summary>Assert that accessing a path can't traverse a link outside its trusted root.</summary>
+    /// <param name="path">The prospective access path.</param>
+    /// <param name="allowedRootPath">The trusted root selected by the installer.</param>
+    /// <param name="allowFinalLink">Whether the final entry itself may be a link, such as when unlinking it without traversing it.</param>
+    private void AssertPathIsConfined(string path, string allowedRootPath, bool allowFinalLink)
+    {
+        string rootPath = Path.GetFullPath(allowedRootPath);
+        string targetPath = Path.GetFullPath(path);
+        string relativePath = Path.GetRelativePath(rootPath, targetPath);
+        if (
+            relativePath == "."
+            || Path.IsPathRooted(relativePath)
+            || relativePath == ".."
+            || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)
+        )
+        {
+            throw new IOException($"Refusing to access '{path}' because it is outside the expected folder '{allowedRootPath}'.");
+        }
+
+        string currentPath = rootPath;
+        string[] segments = relativePath.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        int segmentCount = allowFinalLink ? segments.Length - 1 : segments.Length;
+        for (int i = 0; i < segmentCount; i++)
+        {
+            currentPath = Path.Combine(currentPath, segments[i]);
+            FileSystemInfo entry = Directory.Exists(currentPath)
+                ? new DirectoryInfo(currentPath)
+                : new FileInfo(currentPath);
+            entry.Refresh();
+
+            bool isLink = entry.LinkTarget != null;
+            if (!isLink && entry.Exists)
+                isLink = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
+            if (isLink)
+                throw new IOException($"Refusing to access '{path}' because '{currentPath}' is a symbolic link or reparse point.");
+        }
+    }
+
     /// <summary>Recursively copy a directory or file.</summary>
     /// <param name="source">The file or folder to copy.</param>
     /// <param name="targetFolder">The folder to copy into.</param>
+    /// <param name="allowedRootPath">The trusted root which must contain every copy destination.</param>
     /// <param name="filter">A filter which matches directories and files to copy, or <c>null</c> to match all.</param>
-    private void RecursiveCopy(FileSystemInfo source, DirectoryInfo targetFolder, Func<FileSystemInfo, bool>? filter = null)
+    private void RecursiveCopy(FileSystemInfo source, DirectoryInfo targetFolder, string allowedRootPath, Func<FileSystemInfo, bool>? filter = null)
     {
         if (filter != null && !filter(source))
             return;
+
+        this.AssertPathIsConfined(Path.Combine(targetFolder.FullName, source.Name), allowedRootPath, allowFinalLink: false);
 
         if (!targetFolder.Exists)
             targetFolder.Create();
@@ -716,7 +780,7 @@ internal class InteractiveInstaller
             case DirectoryInfo sourceDir:
                 DirectoryInfo targetSubfolder = new(Path.Combine(targetFolder.FullName, sourceDir.Name));
                 foreach (FileSystemInfo entry in sourceDir.EnumerateFileSystemInfos())
-                    this.RecursiveCopy(entry, targetSubfolder, filter);
+                    this.RecursiveCopy(entry, targetSubfolder, allowedRootPath, filter);
                 break;
 
             default:

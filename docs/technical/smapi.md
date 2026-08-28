@@ -102,28 +102,18 @@ folder before compiling.
 
 ## Prepare a release
 ### Automated build pipeline
-SMAPI releases can be compiled automatically on GitHub. This is the recommended approach for
-official releases, since...
+This fork's Linux alpha releases are compiled automatically on GitHub. This is the required path
+for public fork releases, since...
 - It eliminates the risk of malware on your computer infecting the release.
 - It creates an [attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations),
   so security-savvy users can verify that the release was compiled from the code on GitHub and
   hasn't been tampered with.
 - It benefits from future workflow improvements like code signing.
 
-The typical process is:
-
-1. Commit changes on the `develop` branch.  
-   * _Note: for an alpha version, you're done! All commits on `develop` are compiled into alpha
-     releases. See the 'Actions' tab on GitHub._
-2. Set SMAPI's [version](#version-format) in `build/common.targets`, `src/SMAPI/Constants.cs`, and
-   each mod's `manifest.json`.  
-   * _You can run `pwsh build/scripts/set-smapi-version.ps1 VERSION_HERE` to do it automatically.
-     On Linux/macOS, you'll need to [install PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell)._
-3. Update the [release notes](../release-notes.md).
-4. Commit.
-5. Merge `develop` into `stable`.
-6. Tag the merge commit with the version (e.g. `5.0.0`).
-7. Check the 'Actions' tab on GitHub for the build, and download its artifacts when it finishes.
+The fork does not publish every `develop` commit and does not create bare numeric tags. See the
+[Linux alpha release guide](linux-alpha-release.md#maintainer-release-process) for the exact-commit
+candidate, review, tag, attestation, publication, and clean-room verification sequence. The
+fork-specific version, tag, title, and package must all remain visibly unofficial and Linux-only.
 
 ### Manual release on any platform
 > [!WARNING]  
@@ -139,19 +129,21 @@ First-time setup:
    1. [Install Windows Subsystem for Linux (WSL)](https://docs.microsoft.com/en-us/windows/wsl/install).
    2. Follow the rest of the instructions inside WSL.
 2. Install...
-   - [.NET 6 SDK](https://docs.microsoft.com/en-us/dotnet/core/install/linux-ubuntu) (run
+   - [.NET 10 and .NET 6 SDKs](https://learn.microsoft.com/dotnet/core/install/linux) (run
      `lsb_release -a` if you need the Ubuntu version number);
    - [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell);
    - and Steam (see [Linux instructions](https://linuxconfig.org/how-to-install-steam-on-ubuntu-20-04-focal-fossa-linux)).
 3. Launch `steam` and install the game like usual.
 4. Clone the SMAPI repo:
    ```sh
-   git clone https://github.com/Pathoschild/SMAPI.git
+   git clone https://github.com/4eh5xitv6787h645ebv/SMAPI.git
    ```
 
 To prepare the release:
-1. Run `pwsh build/scripts/prepare-install-package.sh VERSION_HERE` to create the release package in the
-   root `bin` folder. Make sure you use a [semantic version](#version-format).
+1. Run `pwsh build/scripts/prepare-install-package.ps1 VERSION_HERE --linux-only
+   --game-path=/absolute/reference/path` to create the Linux package in the root `bin` folder. Use
+   the documented [fork release identity](linux-alpha-release.md#release-identity). Personal local
+   builds are not public release candidates and don't have GitHub provenance.
 
 ### Manual release On Windows
 > [!WARNING]  
@@ -165,11 +157,11 @@ To prepare the release:
 First-time setup:
 1. Install...
    - [Windows Subsystem for Linux (WSL)](https://docs.microsoft.com/en-us/windows/wsl/install);
-   - [.NET 6 SDK](https://dotnet.microsoft.com/download/dotnet/5.0);
+   - [.NET 10 and .NET 6 SDKs](https://dotnet.microsoft.com/download);
    - [Stardew Valley](https://www.stardewvalley.net/).
 2. Clone the SMAPI repo:
    ```sh
-   git clone https://github.com/Pathoschild/SMAPI.git
+   git clone https://github.com/4eh5xitv6787h645ebv/SMAPI.git
    ```
 
 To prepare the release:
@@ -183,7 +175,7 @@ To prepare the release:
    # In WSL, `/mnt/c/example` accesses `C:\example` on the Windows filesystem.
    version="4.0.0"
    binFolder="/mnt/e/source/_Stardew/SMAPI/bin"
-   pwsh build/scripts/finalize-install-package.sh "$version" "$binFolder"
+   bash build/scripts/finalize-install-package.sh "$version" "$binFolder"
    ```
 
 ## Release notes

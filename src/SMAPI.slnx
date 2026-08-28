@@ -47,6 +47,7 @@
     <Project Path="../benchmarks/SMAPI.PerformanceBenchmarks/SMAPI.PerformanceBenchmarks.csproj" />
     <Project Path="SMAPI.Internal/SMAPI.Internal.shproj" />
     <Project Path="SMAPI.ModBuildConfig.Analyzer.Tests/SMAPI.ModBuildConfig.Analyzer.Tests.csproj" />
+    <Project Path="SMAPI.RuntimeDispatcher.Tests/SMAPI.RuntimeDispatcher.Tests.csproj" />
     <Project Path="SMAPI.Tests.ModApiConsumer/SMAPI.Tests.ModApiConsumer.csproj" />
     <Project Path="SMAPI.Tests.ModApiProvider/SMAPI.Tests.ModApiProvider.csproj" />
     <Project Path="SMAPI.Tests/SMAPI.Tests.csproj" />
