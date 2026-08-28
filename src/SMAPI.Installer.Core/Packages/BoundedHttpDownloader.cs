@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Net;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
 
@@ -36,6 +37,7 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
         CancellationToken cancellationToken = default
     )
     {
+        LinuxPrivilegeGuard.AssertNotRoot();
         ArgumentNullException.ThrowIfNull(sourceUri);
         if (string.IsNullOrWhiteSpace(destinationPath))
             throw new ArgumentException("The destination path is required.", nameof(destinationPath));

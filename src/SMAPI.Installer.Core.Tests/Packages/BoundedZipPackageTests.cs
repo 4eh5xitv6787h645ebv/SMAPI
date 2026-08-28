@@ -58,6 +58,10 @@ public sealed class BoundedZipPackageTests
     [TestCase("SMAPI synthetic Linux installer/../escape")]
     [TestCase("SMAPI synthetic Linux installer\\escape")]
     [TestCase("SMAPI synthetic Linux installer//escape")]
+    [TestCase("SMAPI synthetic Linux installer/bad:name")]
+    [TestCase("SMAPI synthetic Linux installer/trailing.")]
+    [TestCase("SMAPI synthetic Linux installer/trailing ")]
+    [TestCase("SMAPI synthetic Linux installer/control\u0001name")]
     public void Inspect_UnsafePath_Rejects(string entryPath)
     {
         string archivePath = this.CreateArchive(archive => AddFile(archive, entryPath, "bad"));
@@ -70,6 +74,23 @@ public sealed class BoundedZipPackageTests
         );
 
         action.Should().Throw<PackageSecurityException>();
+    }
+
+    [Test]
+    public void Inspect_SegmentOver255Utf8Bytes_Rejects()
+    {
+        string oversizedSegment = new string('é', 128);
+        string archivePath = this.CreateArchive(archive =>
+            AddFile(archive, $"{BoundedZipPackageTests.ExpectedRoot}/{oversizedSegment}", "bad")
+        );
+
+        Action action = () => new BoundedZipPackage().Inspect(
+            archivePath,
+            BoundedZipPackageTests.ExpectedRoot,
+            PermissiveLimits()
+        );
+
+        action.Should().Throw<PackageSecurityException>().WithMessage("*deep*");
     }
 
     [Test]
@@ -293,6 +314,28 @@ public sealed class BoundedZipPackageTests
 
         await action.Should().ThrowAsync<PackageSecurityException>();
         File.ReadAllText(Path.Combine(destination, "sentinel")).Should().Be("preserve");
+    }
+
+    [Test]
+    public async Task InspectAndExtractAsync_PreCancelled_RemovesPrivateStaging()
+    {
+        string archivePath = this.CreateArchive(archive =>
+            AddFile(archive, $"{BoundedZipPackageTests.ExpectedRoot}/file", "payload")
+        );
+        string destination = Path.Combine(this.TempRoot, "cancelled");
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        Func<Task> action = () => new BoundedZipPackage().InspectAndExtractAsync(
+            archivePath,
+            BoundedZipPackageTests.ExpectedRoot,
+            destination,
+            PermissiveLimits(),
+            cancellation.Token
+        );
+
+        await action.Should().ThrowAsync<OperationCanceledException>();
+        Directory.Exists(destination).Should().BeFalse();
     }
 
     [Test]

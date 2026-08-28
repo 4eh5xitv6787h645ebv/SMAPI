@@ -2,6 +2,7 @@ using System.Buffers;
 using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
 
@@ -72,6 +73,7 @@ public sealed class BoundedZipPackage
     /// <summary>Inspect an archive without extracting it.</summary>
     public ZipPackageInspection Inspect(string archivePath, string expectedRoot, ZipPackageLimits? limits = null)
     {
+        LinuxPrivilegeGuard.AssertNotRoot();
         try
         {
             limits ??= ZipPackageLimits.Default;
@@ -97,6 +99,7 @@ public sealed class BoundedZipPackage
         CancellationToken cancellationToken = default
     )
     {
+        LinuxPrivilegeGuard.AssertNotRoot();
         try
         {
             return await this.InspectAndExtractCoreAsync(
@@ -113,6 +116,39 @@ public sealed class BoundedZipPackage
         }
     }
 
+    /// <summary>
+    /// Revalidate and extract the exact private handle retained by release verification. Replacing the original
+    /// download path after verification can't change the bytes consumed here.
+    /// </summary>
+    public async Task<ZipPackageInspection> InspectAndExtractAsync(
+        VerifiedReleasePackage verifiedPackage,
+        string expectedRoot,
+        string destinationPath,
+        ZipPackageLimits? limits = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(verifiedPackage);
+        try
+        {
+            return await verifiedPackage.UseVerifiedStreamAsync(
+                (stream, token) => this.InspectAndExtractCoreAsync(
+                    stream,
+                    expectedRoot,
+                    destinationPath,
+                    limits,
+                    token
+                ),
+                cancellationToken
+            ).ConfigureAwait(false);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new PackageSecurityException("The verified installer package failed ZIP integrity validation.", ex);
+        }
+    }
+
     private async Task<ZipPackageInspection> InspectAndExtractCoreAsync(
         string archivePath,
         string expectedRoot,
@@ -122,15 +158,37 @@ public sealed class BoundedZipPackage
     )
     {
         limits ??= ZipPackageLimits.Default;
+        using FileStream stream = this.OpenArchive(archivePath, limits);
+        return await this.InspectAndExtractCoreAsync(
+            stream,
+            expectedRoot,
+            destinationPath,
+            limits,
+            cancellationToken
+        ).ConfigureAwait(false);
+    }
+
+    private async Task<ZipPackageInspection> InspectAndExtractCoreAsync(
+        Stream stream,
+        string expectedRoot,
+        string destinationPath,
+        ZipPackageLimits? limits,
+        CancellationToken cancellationToken
+    )
+    {
+        limits ??= ZipPackageLimits.Default;
+        if (!stream.CanRead || !stream.CanSeek || stream.Length <= 0 || stream.Length > limits.MaxArchiveBytes)
+            throw new PackageSecurityException("The selected package archive handle has an invalid or excessive size.");
+        stream.Position = 0;
         string fullDestinationPath = Path.GetFullPath(destinationPath);
         if (File.Exists(fullDestinationPath) || Directory.Exists(fullDestinationPath))
             throw new PackageSecurityException("The package extraction destination must not already exist.");
 
-        using FileStream stream = this.OpenArchive(archivePath, limits);
-        using ZipArchive archive = new(stream, ZipArchiveMode.Read, leaveOpen: false, entryNameEncoding: Encoding.UTF8);
+        using ZipArchive archive = new(stream, ZipArchiveMode.Read, leaveOpen: true, entryNameEncoding: Encoding.UTF8);
         ValidatedArchive validated = this.ValidateEntries(archive, expectedRoot, limits);
 
         Directory.CreateDirectory(fullDestinationPath);
+        PrivatePackageStaging.SetDirectoryMode(fullDestinationPath);
         try
         {
             string destinationPrefix = fullDestinationPath.EndsWith(Path.DirectorySeparatorChar)
@@ -151,10 +209,12 @@ public sealed class BoundedZipPackage
                     if (validatedEntry.IsDirectory)
                     {
                         Directory.CreateDirectory(targetPath);
+                        PrivatePackageStaging.SetDirectoryMode(targetPath);
                         continue;
                     }
 
                     Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                    PrivatePackageStaging.SetDirectoryMode(Path.GetDirectoryName(targetPath)!);
                     await using Stream input = validatedEntry.Entry.Open();
                     await using FileStream output = new(
                         targetPath,
@@ -164,6 +224,7 @@ public sealed class BoundedZipPackage
                         bufferSize: 64 * 1024,
                         options: FileOptions.Asynchronous | FileOptions.SequentialScan
                     );
+                    PrivatePackageStaging.SetFileMode(targetPath);
 
                     long actualEntryBytes = 0;
                     while (true)
@@ -227,11 +288,7 @@ public sealed class BoundedZipPackage
     {
         if (
             string.IsNullOrWhiteSpace(expectedRoot)
-            || expectedRoot.Length > 255
-            || expectedRoot is "." or ".."
-            || expectedRoot.IndexOf('\0') >= 0
-            || expectedRoot.Contains('/')
-            || expectedRoot.Contains('\\')
+            || this.IsUnsafeSegment(expectedRoot)
             || !expectedRoot.IsNormalized(NormalizationForm.FormC)
         )
         {
@@ -316,7 +373,8 @@ public sealed class BoundedZipPackage
         if (
             segments.Length == 0
             || segments.Length > maxDepth
-            || segments.Any(segment => segment.Length == 0 || segment is "." or "..")
+            || Encoding.UTF8.GetByteCount(canonicalPath) > 4096
+            || segments.Any(this.IsUnsafeSegment)
         )
         {
             throw new PackageSecurityException("The installer package contains a traversing or excessively deep entry path.");
@@ -327,6 +385,19 @@ public sealed class BoundedZipPackage
             throw new PackageSecurityException("The installer package top-level entry isn't a directory.");
 
         return canonicalPath;
+    }
+
+    private bool IsUnsafeSegment(string segment)
+    {
+        return segment.Length == 0
+            || segment is "." or ".."
+            || Encoding.UTF8.GetByteCount(segment) > 255
+            || segment.Contains('/')
+            || segment.Contains('\\')
+            || segment.Contains(':')
+            || segment.Any(char.IsControl)
+            || segment.EndsWith(" ", StringComparison.Ordinal)
+            || segment.EndsWith(".", StringComparison.Ordinal);
     }
 
     private void AssertNoPathTypeOrPrefixCollisions(
