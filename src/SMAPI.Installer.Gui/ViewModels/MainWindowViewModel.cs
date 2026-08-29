@@ -3,21 +3,20 @@ using StardewModdingAPI.Installer.Gui.Frontend;
 
 namespace StardewModdingAPI.Installer.Gui.ViewModels;
 
-public sealed class MainWindowViewModel : ObservableObject
+internal sealed class MainWindowViewModel : ObservableObject
 {
-    private readonly IInstallerFrontendSession session;
+    private readonly DemoInstallerFrontendSession session;
     private FolderChoice selectedFolder;
     private ReleaseChoice selectedRelease;
     private OperationChoice selectedOperation;
     private string previewHeading = "Choose settings and preview an operation";
     private string previewSummary = "The preview is synthetic. The production installer backend is not connected in this build.";
+    private string previewAnnouncement = "No synthetic preview yet. Backend disconnected and durable state unchanged.";
     private string stateLabel = "Unchanged — no session started";
 
-    public MainWindowViewModel(IInstallerFrontendSession session)
+    public MainWindowViewModel(DemoInstallerFrontendSession session)
     {
         this.session = session ?? throw new ArgumentNullException(nameof(session));
-        if (!session.IsDemoMode)
-            throw new ArgumentException("This shell build only accepts a safe demo session.", nameof(session));
         if (session.Folders.Count == 0 || session.Releases.Count == 0 || session.Operations.Count == 0)
             throw new ArgumentException("The frontend session must provide selectable demo options.", nameof(session));
 
@@ -107,12 +106,20 @@ public sealed class MainWindowViewModel : ObservableObject
         private set => this.SetProperty(ref this.stateLabel, value);
     }
 
+    public string PreviewAnnouncement
+    {
+        get => this.previewAnnouncement;
+        private set => this.SetProperty(ref this.previewAnnouncement, value);
+    }
+
     private void CreatePreview()
     {
         FrontendPreview preview = this.session.CreatePreview(this.SelectedFolder, this.SelectedRelease, this.SelectedOperation);
         this.PreviewHeading = preview.Heading;
         this.PreviewSummary = preview.Summary;
         this.StateLabel = preview.StateLabel;
+        this.PreviewAnnouncement = $"{preview.Heading}. Durable state unchanged. No backend action ran.";
+        DemoText.Validate(this.PreviewAnnouncement);
         this.LogEntries.Clear();
         foreach (string entry in preview.LogEntries)
             this.LogEntries.Add(entry);
@@ -133,6 +140,7 @@ public sealed class MainWindowViewModel : ObservableObject
         this.PreviewHeading = "Settings changed — preview again";
         this.PreviewSummary = "No backend action has run. Generate another synthetic preview to review this selection.";
         this.StateLabel = "Unchanged — backend disconnected";
+        this.PreviewAnnouncement = "Settings changed. Preview again. No backend action ran.";
         this.OnPropertyChanged(nameof(this.FolderDetail));
         this.OnPropertyChanged(nameof(this.ReleaseDetail));
         this.OnPropertyChanged(nameof(this.OperationDetail));

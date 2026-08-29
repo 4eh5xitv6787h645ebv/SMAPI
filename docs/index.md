@@ -102,6 +102,10 @@ health view
     <strong>Performance audit</strong>
     <span>All 95 findings, their risk, evidence, and implementation status.</span>
   </a>
+  <a class="doc-card" href="technical/linux-gui-shell.html">
+    <strong>Graphical installer safe demo</strong>
+    <span>Preview the disconnected synthetic desktop shell; it cannot install or update SMAPI yet.</span>
+  </a>
 </div>
 
 ## Project boundaries

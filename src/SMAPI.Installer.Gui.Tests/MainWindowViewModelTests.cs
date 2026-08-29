@@ -18,12 +18,18 @@ public sealed class MainWindowViewModelTests
     }
 
     [Test]
-    public void RejectsAProductionSessionInThisDemoOnlyBuild()
+    public void ConstructionAcceptsOnlyTheExactInternalSealedDemoType()
     {
-        Action construct = () => _ = new MainWindowViewModel(new NonDemoSession());
+        Type viewModelType = typeof(MainWindowViewModel);
+        Type sessionType = typeof(DemoInstallerFrontendSession);
 
-        construct.Should().Throw<ArgumentException>()
-            .WithMessage("*only accepts a safe demo session*");
+        viewModelType.IsNotPublic.Should().BeTrue();
+        sessionType.IsNotPublic.Should().BeTrue();
+        sessionType.IsSealed.Should().BeTrue();
+        viewModelType.GetConstructors(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+            .Should().ContainSingle()
+            .Which.GetParameters().Should().ContainSingle()
+            .Which.ParameterType.Should().Be(sessionType);
     }
 
     [Test]
@@ -66,19 +72,4 @@ public sealed class MainWindowViewModelTests
         error.Should().Contain("safe demo mode");
     }
 
-    private sealed class NonDemoSession : IInstallerFrontendSession
-    {
-        public bool IsDemoMode => false;
-
-        public IReadOnlyList<FolderChoice> Folders => [];
-
-        public IReadOnlyList<ReleaseChoice> Releases => [];
-
-        public IReadOnlyList<OperationChoice> Operations => [];
-
-        public FrontendPreview CreatePreview(FolderChoice folder, ReleaseChoice release, OperationChoice operation)
-        {
-            throw new InvalidOperationException("A non-demo session must never be used by this shell.");
-        }
-    }
 }

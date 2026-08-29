@@ -133,6 +133,7 @@ jobs:
                         -p:GamePath="$RUNNER_TEMP/StardewValley" \
                         -p:CopyToGameFolder=false \
                         -p:AllowMissingPrunePackageData=true
+                    dotnet format whitespace src/SMAPI.slnx --verify-no-changes --no-restore
                     dotnet format whitespace src/SMAPI.Installer/SMAPI.Installer.csproj --verify-no-changes --no-restore \
                         --include src/SMAPI.Installer/InteractiveInstaller.cs src/SMAPI.Installer/Program.cs
                     git diff --check
@@ -166,6 +167,16 @@ jobs:
                     --configuration Release
                     --no-build
                     -- RunConfiguration.TreatNoTestsAsError=true
+
+            -   name: Run fixture-free Linux GUI shell tests
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    dotnet test src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
+                        --configuration Release \
+                        --no-build \
+                        -- RunConfiguration.TreatNoTestsAsError=true
+                    build/scripts/test-linux-gui-demo-smoke.sh
 
             -   name: Run release-asset quartet tests
                 run: >-

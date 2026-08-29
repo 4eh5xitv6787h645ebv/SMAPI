@@ -24,7 +24,7 @@ internal static class Program
     }
 }
 
-public static class DemoLaunchPolicy
+internal static class DemoLaunchPolicy
 {
     public static bool TryValidate(IReadOnlyList<string> args, out string? error)
     {

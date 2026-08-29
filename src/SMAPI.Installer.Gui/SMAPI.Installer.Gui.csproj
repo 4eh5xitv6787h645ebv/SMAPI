@@ -20,4 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="..\SMAPI.Installer.Core\SMAPI.Installer.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SMAPI.Installer.Gui.Tests" />
+  </ItemGroup>
 </Project>
