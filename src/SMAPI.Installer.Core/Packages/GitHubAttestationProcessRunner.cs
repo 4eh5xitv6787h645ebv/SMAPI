@@ -155,7 +155,11 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     private const int GetSeals = 1034;
     private const int RequiredImmutableSeals = 0x0f;
     private const int SignalKill = 9;
+    private const int ErrorNoProcess = 3;
+    private const int ErrorFunctionNotImplemented = 38;
     private const int MaximumProcEntries = 32_768;
+    private const long SystemCallPidfdSendSignal = 424;
+    private const long SystemCallPidfdOpen = 434;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly TimeSpan TeardownTimeout = TimeSpan.FromSeconds(5);
     private readonly string SetSidPath;
@@ -246,8 +250,12 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 privateDirectory.ProcPath,
                 retainedSetSid.ProcPath
             );
-            using Process process = new() { StartInfo = startInfo, EnableRaisingEvents = true };
-            int processGroupId;
+            // Prove pidfd support before spawning and reserve one descriptor slot for the exact leader handle.
+            using SafeFileHandle leaderPidfdReservation = OpenRequiredPidfd(Environment.ProcessId);
+            // Retain the exact child before WaitForExitAsync enables asynchronous reaping and numeric PID reuse.
+            using Process process = new() { StartInfo = startInfo, EnableRaisingEvents = false };
+            int sessionId;
+            SafeFileHandle? leaderPidfd = null;
             try
             {
                 if (request.BundleAuthority is not null)
@@ -258,7 +266,9 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 }
                 if (!process.Start())
                     throw new InvalidOperationException("The verifier process didn't start.");
-                processGroupId = process.Id;
+                leaderPidfdReservation.Dispose();
+                sessionId = process.Id;
+                leaderPidfd = OpenRequiredPidfd(sessionId);
             }
             catch (OperationCanceledException)
             {
@@ -284,6 +294,8 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 cancellationToken.ThrowIfCancellationRequested();
                 throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
             }
+            using SafeFileHandle retainedLeaderPidfd = leaderPidfd
+                ?? throw new PackageSecurityException("The GitHub attestation verifier couldn't retain exact process authority.");
 
             Task stdout = Task.CompletedTask;
             Task stderr = Task.CompletedTask;
@@ -379,7 +391,13 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             }
             finally
             {
-                bool cleaned = await KillAndObserveAsync(process, processGroupId, stdout, stderr).ConfigureAwait(false);
+                bool cleaned = await KillAndObserveAsync(
+                    process,
+                    sessionId,
+                    retainedLeaderPidfd,
+                    stdout,
+                    stderr
+                ).ConfigureAwait(false);
                 if (!cleaned)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -521,7 +539,13 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             : new PackageSecurityException("The GitHub attestation verifier output couldn't be read safely.");
     }
 
-    private static async Task<bool> KillAndObserveAsync(Process process, int processGroupId, Task stdout, Task stderr)
+    private static async Task<bool> KillAndObserveAsync(
+        Process process,
+        int sessionId,
+        SafeFileHandle leaderPidfd,
+        Task stdout,
+        Task stderr
+    )
     {
         Task reaped = ReapAsync(process);
         Task observed = ObserveAsync(stdout, stderr);
@@ -529,14 +553,11 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         Stopwatch deadline = Stopwatch.StartNew();
         while (deadline.Elapsed < TeardownTimeout)
         {
-            bool? groupExists = TryFindProcessGroupMember(processGroupId, deadline);
-            if (!groupExists.HasValue)
+            bool? sessionExists = TrySignalExactSessionMembers(sessionId, deadline);
+            if (!sessionExists.HasValue || !TrySignalPidfd(leaderPidfd))
                 break;
-            if (groupExists.Value)
-                KillObservedProcessGroup(processGroupId);
-            TryKillDirectProcess(process);
 
-            if (cleanup.IsCompleted && groupExists.Value == false)
+            if (cleanup.IsCompleted && sessionExists.Value == false)
             {
                 await cleanup.ConfigureAwait(false);
                 return true;
@@ -554,80 +575,153 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
 
         TryClose(process.StandardOutput);
         TryClose(process.StandardError);
-        if (TryFindProcessGroupMember(processGroupId, deadline) == true)
-            KillObservedProcessGroup(processGroupId);
-        TryKillDirectProcess(process);
+        _ = TrySignalExactSessionMembers(sessionId, deadline);
+        _ = TrySignalPidfd(leaderPidfd);
         ObserveEventually(cleanup);
         return false;
     }
 
-    private static void KillObservedProcessGroup(int processGroupId)
+    /// <summary>
+    /// Signal only pidfd-retained tasks whose PID, process group, session, and start time stay unchanged across the
+    /// numeric /proc lookup. A wholly new same-UID session can theoretically reuse the numeric session ID between
+    /// bounded scans; that non-hostile-same-UID residual is not claimed as race-free process containment.
+    /// </summary>
+    private static bool? TrySignalExactSessionMembers(int sessionId, Stopwatch deadline)
     {
-        if (processGroupId <= 0)
-            return;
-        _ = kill(-processGroupId, SignalKill);
-    }
-
-    private static bool? TryFindProcessGroupMember(int processGroupId, Stopwatch deadline)
-    {
-        if (processGroupId <= 0)
+        if (sessionId <= 0)
             return false;
         try
         {
+            bool found = false;
             int count = 0;
             foreach (string path in Directory.EnumerateDirectories("/proc"))
             {
                 if (++count > MaximumProcEntries || deadline.Elapsed >= TeardownTimeout)
                     return null;
-                if (!int.TryParse(Path.GetFileName(path), out _))
+                if (!int.TryParse(Path.GetFileName(path), NumberStyles.None, CultureInfo.InvariantCulture, out int processId))
                     continue;
-                string stat;
-                try
-                {
-                    stat = File.ReadAllText(Path.Combine(path, "stat"));
-                }
-                catch (Exception exception) when (
-                    exception is FileNotFoundException or DirectoryNotFoundException
-                )
-                {
-                    continue;
-                }
-
-                int commandEnd = stat.LastIndexOf(')');
-                if (commandEnd < 0 || commandEnd + 2 >= stat.Length)
-                    continue;
-                string[] fields = stat[(commandEnd + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (
-                    fields.Length >= 4
-                    && int.TryParse(fields[2], out int group)
-                    && int.TryParse(fields[3], out int session)
-                    && group == processGroupId
-                    && session == processGroupId
-                )
-                {
-                    return true;
-                }
+                SessionMemberSignalResult result = TrySignalValidatedSessionMember(
+                    processId,
+                    sessionId,
+                    ReadProcessIdentity,
+                    TryOpenPidfd,
+                    SendSignalToPidfd
+                );
+                if (result == SessionMemberSignalResult.Failed)
+                    return null;
+                if (result is SessionMemberSignalResult.Signaled or SessionMemberSignalResult.GoneOrStale)
+                    found = true;
             }
-            return false;
+            return found;
         }
         catch (Exception exception) when (
-            exception is DirectoryNotFoundException or IOException or UnauthorizedAccessException
+            exception is DirectoryNotFoundException
+                or IOException
+                or PackageSecurityException
+                or UnauthorizedAccessException
         )
         {
             return null;
         }
     }
 
-    private static void TryKillDirectProcess(Process process)
+    /// <summary>Open, revalidate, and signal one exact session task. The delegates are an internal deterministic race seam.</summary>
+    internal static SessionMemberSignalResult TrySignalValidatedSessionMember(
+        int processId,
+        int sessionId,
+        Func<int, ProcessSessionIdentity?> readIdentity,
+        Func<int, SafeFileHandle?> openPidfd,
+        Func<SafeFileHandle, int> sendSignal
+    )
+    {
+        ArgumentNullException.ThrowIfNull(readIdentity);
+        ArgumentNullException.ThrowIfNull(openPidfd);
+        ArgumentNullException.ThrowIfNull(sendSignal);
+
+        ProcessSessionIdentity? before = readIdentity(processId);
+        if (before is null || !before.Value.IsSessionMember(processId, sessionId))
+            return SessionMemberSignalResult.NotMember;
+
+        using SafeFileHandle? pidfd = openPidfd(processId);
+        if (pidfd is null)
+            return SessionMemberSignalResult.GoneOrStale;
+        if (pidfd.IsInvalid || pidfd.IsClosed)
+            return SessionMemberSignalResult.Failed;
+
+        ProcessSessionIdentity? after = readIdentity(processId);
+        if (after is null || after.Value != before.Value || !after.Value.IsSessionMember(processId, sessionId))
+            return SessionMemberSignalResult.GoneOrStale;
+
+        int error = sendSignal(pidfd);
+        return error switch
+        {
+            0 => SessionMemberSignalResult.Signaled,
+            ErrorNoProcess => SessionMemberSignalResult.GoneOrStale,
+            _ => SessionMemberSignalResult.Failed
+        };
+    }
+
+    private static ProcessSessionIdentity? ReadProcessIdentity(int processId)
     {
         try
         {
-            if (!process.HasExited)
-                process.Kill();
+            string stat = File.ReadAllText($"/proc/{processId.ToString(CultureInfo.InvariantCulture)}/stat");
+            int commandEnd = stat.LastIndexOf(')');
+            if (commandEnd < 0 || commandEnd + 2 >= stat.Length)
+                return null;
+            string[] fields = stat[(commandEnd + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (
+                fields.Length < 20
+                || !int.TryParse(fields[2], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int group)
+                || !int.TryParse(fields[3], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int session)
+                || !ulong.TryParse(fields[19], NumberStyles.None, CultureInfo.InvariantCulture, out ulong startTime)
+            )
+            {
+                return null;
+            }
+            return new ProcessSessionIdentity(processId, group, session, startTime);
         }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
         {
+            return null;
         }
+    }
+
+    private static SafeFileHandle OpenRequiredPidfd(int processId)
+    {
+        SafeFileHandle? pidfd = TryOpenPidfd(processId, allowGone: false);
+        return pidfd ?? throw new PackageSecurityException("The GitHub attestation verifier couldn't retain exact process authority.");
+    }
+
+    private static SafeFileHandle? TryOpenPidfd(int processId)
+    {
+        return TryOpenPidfd(processId, allowGone: true);
+    }
+
+    private static SafeFileHandle? TryOpenPidfd(int processId, bool allowGone)
+    {
+        long descriptor = syscall_pidfd_open(SystemCallPidfdOpen, processId, 0);
+        if (descriptor >= 0)
+            return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        int error = Marshal.GetLastWin32Error();
+        if (allowGone && error == ErrorNoProcess)
+            return null;
+        string message = error == ErrorFunctionNotImplemented
+            ? "This Linux runtime doesn't support exact pidfd process authority."
+            : "Linux couldn't retain exact verifier process authority.";
+        throw new PackageSecurityException(message, new LinuxNativeIOException("pidfd_open failed", error));
+    }
+
+    private static bool TrySignalPidfd(SafeFileHandle pidfd)
+    {
+        int error = SendSignalToPidfd(pidfd);
+        return error is 0 or ErrorNoProcess;
+    }
+
+    private static int SendSignalToPidfd(SafeFileHandle pidfd)
+    {
+        long result = syscall_pidfd_send_signal(SystemCallPidfdSendSignal, pidfd, SignalKill, IntPtr.Zero, 0);
+        return result == 0 ? 0 : Marshal.GetLastWin32Error();
     }
 
     private static async Task ReapAsync(Process process)
@@ -673,8 +767,17 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         }
     }
 
-    [DllImport("libc", SetLastError = true)]
-    private static extern int kill(int processId, int signal);
+    [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
+    private static extern long syscall_pidfd_open(long systemCallNumber, int processId, uint flags);
+
+    [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
+    private static extern long syscall_pidfd_send_signal(
+        long systemCallNumber,
+        SafeFileHandle pidfd,
+        int signal,
+        IntPtr information,
+        uint flags
+    );
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int statx(
@@ -728,6 +831,28 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         public long Seconds;
         public uint Nanoseconds;
         public int Reserved;
+    }
+
+    internal readonly record struct ProcessSessionIdentity(
+        int ProcessId,
+        int ProcessGroupId,
+        int SessionId,
+        ulong StartTime
+    )
+    {
+        public bool IsSessionMember(int expectedProcessId, int expectedSessionId)
+        {
+            return this.ProcessId == expectedProcessId
+                && this.SessionId == expectedSessionId;
+        }
+    }
+
+    internal enum SessionMemberSignalResult
+    {
+        NotMember,
+        GoneOrStale,
+        Signaled,
+        Failed
     }
 
     private sealed class SystemSetSidAuthority : IDisposable

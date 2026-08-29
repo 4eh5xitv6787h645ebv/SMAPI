@@ -9,6 +9,7 @@ using StardewModdingAPI.Installer.Core.Security;
 namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 
 [TestFixture]
+[Platform("Linux")]
 [NonParallelizable]
 [SupportedOSPlatform("linux")]
 internal sealed class GitHubAttestationProcessRunnerTests
@@ -554,6 +555,72 @@ internal sealed class GitHubAttestationProcessRunnerTests
         Action action = () => this.Request(executable);
 
         action.Should().Throw<ArgumentException>().WithParameterName("executablePath");
+    }
+
+    [TestCase(false, GitHubAttestationProcessRunner.SessionMemberSignalResult.Signaled, 1)]
+    [TestCase(true, GitHubAttestationProcessRunner.SessionMemberSignalResult.GoneOrStale, 0)]
+    public void ExactSessionMemberSignal_RevalidatesStartTimeBeforeSignaling(
+        bool simulateNumericPidReuse,
+        GitHubAttestationProcessRunner.SessionMemberSignalResult expected,
+        int expectedSignals
+    )
+    {
+        const int processId = 4242;
+        const int sessionId = 3131;
+        int reads = 0;
+        int signals = 0;
+        GitHubAttestationProcessRunner.ProcessSessionIdentity original = new(
+            processId,
+            sessionId,
+            sessionId,
+            StartTime: 100
+        );
+        GitHubAttestationProcessRunner.SessionMemberSignalResult result =
+            GitHubAttestationProcessRunner.TrySignalValidatedSessionMember(
+                processId,
+                sessionId,
+                _ =>
+                {
+                    reads++;
+                    return simulateNumericPidReuse && reads == 2
+                        ? original with { StartTime = 101 }
+                        : original;
+                },
+                _ => File.OpenHandle("/dev/null", FileMode.Open, FileAccess.Read, FileShare.ReadWrite),
+                _ =>
+                {
+                    signals++;
+                    return 0;
+                }
+            );
+
+        result.Should().Be(expected);
+        reads.Should().Be(2, "the numeric /proc identity must be checked before and after pidfd_open");
+        signals.Should().Be(expectedSignals, "a stale or reused numeric PID must never receive a signal");
+    }
+
+    [Test]
+    public void ExactSessionMemberSignal_FailsClosedWhenPidfdSignalFails()
+    {
+        const int processId = 4242;
+        const int sessionId = 3131;
+        GitHubAttestationProcessRunner.ProcessSessionIdentity identity = new(
+            processId,
+            sessionId,
+            sessionId,
+            StartTime: 100
+        );
+
+        GitHubAttestationProcessRunner.SessionMemberSignalResult result =
+            GitHubAttestationProcessRunner.TrySignalValidatedSessionMember(
+                processId,
+                sessionId,
+                _ => identity,
+                _ => File.OpenHandle("/dev/null", FileMode.Open, FileAccess.Read, FileShare.ReadWrite),
+                _ => 1
+            );
+
+        result.Should().Be(GitHubAttestationProcessRunner.SessionMemberSignalResult.Failed);
     }
 
     private async Task<GitHubAttestationProcessResult> Run(string script, string[]? arguments = null)
