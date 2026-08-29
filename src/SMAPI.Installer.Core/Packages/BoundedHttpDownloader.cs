@@ -294,6 +294,8 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                         destination.LeafName,
                         staged
                     );
+                    temporaryName = null;
+                    destination.SetPublished(published);
                     if (
                         published.Size != totalBytes
                         || published.UnixMode != PrivateFileMode
@@ -304,8 +306,6 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                     {
                         throw new IOException("The published release download failed exact metadata verification.");
                     }
-                    temporaryName = null;
-                    destination.SetPublished(published);
                 }
                 finally
                 {

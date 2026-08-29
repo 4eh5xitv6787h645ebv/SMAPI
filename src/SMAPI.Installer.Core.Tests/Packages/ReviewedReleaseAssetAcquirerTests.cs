@@ -312,6 +312,28 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
     }
 
     [Test]
+    public async Task Bind_RejectsExtraWorkspaceEntryAndCleanupLeavesItUntouched()
+    {
+        ReviewedReleaseCandidate candidate = Candidate(6);
+        ReviewedReleaseAssetLease lease = await ReviewedReleaseAssetAcquirer.AcquireAsync(candidate, new RecordingTransport());
+        ReviewedGitHubResolvedTag resolved = new(candidate, Commit);
+        ReviewedReleaseProtocolAssetPaths initial = lease.Bind(resolved);
+        string[] procPaths = AssetPaths(initial);
+        string namedDirectory = ResolveProcTarget(Path.GetDirectoryName(procPaths[0])!);
+        string extra = Path.Combine(namedDirectory, "unrelated-extra");
+        File.WriteAllText(extra, "keep");
+
+        FluentActions.Invoking(() => lease.Bind(resolved))
+            .Should().Throw<PackageSecurityException>().WithMessage("*exactly six assets*");
+        await lease.DisposeAsync();
+
+        File.ReadAllText(extra).Should().Be("keep");
+        procPaths.Should().OnlyContain(path => !File.Exists(path));
+        Directory.EnumerateFileSystemEntries(namedDirectory).Should().Equal(extra);
+        Directory.Delete(namedDirectory, true);
+    }
+
+    [Test]
     public async Task Target_RejectsSymlinkHardlinkFifoDirectoryAndWrongOwnerWithoutTouchingSentinel()
     {
         string outsideRoot = Path.Combine(Path.GetTempPath(), $"smapi-target-sentinel-{Guid.NewGuid():N}");

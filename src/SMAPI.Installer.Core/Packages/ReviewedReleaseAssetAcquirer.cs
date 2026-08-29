@@ -80,6 +80,7 @@ public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(resolvedTag);
         if (!ReferenceEquals(resolvedTag.Release, this.Candidate))
             throw new PackageSecurityException("The resolved tag belongs to a different reviewed release selection.");
+        this.Workspace.AssertComplete(this.Candidate);
 
         return new ReviewedReleaseProtocolAssetPaths(
             resolvedTag.ReleaseTag,
@@ -158,6 +159,7 @@ public static class ReviewedReleaseAssetAcquirer
                 for (int index = 0; index < assets.Length; index++)
                 {
                     linked.Token.ThrowIfCancellationRequested();
+                    workspace.AssertExpectedPrefix(candidate, index);
                     ReviewedReleaseAsset asset = assets[index];
                     AnchoredDownloadTarget target = workspace.CreateTarget(asset);
                     int completedAssetsBefore = index;
@@ -174,10 +176,10 @@ public static class ReviewedReleaseAssetAcquirer
                             totalBytes
                         )));
                     DownloadResult result = await transport.DownloadAsync(
-                            asset,
-                            target,
-                            new DownloadLimits(asset.SizeBytes, PerAssetTimeout, MaximumRedirects),
-                            currentProgress,
+                        asset,
+                        target,
+                        new DownloadLimits(asset.SizeBytes, PerAssetTimeout, MaximumRedirects),
+                        currentProgress,
                         linked.Token
                     ).ConfigureAwait(false);
                     linked.Token.ThrowIfCancellationRequested();
@@ -186,18 +188,19 @@ public static class ReviewedReleaseAssetAcquirer
                     workspace.RetainPublished(target, asset);
                     completedBytes = checked(completedBytes + result.BytesReceived);
                     progress?.Report(new ReviewedReleaseAcquisitionProgress(
-                            asset.Kind,
-                            index + 1,
-                            assets.Length,
-                            result.BytesReceived,
-                            asset.SizeBytes,
-                            completedBytes,
+                        asset.Kind,
+                        index + 1,
+                        assets.Length,
+                        result.BytesReceived,
+                        asset.SizeBytes,
+                        completedBytes,
                         totalBytes
                     ));
                     linked.Token.ThrowIfCancellationRequested();
                 }
 
                 linked.Token.ThrowIfCancellationRequested();
+                workspace.AssertComplete(candidate);
                 ReviewedReleaseAssetLease lease = new(candidate, workspace);
                 workspace = null;
                 return lease;

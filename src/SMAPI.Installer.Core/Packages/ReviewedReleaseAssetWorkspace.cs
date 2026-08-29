@@ -45,8 +45,8 @@ internal sealed class ReviewedReleaseAssetWorkspace : IAsyncDisposable
     {
         if (!OperatingSystem.IsLinux())
             throw new PlatformNotSupportedException("Reviewed release acquisition requires Linux.");
-        LinuxPrivilegeGuard.AssertNotRoot();
         uint effectiveUserId = geteuid();
+        LinuxPrivilegeGuard.AssertNotRoot(effectiveUserId);
         LinuxAnchoredFileSystem? parent = null;
         LinuxAnchoredFileSystem? directory = null;
         try
@@ -144,6 +144,8 @@ internal sealed class ReviewedReleaseAssetWorkspace : IAsyncDisposable
 
     private void RegisterPublished(ReviewedReleaseAsset asset, LinuxFileIdentity identity)
     {
+        if (!this.OwnedFiles.TryAdd(asset.Name, identity))
+            throw new PackageSecurityException("A reviewed release asset was published more than once.");
         if (
             identity.Kind != LinuxAnchoredEntryKind.RegularFile
             || identity.OwnerUserId != this.EffectiveUserId
@@ -151,11 +153,47 @@ internal sealed class ReviewedReleaseAssetWorkspace : IAsyncDisposable
             || identity.LinkCount != 1
             || identity.UnixMode != 0x180
             || identity.Size != asset.SizeBytes
-            || !this.OwnedFiles.TryAdd(asset.Name, identity)
         )
         {
             throw new PackageSecurityException("A reviewed release asset wasn't retained after publication.");
         }
+    }
+
+    public void AssertComplete(ReviewedReleaseCandidate candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        this.AssertPrivate();
+        string[] expectedNames = Enum.GetValues<ReviewedReleaseAssetKind>()
+            .Select(kind => candidate.GetAsset(kind).Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        string[] observedNames = this.FileSystem.EnumerateEntryNames(maximumEntries: expectedNames.Length + 1)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        if (!observedNames.SequenceEqual(expectedNames, StringComparer.Ordinal))
+            throw new PackageSecurityException("The private reviewed-release workspace doesn't contain exactly six assets.");
+        foreach (ReviewedReleaseAsset asset in candidate.Assets)
+            _ = this.GetProcPath(asset.Name);
+    }
+
+    public void AssertExpectedPrefix(ReviewedReleaseCandidate candidate, int completedAssets)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        ReviewedReleaseAssetKind[] kinds = Enum.GetValues<ReviewedReleaseAssetKind>();
+        if (completedAssets < 0 || completedAssets > kinds.Length)
+            throw new ArgumentOutOfRangeException(nameof(completedAssets));
+        this.AssertPrivate();
+        string[] expectedNames = kinds.Take(completedAssets)
+            .Select(kind => candidate.GetAsset(kind).Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        string[] observedNames = this.FileSystem.EnumerateEntryNames(maximumEntries: expectedNames.Length + 1)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        if (!observedNames.SequenceEqual(expectedNames, StringComparer.Ordinal))
+            throw new PackageSecurityException("The private reviewed-release workspace changed between sequential downloads.");
+        foreach (string name in expectedNames)
+            _ = this.GetProcPath(name);
     }
 
     public string GetProcPath(string exactName)

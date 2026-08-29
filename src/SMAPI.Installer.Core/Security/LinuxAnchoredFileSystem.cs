@@ -696,7 +696,9 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         this.AssertUsable();
         if (maximumEntries < 0)
             throw new ArgumentOutOfRangeException(nameof(maximumEntries));
-        using SafeFileHandle directory = relativePath is null ? Duplicate(this.RootHandle) : this.OpenDirectoryPath(relativePath);
+        using SafeFileHandle directory = relativePath is null
+            ? OpenDirectoryAt(this.RootHandle, ".")
+            : this.OpenDirectoryPath(relativePath);
         SafeFileHandle duplicate = Duplicate(directory);
         IntPtr stream = fdopendir(duplicate.DangerousGetHandle().ToInt32());
         if (stream == IntPtr.Zero)
