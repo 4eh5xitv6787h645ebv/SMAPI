@@ -167,11 +167,17 @@ public sealed class ProcessInstallerProtocolClientTests
             DiscoverGamesRequest => Serialize(new GameDiscoveryEvent(
                 ProtocolSessionId.CreateRandom(),
                 [new(selectedPath, LinuxGameFolderStatus.Valid, "Stardew Valley")]
-            ) { CommandId = request.CommandId }),
+            )
+            {
+                CommandId = request.CommandId
+            }),
             ValidateGameRequest => Serialize(new GameValidationEvent(
                 ProtocolSessionId.CreateRandom(),
                 new("/games/a-different-root", LinuxGameFolderStatus.Valid, "Stardew Valley")
-            ) { CommandId = request.CommandId }),
+            )
+            {
+                CommandId = request.CommandId
+            }),
             _ => throw new AssertionException("Unexpected protocol request.")
         });
         await using ProcessInstallerProtocolClient client = Create(process);
@@ -361,7 +367,10 @@ public sealed class ProcessInstallerProtocolClientTests
                 Session,
                 "1",
                 RequiredCapabilities.Where(value => value != omitted).ToArray()
-            ) { CommandId = request.CommandId }));
+            )
+            {
+                CommandId = request.CommandId
+            }));
             await using ProcessInstallerProtocolClient client = Create(process);
 
             Func<Task> action = () => client.HandshakeAsync("SMAPI GUI", "1");
