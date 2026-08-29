@@ -251,6 +251,19 @@ Scope constraints apply throughout:
 - [x] Address every actionable release-authority architecture, installer, security/privacy, testing, workflow, documentation, and final-diff finding and obtain clean exact-head reviews ([review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179#issuecomment-5458606915)).
 - [x] Merge and close focused [PR #179](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/179), delete its feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` (`c289d9989250d4e51a2c9890de13466b35af733d`).
 
+### Installer host protocol and retained package authority
+
+- [x] Classify actionable Linux filesystem failures through nested and aggregate wrappers without leaking private paths or collapsing disk-full, quota, read-only, permission, cross-device, concurrency, and generic I/O outcomes ([merged PR #181](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181)).
+- [x] Read the exact caller-selected release quartet through bounded retained no-follow handles, reject hostile path components and special or linked files, and make the production protocol opener use that hardened path ([actual-opener review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181#issuecomment-5459189115)).
+- [x] Retain verified Linux package bytes in an anonymous sealed `memfd`, verify all required kernel seals before the authoritative hash, and prove a writable alias acquired before sealing cannot mutate, shrink, or grow the archive before ZIP consumption ([security review evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181#issuecomment-5459144938)).
+- [x] Define the bounded deterministic Protocol V1 JSONL contract with unique command correlation, strict request/event direction, opaque authority IDs, pull pagination, and explicit confirmation and cancellation acknowledgements ([merged PR #181](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181)).
+- [x] Make terminal outcome, durable state, exact error, recovery disposition, bounded counts, and next action typed protocol authority independent of mutable display prose ([protocol final-diff review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181#issuecomment-5459144938)).
+- [x] Reject invalid terminal-state combinations, contradictory or excessive aggregate counts, stale command/plan bindings, invented pre-execution work, and unrequested cancellation reclassification ([protocol final-diff review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181#issuecomment-5459144938)).
+- [x] Address every actionable retained-file, descriptor-immutability, cleanup-authority, cancellation, terminal-state, aggregate-count, and production-opener integration finding and obtain clean exact-head re-reviews ([review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181#issuecomment-5459189115)).
+- [x] Pass 123/123 Protocol V1 tests, 605/605 installer-core tests, 142/142 package tests, Release warnings-as-errors, formatting, and diff checks on the exact reviewed source ([final-head review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181#issuecomment-5459189115); [post-merge 142/142 verification](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181#issuecomment-5459217470)).
+- [x] Pass required CI on the exact reviewed head ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33223747914); [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33223747770)).
+- [x] Merge and close focused [PR #181](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181), delete its feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` ([merge commit `2283994a`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/2283994a39aeeee591b0da016ba24769b09fe662)).
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
