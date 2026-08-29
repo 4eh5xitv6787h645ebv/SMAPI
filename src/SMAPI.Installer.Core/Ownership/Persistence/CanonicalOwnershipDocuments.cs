@@ -24,16 +24,21 @@ internal static class CanonicalOwnershipDocuments
             int schemaVersion = GetInt32(root.GetProperty("schema_version"), "schema_version");
             if (schemaVersion == PackageManifest.LegacySchemaVersion)
                 AssertExactObject(root, "manifest", "schema_version", "release", "entries");
-            else if (schemaVersion == PackageManifest.CurrentSchemaVersion)
+            else if (schemaVersion == PackageManifest.GeneratedFilesSchemaVersion)
                 AssertExactObject(root, "manifest", "schema_version", "release", "entries", "generated_files");
+            else if (schemaVersion == PackageManifest.CurrentSchemaVersion)
+                AssertExactObject(root, "manifest", "schema_version", "release", "entries", "generated_files", "release_authority_policy");
             else
                 throw new OwnershipDocumentException($"Unsupported ownership document schema version {schemaVersion}.");
             InstallationReleaseIdentity release = ParseRelease(root.GetProperty("release"));
             PackageManifestEntry[] entries = ParseArray(root.GetProperty("entries"), limits, "manifest entries", ParseManifestEntry);
-            GeneratedFileRecipe[] generated = schemaVersion == PackageManifest.CurrentSchemaVersion
+            GeneratedFileRecipe[] generated = schemaVersion >= PackageManifest.GeneratedFilesSchemaVersion
                 ? ParseArray(root.GetProperty("generated_files"), limits, "generated files", ParseGeneratedFileRecipe)
                 : Array.Empty<GeneratedFileRecipe>();
-            return new PackageManifest(release, entries, generated, schemaVersion);
+            TaggedReleaseAuthorityPolicy? policy = schemaVersion == PackageManifest.CurrentSchemaVersion
+                ? ParseReleaseAuthorityPolicy(root.GetProperty("release_authority_policy"), release)
+                : null;
+            return new PackageManifest(release, entries, generated, schemaVersion, policy);
         }, SerializeManifest, "package manifest");
     }
 
@@ -54,10 +59,18 @@ internal static class CanonicalOwnershipDocuments
         limits ??= OwnershipPersistenceLimits.Default;
         InstallationReceipt receipt = ParseCanonical(bytes, limits, root =>
         {
-            AssertExactObject(root, "receipt", "schema_version", "release", "manifest_sha256", "transaction_id", "entries", "launcher");
-            AssertSchema(root, InstallationReceipt.CurrentSchemaVersion);
+            int schemaVersion = GetInt32(root.GetProperty("schema_version"), "schema_version");
+            if (schemaVersion == InstallationReceipt.LegacySchemaVersion)
+                AssertExactObject(root, "receipt", "schema_version", "release", "manifest_sha256", "transaction_id", "entries", "launcher");
+            else if (schemaVersion == InstallationReceipt.CurrentSchemaVersion)
+                AssertExactObject(root, "receipt", "schema_version", "release", "manifest_sha256", "release_authority_evidence", "transaction_id", "entries", "launcher");
+            else
+                throw new OwnershipDocumentException($"Unsupported ownership document schema version {schemaVersion}.");
             InstallationReleaseIdentity release = ParseRelease(root.GetProperty("release"));
             Sha256Digest manifestSha256 = ParseDigest(root.GetProperty("manifest_sha256"), "manifest_sha256");
+            VerifiedTaggedPackageTrust? releaseTrust = schemaVersion == InstallationReceipt.CurrentSchemaVersion
+                ? ParseReleaseAuthorityEvidence(root.GetProperty("release_authority_evidence"), release)
+                : null;
             string transactionId = GetString(root.GetProperty("transaction_id"), "transaction_id");
             InstallationReceiptEntry[] entries = ParseArray(root.GetProperty("entries"), limits, "receipt entries", ParseReceiptEntry);
 
@@ -76,7 +89,7 @@ internal static class CanonicalOwnershipDocuments
                 GetInt32(launcherElement.GetProperty("installed_unix_mode"), "launcher.installed_unix_mode"),
                 GetInt32(launcherElement.GetProperty("original_unix_mode"), "launcher.original_unix_mode")
             );
-            return new InstallationReceipt(release, manifestSha256, transactionId, entries, launcher);
+            return new InstallationReceipt(release, manifestSha256, transactionId, entries, launcher, releaseTrust, schemaVersion);
         }, SerializeReceipt, "installation receipt");
 
         AssertReceiptMatchesManifest(receipt, verifiedManifest);
@@ -172,6 +185,13 @@ internal static class CanonicalOwnershipDocuments
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(verifiedManifest);
 
+        bool matchingLegacySchemas = receipt.SchemaVersion == InstallationReceipt.LegacySchemaVersion
+            && verifiedManifest.SchemaVersion is PackageManifest.LegacySchemaVersion or PackageManifest.GeneratedFilesSchemaVersion;
+        bool matchingAuthoritySchemas = receipt.SchemaVersion == InstallationReceipt.CurrentSchemaVersion
+            && verifiedManifest.SchemaVersion == PackageManifest.CurrentSchemaVersion;
+        if (!matchingLegacySchemas && !matchingAuthoritySchemas)
+            throw new OwnershipDocumentException("The receipt and manifest schemas aren't an allowed exact compatibility pair.");
+
         if (!receipt.Release.Equals(verifiedManifest.Release))
             throw new OwnershipDocumentException("The receipt release identity doesn't match the verified manifest.");
         if (receipt.ManifestSha256 != verifiedManifest.GetCanonicalDigest())
@@ -197,6 +217,17 @@ internal static class CanonicalOwnershipDocuments
         PackageManifestEntry expectedLauncher = verifiedManifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
         if (receipt.Launcher.InstalledLauncherSha256 != expectedLauncher.Sha256)
             throw new OwnershipDocumentException("The receipt launcher doesn't match the verified manifest launcher.");
+
+        if (matchingAuthoritySchemas)
+        {
+            VerifiedTaggedPackageTrust trust = receipt.ReleaseTrust!;
+            TaggedReleaseAuthorityPolicy policy = verifiedManifest.ReleaseAuthorityPolicy!;
+            if (!policy.Matches(trust))
+                throw new OwnershipDocumentException("The receipt evidence doesn't match the manifest's exact release-authority policy.");
+            (Sha256Digest sha256, long sizeBytes) = verifiedManifest.GetAttestedTemplateIdentity();
+            if (trust.ManifestSubject.Sha256 != sha256 || trust.ManifestSubject.ObservedSizeBytes != sizeBytes)
+                throw new OwnershipDocumentException("The receipt evidence doesn't bind the exact unresolved attested manifest template.");
+        }
     }
 
     private static T ParseCanonical<T>(
@@ -268,6 +299,110 @@ internal static class CanonicalOwnershipDocuments
             GetString(element.GetProperty("build_configuration"), "release.build_configuration"),
             GetString(element.GetProperty("runtime_identifier"), "release.runtime_identifier")
         );
+    }
+
+    private static TaggedReleaseAuthorityPolicy ParseReleaseAuthorityPolicy(JsonElement element, InstallationReleaseIdentity release)
+    {
+        AssertExactObject(
+            element,
+            "release authority policy",
+            "kind",
+            "repository",
+            "source_reference",
+            "source_commit",
+            "build_workflow",
+            "runner_environment",
+            "trigger",
+            "repository_identifier",
+            "repository_owner_identifier",
+            "package_subject_name",
+            "manifest_subject_name"
+        );
+        TaggedReleaseAuthorityPolicy expected = TaggedReleaseAuthorityPolicy.Create(release);
+        RequireExact(GetString(element.GetProperty("kind"), "release_authority_policy.kind"), expected.Kind, "release_authority_policy.kind");
+        RequireExact(GetString(element.GetProperty("repository"), "release_authority_policy.repository"), expected.Repository, "release_authority_policy.repository");
+        RequireExact(GetString(element.GetProperty("source_reference"), "release_authority_policy.source_reference"), expected.SourceReference, "release_authority_policy.source_reference");
+        RequireExact(GetString(element.GetProperty("source_commit"), "release_authority_policy.source_commit"), expected.SourceCommit, "release_authority_policy.source_commit");
+        RequireExact(GetString(element.GetProperty("build_workflow"), "release_authority_policy.build_workflow"), expected.BuildWorkflow, "release_authority_policy.build_workflow");
+        RequireExact(GetString(element.GetProperty("runner_environment"), "release_authority_policy.runner_environment"), expected.RunnerEnvironment, "release_authority_policy.runner_environment");
+        RequireExact(GetString(element.GetProperty("trigger"), "release_authority_policy.trigger"), expected.Trigger, "release_authority_policy.trigger");
+        RequireExact(GetString(element.GetProperty("repository_identifier"), "release_authority_policy.repository_identifier"), expected.RepositoryIdentifier, "release_authority_policy.repository_identifier");
+        RequireExact(GetString(element.GetProperty("repository_owner_identifier"), "release_authority_policy.repository_owner_identifier"), expected.RepositoryOwnerIdentifier, "release_authority_policy.repository_owner_identifier");
+        RequireExact(GetString(element.GetProperty("package_subject_name"), "release_authority_policy.package_subject_name"), expected.PackageSubjectName, "release_authority_policy.package_subject_name");
+        RequireExact(GetString(element.GetProperty("manifest_subject_name"), "release_authority_policy.manifest_subject_name"), expected.ManifestSubjectName, "release_authority_policy.manifest_subject_name");
+        return expected;
+    }
+
+    private static VerifiedTaggedPackageTrust ParseReleaseAuthorityEvidence(JsonElement element, InstallationReleaseIdentity release)
+    {
+        AssertExactObject(
+            element,
+            "release authority evidence",
+            "kind",
+            "package_subject",
+            "manifest_subject",
+            "run_id",
+            "run_attempt",
+            "transparency_log_timestamp_utc_ticks"
+        );
+        RequireExact(
+            GetString(element.GetProperty("kind"), "release_authority_evidence.kind"),
+            TaggedReleaseAuthorityPolicy.GitHubArtifactAttestationV1,
+            "release_authority_evidence.kind"
+        );
+        VerifiedAttestedSubject packageSubject = ParseAttestedSubject(element.GetProperty("package_subject"), "package_subject");
+        VerifiedAttestedSubject manifestSubject = ParseAttestedSubject(element.GetProperty("manifest_subject"), "manifest_subject");
+        string runIdText = GetString(element.GetProperty("run_id"), "release_authority_evidence.run_id");
+        if (
+            !ulong.TryParse(runIdText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out ulong runId)
+            || runId == 0
+            || runId.ToString(System.Globalization.CultureInfo.InvariantCulture) != runIdText
+        )
+            throw new OwnershipDocumentException("'release_authority_evidence.run_id' must be a positive canonical 64-bit decimal string.");
+        int runAttempt = GetInt32(element.GetProperty("run_attempt"), "release_authority_evidence.run_attempt");
+        if (runAttempt <= 0)
+            throw new OwnershipDocumentException("'release_authority_evidence.run_attempt' must be positive.");
+        long ticks = GetInt64(element.GetProperty("transparency_log_timestamp_utc_ticks"), "release_authority_evidence.transparency_log_timestamp_utc_ticks");
+        DateTimeOffset timestamp = new(ticks, TimeSpan.Zero);
+        string runUri = $"https://github.com/{TaggedReleaseAuthorityPolicy.ReviewedRepository}/actions/runs/{runId}/attempts/{runAttempt}";
+        VerifiedGitHubWorkflowEvidence evidence = new(
+            release,
+            release.Repository,
+            $"refs/tags/{release.Tag}",
+            release.SourceCommit,
+            release.BuildWorkflow,
+            $"https://github.com/{release.BuildWorkflow}",
+            runUri,
+            VerifiedGitHubWorkflowEvidence.RequiredRunnerEnvironment,
+            VerifiedGitHubWorkflowEvidence.RequiredTrigger,
+            VerifiedGitHubWorkflowEvidence.ReviewedRepositoryIdentifier,
+            VerifiedGitHubWorkflowEvidence.ReviewedRepositoryOwnerIdentifier,
+            timestamp
+        );
+        return new VerifiedTaggedPackageTrust(
+            release,
+            packageSubject,
+            manifestSubject,
+            manifestSubject.Sha256,
+            manifestSubject.ObservedSizeBytes,
+            evidence
+        );
+    }
+
+    private static VerifiedAttestedSubject ParseAttestedSubject(JsonElement element, string name)
+    {
+        AssertExactObject(element, name, "name", "sha256", "size_bytes");
+        return new VerifiedAttestedSubject(
+            GetString(element.GetProperty("name"), $"{name}.name"),
+            ParseDigest(element.GetProperty("sha256"), $"{name}.sha256"),
+            GetInt64(element.GetProperty("size_bytes"), $"{name}.size_bytes")
+        );
+    }
+
+    private static void RequireExact(string actual, string expected, string name)
+    {
+        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            throw new OwnershipDocumentException($"'{name}' doesn't match the exact release authority policy.");
     }
 
     private static PackageManifestEntry ParseManifestEntry(JsonElement element)

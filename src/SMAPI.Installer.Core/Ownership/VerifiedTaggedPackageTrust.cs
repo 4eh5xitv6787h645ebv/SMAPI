@@ -92,6 +92,11 @@ public sealed class VerifiedGitHubWorkflowEvidence : IEquatable<VerifiedGitHubWo
         RegexOptions.CultureInvariant
     );
 
+    private static readonly Regex InvocationIdentityPattern = new(
+        @"\Ahttps://github\.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/(?<run>[1-9][0-9]*)/attempts/(?<attempt>[1-9][0-9]*)\z",
+        RegexOptions.CultureInvariant
+    );
+
     /// <summary>The exact reviewed repository URL verified in the two-subject attestation.</summary>
     public string Repository { get; }
 
@@ -247,6 +252,22 @@ public sealed class VerifiedGitHubWorkflowEvidence : IEquatable<VerifiedGitHubWo
         if (value.Offset != TimeSpan.Zero)
             throw new ArgumentException("The verified transparency-log timestamp must be normalized to UTC.", parameterName);
     }
+
+    internal (ulong RunId, int RunAttempt) GetRunIdentity()
+    {
+        Match match = InvocationIdentityPattern.Match(this.RunInvocationUri);
+        if (
+            !match.Success
+            || !ulong.TryParse(match.Groups["run"].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out ulong runId)
+            || !int.TryParse(match.Groups["attempt"].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int attempt)
+            || runId == 0
+            || attempt == 0
+        )
+        {
+            throw new InvalidOperationException("Verified workflow evidence has no canonical bounded run identity.");
+        }
+        return (runId, attempt);
+    }
 }
 
 /// <summary>
@@ -302,6 +323,7 @@ public sealed class VerifiedTaggedPackageTrust : IEquatable<VerifiedTaggedPackag
         );
 
         VerifiedTaggedPackageTrust.RequireEvidence(identity, evidence);
+        _ = evidence.GetRunIdentity();
 
         this.Identity = identity;
         this.PackageSubject = packageSubject;
