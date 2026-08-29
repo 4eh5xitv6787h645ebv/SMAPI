@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
 
@@ -18,20 +19,32 @@ internal sealed class GitHubArtifactAttestationVerificationRequest
     public string PackageProcPath { get; }
     public VerifiedAttestedSubject ManifestSubject { get; }
     public string GitHubCliPath { get; }
-    public string IsolatedDirectory { get; }
 
     internal GitHubArtifactAttestationVerificationRequest(
         InstallationReleaseIdentity identity,
         string packageProcPath,
         VerifiedAttestedSubject manifestSubject,
-        string gitHubCliPath,
-        string isolatedDirectory
+        string gitHubCliPath
     )
     {
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(manifestSubject);
-        string procPathValue = packageProcPath ?? "";
-        Match procPath = GitHubArtifactAttestationVerificationRequest.ProcFileDescriptorPattern.Match(procPathValue);
+        string procPathValue = AssertCurrentProcessDescriptorPath(packageProcPath, nameof(packageProcPath), "package");
+        string gitHubCliPathValue = AssertCurrentProcessDescriptorPath(gitHubCliPath, nameof(gitHubCliPath), "GitHub CLI");
+        string expectedManifestName = $"SMAPI-{identity.EmbeddedVersion}-linux-x64-install-manifest.json";
+        if (!string.Equals(manifestSubject.Name, expectedManifestName, StringComparison.Ordinal))
+            throw new ArgumentException("The retained manifest subject doesn't match the tagged release identity.", nameof(manifestSubject));
+
+        this.Identity = identity;
+        this.PackageProcPath = procPathValue;
+        this.ManifestSubject = manifestSubject;
+        this.GitHubCliPath = gitHubCliPathValue;
+    }
+
+    private static string AssertCurrentProcessDescriptorPath(string? value, string parameterName, string authorityName)
+    {
+        string pathValue = value ?? "";
+        Match procPath = GitHubArtifactAttestationVerificationRequest.ProcFileDescriptorPattern.Match(pathValue);
         if (
             !procPath.Success
             || !int.TryParse(procPath.Groups["pid"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int pid)
@@ -39,38 +52,12 @@ internal sealed class GitHubArtifactAttestationVerificationRequest
             || !int.TryParse(procPath.Groups["fd"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out _)
         )
         {
-            throw new ArgumentException("The package must be exposed through this process's retained file descriptor.", nameof(packageProcPath));
-        }
-        string expectedManifestName = $"SMAPI-{identity.EmbeddedVersion}-linux-x64-install-manifest.json";
-        if (!string.Equals(manifestSubject.Name, expectedManifestName, StringComparison.Ordinal))
-            throw new ArgumentException("The retained manifest subject doesn't match the tagged release identity.", nameof(manifestSubject));
-
-        // Reuse the process boundary's exact canonical-path validation before retaining any request values.
-        try
-        {
-            _ = new GitHubAttestationProcessRequest(
-                gitHubCliPath,
-                [],
-                isolatedDirectory,
-                TimeSpan.FromSeconds(30),
-                2 * 1024 * 1024,
-                64 * 1024
+            throw new ArgumentException(
+                $"The {authorityName} must be exposed through this process's retained file descriptor.",
+                parameterName
             );
         }
-        catch (ArgumentException exception) when (exception.ParamName == "executablePath")
-        {
-            throw new ArgumentException("The GitHub CLI path must be canonical and absolute.", nameof(gitHubCliPath));
-        }
-        catch (ArgumentException exception) when (exception.ParamName == "isolatedDirectory")
-        {
-            throw new ArgumentException("The isolated verifier directory must be canonical and absolute.", nameof(isolatedDirectory));
-        }
-
-        this.Identity = identity;
-        this.PackageProcPath = procPathValue;
-        this.ManifestSubject = manifestSubject;
-        this.GitHubCliPath = gitHubCliPath;
-        this.IsolatedDirectory = isolatedDirectory;
+        return pathValue;
     }
 }
 
@@ -109,6 +96,42 @@ internal sealed class GitHubArtifactAttestationVerifier
     }
 
     internal async Task<VerifiedTaggedPackageTrust> VerifyAsync(
+        VerifiedInstallerPackage package,
+        PinnedGitHubCli cli,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        ArgumentNullException.ThrowIfNull(cli);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        LinuxSealedFileLease? packageLease = null;
+        LinuxSealedFileLease? manifestLease = null;
+        LinuxSealedFileLease? executableLease = null;
+        try
+        {
+            packageLease = package.Package.LeasePackageForExternalRead();
+            manifestLease = package.LeaseManifestForExternalRead();
+            executableLease = cli.LeaseForExecution();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            GitHubArtifactAttestationVerificationRequest request = new(
+                package.Release,
+                packageLease.ProcPath,
+                new VerifiedAttestedSubject(package.ManifestAssetName, package.ManifestSha256, package.ManifestSizeBytes),
+                executableLease.ProcPath
+            );
+            return await this.VerifyAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            executableLease?.Dispose();
+            manifestLease?.Dispose();
+            packageLease?.Dispose();
+        }
+    }
+
+    internal async Task<VerifiedTaggedPackageTrust> VerifyAsync(
         GitHubArtifactAttestationVerificationRequest request,
         CancellationToken cancellationToken = default
     )
@@ -118,7 +141,6 @@ internal sealed class GitHubArtifactAttestationVerifier
         GitHubAttestationProcessRequest processRequest = new(
             request.GitHubCliPath,
             CreateArguments(request),
-            request.IsolatedDirectory,
             TimeSpan.FromSeconds(30),
             MaximumOutputBytes,
             MaximumErrorBytes

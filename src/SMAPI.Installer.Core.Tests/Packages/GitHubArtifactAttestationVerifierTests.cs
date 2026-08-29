@@ -1,13 +1,18 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
+using Microsoft.Win32.SafeHandles;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 
 [TestFixture]
+[Platform("Linux")]
+[NonParallelizable]
 internal sealed class GitHubArtifactAttestationVerifierTests
 {
     private const string Tag = "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1";
@@ -26,27 +31,53 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     private const string Timestamp = "2026-08-28T21:51:36+08:00";
     private static readonly Sha256Digest PackageSha256 = Sha256Digest.Parse(new string('a', 64));
     private static readonly Sha256Digest ManifestSha256 = Sha256Digest.Parse(new string('b', 64));
+    private string TempRoot = null!;
+    private SafeFileHandle PackageFixtureHandle = null!;
+    private SafeFileHandle CliFixtureHandle = null!;
+    private LinuxSealedFileLease PackageFixtureLease = null!;
+    private LinuxSealedFileLease CliFixtureLease = null!;
 
     public static IEnumerable<AuthorityField> EveryAuthorityField => Enum.GetValues<AuthorityField>().Where(value => value != AuthorityField.None);
+
+    [SetUp]
+    public void SetUp()
+    {
+        this.TempRoot = Path.Combine(Path.GetTempPath(), $"smapi-attestation-verifier-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(this.TempRoot);
+        this.PackageFixtureHandle = CreateSealedFixture("smapi-attestation-package-fixture", "package"u8);
+        this.CliFixtureHandle = CreateSealedFixture("smapi-attestation-cli-fixture", "cli"u8);
+        this.PackageFixtureLease = LinuxSealedFile.LeaseForExternalRead(this.PackageFixtureHandle);
+        this.CliFixtureLease = LinuxSealedFile.LeaseForExternalRead(this.CliFixtureHandle);
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        this.CliFixtureLease.Dispose();
+        this.PackageFixtureLease.Dispose();
+        this.CliFixtureHandle.Dispose();
+        this.PackageFixtureHandle.Dispose();
+        if (Directory.Exists(this.TempRoot))
+            Directory.Delete(this.TempRoot, recursive: true);
+    }
 
     [Test]
     public async Task VerifyAsync_UsesExactCompatibleArgumentsAndReturnsClosedTwoSubjectTrust()
     {
         StubRunner runner = new(WriteJson());
-        GitHubArtifactAttestationVerificationRequest request = CreateRequest();
+        GitHubArtifactAttestationVerificationRequest request = this.CreateRequest();
 
         VerifiedTaggedPackageTrust trust = await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(request);
 
         runner.Request.Should().NotBeNull();
-        runner.Request!.ExecutablePath.Should().Be("/usr/bin/gh");
-        runner.Request.IsolatedDirectory.Should().Be("/tmp/smapi-attestation-private");
+        runner.Request!.ExecutablePath.Should().Be(this.CliFixtureLease.ProcPath);
         runner.Request.Timeout.Should().Be(TimeSpan.FromSeconds(30));
         runner.Request.MaximumStandardOutputBytes.Should().Be(2 * 1024 * 1024);
         runner.Request.MaximumStandardErrorBytes.Should().Be(64 * 1024);
         runner.Request.Arguments.Should().Equal(
             "attestation",
             "verify",
-            $"/proc/{Environment.ProcessId}/fd/123",
+            this.PackageFixtureLease.ProcPath,
             "--hostname",
             "github.com",
             "--repo",
@@ -84,7 +115,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     public async Task VerifyAsync_RejectsEveryMutatedAuthorityField(AuthorityField mutation)
     {
         StubRunner runner = new(WriteJson(new FixtureOptions { Mutation = mutation }));
-        Func<Task> verify = async () => await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(CreateRequest());
+        Func<Task> verify = async () => await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(this.CreateRequest());
 
         await verify.Should().ThrowAsync<PackageSecurityException>()
             .WithMessage("The GitHub attestation verifier returned evidence outside the reviewed release policy.");
@@ -94,7 +125,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [TestCase(2)]
     public async Task VerifyAsync_RequiresExactlyOneVerificationResult(int resultCount)
     {
-        Func<Task> verify = () => Verify(WriteJson(new FixtureOptions { ResultCount = resultCount }));
+        Func<Task> verify = () => this.Verify(WriteJson(new FixtureOptions { ResultCount = resultCount }));
 
         await verify.Should().ThrowAsync<PackageSecurityException>();
     }
@@ -103,7 +134,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     public async Task VerifyAsync_NeverCombinesIndependentOneSubjectResults()
     {
         FixtureOptions options = new() { ResultCount = 2, IndependentOneSubjectResults = true };
-        Func<Task> verify = () => Verify(WriteJson(options));
+        Func<Task> verify = () => this.Verify(WriteJson(options));
 
         await verify.Should().ThrowAsync<PackageSecurityException>();
     }
@@ -112,7 +143,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [TestCase(3)]
     public async Task VerifyAsync_RequiresExactlyTwoSubjectsInOneStatement(int subjectCount)
     {
-        Func<Task> verify = () => Verify(WriteJson(new FixtureOptions { SubjectCount = subjectCount }));
+        Func<Task> verify = () => this.Verify(WriteJson(new FixtureOptions { SubjectCount = subjectCount }));
 
         await verify.Should().ThrowAsync<PackageSecurityException>();
     }
@@ -120,8 +151,8 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [Test]
     public async Task VerifyAsync_RejectsReversedCanonicalSubjectOrderAndExtraDigestAlgorithm()
     {
-        Func<Task> reversed = () => Verify(WriteJson(new FixtureOptions { ReverseSubjects = true }));
-        Func<Task> extraDigest = () => Verify(WriteJson(new FixtureOptions { ExtraDigestAlgorithm = true }));
+        Func<Task> reversed = () => this.Verify(WriteJson(new FixtureOptions { ReverseSubjects = true }));
+        Func<Task> extraDigest = () => this.Verify(WriteJson(new FixtureOptions { ExtraDigestAlgorithm = true }));
 
         await reversed.Should().ThrowAsync<PackageSecurityException>();
         await extraDigest.Should().ThrowAsync<PackageSecurityException>();
@@ -130,9 +161,9 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [Test]
     public async Task VerifyAsync_RejectsDuplicateAndUnknownAuthorityPropertiesButIgnoresOpaqueRawPayload()
     {
-        Func<Task> duplicate = () => Verify(WriteJson(new FixtureOptions { DuplicateMediaType = true }));
-        Func<Task> unknown = () => Verify(WriteJson(new FixtureOptions { UnknownCertificateProperty = true }));
-        VerifiedTaggedPackageTrust accepted = await Verify(WriteJson(new FixtureOptions { ExtraOpaqueRawProperty = true }));
+        Func<Task> duplicate = () => this.Verify(WriteJson(new FixtureOptions { DuplicateMediaType = true }));
+        Func<Task> unknown = () => this.Verify(WriteJson(new FixtureOptions { UnknownCertificateProperty = true }));
+        VerifiedTaggedPackageTrust accepted = await this.Verify(WriteJson(new FixtureOptions { ExtraOpaqueRawProperty = true }));
 
         await duplicate.Should().ThrowAsync<PackageSecurityException>();
         await unknown.Should().ThrowAsync<PackageSecurityException>();
@@ -142,7 +173,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [Test]
     public async Task VerifyAsync_TreatsDisplayCertificateChainAndVerifiedIssuerProjectionAsBoundedNonAuthority()
     {
-        VerifiedTaggedPackageTrust changed = await Verify(
+        VerifiedTaggedPackageTrust changed = await this.Verify(
             WriteJson(
                 new FixtureOptions
                 {
@@ -152,11 +183,11 @@ internal sealed class GitHubArtifactAttestationVerifierTests
                 }
             )
         );
-        VerifiedTaggedPackageTrust omittedChain = await Verify(WriteJson(new FixtureOptions { OmitCertificateIssuer = true }));
-        Func<Task> wrongChainType = () => Verify(WriteJson(new FixtureOptions { MalformedDisplayProjection = true }));
-        Func<Task> wrongIssuerType = () => Verify(WriteJson(new FixtureOptions { MalformedVerifiedIssuerProjection = true }));
-        Func<Task> oversizedChain = () => Verify(WriteJson(new FixtureOptions { CertificateIssuer = new string('x', 513) }));
-        Func<Task> oversizedIssuer = () => Verify(WriteJson(new FixtureOptions { VerifiedIdentityIssuerRegexp = new string('x', 513) }));
+        VerifiedTaggedPackageTrust omittedChain = await this.Verify(WriteJson(new FixtureOptions { OmitCertificateIssuer = true }));
+        Func<Task> wrongChainType = () => this.Verify(WriteJson(new FixtureOptions { MalformedDisplayProjection = true }));
+        Func<Task> wrongIssuerType = () => this.Verify(WriteJson(new FixtureOptions { MalformedVerifiedIssuerProjection = true }));
+        Func<Task> oversizedChain = () => this.Verify(WriteJson(new FixtureOptions { CertificateIssuer = new string('x', 513) }));
+        Func<Task> oversizedIssuer = () => this.Verify(WriteJson(new FixtureOptions { VerifiedIdentityIssuerRegexp = new string('x', 513) }));
 
         changed.Identity.Should().Be(CreateIdentity());
         omittedChain.Identity.Should().Be(CreateIdentity());
@@ -170,7 +201,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [TestCase(2)]
     public async Task VerifyAsync_RequiresExactlyOneResolvedTaggedDependency(int dependencyCount)
     {
-        Func<Task> verify = () => Verify(WriteJson(new FixtureOptions { DependencyCount = dependencyCount }));
+        Func<Task> verify = () => this.Verify(WriteJson(new FixtureOptions { DependencyCount = dependencyCount }));
 
         await verify.Should().ThrowAsync<PackageSecurityException>();
     }
@@ -178,11 +209,11 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [Test]
     public async Task VerifyAsync_RequiresUnambiguousRekorTimestampAndNormalizesEquivalentValues()
     {
-        Func<Task> zero = () => Verify(WriteJson(new FixtureOptions { TimestampCount = 0 }));
-        Func<Task> conflicting = () => Verify(
+        Func<Task> zero = () => this.Verify(WriteJson(new FixtureOptions { TimestampCount = 0 }));
+        Func<Task> conflicting = () => this.Verify(
             WriteJson(new FixtureOptions { TimestampCount = 2, SecondTimestamp = "2026-08-28T21:51:37+08:00" })
         );
-        VerifiedTaggedPackageTrust same = await Verify(
+        VerifiedTaggedPackageTrust same = await this.Verify(
             WriteJson(new FixtureOptions { TimestampCount = 2, SecondTimestamp = "2026-08-28T13:51:36Z" })
         );
 
@@ -197,7 +228,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     [TestCase("not-a-timestamp")]
     public async Task VerifyAsync_RejectsMalformedOrZoneLessTimestamp(string timestamp)
     {
-        Func<Task> verify = () => Verify(WriteJson(new FixtureOptions { FirstTimestamp = timestamp }));
+        Func<Task> verify = () => this.Verify(WriteJson(new FixtureOptions { FirstTimestamp = timestamp }));
 
         await verify.Should().ThrowAsync<PackageSecurityException>();
     }
@@ -207,10 +238,10 @@ internal sealed class GitHubArtifactAttestationVerifierTests
     {
         const string secret = "raw-private-signature-secret";
         string invalidUnicode = "[\"\ud800\"]";
-        Func<Task> malformed = () => Verify("{");
-        Func<Task> oversized = () => Verify(new string(' ', 2 * 1024 * 1024 + 1));
-        Func<Task> unicode = () => Verify(invalidUnicode);
-        Func<Task> secretFailure = () => Verify(WriteJson(new FixtureOptions { RawSecret = secret, Mutation = AuthorityField.MediaType }));
+        Func<Task> malformed = () => this.Verify("{");
+        Func<Task> oversized = () => this.Verify(new string(' ', 2 * 1024 * 1024 + 1));
+        Func<Task> unicode = () => this.Verify(invalidUnicode);
+        Func<Task> secretFailure = () => this.Verify(WriteJson(new FixtureOptions { RawSecret = secret, Mutation = AuthorityField.MediaType }));
 
         await malformed.Should().ThrowAsync<PackageSecurityException>();
         await oversized.Should().ThrowAsync<PackageSecurityException>();
@@ -228,37 +259,43 @@ internal sealed class GitHubArtifactAttestationVerifierTests
             identity,
             $"/proc/{Environment.ProcessId + 1}/fd/1",
             manifest,
-            "/usr/bin/gh",
-            "/tmp/private"
+            this.CliFixtureLease.ProcPath
         );
-        Action relativeProc = () => new GitHubArtifactAttestationVerificationRequest(identity, "package.zip", manifest, "/usr/bin/gh", "/tmp/private");
+        Action relativeProc = () => new GitHubArtifactAttestationVerificationRequest(
+            identity,
+            "package.zip",
+            manifest,
+            this.CliFixtureLease.ProcPath
+        );
         Action nonCanonicalDescriptor = () => new GitHubArtifactAttestationVerificationRequest(
             identity,
             $"/proc/{Environment.ProcessId}/fd/01",
             manifest,
-            "/usr/bin/gh",
-            "/tmp/private"
+            this.CliFixtureLease.ProcPath
         );
         Action wrongManifest = () => new GitHubArtifactAttestationVerificationRequest(
             identity,
-            $"/proc/{Environment.ProcessId}/fd/1",
+            this.PackageFixtureLease.ProcPath,
             new VerifiedAttestedSubject("manifest.json", ManifestSha256, 1),
-            "/usr/bin/gh",
-            "/tmp/private"
+            this.CliFixtureLease.ProcPath
         );
         Action relativeGh = () => new GitHubArtifactAttestationVerificationRequest(
             identity,
-            $"/proc/{Environment.ProcessId}/fd/1",
+            this.PackageFixtureLease.ProcPath,
             manifest,
-            "gh",
-            "/tmp/private"
+            "gh"
         );
-        Action relativeDirectory = () => new GitHubArtifactAttestationVerificationRequest(
+        Action otherProcessGh = () => new GitHubArtifactAttestationVerificationRequest(
             identity,
-            $"/proc/{Environment.ProcessId}/fd/1",
+            this.PackageFixtureLease.ProcPath,
             manifest,
-            "/usr/bin/gh",
-            "private"
+            $"/proc/{Environment.ProcessId + 1}/fd/1"
+        );
+        Action nonCanonicalGhDescriptor = () => new GitHubArtifactAttestationVerificationRequest(
+            identity,
+            this.PackageFixtureLease.ProcPath,
+            manifest,
+            $"/proc/{Environment.ProcessId}/fd/01"
         );
 
         otherProcess.Should().Throw<ArgumentException>().WithParameterName("packageProcPath");
@@ -266,7 +303,8 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         nonCanonicalDescriptor.Should().Throw<ArgumentException>().WithParameterName("packageProcPath");
         wrongManifest.Should().Throw<ArgumentException>().WithParameterName("manifestSubject");
         relativeGh.Should().Throw<ArgumentException>().WithParameterName("gitHubCliPath");
-        relativeDirectory.Should().Throw<ArgumentException>().WithParameterName("isolatedDirectory");
+        otherProcessGh.Should().Throw<ArgumentException>().WithParameterName("gitHubCliPath");
+        nonCanonicalGhDescriptor.Should().Throw<ArgumentException>().WithParameterName("gitHubCliPath");
     }
 
     [Test]
@@ -275,26 +313,284 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         using CancellationTokenSource cancellation = new();
         cancellation.Cancel();
         StubRunner runner = new("private-invalid-output");
-        Func<Task> verify = async () => await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(CreateRequest(), cancellation.Token);
+        Func<Task> verify = async () => await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(this.CreateRequest(), cancellation.Token);
 
         await verify.Should().ThrowAsync<OperationCanceledException>();
         runner.Request.Should().BeNull();
     }
 
-    private static Task<VerifiedTaggedPackageTrust> Verify(string output)
+    [Test]
+    public async Task ProductionVerifyAsync_DerivesOnlyAuthorityFieldsAndHoldsAllLeasesThroughRunnerAndParse()
     {
-        return new GitHubArtifactAttestationVerifier(new StubRunner(output)).VerifyAsync(CreateRequest());
+        HashSet<string> manifestDescriptorBaseline = FindDescriptors("memfd:smapi-installer-verified-manifest");
+        using VerifiedInstallerPackage package = await this.CreateVerifiedInstallerPackageAsync();
+        string manifestProcPath = FindDescriptors("memfd:smapi-installer-verified-manifest")
+            .Except(manifestDescriptorBaseline)
+            .Single();
+        using PinnedGitHubCli cli = await this.CreatePinnedGitHubCliAsync();
+        InstallationReleaseIdentity expectedIdentity = package.Release;
+        Sha256Digest expectedManifestSha256 = package.ManifestSha256;
+        string output = WriteJson(
+            new FixtureOptions
+            {
+                PackageSubjectSha256 = expectedIdentity.PackageSha256.Value,
+                ManifestSubjectSha256 = expectedManifestSha256.Value
+            }
+        );
+        string? packageProcPath = null;
+        string? cliProcPath = null;
+        StubRunner runner = new(
+            output,
+            request =>
+            {
+                packageProcPath = request.Arguments[2];
+                cliProcPath = request.ExecutablePath;
+                File.Exists(packageProcPath).Should().BeTrue();
+                File.Exists(cliProcPath).Should().BeTrue();
+
+                package.Dispose();
+                cli.Dispose();
+
+                File.Exists(packageProcPath).Should().BeTrue("the package descriptor lease must outlive authority disposal");
+                File.Exists(cliProcPath).Should().BeTrue("the executable descriptor lease must outlive authority disposal");
+                File.Exists(manifestProcPath).Should().BeTrue("the hidden retained manifest lease must outlive authority disposal");
+            }
+        );
+
+        VerifiedTaggedPackageTrust trust = await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(package, cli);
+
+        runner.Request.Should().NotBeNull();
+        runner.Request!.ExecutablePath.Should().Be(cliProcPath);
+        runner.Request.Arguments[2].Should().Be(packageProcPath);
+        runner.Request.Arguments.Should().ContainInOrder("--signer-digest", SourceCommit, "--source-ref", SourceReference);
+        trust.Identity.Should().Be(expectedIdentity);
+        trust.PackageSubject.Name.Should().Be(expectedIdentity.PackageAssetName);
+        trust.PackageSubject.Sha256.Should().Be(expectedIdentity.PackageSha256);
+        trust.ManifestSubject.Name.Should().Be(ManifestName);
+        trust.ManifestSubject.Sha256.Should().Be(expectedManifestSha256);
+        File.Exists(packageProcPath).Should().BeFalse("the production package lease must be released after parsing");
+        File.Exists(cliProcPath).Should().BeFalse("the production executable lease must be released after parsing");
+        File.Exists(manifestProcPath).Should().BeFalse("the production manifest lease must be released after parsing");
+        FindDescriptors("memfd:smapi-installer-verified-manifest").Should().BeEquivalentTo(manifestDescriptorBaseline);
     }
 
-    private static GitHubArtifactAttestationVerificationRequest CreateRequest()
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task ProductionVerifyAsync_DisposalBeforeAllLeasesFailsWithoutCallingRunner(bool disposePackage)
+    {
+        using VerifiedInstallerPackage package = await this.CreateVerifiedInstallerPackageAsync();
+        using PinnedGitHubCli cli = await this.CreatePinnedGitHubCliAsync();
+        StubRunner runner = new(WriteJson());
+        if (disposePackage)
+            package.Dispose();
+        else
+            cli.Dispose();
+
+        Func<Task> verify = async () => await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(package, cli);
+
+        await verify.Should().ThrowAsync<ObjectDisposedException>();
+        runner.Request.Should().BeNull();
+        package.Dispose();
+        cli.Dispose();
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task ProductionVerifyAsync_ReleasesEveryLeaseAfterRunnerOrParserFailure(bool runnerFailure)
+    {
+        HashSet<string> manifestDescriptorBaseline = FindDescriptors("memfd:smapi-installer-verified-manifest");
+        using VerifiedInstallerPackage package = await this.CreateVerifiedInstallerPackageAsync();
+        string manifestProcPath = FindDescriptors("memfd:smapi-installer-verified-manifest")
+            .Except(manifestDescriptorBaseline)
+            .Single();
+        using PinnedGitHubCli cli = await this.CreatePinnedGitHubCliAsync();
+        string? packageProcPath = null;
+        string? cliProcPath = null;
+        StubRunner runner = new(
+            runnerFailure ? WriteJson() : "{",
+            request =>
+            {
+                packageProcPath = request.Arguments[2];
+                cliProcPath = request.ExecutablePath;
+                package.Dispose();
+                cli.Dispose();
+                if (runnerFailure)
+                    throw new PackageSecurityException("Synthetic bounded runner failure.");
+            }
+        );
+
+        Func<Task> verify = async () => await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(package, cli);
+
+        await verify.Should().ThrowAsync<PackageSecurityException>();
+        File.Exists(packageProcPath).Should().BeFalse();
+        File.Exists(cliProcPath).Should().BeFalse();
+        File.Exists(manifestProcPath).Should().BeFalse();
+        FindDescriptors("memfd:smapi-installer-verified-manifest").Should().BeEquivalentTo(manifestDescriptorBaseline);
+    }
+
+    [Test]
+    public async Task ProductionVerifyAsync_ReleasesEveryLeaseWhenCancellationArrivesDuringRunner()
+    {
+        HashSet<string> manifestDescriptorBaseline = FindDescriptors("memfd:smapi-installer-verified-manifest");
+        using VerifiedInstallerPackage package = await this.CreateVerifiedInstallerPackageAsync();
+        string manifestProcPath = FindDescriptors("memfd:smapi-installer-verified-manifest")
+            .Except(manifestDescriptorBaseline)
+            .Single();
+        using PinnedGitHubCli cli = await this.CreatePinnedGitHubCliAsync();
+        using CancellationTokenSource cancellation = new();
+        string? packageProcPath = null;
+        string? cliProcPath = null;
+        StubRunner runner = new(
+            WriteJson(),
+            request =>
+            {
+                packageProcPath = request.Arguments[2];
+                cliProcPath = request.ExecutablePath;
+                package.Dispose();
+                cli.Dispose();
+                cancellation.Cancel();
+            }
+        );
+
+        Func<Task> verify = async () => await new GitHubArtifactAttestationVerifier(runner).VerifyAsync(package, cli, cancellation.Token);
+
+        await verify.Should().ThrowAsync<OperationCanceledException>();
+        File.Exists(packageProcPath).Should().BeFalse();
+        File.Exists(cliProcPath).Should().BeFalse();
+        File.Exists(manifestProcPath).Should().BeFalse();
+        FindDescriptors("memfd:smapi-installer-verified-manifest").Should().BeEquivalentTo(manifestDescriptorBaseline);
+    }
+
+    private Task<VerifiedTaggedPackageTrust> Verify(string output)
+    {
+        return new GitHubArtifactAttestationVerifier(new StubRunner(output)).VerifyAsync(this.CreateRequest());
+    }
+
+    private GitHubArtifactAttestationVerificationRequest CreateRequest()
     {
         return new GitHubArtifactAttestationVerificationRequest(
             CreateIdentity(),
-            $"/proc/{Environment.ProcessId}/fd/123",
+            this.PackageFixtureLease.ProcPath,
             CreateManifestSubject(),
-            "/usr/bin/gh",
-            "/tmp/smapi-attestation-private"
+            this.CliFixtureLease.ProcPath
         );
+    }
+
+    private static SafeFileHandle CreateSealedFixture(string name, ReadOnlySpan<byte> bytes)
+    {
+        SafeFileHandle handle = LinuxSealedFile.CreateAnonymous(name);
+        try
+        {
+            RandomAccess.Write(handle, bytes, 0);
+            LinuxSealedFile.SealImmutable(handle);
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    private async Task<VerifiedInstallerPackage> CreateVerifiedInstallerPackageAsync()
+    {
+        byte[] packageBytes = "synthetic installer package"u8.ToArray();
+        string packageHash = Convert.ToHexString(SHA256.HashData(packageBytes)).ToLowerInvariant();
+        ForkReleaseIdentity forkIdentity = ForkReleaseIdentity.Parse(Tag);
+        string packagePath = Path.Combine(this.TempRoot, PackageName);
+        File.WriteAllBytes(packagePath, packageBytes);
+        InstallationReleaseIdentity releaseIdentity = new(
+            InstallationReleaseIdentity.ReviewedRepository,
+            Tag,
+            EmbeddedVersion,
+            PackageName,
+            SourceCommit,
+            SourceTree,
+            Sha256Digest.Parse(packageHash),
+            packageBytes.LongLength,
+            Workflow,
+            "Release",
+            "linux-x64"
+        );
+        PackageManifest manifest = new(
+            releaseIdentity,
+            [
+                new PackageManifestEntry(
+                    NormalizedRelativePath.Parse("StardewValley"),
+                    Sha256Digest.Parse(new string('d', 64)),
+                    42,
+                    493,
+                    OwnedEntryKind.Launcher
+                )
+            ]
+        );
+        byte[] manifestBytes = Encoding.UTF8.GetBytes(manifest.ToCanonicalJson());
+        string manifestHash = Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant();
+        string manifestPath = Path.Combine(this.TempRoot, ManifestName);
+        File.WriteAllBytes(manifestPath, manifestBytes);
+        string checksums = $"{packageHash}  {PackageName}\n{manifestHash}  {ManifestName}\n";
+        string metadata = JsonSerializer.Serialize(new
+        {
+            schema_version = 1,
+            release = new { version = EmbeddedVersion, tag = Tag },
+            source = new { repository = ForkReleaseIdentity.RepositoryUrl, commit = SourceCommit, tree = SourceTree },
+            build = new { workflow = Workflow, configuration = "Release", runtime_identifier = "linux-x64" },
+            artifacts = new object[]
+            {
+                new { name = PackageName, size_bytes = packageBytes.LongLength, sha256 = packageHash },
+                new { name = ManifestName, size_bytes = manifestBytes.LongLength, sha256 = manifestHash }
+            }
+        });
+        VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyAsync(
+            packagePath,
+            checksums,
+            metadata,
+            forkIdentity,
+            SourceCommit
+        );
+        try
+        {
+            VerifiedInstallerPackage result = await new VerifiedInstallerPackageFactory().VerifyAsync(release, manifestPath);
+            release = null;
+            return result;
+        }
+        finally
+        {
+            if (release is not null)
+                await release.DisposeAsync();
+        }
+    }
+
+    private async Task<PinnedGitHubCli> CreatePinnedGitHubCliAsync()
+    {
+        string directory = Path.Combine(this.TempRoot, $"cli-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, PinnedGitHubCli.ExecutableFilename);
+        byte[] bytes = "#!/bin/sh\nexit 0\n"u8.ToArray();
+        File.WriteAllBytes(path, bytes);
+        PinnedGitHubCliTestIdentity identity = new(
+            bytes.LongLength,
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()
+        );
+        return await PinnedGitHubCli.OpenForTestingAsync(path, identity);
+    }
+
+    private static HashSet<string> FindDescriptors(string linkTargetFragment)
+    {
+        HashSet<string> paths = new(StringComparer.Ordinal);
+        foreach (string path in Directory.EnumerateFiles($"/proc/{Environment.ProcessId}/fd"))
+        {
+            try
+            {
+                if (new FileInfo(path).LinkTarget?.Contains(linkTargetFragment, StringComparison.Ordinal) == true)
+                    paths.Add(path);
+            }
+            catch (IOException)
+            {
+                // Another runtime descriptor can close while procfs is enumerated.
+            }
+        }
+        return paths;
     }
 
     private static InstallationReleaseIdentity CreateIdentity()
@@ -504,7 +800,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
             options,
             manifest ? AuthorityField.ManifestSubjectDigest : AuthorityField.PackageSubjectDigest,
             "sha256",
-            (manifest ? ManifestSha256 : PackageSha256).Value
+            manifest ? options.ManifestSubjectSha256 : options.PackageSubjectSha256
         );
         if (options.ExtraDigestAlgorithm)
             writer.WriteString("sha512", new string('c', 128));
@@ -605,17 +901,21 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         public string VerifiedIdentityIssuer { get; init; } = "";
         public string VerifiedIdentityIssuerRegexp { get; init; } = ".*";
         public string? RawSecret { get; init; }
+        public string PackageSubjectSha256 { get; init; } = PackageSha256.Value;
+        public string ManifestSubjectSha256 { get; init; } = ManifestSha256.Value;
     }
 
     private sealed class StubRunner : IGitHubAttestationProcessRunner
     {
         private readonly string Output;
+        private readonly Action<GitHubAttestationProcessRequest>? OnRun;
 
         public GitHubAttestationProcessRequest? Request { get; private set; }
 
-        public StubRunner(string output)
+        public StubRunner(string output, Action<GitHubAttestationProcessRequest>? onRun = null)
         {
             this.Output = output;
+            this.OnRun = onRun;
         }
 
         public Task<GitHubAttestationProcessResult> RunAsync(
@@ -625,6 +925,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             this.Request = request;
+            this.OnRun?.Invoke(request);
             return Task.FromResult(new GitHubAttestationProcessResult(this.Output));
         }
     }
