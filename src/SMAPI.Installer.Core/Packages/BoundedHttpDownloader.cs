@@ -19,16 +19,22 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
     /// <summary>Construct an instance using a redirect-disabled, cookie-free HTTP handler.</summary>
     /// <param name="uriPolicy">The policy applied before every request.</param>
     public BoundedHttpDownloader(IDownloadUriPolicy uriPolicy)
-    {
-        this.UriPolicy = uriPolicy ?? throw new ArgumentNullException(nameof(uriPolicy));
-        this.Client = new HttpClient(
+        : this(
+            uriPolicy,
             new SocketsHttpHandler
             {
                 AllowAutoRedirect = false,
                 UseCookies = false
-            },
-            disposeHandler: true
+            }
         )
+    {
+    }
+
+    /// <summary>Construct with an internal deterministic handler while preserving the exact caller policy.</summary>
+    internal BoundedHttpDownloader(IDownloadUriPolicy uriPolicy, HttpMessageHandler handler)
+    {
+        this.UriPolicy = uriPolicy ?? throw new ArgumentNullException(nameof(uriPolicy));
+        this.Client = new HttpClient(handler ?? throw new ArgumentNullException(nameof(handler)), disposeHandler: true)
         {
             Timeout = System.Threading.Timeout.InfiniteTimeSpan
         };
@@ -85,7 +91,6 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                     throw new PackageSecurityException("The release server returned an invalid content length.");
                 if (declaredLength > limits.MaxBytes)
                     throw new PackageSecurityException("The release asset exceeds the configured download size limit.");
-
                 long totalBytes = 0;
                 byte[] buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
                 try
@@ -117,7 +122,6 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
 
                     if (declaredLength.HasValue && totalBytes != declaredLength.Value)
                         throw new PackageSecurityException("The release download ended before its declared content length was received.");
-
                     LinuxFileIdentity stagedIdentity = destinationFileSystem.Stat(temporaryName)
                         ?? throw new IOException("The private download staging file disappeared.");
                     if (
@@ -195,6 +199,140 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
         finally
         {
             destinationFileSystem?.Dispose();
+        }
+    }
+
+    /// <summary>Download into an already-retained anchored directory, publishing a previously absent exact leaf.</summary>
+    internal async Task<DownloadResult> DownloadAsync(
+        Uri sourceUri,
+        AnchoredDownloadTarget destination,
+        DownloadLimits limits,
+        IProgress<DownloadProgress>? progress = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(sourceUri);
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentNullException.ThrowIfNull(limits);
+        this.UriPolicy.AssertAllowed(sourceUri, isInitial: true);
+        destination.AssertReady();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        using CancellationTokenSource timeoutSource = new(limits.Timeout);
+        using CancellationTokenSource linkedSource = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            timeoutSource.Token
+        );
+        string? temporaryName = null;
+        LinuxFileIdentity? temporaryIdentity = null;
+        try
+        {
+            (HttpResponseMessage response, Uri finalUri) = await this.GetResponseAsync(
+                sourceUri,
+                limits.MaxRedirects,
+                linkedSource.Token
+            ).ConfigureAwait(false);
+            using (response)
+            {
+                long? declaredLength = response.Content.Headers.ContentLength;
+                if (declaredLength is < 0)
+                    throw new PackageSecurityException("The release server returned an invalid content length.");
+                if (declaredLength > limits.MaxBytes)
+                    throw new PackageSecurityException("The release asset exceeds the configured download size limit.");
+                if (declaredLength.HasValue && declaredLength.Value != destination.ExpectedBytes)
+                    throw new PackageSecurityException("The release asset length differs from its catalog advertisement.");
+
+                long totalBytes = 0;
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+                try
+                {
+                    temporaryName = destination.GetFreshTemporaryName();
+                    await using Stream input = await response.Content.ReadAsStreamAsync(linkedSource.Token).ConfigureAwait(false);
+                    using LinuxAnchoredFile output = destination.FileSystem.CreateNewFile(temporaryName, PrivateFileMode);
+                    temporaryIdentity = output.Identity;
+                    while (true)
+                    {
+                        int bytesRead = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), linkedSource.Token).ConfigureAwait(false);
+                        if (bytesRead == 0)
+                            break;
+
+                        long writeOffset = totalBytes;
+                        totalBytes = checked(totalBytes + bytesRead);
+                        if (totalBytes > limits.MaxBytes)
+                            throw new PackageSecurityException("The release asset exceeded the configured download size limit while streaming.");
+                        await RandomAccess.WriteAsync(
+                            output.Handle,
+                            buffer.AsMemory(0, bytesRead),
+                            writeOffset,
+                            linkedSource.Token
+                        ).ConfigureAwait(false);
+                        progress?.Report(new DownloadProgress(totalBytes, declaredLength));
+                    }
+
+                    if (declaredLength.HasValue && totalBytes != declaredLength.Value)
+                        throw new PackageSecurityException("The release download ended before its declared content length was received.");
+                    if (totalBytes != destination.ExpectedBytes)
+                        throw new PackageSecurityException("The release asset length differs from its catalog advertisement.");
+                    LinuxFileIdentity staged = destination.FileSystem.Stat(temporaryName)
+                        ?? throw new IOException("The private download staging file disappeared.");
+                    if (
+                        !staged.IsSameObject(temporaryIdentity)
+                        || staged.Size != totalBytes
+                        || staged.LinkCount != 1
+                        || staged.OwnerUserId != destination.OwnerUserId
+                        || staged.SpecialModeBits != 0
+                        || staged.UnixMode != PrivateFileMode
+                    )
+                    {
+                        throw new IOException("The private download staging file changed while streaming.");
+                    }
+                    linkedSource.Token.ThrowIfCancellationRequested();
+                    destination.AssertReady();
+                    LinuxFileIdentity published = destination.FileSystem.RenameFileNoReplace(
+                        temporaryName,
+                        destination.LeafName,
+                        staged
+                    );
+                    if (
+                        published.Size != totalBytes
+                        || published.UnixMode != PrivateFileMode
+                        || published.LinkCount != 1
+                        || published.OwnerUserId != destination.OwnerUserId
+                        || published.SpecialModeBits != 0
+                    )
+                    {
+                        throw new IOException("The published release download failed exact metadata verification.");
+                    }
+                    temporaryName = null;
+                    destination.SetPublished(published);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
+                return new DownloadResult(destination.ProcPath, totalBytes, finalUri);
+            }
+        }
+        catch (OperationCanceledException ex) when (timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
+            throw new PackageSecurityException($"The release download timed out before it completed ({ex.GetType().Name}).");
+        }
+        catch (OperationCanceledException)
+        {
+            CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
+            throw;
+        }
+        catch (PackageSecurityException)
+        {
+            CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
+            throw new PackageSecurityException($"The release download failed without exposing request credentials ({ex.GetType().Name}).");
         }
     }
 
@@ -300,5 +438,72 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
         {
             // Best-effort cleanup is limited to the exact file this attempt created.
         }
+    }
+}
+
+/// <summary>An opaque, retained, previously absent publication target for one bounded download.</summary>
+internal sealed class AnchoredDownloadTarget
+{
+    private int Published;
+    private int TemporaryIssued;
+
+    public LinuxAnchoredFileSystem FileSystem { get; }
+    public string LeafName { get; }
+    public string ProcPath { get; }
+    public uint OwnerUserId { get; }
+    public long ExpectedBytes { get; }
+    public LinuxFileIdentity? PublishedIdentity { get; private set; }
+    private readonly Action<LinuxFileIdentity> OnPublished;
+
+    public AnchoredDownloadTarget(
+        LinuxAnchoredFileSystem fileSystem,
+        string leafName,
+        string procDirectoryPath,
+        uint ownerUserId,
+        long expectedBytes,
+        Action<LinuxFileIdentity> onPublished
+    )
+    {
+        this.FileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
+        if (string.IsNullOrEmpty(leafName) || leafName.Contains('/') || leafName.Any(char.IsControl))
+            throw new PackageSecurityException("The reviewed release asset name isn't a safe exact leaf.");
+        this.LeafName = leafName;
+        this.ProcPath = Path.Combine(procDirectoryPath, leafName);
+        this.OwnerUserId = ownerUserId;
+        this.ExpectedBytes = expectedBytes > 0
+            ? expectedBytes
+            : throw new ArgumentOutOfRangeException(nameof(expectedBytes));
+        this.OnPublished = onPublished ?? throw new ArgumentNullException(nameof(onPublished));
+    }
+
+    public void AssertReady()
+    {
+        LinuxFileIdentity root = this.FileSystem.GetCurrentRootIdentity();
+        if (
+            Volatile.Read(ref this.Published) != 0
+            || root.Kind != LinuxAnchoredEntryKind.Directory
+            || root.LinkCount < 1
+            || root.OwnerUserId != this.OwnerUserId
+            || root.SpecialModeBits != 0
+            || root.UnixMode != 0x1c0
+            || this.FileSystem.Stat(this.LeafName) is not null
+        )
+        {
+            throw new PackageSecurityException("The retained private release workspace changed before download publication.");
+        }
+    }
+
+    public string GetFreshTemporaryName()
+    {
+        if (Interlocked.Exchange(ref this.TemporaryIssued, 1) != 0)
+            throw new PackageSecurityException("The bounded release download attempted more than one private staging file.");
+        return $".download-{Guid.NewGuid():N}.tmp";
+    }
+
+    public void SetPublished(LinuxFileIdentity identity)
+    {
+        this.OnPublished(identity);
+        this.PublishedIdentity = identity;
+        Volatile.Write(ref this.Published, 1);
     }
 }
