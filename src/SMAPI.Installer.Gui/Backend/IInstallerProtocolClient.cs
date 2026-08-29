@@ -5,6 +5,9 @@ namespace StardewModdingAPI.Installer.Gui.Backend;
 /// <summary>The deliberately narrow backend surface available to the release-verification UI slice.</summary>
 internal interface IInstallerProtocolClient : IAsyncDisposable
 {
+    /// <summary>Completes with a generic fault if the live backend session later violates its transport contract.</summary>
+    Task<InstallerProtocolClientException> SessionFaulted { get; }
+
     /// <summary>Start and authenticate a fresh protocol session.</summary>
     Task<HandshakeEvent> HandshakeAsync(string clientName, string clientVersion, CancellationToken cancellationToken = default);
 
@@ -27,7 +30,7 @@ internal sealed record InstallerPackageOpenInput(
 /// <summary>A sanitized, typed outcome from local package verification.</summary>
 internal abstract record InstallerPackageOpenResult;
 
-internal sealed record InstallerPackageOpenSuccess(PackageOpenedEvent Opened) : InstallerPackageOpenResult;
+internal sealed record InstallerPackageOpenSuccess(ProtocolReleaseIdentity Release) : InstallerPackageOpenResult;
 
 /// <summary>A normal backend domain rejection with no private log path or raw exception detail.</summary>
 internal sealed record InstallerPackageOpenRejection(

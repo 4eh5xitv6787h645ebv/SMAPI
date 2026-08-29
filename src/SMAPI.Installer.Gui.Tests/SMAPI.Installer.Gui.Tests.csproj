@@ -19,5 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SMAPI.Installer.Gui\SMAPI.Installer.Gui.csproj" />
+    <!-- Build the actual host for fixture-free protocol integration. Its existing net6/trimming diagnostics are outside this GUI slice. -->
+    <ProjectReference Include="..\SMAPI.Installer\SMAPI.Installer.csproj" ReferenceOutputAssembly="false" AdditionalProperties="CheckEolTargetFramework=false;NoWarn=CS8618%3BIL2026" />
   </ItemGroup>
 </Project>

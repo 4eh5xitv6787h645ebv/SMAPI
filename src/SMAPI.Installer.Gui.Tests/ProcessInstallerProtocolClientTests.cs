@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Text;
+using System.Threading.Channels;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
+using StardewModdingAPI.Installer.Core.Security;
 using StardewModdingAPI.Installer.Gui.Backend;
 
 namespace StardewModdingAPI.Installer.Gui.Tests;
@@ -49,10 +51,15 @@ public sealed class ProcessInstallerProtocolClientTests
                 command_id=$(printf '%s\n' "$request" | sed -n 's/.*"commandId":"\([0-9a-f]*\)".*/\1/p')
                 test "${#command_id}" -eq 32 || exit 44
                 printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\"]}}"
+                while IFS= read -r ignored; do :; done
                 """);
             File.SetUnixFileMode(installer, UnixFileMode.UserRead | UnixFileMode.UserExecute);
-            string located = SiblingInstallerLocator.Locate(gui);
-            await using ProcessInstallerProtocolClient client = ProcessInstallerProtocolClient.CreateForTesting(located, new SystemInstallerProtocolProcessFactory());
+            using LinuxExternalExecutableLease lease = SiblingInstallerLocator.OpenSibling(gui);
+            await using ProcessInstallerProtocolClient client = ProcessInstallerProtocolClient.CreateForTesting(
+                installer,
+                new SystemInstallerProtocolProcessFactory(),
+                executableLease: lease
+            );
 
             HandshakeEvent response = await client.HandshakeAsync("SMAPI GUI", "1");
 
@@ -65,6 +72,34 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    [SupportedOSPlatform("linux")]
+    public async Task ActualSmapiInstallerProtocolHostKeepsLiveSessionAcrossTwoNormalRejections()
+    {
+        string configuration = new DirectoryInfo(TestContext.CurrentContext.TestDirectory).Parent?.Name
+            ?? throw new AssertionException("The test build configuration couldn't be derived.");
+        string installer = Path.GetFullPath(Path.Combine(
+            TestContext.CurrentContext.TestDirectory,
+            "..", "..", "..", "..", "SMAPI.Installer", "bin", configuration, "SMAPI.Installer"
+        ));
+        File.Exists(installer).Should().BeTrue("the test project has a build-only reference to the actual installer host");
+        using LinuxExternalExecutableLease lease = LinuxExternalExecutableLease.Open(installer);
+        await using ProcessInstallerProtocolClient client = ProcessInstallerProtocolClient.CreateForTesting(
+            installer,
+            new RollForwardSystemFactory(),
+            executableLease: lease
+        );
+
+        HandshakeEvent response = await client.HandshakeAsync("SMAPI GUI integration test", "1");
+        InstallerPackageOpenResult first = await client.OpenPackageAsync(CreatePackage());
+        InstallerPackageOpenResult second = await client.OpenPackageAsync(CreatePackage());
+
+        response.Capabilities.Should().Contain(ProcessInstallerProtocolClient.PackageVerificationCapability);
+        first.Should().BeOfType<InstallerPackageOpenRejection>();
+        second.Should().BeOfType<InstallerPackageOpenRejection>();
+        client.SessionFaulted.IsCompleted.Should().BeFalse();
+    }
+
+    [Test]
     public async Task CorrelatesHandshakeAndPackageOpenAndSendsOnlyThoseTwoRequestKinds()
     {
         ScriptedProcess process = new(CorrectResponse);
@@ -72,15 +107,96 @@ public sealed class ProcessInstallerProtocolClientTests
 
         await client.HandshakeAsync("SMAPI GUI", "1");
         InstallerPackageOpenSuccess result = (await client.OpenPackageAsync(CreatePackage())).Should().BeOfType<InstallerPackageOpenSuccess>().Subject;
-        PackageOpenedEvent opened = result.Opened;
+        ProtocolReleaseIdentity opened = result.Release;
 
-        opened.SessionId.Should().Be(Session);
+        opened.Tag.Should().Be(CreatePackage().ReleaseTag);
+        client.HasRetainedPackageAuthority.Should().BeTrue();
         process.Requests.Select(request => request.Kind).Should().Equal(ProtocolMessageKind.HandshakeRequest, ProtocolMessageKind.OpenPackageRequest);
         OpenPackageRequest sent = process.Requests.OfType<OpenPackageRequest>().Single();
         sent.PackagePath.Should().Be(CreatePackage().PackagePath);
         sent.AttestationBundleChecksumPath.Should().Be(CreatePackage().AttestationBundleChecksumPath);
         typeof(IInstallerProtocolClient).GetMethods().Select(method => method.Name)
+            .Where(name => !name.StartsWith("get_", StringComparison.Ordinal))
             .Should().BeEquivalentTo([nameof(IInstallerProtocolClient.HandshakeAsync), nameof(IInstallerProtocolClient.OpenPackageAsync)]);
+    }
+
+    [Test]
+    public async Task DuplicateStdoutAfterValidPackageResultRevokesSuccessAndFailStops()
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            OpenPackageRequest => [.. Serialize(CreateOpened(Session, request.CommandId)), .. Serialize(CreateOpened(Session, request.CommandId))],
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        Func<Task> action = () => client.OpenPackageAsync(CreatePackage());
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+        process.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task PartialSecondFrameBufferedWithValidPackageResultRevokesSuccess()
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            OpenPackageRequest => [.. Serialize(CreateOpened(Session, request.CommandId)), (byte)'{'],
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        Func<Task> action = () => client.OpenPackageAsync(CreatePackage());
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        client.HasRetainedPackageAuthority.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task ValidPackageResultKeepsSessionAliveAndDelayedUnsolicitedOutputFaultsIt()
+    {
+        ScriptedProcess process = new(CorrectResponse);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        InstallerPackageOpenResult result = await client.OpenPackageAsync(CreatePackage());
+
+        result.Should().BeOfType<InstallerPackageOpenSuccess>();
+        process.Terminated.Should().BeFalse();
+        process.Disposed.Should().BeFalse();
+        client.SessionFaulted.IsCompleted.Should().BeFalse();
+
+        process.Publish(Serialize(CreateOpened(Session, ProtocolCommandId.CreateRandom())));
+        InstallerProtocolClientException fault = await client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2));
+        fault.Message.Should().NotContain("commandId").And.NotContain("111111");
+        await SpinWaitUntilAsync(() => process.Disposed);
+        process.Terminated.Should().BeTrue();
+        client.HasRetainedPackageAuthority.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task FaultBetweenResponseAndAuthorityCommitCannotResurrectPackageAuthority()
+    {
+        ScriptedProcess process = new(CorrectResponse);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        client.BeforePackageAuthorityCommitForTesting = () =>
+        {
+            process.Publish(Serialize(CreateOpened(Session, ProtocolCommandId.CreateRandom())));
+            _ = client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+        };
+
+        Func<Task> action = () => client.OpenPackageAsync(CreatePackage());
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        client.HasRetainedPackageAuthority.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -295,6 +411,155 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    public async Task PartialProcessInitializationStillTerminatesReapsAndDisposesStartedChild()
+    {
+        ThrowingSetupProcess process = new();
+        await using ProcessInstallerProtocolClient client = ProcessInstallerProtocolClient.CreateForTesting(
+            "/tmp/SMAPI.Installer",
+            new SingleProcessFactory(process),
+            reapTimeout: TimeSpan.FromMilliseconds(100)
+        );
+
+        Func<Task> action = () => client.HandshakeAsync("SMAPI GUI", "1");
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+        process.WaitObserved.Should().BeTrue();
+        process.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    [SupportedOSPlatform("linux")]
+    public async Task RetainedSiblingIdentityExecutesThroughOriginalDescriptorAfterPathSwap()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"smapi-gui-identity-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string installer = Path.Combine(root, SiblingInstallerLocator.InstallerFileName);
+            string gui = Path.Combine(root, "SMAPI.Installer.Gui");
+            await File.WriteAllTextAsync(gui, "gui");
+            await File.WriteAllTextAsync(installer, "original executable");
+            File.SetUnixFileMode(installer, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            using LinuxExternalExecutableLease lease = SiblingInstallerLocator.OpenSibling(gui);
+            File.Delete(installer);
+            await File.WriteAllTextAsync(installer, "replacement executable");
+            File.SetUnixFileMode(installer, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            ScriptedProcess process = new(CorrectResponse);
+            CapturingFactory factory = new(process);
+            await using ProcessInstallerProtocolClient client = ProcessInstallerProtocolClient.CreateForTesting(
+                installer,
+                factory,
+                executableLease: lease
+            );
+
+            await client.HandshakeAsync("SMAPI GUI", "1");
+
+            factory.StartInfo!.FileName.Should().Be(lease.ProcPath).And.NotBe(installer);
+            File.ReadAllText(lease.ProcPath).Should().Be("original executable");
+            process.Requests.Should().ContainSingle().Which.Should().BeOfType<HandshakeRequest>();
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Test]
+    [SupportedOSPlatform("linux")]
+    public async Task UnconfirmedTerminationIsReportedTruthfullyAndRetainedForDeferredReap()
+    {
+        string executablePath = Path.Combine(Path.GetTempPath(), $"smapi-backend-lease-{Guid.NewGuid():N}");
+        await File.WriteAllTextAsync(executablePath, "backend");
+        File.SetUnixFileMode(executablePath, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        using LinuxExternalExecutableLease lease = LinuxExternalExecutableLease.Open(executablePath);
+        string procPath = lease.ProcPath;
+        ScriptedProcess process = new(
+            _ => Encoding.UTF8.GetBytes("not-json\n"),
+            completeWaitInitially: false,
+            completeExitOnTerminate: false
+        );
+        await using ProcessInstallerProtocolClient client = ProcessInstallerProtocolClient.CreateForTesting(
+            executablePath,
+            new CapturingFactory(process),
+            reapTimeout: TimeSpan.FromMilliseconds(50),
+            executableLease: lease
+        );
+
+        Func<Task> action = () => client.HandshakeAsync("SMAPI GUI", "1");
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>().WithMessage("*termination could not be confirmed*");
+        client.CleanupConfirmed.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+        process.Disposed.Should().BeFalse("the process handle must remain owned by the deferred reaper");
+        File.Exists(procPath).Should().BeTrue("the exact execution authority must remain retained until deferred reap");
+
+        process.CompleteExit();
+        await SpinWaitUntilAsync(() => process.Disposed);
+        await SpinWaitUntilAsync(() => !File.Exists(procPath));
+        File.Delete(executablePath);
+    }
+
+    [Test]
+    [SupportedOSPlatform("linux")]
+    [NonParallelizable]
+    public async Task ProductionGateAllowsOnlyOneClientAndDisablesRelaunchAfterUnconfirmedReap()
+    {
+        string executablePath = Path.Combine(Path.GetTempPath(), $"smapi-production-gate-{Guid.NewGuid():N}");
+        await File.WriteAllTextAsync(executablePath, "backend");
+        File.SetUnixFileMode(executablePath, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        ScriptedProcess process = new(
+            _ => Encoding.UTF8.GetBytes("not-json\n"),
+            completeWaitInitially: false,
+            completeExitOnTerminate: false
+        );
+        ProcessInstallerProtocolClient? client = null;
+        try
+        {
+            client = ProcessInstallerProtocolClient.CreateProductionForTesting(
+                () => LinuxExternalExecutableLease.Open(executablePath),
+                new CapturingFactory(process),
+                reapTimeout: TimeSpan.FromMilliseconds(50)
+            );
+            FluentActions.Invoking(() => ProcessInstallerProtocolClient.CreateProductionForTesting(
+                () => LinuxExternalExecutableLease.Open(executablePath),
+                new CapturingFactory(new ScriptedProcess(CorrectResponse))
+            )).Should().Throw<InvalidOperationException>().WithMessage("*already active*");
+
+            await FluentActions.Awaiting(() => client.HandshakeAsync("SMAPI GUI", "1"))
+                .Should().ThrowAsync<InstallerProtocolClientException>().WithMessage("*termination could not be confirmed*");
+            FluentActions.Invoking(() => ProcessInstallerProtocolClient.CreateProductionForTesting(
+                () => LinuxExternalExecutableLease.Open(executablePath),
+                new CapturingFactory(new ScriptedProcess(CorrectResponse))
+            )).Should().Throw<InvalidOperationException>().WithMessage("*disabled until restart*");
+        }
+        finally
+        {
+            process.CompleteExit();
+            if (client is not null)
+                await client.DisposeAsync();
+            if (process.WaitObserved)
+                await SpinWaitUntilAsync(() => process.Disposed);
+            ProcessInstallerProtocolClient.ResetProductionGateForTesting();
+            File.Delete(executablePath);
+        }
+    }
+
+    [Test]
+    public async Task FaultedWaitIsNeverTreatedAsConfirmedReap()
+    {
+        ScriptedProcess process = new(_ => Encoding.UTF8.GetBytes("not-json\n"), faultWait: true);
+        await using ProcessInstallerProtocolClient client = Create(process, TimeSpan.FromMilliseconds(50));
+
+        Func<Task> action = () => client.HandshakeAsync("SMAPI GUI", "1");
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>().WithMessage("*termination could not be confirmed*");
+        client.CleanupConfirmed.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+        process.Disposed.Should().BeFalse();
+    }
+
+    [Test]
     public async Task CancellationStopsAndReapsWithCancellationResistantInput()
     {
         CancellationResistantWriteStream input = new();
@@ -445,9 +710,26 @@ public sealed class ProcessInstallerProtocolClientTests
         }
     }
 
+    private sealed class SingleProcessFactory(IInstallerProtocolProcess process) : IInstallerProtocolProcessFactory
+    {
+        public IInstallerProtocolProcess Start(ProcessStartInfo startInfo) => process;
+    }
+
+    private sealed class RollForwardSystemFactory : IInstallerProtocolProcessFactory
+    {
+        public IInstallerProtocolProcess Start(ProcessStartInfo startInfo)
+        {
+            // Local/CI developer hosts may only retain the current SDK runtime; release packages are self-contained.
+            startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+            return new SystemInstallerProtocolProcessFactory().Start(startInfo);
+        }
+    }
+
     private sealed class ScriptedProcess : IInstallerProtocolProcess
     {
         private readonly TaskCompletionSource Exit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool CompleteExitOnTerminate;
+        private readonly bool FaultWait;
         private readonly ResponseStream Responses;
         private readonly RequestStream RequestsStream;
         public Func<ProtocolRequest, byte[]?> Responder { get => this.RequestsStream.Responder; set => this.RequestsStream.Responder = value; }
@@ -461,13 +743,23 @@ public sealed class ProcessInstallerProtocolClientTests
         public bool Disposed { get; private set; }
         public bool InputDisposed => this.Input switch { RequestStream request => request.Disposed, CancellationResistantWriteStream resistant => resistant.Disposed, _ => false };
 
-        public ScriptedProcess(Func<ProtocolRequest, byte[]?> responder, Stream? input = null, Stream? output = null, Stream? error = null, bool completeWaitInitially = true)
+        public ScriptedProcess(
+            Func<ProtocolRequest, byte[]?> responder,
+            Stream? input = null,
+            Stream? output = null,
+            Stream? error = null,
+            bool completeWaitInitially = true,
+            bool completeExitOnTerminate = true,
+            bool faultWait = false
+        )
         {
             this.Responses = new ResponseStream();
             this.RequestsStream = new RequestStream(this.Responses, responder);
             this.Input = input ?? this.RequestsStream;
             this.Output = output ?? this.Responses;
             this.Error = error ?? new MemoryStream();
+            this.CompleteExitOnTerminate = completeExitOnTerminate;
+            this.FaultWait = faultWait;
             if (completeWaitInitially)
                 this.Exit.TrySetResult();
         }
@@ -475,15 +767,42 @@ public sealed class ProcessInstallerProtocolClientTests
         public Task WaitForExitAsync()
         {
             this.WaitObserved = true;
+            if (this.FaultWait)
+                return Task.FromException(new IOException("private wait failure"));
             return this.Exit.Task;
         }
+
 
         public void Terminate()
         {
             this.Terminated = true;
-            this.Exit.TrySetResult();
+            if (this.CompleteExitOnTerminate)
+                this.Exit.TrySetResult();
+            this.Responses.Complete();
         }
 
+        public void CompleteExit() => this.Exit.TrySetResult();
+
+        public void Publish(byte[] response) => this.Responses.Set(response);
+
+        public void Dispose()
+        {
+            this.Disposed = true;
+            this.Responses.Complete();
+        }
+    }
+
+    private sealed class ThrowingSetupProcess : IInstallerProtocolProcess
+    {
+        private readonly MemoryStream InputStream = new();
+        public Stream Input => this.InputStream;
+        public Stream Output => throw new IOException("private output setup detail");
+        public Stream Error => throw new IOException("private error setup detail");
+        public bool Terminated { get; private set; }
+        public bool WaitObserved { get; private set; }
+        public bool Disposed { get; private set; }
+        public Task WaitForExitAsync() { this.WaitObserved = true; return Task.CompletedTask; }
+        public void Terminate() => this.Terminated = true;
         public void Dispose() => this.Disposed = true;
     }
 
@@ -506,7 +825,12 @@ public sealed class ProcessInstallerProtocolClientTests
             this.RequestObserved.TrySetResult();
             byte[]? response = this.Responder(request);
             if (response is not null)
-                responses.Set(response);
+            {
+                if (response.Length == 0)
+                    responses.Complete();
+                else
+                    responses.Set(response);
+            }
             return Task.CompletedTask;
         }
 
@@ -519,24 +843,29 @@ public sealed class ProcessInstallerProtocolClientTests
 
     private sealed class ResponseStream : Stream
     {
+        private readonly Channel<byte[]> Responses = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = true
+        });
         private byte[] Current = [];
         private int Offset;
-        public void Set(byte[] bytes) { this.Current = bytes; this.Offset = 0; }
-        public override int Read(byte[] buffer, int offset, int count)
+        public void Set(byte[] bytes) => this.Responses.Writer.TryWrite(bytes);
+        public void Complete() => this.Responses.Writer.TryComplete();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
-            int copy = Math.Min(count, this.Current.Length - this.Offset);
-            if (copy <= 0) return 0;
-            Array.Copy(this.Current, this.Offset, buffer, offset, copy);
-            this.Offset += copy;
-            return copy;
-        }
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-        {
+            while (this.Offset == this.Current.Length)
+            {
+                try { this.Current = await this.Responses.Reader.ReadAsync(cancellationToken); }
+                catch (ChannelClosedException) { return 0; }
+                this.Offset = 0;
+            }
             int copy = Math.Min(buffer.Length, this.Current.Length - this.Offset);
-            if (copy <= 0) return ValueTask.FromResult(0);
             this.Current.AsMemory(this.Offset, copy).CopyTo(buffer);
             this.Offset += copy;
-            return ValueTask.FromResult(copy);
+            return copy;
         }
         public override bool CanRead => true;
         public override bool CanSeek => false;

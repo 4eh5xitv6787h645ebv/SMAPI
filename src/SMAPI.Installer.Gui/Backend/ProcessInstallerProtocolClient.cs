@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
 
@@ -13,54 +14,111 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan DefaultReapTimeout = TimeSpan.FromSeconds(5);
+    private static readonly object ProductionQuarantineLock = new();
+    private static (IInstallerProtocolProcess Process, LinuxExternalExecutableLease Executable)? ProductionQuarantine;
+    private static bool ProductionLaunchDisabled;
+    private static bool ProductionClientActive;
 
     private readonly string InstallerPath;
     private readonly IInstallerProtocolProcessFactory ProcessFactory;
     private readonly TimeSpan OperationTimeout;
     private readonly TimeSpan ReapTimeout;
+    private readonly LinuxExternalExecutableLease? ExecutableLease;
+    private readonly bool IsProduction;
     private readonly SemaphoreSlim CommandGate = new(1, 1);
     private readonly CancellationTokenSource Lifetime = new();
     private readonly object CleanupLock = new();
     private readonly object DisposeLock = new();
+    private readonly object ResponseLock = new();
+    private readonly TaskCompletionSource<InstallerProtocolClientException> SessionFault = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private IInstallerProtocolProcess? Process;
+    private Stream? ProcessInput;
+    private Stream? ProcessOutput;
+    private Stream? ProcessError;
     private StrictJsonLineReader? Reader;
+    private Task? ReaderPump;
+    private PendingProtocolResponse? PendingResponse;
     private Task? StderrDrain;
     private ProtocolSessionId? SessionId;
-    private bool PackageOpened;
+    private ProtocolPackageId? VerifiedPackageId;
+    private ProtocolReleaseIdentity? VerifiedRelease;
     private int CleanupStarted;
     private int DisposeStarted;
     private int ObservedStderrBytesValue;
+    private int CleanupUnconfirmed;
     private Task? CleanupTask;
     private Task? DisposalTask;
+    internal Action? BeforePackageAuthorityCommitForTesting { get; set; }
 
     internal int ObservedStderrBytes => Volatile.Read(ref this.ObservedStderrBytesValue);
+    internal bool CleanupConfirmed => Volatile.Read(ref this.CleanupUnconfirmed) == 0;
+    internal bool HasRetainedPackageAuthority
+    {
+        get
+        {
+            lock (this.ResponseLock)
+                return this.VerifiedPackageId is not null && this.VerifiedRelease is not null;
+        }
+    }
+    public Task<InstallerProtocolClientException> SessionFaulted => this.SessionFault.Task;
 
-    private ProcessInstallerProtocolClient(string installerPath, IInstallerProtocolProcessFactory processFactory, TimeSpan operationTimeout, TimeSpan reapTimeout)
+    private ProcessInstallerProtocolClient(string installerPath, IInstallerProtocolProcessFactory processFactory, TimeSpan operationTimeout, TimeSpan reapTimeout, LinuxExternalExecutableLease? executableLease, bool isProduction)
     {
         this.InstallerPath = installerPath;
         this.ProcessFactory = processFactory;
         this.OperationTimeout = operationTimeout;
         this.ReapTimeout = reapTimeout;
+        this.ExecutableLease = executableLease;
+        this.IsProduction = isProduction;
     }
 
     /// <summary>Create a client whose executable authority comes only from the current GUI's packaged sibling.</summary>
     public static ProcessInstallerProtocolClient CreateForCurrentProcess()
     {
-        string guiExecutable = Environment.ProcessPath
-            ?? throw new InvalidOperationException("The graphical installer executable path isn't available.");
-        return new(SiblingInstallerLocator.Locate(guiExecutable), new SystemInstallerProtocolProcessFactory(), DefaultOperationTimeout, DefaultReapTimeout);
+        return CreateProduction(
+            SiblingInstallerLocator.OpenForCurrentProcess,
+            new SystemInstallerProtocolProcessFactory(),
+            DefaultOperationTimeout,
+            DefaultReapTimeout
+        );
+    }
+
+    internal static ProcessInstallerProtocolClient CreateProductionForTesting(
+        Func<LinuxExternalExecutableLease> executableFactory,
+        IInstallerProtocolProcessFactory processFactory,
+        TimeSpan? operationTimeout = null,
+        TimeSpan? reapTimeout = null
+    ) => CreateProduction(
+        executableFactory,
+        processFactory,
+        operationTimeout ?? DefaultOperationTimeout,
+        reapTimeout ?? DefaultReapTimeout
+    );
+
+    internal static void ResetProductionGateForTesting()
+    {
+        lock (ProductionQuarantineLock)
+        {
+            if (ProductionQuarantine is not null)
+                throw new InvalidOperationException("A quarantined process is still awaiting confirmed reap.");
+            ProductionLaunchDisabled = false;
+            ProductionClientActive = false;
+        }
     }
 
     internal static ProcessInstallerProtocolClient CreateForTesting(
         string installerPath,
         IInstallerProtocolProcessFactory processFactory,
         TimeSpan? operationTimeout = null,
-        TimeSpan? reapTimeout = null
+        TimeSpan? reapTimeout = null,
+        LinuxExternalExecutableLease? executableLease = null
     ) => new(
         installerPath,
         processFactory ?? throw new ArgumentNullException(nameof(processFactory)),
         operationTimeout ?? DefaultOperationTimeout,
-        reapTimeout ?? DefaultReapTimeout
+        reapTimeout ?? DefaultReapTimeout,
+        executableLease,
+        false
     );
 
     public async Task<HandshakeEvent> HandshakeAsync(string clientName, string clientVersion, CancellationToken cancellationToken = default)
@@ -94,7 +152,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.AssertUsable();
             ProtocolSessionId session = this.SessionId
                 ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
-            if (this.PackageOpened)
+            if (this.HasRetainedPackageAuthority)
                 throw new InstallerProtocolClientException("A package was already opened in this installer backend session.");
             string packageAssetName = GetSafeLinuxFileName(package.PackagePath);
 
@@ -117,8 +175,10 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                     && string.Equals(opened.Release.Tag, package.ReleaseTag, StringComparison.Ordinal)
                     && string.Equals(opened.Release.SourceCommit, package.ExpectedSourceCommit, StringComparison.Ordinal)
                     && string.Equals(opened.Release.PackageAssetName, packageAssetName, StringComparison.Ordinal):
-                    this.PackageOpened = true;
-                    return new InstallerPackageOpenSuccess(opened);
+                    this.BeforePackageAuthorityCommitForTesting?.Invoke();
+                    if (!this.TryCommitPackageAuthority(opened))
+                        return await this.FailProtocolAsync<InstallerPackageOpenResult>().ConfigureAwait(false);
+                    return new InstallerPackageOpenSuccess(opened.Release);
 
                 case PrePlanRejectedEvent rejected when rejected.SessionId == session:
                     return new InstallerPackageOpenRejection(rejected.ErrorCode, rejected.NextAction, rejected.Message, rejected.IsTerminal);
@@ -153,6 +213,39 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         this.CommandGate.Dispose();
     }
 
+    private static ProcessInstallerProtocolClient CreateProduction(
+        Func<LinuxExternalExecutableLease> executableFactory,
+        IInstallerProtocolProcessFactory processFactory,
+        TimeSpan operationTimeout,
+        TimeSpan reapTimeout
+    )
+    {
+        ArgumentNullException.ThrowIfNull(executableFactory);
+        ArgumentNullException.ThrowIfNull(processFactory);
+        lock (ProductionQuarantineLock)
+        {
+            if (ProductionLaunchDisabled)
+                throw new InvalidOperationException("A prior backend process could not be reaped; production launch is disabled until restart.");
+            if (ProductionClientActive)
+                throw new InvalidOperationException("A production installer backend client is already active.");
+            ProductionClientActive = true;
+        }
+
+        LinuxExternalExecutableLease? executable = null;
+        try
+        {
+            executable = executableFactory();
+            return new(executable.ProcPath, processFactory, operationTimeout, reapTimeout, executable, true);
+        }
+        catch
+        {
+            executable?.Dispose();
+            lock (ProductionQuarantineLock)
+                ProductionClientActive = false;
+            throw;
+        }
+    }
+
     private async Task<TEvent> ExchangeAsync<TEvent>(ProtocolRequest request, CancellationToken callerToken)
         where TEvent : ProtocolEvent
     {
@@ -165,21 +258,20 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             throw new InstallerProtocolClientException("The installer backend request was rejected safely.");
         }
-        this.EnsureStarted();
+        await this.EnsureStartedAsync().ConfigureAwait(false);
+        TaskCompletionSource<ProtocolEvent> responseCompletion = this.RegisterPendingResponse(request.CommandId);
 
         using CancellationTokenSource timeout = new(this.OperationTimeout);
         using CancellationTokenSource operation = CancellationTokenSource.CreateLinkedTokenSource(callerToken, timeout.Token, this.Lifetime.Token);
         try
         {
             byte[] bytes = StrictUtf8.GetBytes(line + "\n");
-            await this.AwaitTransportAsync(this.Process!.Input.WriteAsync(bytes, operation.Token).AsTask(), operation.Token).ConfigureAwait(false);
-            await this.AwaitTransportAsync(this.Process.Input.FlushAsync(operation.Token), operation.Token).ConfigureAwait(false);
-            string? responseLine = await this.AwaitTransportAsync(this.Reader!.ReadLineAsync(operation.Token).AsTask(), operation.Token).ConfigureAwait(false);
-            if (responseLine is null)
-                return await this.FailProtocolAsync<TEvent>().ConfigureAwait(false);
-
-            ProtocolEvent response = ProtocolJsonSerializer.DeserializeEventLine(responseLine);
-            if (response is not TEvent typed || response.CommandId != request.CommandId)
+            await this.AwaitTransportAsync(this.ProcessInput!.WriteAsync(bytes, operation.Token).AsTask(), operation.Token).ConfigureAwait(false);
+            await this.AwaitTransportAsync(this.ProcessInput.FlushAsync(operation.Token), operation.Token).ConfigureAwait(false);
+            ProtocolEvent response = await this.AwaitTransportAsync(responseCompletion.Task, operation.Token).ConfigureAwait(false);
+            if (this.SessionFault.Task.IsCompletedSuccessfully)
+                throw await this.SessionFault.Task.ConfigureAwait(false);
+            if (response is not TEvent typed)
                 return await this.FailProtocolAsync<TEvent>().ConfigureAwait(false);
             return typed;
         }
@@ -191,17 +283,27 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         catch (OperationCanceledException)
         {
             await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
-            throw new InstallerProtocolClientException("The installer backend did not respond within its bounded deadline.");
+            throw new InstallerProtocolClientException(this.CleanupConfirmed
+                ? "The installer backend did not respond within its bounded deadline and was stopped."
+                : "The installer backend did not respond within its bounded deadline, and termination could not be confirmed.");
         }
         catch (InstallerProtocolClientException)
         {
             await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+            if (!this.CleanupConfirmed)
+                throw new InstallerProtocolClientException("The installer backend failed, and termination could not be confirmed.");
             throw;
         }
         catch
         {
             await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
-            throw new InstallerProtocolClientException("The installer backend transport stopped safely.");
+            throw new InstallerProtocolClientException(this.CleanupConfirmed
+                ? "The installer backend transport stopped."
+                : "The installer backend transport failed, and termination could not be confirmed.");
+        }
+        finally
+        {
+            this.ClearPendingResponse(responseCompletion);
         }
     }
 
@@ -222,14 +324,14 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         return fileName;
     }
 
-    private void EnsureStarted()
+    private async Task EnsureStartedAsync()
     {
         if (this.Process is not null)
             return;
 
         ProcessStartInfo start = new()
         {
-            FileName = this.InstallerPath,
+            FileName = this.ExecutableLease?.ProcPath ?? this.InstallerPath,
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -241,12 +343,115 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             this.Process = this.ProcessFactory.Start(start)
                 ?? throw new InvalidOperationException("The process factory returned null.");
-            this.Reader = new StrictJsonLineReader(this.Process.Output);
-            this.StderrDrain = this.DrainStderrAsync(this.Process.Error, this.Lifetime.Token);
+            this.ProcessInput = this.Process.Input;
+            this.ProcessOutput = this.Process.Output;
+            this.ProcessError = this.Process.Error;
+            this.Reader = new StrictJsonLineReader(this.ProcessOutput);
+            this.StderrDrain = this.DrainStderrAsync(this.ProcessError, this.Lifetime.Token);
+            this.ReaderPump = this.PumpResponsesAsync(this.Lifetime.Token);
         }
         catch
         {
-            throw new InstallerProtocolClientException("The packaged installer backend could not be started safely.");
+            await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+            throw new InstallerProtocolClientException(this.CleanupConfirmed
+                ? "The packaged installer backend could not be started."
+                : "The packaged installer backend could not be started, and termination could not be confirmed.");
+        }
+    }
+
+    private TaskCompletionSource<ProtocolEvent> RegisterPendingResponse(ProtocolCommandId commandId)
+    {
+        TaskCompletionSource<ProtocolEvent> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (this.ResponseLock)
+        {
+            if (this.PendingResponse is not null)
+                throw new InstallerProtocolClientException("The installer backend already has an active command.");
+            this.PendingResponse = new(commandId, completion);
+        }
+        return completion;
+    }
+
+    private void ClearPendingResponse(TaskCompletionSource<ProtocolEvent> completion)
+    {
+        lock (this.ResponseLock)
+        {
+            if (ReferenceEquals(this.PendingResponse?.Completion, completion))
+                this.PendingResponse = null;
+        }
+    }
+
+    private async Task PumpResponsesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (true)
+            {
+                string? line = await this.Reader!.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+                if (line is null)
+                {
+                    if (Volatile.Read(ref this.CleanupStarted) == 0)
+                        this.FaultSession("The installer backend closed its response stream unexpectedly.");
+                    return;
+                }
+
+                ProtocolEvent response = ProtocolJsonSerializer.DeserializeEventLine(line);
+                PendingProtocolResponse? pending;
+                lock (this.ResponseLock)
+                {
+                    pending = this.PendingResponse;
+                    this.PendingResponse = null;
+                }
+                if (pending is null || response.CommandId != pending.CommandId)
+                {
+                    this.FaultSession("The installer backend emitted an unsolicited or incorrectly correlated response.");
+                    return;
+                }
+                if (this.Reader.HasBufferedFrameData)
+                {
+                    InstallerProtocolClientException duplicate = new("The installer backend emitted duplicate buffered output.");
+                    pending.Completion.TrySetException(duplicate);
+                    this.FaultSession(duplicate.Message);
+                    return;
+                }
+                pending.Completion.TrySetResult(response);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (InstallerProtocolClientException exception)
+        {
+            this.FaultSession(exception.Message);
+        }
+        catch
+        {
+            this.FaultSession("The installer backend response transport failed.");
+        }
+    }
+
+    private void FaultSession(string message)
+    {
+        InstallerProtocolClientException fault = new(message);
+        this.SessionFault.TrySetResult(fault);
+        PendingProtocolResponse? pending;
+        lock (this.ResponseLock)
+        {
+            this.VerifiedPackageId = null;
+            this.VerifiedRelease = null;
+            pending = this.PendingResponse;
+            this.PendingResponse = null;
+        }
+        pending?.Completion.TrySetException(fault);
+        _ = this.CleanupAsync(allowCleanExit: false);
+    }
+
+    private bool TryCommitPackageAuthority(PackageOpenedEvent opened)
+    {
+        lock (this.ResponseLock)
+        {
+            if (this.SessionFault.Task.IsCompleted || Volatile.Read(ref this.CleanupStarted) != 0)
+                return false;
+            this.VerifiedPackageId = opened.PackageId;
+            this.VerifiedRelease = opened.Release;
+            return true;
         }
     }
 
@@ -260,7 +465,9 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
         ObserveAbandoned(transport);
         cancellationToken.ThrowIfCancellationRequested();
-        throw new InstallerProtocolClientException("The installer backend transport stopped safely.");
+        throw new InstallerProtocolClientException(this.CleanupConfirmed
+            ? "The installer backend transport stopped."
+            : "The installer backend transport failed, and termination could not be confirmed.");
     }
 
     private async Task AwaitTransportAsync(Task transport, CancellationToken cancellationToken)
@@ -306,7 +513,9 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private async Task<T> FailProtocolAsync<T>()
     {
         await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
-        throw new InstallerProtocolClientException("The installer backend returned an invalid response and was stopped safely.");
+        throw new InstallerProtocolClientException(this.CleanupConfirmed
+            ? "The installer backend returned an invalid response and was stopped."
+            : "The installer backend returned an invalid response, and termination could not be confirmed.");
     }
 
     private async Task FailProtocolAsync() => await this.FailProtocolAsync<object>().ConfigureAwait(false);
@@ -324,32 +533,104 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
 
     private async Task CleanupCoreAsync(bool allowCleanExit)
     {
-        this.Lifetime.Cancel();
-        IInstallerProtocolProcess? process = this.Process;
-        if (process is null)
-            return;
-
-        try { process.Input.Dispose(); } catch { }
-        if (allowCleanExit && await WaitBoundedAsync(process.WaitForExitAsync(), this.ReapTimeout).ConfigureAwait(false))
+        bool leaseTransferred = false;
+        try
         {
-            await this.FinishCleanupAsync(process).ConfigureAwait(false);
-            return;
-        }
+            this.Lifetime.Cancel();
+            lock (this.ResponseLock)
+            {
+                this.VerifiedPackageId = null;
+                this.VerifiedRelease = null;
+            }
+            IInstallerProtocolProcess? process = this.Process;
+            if (process is null)
+                return;
 
-        try { process.Terminate(); } catch { }
-        Task reap = process.WaitForExitAsync();
-        if (!await WaitBoundedAsync(reap, this.ReapTimeout).ConfigureAwait(false))
-            ObserveAbandoned(reap);
-        await this.FinishCleanupAsync(process).ConfigureAwait(false);
+            try { (this.ProcessInput ?? process.Input).Dispose(); } catch { }
+            if (allowCleanExit && await WaitBoundedAsync(GetWaitTask(process), this.ReapTimeout).ConfigureAwait(false))
+            {
+                await this.FinishCleanupAsync(process).ConfigureAwait(false);
+                return;
+            }
+
+            try { process.Terminate(); } catch { }
+            Task reap = GetWaitTask(process);
+            if (!await WaitBoundedAsync(reap, this.ReapTimeout).ConfigureAwait(false))
+            {
+                Volatile.Write(ref this.CleanupUnconfirmed, 1);
+                await this.FinishStreamCleanupAsync(process).ConfigureAwait(false);
+                ReapAndDisposeLater(process, reap, this.ExecutableLease, this.IsProduction);
+                leaseTransferred = this.ExecutableLease is not null;
+                return;
+            }
+            await this.FinishCleanupAsync(process).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!leaseTransferred)
+            {
+                this.ExecutableLease?.Dispose();
+                if (this.IsProduction)
+                {
+                    lock (ProductionQuarantineLock)
+                        ProductionClientActive = false;
+                }
+            }
+        }
     }
 
     private async Task FinishCleanupAsync(IInstallerProtocolProcess process)
     {
-        try { process.Output.Dispose(); } catch { }
-        try { process.Error.Dispose(); } catch { }
+        await this.FinishStreamCleanupAsync(process).ConfigureAwait(false);
+        process.Dispose();
+    }
+
+    private async Task FinishStreamCleanupAsync(IInstallerProtocolProcess process)
+    {
+        try { (this.ProcessOutput ?? process.Output).Dispose(); } catch { }
+        try { (this.ProcessError ?? process.Error).Dispose(); } catch { }
         if (this.StderrDrain is { } stderr && !await WaitBoundedAsync(stderr, this.ReapTimeout).ConfigureAwait(false))
             ObserveAbandoned(stderr);
-        process.Dispose();
+        if (this.ReaderPump is { } reader && !await WaitBoundedAsync(reader, this.ReapTimeout).ConfigureAwait(false))
+            ObserveAbandoned(reader);
+    }
+
+    private static void ReapAndDisposeLater(IInstallerProtocolProcess process, Task reap, LinuxExternalExecutableLease? executableLease, bool production)
+    {
+        if (production)
+        {
+            LinuxExternalExecutableLease retained = executableLease
+                ?? throw new InvalidOperationException("Production process quarantine requires retained executable authority.");
+            lock (ProductionQuarantineLock)
+            {
+                ProductionLaunchDisabled = true;
+                ProductionQuarantine ??= (process, retained);
+            }
+        }
+        _ = reap.ContinueWith(
+            completed =>
+            {
+                if (completed.Status == TaskStatus.RanToCompletion)
+                {
+                    process.Dispose();
+                    executableLease?.Dispose();
+                    if (production)
+                    {
+                        lock (ProductionQuarantineLock)
+                            ProductionQuarantine = null;
+                    }
+                }
+                else
+                {
+                    _ = completed.Exception;
+                    // Production retains one catastrophic quarantine slot until restart. A test-injected
+                    // process remains retained by this continuation task and its owning test client.
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default
+        );
     }
 
     private static async Task<bool> WaitBoundedAsync(Task operation, TimeSpan timeout)
@@ -357,9 +638,25 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         Task completed = await Task.WhenAny(operation, Task.Delay(timeout)).ConfigureAwait(false);
         if (!ReferenceEquals(completed, operation))
             return false;
-        try { await operation.ConfigureAwait(false); }
-        catch { }
+        if (operation.Status != TaskStatus.RanToCompletion)
+        {
+            _ = operation.Exception;
+            return false;
+        }
+        await operation.ConfigureAwait(false);
         return true;
+    }
+
+    private static Task GetWaitTask(IInstallerProtocolProcess process)
+    {
+        try
+        {
+            return process.WaitForExitAsync();
+        }
+        catch (Exception exception)
+        {
+            return Task.FromException(exception);
+        }
     }
 
     private static void ObserveAbandoned(Task operation)
@@ -421,6 +718,8 @@ internal sealed class SystemInstallerProtocolProcess(Process process) : IInstall
     public void Dispose() => process.Dispose();
 }
 
+internal sealed record PendingProtocolResponse(ProtocolCommandId CommandId, TaskCompletionSource<ProtocolEvent> Completion);
+
 internal sealed class StrictJsonLineReader
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
@@ -432,6 +731,8 @@ internal sealed class StrictJsonLineReader
     private int LineLength;
 
     public StrictJsonLineReader(Stream input) => this.Input = input;
+
+    public bool HasBufferedFrameData => this.LineLength != 0 || this.ReadOffset < this.ReadLength;
 
     public async ValueTask<string?> ReadLineAsync(CancellationToken cancellationToken)
     {
@@ -453,7 +754,7 @@ internal sealed class StrictJsonLineReader
             if (this.ReadLength != 0)
                 continue;
             if (this.LineLength != 0)
-                throw new InstallerProtocolClientException("The installer backend returned an incomplete response and was stopped safely.");
+                throw new InstallerProtocolClientException("The installer backend returned an incomplete response.");
             return null;
         }
     }
@@ -469,6 +770,6 @@ internal sealed class StrictJsonLineReader
     private string Decode()
     {
         try { return StrictUtf8.GetString(this.LineBuffer, 0, this.LineLength); }
-        catch (DecoderFallbackException) { throw new InstallerProtocolClientException("The installer backend response wasn't valid UTF-8 and was stopped safely."); }
+        catch (DecoderFallbackException) { throw new InstallerProtocolClientException("The installer backend response wasn't valid UTF-8."); }
     }
 }
