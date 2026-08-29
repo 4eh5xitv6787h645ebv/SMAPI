@@ -1042,7 +1042,9 @@ internal static class InstallationStateInspector
                         entry.UnixMode,
                         entry.Kind
                     )),
-                    receipt.Launcher
+                    receipt.Launcher,
+                    receipt.ReleaseTrust,
+                    receipt.SchemaVersion
                 );
             }
         }

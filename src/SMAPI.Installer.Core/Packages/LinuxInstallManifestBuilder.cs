@@ -9,7 +9,7 @@ using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
 
-/// <summary>The deterministic schema-3 manifest generated from one finalized Linux installer package.</summary>
+/// <summary>The deterministic schema-4 manifest generated from one finalized Linux installer package.</summary>
 public sealed class LinuxInstallManifestBuildResult
 {
     private readonly byte[] Bytes;
@@ -116,7 +116,9 @@ public sealed class LinuxInstallManifestBuilder
         PackageManifest manifest = new(
             release,
             inspected.Entries,
-            [GeneratedFileRecipe.CreateCopyGameDepsTemplate()]
+            [GeneratedFileRecipe.CreateCopyGameDepsTemplate()],
+            PackageManifest.CurrentSchemaVersion,
+            TaggedReleaseAuthorityPolicy.Create(release)
         );
         byte[] bytes = Encoding.UTF8.GetBytes(manifest.ToCanonicalJson());
         PackageManifest roundTrip = CanonicalOwnershipDocuments.ParseManifest(bytes);

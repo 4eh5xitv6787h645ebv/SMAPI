@@ -240,7 +240,7 @@ internal sealed class InstallerExecutionCompiler
             ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Write destination '{operation.Path}' isn't supplied by the verified manifest.");
         if (target.Sha256 != operation.ResultSha256)
             throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Write destination '{operation.Path}' doesn't match its verified package digest.");
-        if (target.Kind == OwnedEntryKind.GeneratedFile && request.TargetManifest!.SchemaVersion >= PackageManifest.CurrentSchemaVersion)
+        if (target.Kind == OwnedEntryKind.GeneratedFile && request.TargetManifest!.SchemaVersion >= PackageManifest.GeneratedFilesSchemaVersion)
         {
             GeneratedFileRecipe recipe = request.TargetManifest!.GeneratedFiles.SingleOrDefault(candidate => candidate.Path.Equals(target.Path))
                 ?? throw Error(ExecutionCompilationError.InvalidOperationMapping, $"Generated destination '{operation.Path}' has no exact manifest recipe.");
@@ -455,7 +455,14 @@ internal sealed class InstallerExecutionCompiler
                         manifest.GetCanonicalDigest(),
                         transactionId.ToString("N"),
                         manifest.Entries.Select(entry => new InstallationReceiptEntry(entry.Path, entry.Sha256, entry.UnixMode, entry.Kind)),
-                        new LauncherReceipt(launcher.Sha256, originalLauncher, launcher.UnixMode, originalLauncherMode)
+                        new LauncherReceipt(launcher.Sha256, originalLauncher, launcher.UnixMode, originalLauncherMode),
+                        manifest.SchemaVersion == PackageManifest.CurrentSchemaVersion
+                            ? binding.TargetPackageContent?.ReleaseTrust
+                                ?? throw Error(ExecutionCompilationError.StaleManifest, "A schema-4 target has no live verified release authority.")
+                            : null,
+                        manifest.SchemaVersion == PackageManifest.CurrentSchemaVersion
+                            ? InstallationReceipt.CurrentSchemaVersion
+                            : InstallationReceipt.LegacySchemaVersion
                     );
                     GeneratedCanonicalReceiptSource source = new(
                         generated,
