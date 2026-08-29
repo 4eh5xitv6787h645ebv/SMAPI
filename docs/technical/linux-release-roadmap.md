@@ -208,7 +208,7 @@ Scope constraints apply throughout:
 ### GUI screenshots and visual documentation
 
 - [ ] Follow the complete [Linux GUI screenshot evidence matrix](linux-gui-screenshot-evidence.md), label every image as real qualification or controlled fixture, and never present a mockup, generated image, or safe-demo capture as production evidence.
-- [ ] Capture every production screenshot from the exact reviewed packaged GUI build without private fixture names, paths, or personal data.
+- [ ] Capture every production screenshot from the exact reviewed release package and applicable production frontend (GUI or manual console) without private fixture names, paths, or personal data.
 - [ ] Document one automatically detected valid game, no-game and multiple-game detection states, and manual invalid/valid folder selection (D1–D4).
 - [ ] Document packaged effective-UID-0 refusal before discovery, download, logging, or mutation (D5).
 - [ ] Document current, upgrade, prerelease, downgrade, and local-package release-selection labels (R1).

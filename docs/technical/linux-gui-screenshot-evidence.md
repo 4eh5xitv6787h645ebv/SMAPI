@@ -6,7 +6,7 @@ This specification defines the production screenshot set required for the Phase 
 
 Each caption and provenance entry must identify one of these evidence classes.
 
-- **Real qualification** uses the exact reviewed packaged GUI, backend, and public release artifacts in a clean isolated environment. It exercises the real protocol and filesystem lifecycle. This is required whenever the image implies that download, verification, mutation, recovery, or a public artifact succeeded.
+- **Real qualification** uses the exact reviewed release package, applicable production frontend (GUI or manual console), backend, and public release artifacts in a clean isolated environment. It exercises the real protocol and filesystem lifecycle. This is required whenever the image implies that download, verification, mutation, recovery, or a public artifact succeeded.
 - **Controlled fixture** uses the exact reviewed production GUI and adapter with deterministic public/synthetic data, a disposable filesystem, or an injected failure. It may document layout, validation, conflicts, confirmations, accessibility, and failure handling, but must not imply that a real package lifecycle completed.
 
 A controlled fixture is not a mockup. Design renders, AI-generated images, manually constructed UI facsimiles, and the sealed safe-demo session are never production evidence. The private trusted modpack and save are neither required nor permitted in screenshot inputs.
