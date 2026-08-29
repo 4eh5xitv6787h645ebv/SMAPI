@@ -762,20 +762,38 @@ internal sealed class ProtocolPackageRegistration : IDisposable
 internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProtocolPackageOpener, IDisposable
 {
     private readonly string GitHubCliPath;
-    private readonly LinuxParentProcFdAuthority ParentProcAuthority;
+    private readonly LinuxParentProcFdAuthority? ParentProcAuthority;
+    private readonly PackageSecurityException? ParentProcUnavailable;
     private bool Disposed;
 
     public LinuxInstallerProtocolPackageOpener(string githubCliPath)
-        : this(githubCliPath, null)
+        : this(githubCliPath, () => new LinuxParentProcFdAuthority())
     {
     }
 
     internal LinuxInstallerProtocolPackageOpener(string githubCliPath, LinuxParentProcFdAuthority? parentProcAuthority)
+        : this(githubCliPath, () => parentProcAuthority ?? new LinuxParentProcFdAuthority())
+    {
+    }
+
+    internal LinuxInstallerProtocolPackageOpener(
+        string githubCliPath,
+        Func<LinuxParentProcFdAuthority> parentProcAuthorityFactory
+    )
     {
         if (string.IsNullOrWhiteSpace(githubCliPath) || !Path.IsPathFullyQualified(githubCliPath))
             throw new ArgumentException("An absolute host-owned GitHub CLI path is required.", nameof(githubCliPath));
+        ArgumentNullException.ThrowIfNull(parentProcAuthorityFactory);
         this.GitHubCliPath = githubCliPath;
-        this.ParentProcAuthority = parentProcAuthority ?? new LinuxParentProcFdAuthority();
+        try
+        {
+            this.ParentProcAuthority = parentProcAuthorityFactory()
+                ?? throw new PackageSecurityException("The controller proc authority factory returned no authority.");
+        }
+        catch (PackageSecurityException)
+        {
+            this.ParentProcUnavailable = new PackageSecurityException("The controller proc authority was unavailable at session creation.");
+        }
     }
 
     public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
@@ -811,6 +829,8 @@ internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProto
         VerifiedPackageContent content;
         if (procPaths.All(value => value))
         {
+            if (this.ParentProcAuthority is null)
+                throw this.ParentProcUnavailable ?? new PackageSecurityException("The controller proc authority is unavailable.");
             ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(assets.ReleaseTag);
             using LinuxParentProcAssetSource source = this.ParentProcAuthority.Capture(
                 assets,
@@ -832,7 +852,7 @@ internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProto
         if (this.Disposed)
             return;
         this.Disposed = true;
-        this.ParentProcAuthority.Dispose();
+        this.ParentProcAuthority?.Dispose();
     }
 
 }

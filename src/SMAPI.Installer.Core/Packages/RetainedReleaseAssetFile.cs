@@ -11,6 +11,7 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
     private readonly LinuxAnchoredFileSystem? LinuxFileSystem;
     private readonly LinuxAnchoredFile? LinuxFile;
     private readonly bool OwnsLinuxFileSystem;
+    private readonly bool RequireExactLinuxIdentity;
     private readonly FileStream? PortableFile;
     private readonly long CapturedSize;
 
@@ -22,7 +23,8 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
         LinuxAnchoredFile? linuxFile,
         FileStream? portableFile,
         long capturedSize,
-        bool ownsLinuxFileSystem = true
+        bool ownsLinuxFileSystem = true,
+        bool requireExactLinuxIdentity = false
     )
     {
         this.LinuxFileSystem = linuxFileSystem;
@@ -30,6 +32,7 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
         this.PortableFile = portableFile;
         this.CapturedSize = capturedSize;
         this.OwnsLinuxFileSystem = ownsLinuxFileSystem;
+        this.RequireExactLinuxIdentity = requireExactLinuxIdentity;
     }
 
     /// <summary>Adopt one already-retained Linux asset captured by a stricter aggregate authority.</summary>
@@ -37,7 +40,14 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
     {
         ArgumentNullException.ThrowIfNull(fileSystem);
         ArgumentNullException.ThrowIfNull(file);
-        return new RetainedReleaseAssetFile(fileSystem, file, null, file.Identity.Size, ownsLinuxFileSystem: false);
+        return new RetainedReleaseAssetFile(
+            fileSystem,
+            file,
+            null,
+            file.Identity.Size,
+            ownsLinuxFileSystem: false,
+            requireExactLinuxIdentity: true
+        );
     }
 
     /// <summary>
@@ -113,7 +123,11 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
         try
         {
             if (this.LinuxFileSystem is not null)
-                return this.LinuxFileSystem.ReadAllBytes(this.LinuxFile!, maximumBytes, cancellationToken);
+            {
+                return this.RequireExactLinuxIdentity
+                    ? this.LinuxFileSystem.ReadAllBytesExact(this.LinuxFile!, maximumBytes, cancellationToken)
+                    : this.LinuxFileSystem.ReadAllBytes(this.LinuxFile!, maximumBytes, cancellationToken);
+            }
 
             FileStream stream = this.PortableFile ?? throw new ObjectDisposedException(nameof(RetainedReleaseAssetFile));
             byte[] result = new byte[checked((int)this.CapturedSize)];
@@ -161,7 +175,11 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
         try
         {
             if (this.LinuxFileSystem is not null)
-                return await this.LinuxFileSystem.CopyAndHashAsync(this.LinuxFile!, destination, maximumBytes, cancellationToken).ConfigureAwait(false);
+            {
+                return this.RequireExactLinuxIdentity
+                    ? await this.LinuxFileSystem.CopyAndHashExactAsync(this.LinuxFile!, destination, maximumBytes, cancellationToken).ConfigureAwait(false)
+                    : await this.LinuxFileSystem.CopyAndHashAsync(this.LinuxFile!, destination, maximumBytes, cancellationToken).ConfigureAwait(false);
+            }
 
             FileStream stream = this.PortableFile ?? throw new ObjectDisposedException(nameof(RetainedReleaseAssetFile));
             if (!destination.CanWrite || !destination.CanSeek || destination.Position != 0 || destination.Length != 0)
@@ -207,6 +225,7 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
         if (this.OwnsLinuxFileSystem)
             this.LinuxFileSystem?.Dispose();
     }
+
 }
 
 

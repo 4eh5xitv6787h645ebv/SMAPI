@@ -377,6 +377,44 @@ internal sealed class LinuxParentProcAssetSourceTests
         }
     }
 
+    [TestCase(0)]
+    [TestCase(1)]
+    [TestCase(2)]
+    [TestCase(3)]
+    [TestCase(4)]
+    [TestCase(5)]
+    public async Task RetainedSource_RejectsSameSizeInPlaceMutationBeforeEveryAssetRead(int assetIndex)
+    {
+        string root = CreateWorkspace(this.Identity);
+        try
+        {
+            using LinuxAnchoredFileSystem workspace = new(root);
+            using LinuxParentProcFdAuthority authority = CreateSelfAuthority();
+            using LinuxParentProcAssetSource source = authority.Capture(
+                CreateAssets(workspace.ProcPath, this.Identity),
+                this.Identity,
+                WorkspaceIdentity(workspace),
+                CancellationToken.None
+            );
+            string[] leaves = AssetLeaves(this.Identity);
+            string selected = Path.Combine(root, leaves[assetIndex]);
+            File.WriteAllBytes(selected, [3, 2, 1]);
+            File.SetUnixFileMode(selected, UnixFileMode.UserRead);
+            File.SetUnixFileMode(selected, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            using RetainedReleaseAssetFile retained = source.Open(leaves[assetIndex], "selected asset");
+
+            Func<Task> read = assetIndex == 0
+                ? async () => await retained.CopyAndHashAsync(new MemoryStream(), 1024, CancellationToken.None)
+                : async () => await retained.ReadAllBytesAsync(1024, true, CancellationToken.None);
+
+            await read.Should().ThrowAsync<PackageSecurityException>();
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Test]
     public void Capture_CancellationAfterLeafDisposesPartialHandles()
     {
@@ -429,15 +467,7 @@ internal sealed class LinuxParentProcAssetSourceTests
         string root = Path.Combine(Path.GetTempPath(), $"smapi-proc-source-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        string[] names =
-        [
-            identity.PackageAssetName,
-            ReleasePackageVerifier.ChecksumAssetName,
-            ReleasePackageVerifier.BuildMetadataAssetName,
-            VerifiedInstallerPackageFactory.GetManifestAssetName(identity),
-            VerifiedGitHubAttestationBundleFactory.GetBundleAssetName(identity),
-            VerifiedGitHubAttestationBundleFactory.GetChecksumAssetName(identity)
-        ];
+        string[] names = AssetLeaves(identity);
         foreach (string name in names)
         {
             string path = Path.Combine(root, name);
@@ -446,6 +476,16 @@ internal sealed class LinuxParentProcAssetSourceTests
         }
         return root;
     }
+
+    private static string[] AssetLeaves(ForkReleaseIdentity identity) =>
+    [
+        identity.PackageAssetName,
+        ReleasePackageVerifier.ChecksumAssetName,
+        ReleasePackageVerifier.BuildMetadataAssetName,
+        VerifiedInstallerPackageFactory.GetManifestAssetName(identity),
+        VerifiedGitHubAttestationBundleFactory.GetBundleAssetName(identity),
+        VerifiedGitHubAttestationBundleFactory.GetChecksumAssetName(identity)
+    ];
 
     private static int CountFileDescriptors() => Directory.EnumerateFileSystemEntries($"/proc/{Environment.ProcessId}/fd").Count();
 

@@ -62,6 +62,59 @@ internal sealed class LinuxInstallerProtocolServiceTests
         }
     }
 
+    [Test]
+    [Platform("Linux")]
+    public async Task ActualPackageOpener_OneShotProcCaptureFailureDoesNotBlockOrdinaryPathsOrReanchor()
+    {
+        string root = CreateTemporaryDirectory();
+        int captureCalls = 0;
+        try
+        {
+            using LinuxInstallerProtocolPackageOpener opener = new(
+                Path.Combine(root, "gh"),
+                () =>
+                {
+                    captureCalls++;
+                    throw new PackageSecurityException("private proc detail");
+                }
+            );
+            OpenPackageRequest ordinary = CreateActualPackageRequest(root);
+            OpenPackageRequest proc = ordinary with
+            {
+                PackagePath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.PackagePath)}",
+                ChecksumsPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.ChecksumsPath)}",
+                BuildMetadataPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.BuildMetadataPath)}",
+                InstallManifestPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.InstallManifestPath)}",
+                AttestationBundlePath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.AttestationBundlePath)}",
+                AttestationBundleChecksumPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.AttestationBundleChecksumPath)}",
+                ProcWorkspaceIdentity = new ProtocolProcWorkspaceIdentity(1, 2, 3, 4, 5)
+            };
+
+            await FluentActions.Awaiting(() => opener.OpenAsync(ordinary, CancellationToken.None))
+                .Should().ThrowAsync<PackageSecurityException>().WithMessage("*safe accessible single-link regular file*");
+            PackageSecurityException unavailable = (await FluentActions.Awaiting(() => opener.OpenAsync(proc, CancellationToken.None))
+                .Should().ThrowAsync<PackageSecurityException>().WithMessage("*unavailable at session creation*")).Which;
+            unavailable.Message.Should().NotContain("private proc detail");
+            unavailable.InnerException.Should().BeNull();
+            captureCalls.Should().Be(1);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ActualPackageOpener_DoesNotSuppressPrivilegeRefusalFromProcCapture()
+    {
+        Action construct = () => _ = new LinuxInstallerProtocolPackageOpener(
+            "/tmp/gh",
+            () => throw new PrivilegedInstallerException("root refused")
+        );
+
+        construct.Should().Throw<PrivilegedInstallerException>();
+    }
+
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private static readonly GameRootIdentity Root = new("/game", 1, 2, 3);

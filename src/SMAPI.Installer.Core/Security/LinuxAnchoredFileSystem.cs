@@ -494,6 +494,25 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         CancellationToken cancellationToken = default
     )
     {
+        return this.ReadAllBytes(file, maximumBytes, requireExactCapturedIdentity: false, cancellationToken);
+    }
+
+    internal byte[] ReadAllBytesExact(
+        LinuxAnchoredFile file,
+        int maximumBytes,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return this.ReadAllBytes(file, maximumBytes, requireExactCapturedIdentity: true, cancellationToken);
+    }
+
+    private byte[] ReadAllBytes(
+        LinuxAnchoredFile file,
+        int maximumBytes,
+        bool requireExactCapturedIdentity,
+        CancellationToken cancellationToken
+    )
+    {
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(file);
         if (maximumBytes < 0)
@@ -502,7 +521,10 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         file.AssertOpen();
 
         LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
-        if (!before.IsSameObject(file.Identity) || before.Size > maximumBytes)
+        if (
+            (requireExactCapturedIdentity ? before != file.Identity : !before.IsSameObject(file.Identity))
+            || before.Size > maximumBytes
+        )
             throw new IOException("The open file is too large or no longer refers to its captured object.");
         byte[] result = new byte[(int)before.Size];
         int offset = 0;
@@ -534,6 +556,27 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         CancellationToken cancellationToken = default
     )
     {
+        return await this.CopyAndHashAsync(file, destination, maximumBytes, requireExactCapturedIdentity: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<string> CopyAndHashExactAsync(
+        LinuxAnchoredFile file,
+        Stream destination,
+        long maximumBytes,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return await this.CopyAndHashAsync(file, destination, maximumBytes, requireExactCapturedIdentity: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string> CopyAndHashAsync(
+        LinuxAnchoredFile file,
+        Stream destination,
+        long maximumBytes,
+        bool requireExactCapturedIdentity,
+        CancellationToken cancellationToken
+    )
+    {
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(destination);
@@ -545,7 +588,11 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         file.AssertOpen();
 
         LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
-        if (!before.IsSameObject(file.Identity) || before.Size <= 0 || before.Size > maximumBytes)
+        if (
+            (requireExactCapturedIdentity ? before != file.Identity : !before.IsSameObject(file.Identity))
+            || before.Size <= 0
+            || before.Size > maximumBytes
+        )
             throw new IOException("The open file is empty, too large, or no longer refers to its captured object.");
         using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         byte[] buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
