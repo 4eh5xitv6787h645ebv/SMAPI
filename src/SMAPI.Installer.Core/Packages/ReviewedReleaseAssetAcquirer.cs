@@ -14,7 +14,7 @@ public sealed record ReviewedReleaseAcquisitionProgress(
 );
 
 /// <summary>
-/// The exact six retained process-descriptor paths bound to one freshly resolved reviewed tag. This remains internal
+/// The exact six retained process-descriptor paths bound to one same-candidate resolved-tag authority. This remains internal
 /// until the dependent protocol opener can validate cross-process retained-directory descriptor paths explicitly.
 /// </summary>
 internal sealed class ReviewedReleaseProtocolAssetPaths
@@ -72,8 +72,11 @@ public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
     public string ReleaseTag => this.Candidate.Identity.Tag;
 
     /// <summary>
-    /// Bind the retained assets to a freshly resolved tag authority for this exact candidate. The projection remains
-    /// internal until a dependent backend change can consume proc-directory capabilities without a named-path fallback.
+    /// Bind the retained assets to a same-candidate resolved-tag authority. This method doesn't prove when the remote
+    /// documents were fetched. The dependent serialized controller must fetch the refreshed reference after all six
+    /// downloads, then call <see cref="ReviewedGitHubTagResolver.ResolveAfterRefresh"/> and this method before exposing
+    /// paths. The projection remains internal until a dependent backend change can consume proc-directory capabilities
+    /// without a named-path fallback.
     /// </summary>
     internal ReviewedReleaseProtocolAssetPaths Bind(ReviewedGitHubResolvedTag resolvedTag)
     {
