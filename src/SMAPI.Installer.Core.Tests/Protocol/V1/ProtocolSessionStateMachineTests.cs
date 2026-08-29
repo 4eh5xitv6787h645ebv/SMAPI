@@ -387,7 +387,7 @@ internal sealed class ProtocolSessionStateMachineTests
     private static PackageOpenedEvent Register(ProtocolSessionStateMachine machine, FakePackageAuthority authority)
     {
         InstallationReleaseIdentity release = authority.Release;
-        return machine.RegisterPackageAuthority(new(machine.SessionId, release.Tag, release.SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json", "/tmp/bundle.jsonl", "/tmp/bundle.sha256", "/tmp/gh"), release, authority, authority);
+        return machine.RegisterPackageAuthority(new(machine.SessionId, release.Tag, release.SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json", "/tmp/bundle.jsonl", "/tmp/bundle.sha256"), release, authority, authority);
     }
 
     private static RecoveryCatalogEvent Catalog(ProtocolSessionStateMachine machine, FakeRecoveryAuthority[] recoveries)

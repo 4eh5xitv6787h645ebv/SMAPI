@@ -236,6 +236,7 @@ if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
     launcher="$test_root/package/$package_root_name/install on Linux.sh"
     for root_command in \
         "'$installer' --no-prompt --install --game-path '$game_path'" \
+        "'$installer' --linux-protocol-v1-jsonl" \
         "bash '$launcher'"; do
         set +e
         sudo -n env \
@@ -252,6 +253,9 @@ if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
             exit 1
         fi
         grep -F "must not be run as root or with sudo" "$test_root/root.stderr" >/dev/null
+        if [[ "$root_command" == *"--linux-protocol-v1-jsonl"* ]]; then
+            test ! -s "$test_root/root.stdout"
+        fi
     done
 else
     echo "Skipping effective-UID root invocation check because passwordless sudo isn't available." >&2

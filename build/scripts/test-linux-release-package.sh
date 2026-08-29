@@ -16,7 +16,34 @@ if [[ ! -f "$archive_path" ]]; then
 fi
 
 temp_root="$(mktemp -d)"
-trap 'rm -rf -- "$temp_root"' EXIT
+protocol_pid=""
+protocol_watchdog_pid=""
+cleanup() {
+    set +e
+    if [[ -n "$protocol_pid" ]]; then
+        kill -KILL "$protocol_pid" 2>/dev/null
+        wait "$protocol_pid" 2>/dev/null
+    fi
+    if [[ -n "$protocol_watchdog_pid" ]]; then
+        kill -KILL "$protocol_watchdog_pid" 2>/dev/null
+        wait "$protocol_watchdog_pid" 2>/dev/null
+    fi
+    exec 9>&- 2>/dev/null
+    rm -rf -- "$temp_root"
+}
+trap cleanup EXIT
+
+assert_exact_line_file() {
+    local expected="$1"
+    local actual_path="$2"
+    local expected_path="$temp_root/expected-line.txt"
+
+    printf '%s\n' "$expected" > "$expected_path"
+    if ! cmp -s -- "$expected_path" "$actual_path"; then
+        echo "Protocol host emitted unexpected diagnostic output." >&2
+        exit 1
+    fi
+}
 
 entries_path="$temp_root/entries.txt"
 zipinfo -1 "$archive_path" > "$entries_path"
@@ -43,6 +70,7 @@ test -x "$package_root/install on Linux.sh"
 grep -F 'must not be run as root or with sudo' "$package_root/install on Linux.sh" >/dev/null
 test -f "$package_root/README.txt"
 test -f "$package_root/internal/linux/SMAPI.Installer"
+test -f "$package_root/internal/linux/SMAPI.Installer.Core.dll"
 test -f "$package_root/internal/linux/install.dat"
 test -f "$package_root/internal/linux/gh"
 test ! -L "$package_root/internal/linux/gh"
@@ -59,6 +87,117 @@ test "$(stat -c %s -- "$package_root/internal/linux/gh-LICENSE.txt")" = 1068
 test "$(sha256sum -- "$package_root/internal/linux/gh-LICENSE.txt" | cut -d ' ' -f 1)" = 6da4adc42392c8485e40b4251c7e332fc3352df1947c9ffade71dd60b14a7a4f
 test ! -e "$package_root/internal/macOS"
 test ! -e "$package_root/internal/windows"
+
+# The JSONL backend must run directly from the trimmed published installer without inspecting or
+# extracting the legacy install.dat payload. Exercise both a missing and poisoned ambient bundle.
+protocol_root="$temp_root/protocol-host"
+cp -a "$package_root/internal/linux" "$protocol_root"
+rm "$protocol_root/install.dat"
+protocol_request='{"protocolVersion":1,"messageType":"handshake.request","payload":{"commandId":"11111111111111111111111111111111","clientName":"package-test","clientVersion":"1"}}'
+for ambient_bundle in missing poisoned; do
+    if [[ "$ambient_bundle" == poisoned ]]; then
+        printf 'not an installer archive\n' > "$protocol_root/install.dat"
+    fi
+    printf '%s\n' "$protocol_request" \
+        | "$protocol_root/SMAPI.Installer" --linux-protocol-v1-jsonl \
+            > "$temp_root/protocol-$ambient_bundle.stdout" \
+            2> "$temp_root/protocol-$ambient_bundle.stderr"
+    test ! -s "$temp_root/protocol-$ambient_bundle.stderr"
+    python3 - "$temp_root/protocol-$ambient_bundle.stdout" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_bytes().splitlines()
+assert len(lines) == 1
+message = json.loads(lines[0].decode("utf-8", errors="strict"))
+assert set(message) == {"protocolVersion", "messageType", "payload"}
+assert message["protocolVersion"] == 1
+assert message["messageType"] == "handshake.event"
+assert message["payload"]["commandId"] == "11111111111111111111111111111111"
+assert message["payload"]["serverVersion"]
+assert "verified-local-package" in message["payload"]["capabilities"]
+PY
+done
+
+set +e
+"$protocol_root/SMAPI.Installer" --linux-protocol-v1-jsonl unexpected \
+    > "$temp_root/protocol-mixed.stdout" 2> "$temp_root/protocol-mixed.stderr"
+mixed_exit=$?
+set -e
+test "$mixed_exit" = 2
+test ! -s "$temp_root/protocol-mixed.stdout"
+assert_exact_line_file \
+    'The Linux protocol host requires exactly --linux-protocol-v1-jsonl on Linux.' \
+    "$temp_root/protocol-mixed.stderr"
+
+# A packaged host blocked on controller input must handle SIGTERM through its graceful cancellation
+# path, without extracting install.dat, polluting stdout, or leaving a child process behind.
+protocol_fifo="$temp_root/protocol-input.fifo"
+protocol_tmp="$temp_root/protocol-tmp"
+mkdir "$protocol_tmp"
+mkfifo "$protocol_fifo"
+exec 9<> "$protocol_fifo"
+TMPDIR="$protocol_tmp" "$protocol_root/SMAPI.Installer" --linux-protocol-v1-jsonl \
+    < "$protocol_fifo" > "$temp_root/protocol-sigterm.stdout" 2> "$temp_root/protocol-sigterm.stderr" &
+protocol_pid=$!
+for _ in {1..100}; do
+    [[ -e "/proc/$protocol_pid/status" ]] && break
+    sleep 0.01
+done
+test -e "/proc/$protocol_pid/status"
+printf '%s\n' "$protocol_request" >&9
+for _ in {1..500}; do
+    [[ -s "$temp_root/protocol-sigterm.stdout" ]] && break
+    kill -0 "$protocol_pid" 2>/dev/null || break
+    sleep 0.01
+done
+test -s "$temp_root/protocol-sigterm.stdout"
+mapfile -t protocol_children < <(pgrep -P "$protocol_pid" || true)
+kill -TERM "$protocol_pid"
+protocol_watchdog_marker="$temp_root/protocol-sigterm.watchdog"
+(
+    sleep 10
+    if kill -0 "$protocol_pid" 2>/dev/null; then
+        : > "$protocol_watchdog_marker"
+        kill -KILL "$protocol_pid" 2>/dev/null || true
+    fi
+) &
+protocol_watchdog_pid=$!
+set +e
+wait "$protocol_pid"
+sigterm_exit=$?
+kill -KILL "$protocol_watchdog_pid" 2>/dev/null
+wait "$protocol_watchdog_pid" 2>/dev/null
+set -e
+protocol_pid=""
+protocol_watchdog_pid=""
+exec 9>&-
+if [[ -e "$protocol_watchdog_marker" ]]; then
+    echo "Protocol host didn't exit within 10 seconds of SIGTERM and was killed." >&2
+    exit 1
+fi
+test "$sigterm_exit" = 130
+assert_exact_line_file 'Protocol host was cancelled.' "$temp_root/protocol-sigterm.stderr"
+python3 - "$temp_root/protocol-sigterm.stdout" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_bytes().splitlines()
+assert len(lines) == 1
+message = json.loads(lines[0].decode("utf-8", errors="strict"))
+assert message["protocolVersion"] == 1
+assert message["messageType"] == "handshake.event"
+assert message["payload"]["commandId"] == "11111111111111111111111111111111"
+PY
+test -z "$(find "$protocol_tmp" -mindepth 1 -print -quit)"
+for child in "${protocol_children[@]}"; do
+    if kill -0 "$child" 2>/dev/null; then
+        echo "Protocol host left child process $child after SIGTERM." >&2
+        exit 1
+    fi
+done
 
 mkdir "$temp_root/bundle"
 unzip -q "$package_root/internal/linux/install.dat" -d "$temp_root/bundle"

@@ -10,7 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\SMAPI.Installer.Core\SMAPI.Installer.Core.csproj" />
     <ProjectReference Include="..\SMAPI.Toolkit\SMAPI.Toolkit.csproj" />
+    <!-- Protocol V1 uses strict reflection-based JSON contracts; retain its Core message graph in trimmed publishes. -->
+    <TrimmerRootAssembly Include="SMAPI.Installer.Core" />
   </ItemGroup>
 
   <ItemGroup>

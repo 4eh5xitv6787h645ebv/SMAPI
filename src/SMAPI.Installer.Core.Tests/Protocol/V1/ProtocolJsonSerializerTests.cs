@@ -37,7 +37,7 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolRequest[] requests =
         [
             new HandshakeRequest("gui", "1"), new DiscoverGamesRequest(session), new RecoverInterruptedRequest(session, "/game"),
-            new OpenPackageRequest(session, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json", "/tmp/bundle.jsonl", "/tmp/bundle.sha256", "/tmp/gh"),
+            new OpenPackageRequest(session, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json", "/tmp/bundle.jsonl", "/tmp/bundle.sha256"),
             new ListRecoveriesRequest(session, "/game"), new InspectPlanRequest(session, "/game", InstallerOperation.Repair, package, null),
             new SelectPlanCandidatesRequest(session, plan, digest, [candidate]), new GetPlanPageRequest(session, plan, digest, ProtocolPlanPageKind.Candidates, 0), new ConfirmPlanRequest(session, plan, digest), new ExecutePlanRequest(session, plan, digest), new CancelPlanRequest(session, plan, digest),
             new InspectPruneRequest(session, catalog, 1), new ConfirmPruneRequest(session, prune, pruneDigest), new ExecutePruneRequest(session, prune, pruneDigest), new CancelPruneRequest(session, prune, pruneDigest)
@@ -141,6 +141,17 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolCandidateId id = plan.Candidates[0].CandidateId;
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new SelectPlanCandidatesRequest(plan.SessionId, plan.PlanId, plan.PlanDigest, [id, id])))
             .Should().Throw<ProtocolException>().WithMessage("*duplicate IDs*");
+    }
+
+    [Test]
+    public void OpenPackageRequest_RejectsFrontendProvidedGitHubCliAuthority()
+    {
+        OpenPackageRequest request = new(ProtocolSessionId.CreateRandom(), CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json", "/tmp/bundle.jsonl", "/tmp/bundle.sha256");
+        string line = ProtocolJsonSerializer.SerializeLine(request);
+        string injected = line.Replace("\"attestationBundleChecksumPath\":\"/tmp/bundle.sha256\"", "\"attestationBundleChecksumPath\":\"/tmp/bundle.sha256\",\"gitHubCliPath\":\"/tmp/untrusted-gh\"", StringComparison.Ordinal);
+
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(injected))
+            .Should().Throw<ProtocolException>().WithMessage("*unknown 'gitHubCliPath'*");
     }
 
     [Test]
