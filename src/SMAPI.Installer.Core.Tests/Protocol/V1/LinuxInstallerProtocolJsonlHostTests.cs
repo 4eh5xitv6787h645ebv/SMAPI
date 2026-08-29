@@ -27,6 +27,27 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         session.Disposed.Should().BeTrue();
     }
 
+    [Test]
+    public async Task RunAsync_ManualValidationDispatchesStrictRequestAndWritesTypedCorrelatedEvent()
+    {
+        ValidateGameRequest request = new(Session, "/selected/game");
+        FakeSession session = new((value, _) =>
+        {
+            ValidateGameRequest validation = value.Should().BeOfType<ValidateGameRequest>().Subject;
+            validation.GamePath.Should().Be("/selected/game");
+            return Task.FromResult<ProtocolEvent>(new GameValidationEvent(Session, new("/canonical/game", StardewModdingAPI.Installer.Core.Engine.LinuxGameFolderStatus.Valid, "Stardew Valley")) { CommandId = value.CommandId });
+        });
+
+        (int exit, byte[] output, string diagnostics) = await RunAsync(new MemoryStream(Encoding.UTF8.GetBytes(Lines(request))), session);
+
+        exit.Should().Be(0);
+        diagnostics.Should().BeEmpty();
+        GameValidationEvent response = ParseEvents(output).Should().ContainSingle().Which.Should().BeOfType<GameValidationEvent>().Subject;
+        response.CommandId.Should().Be(request.CommandId);
+        response.Candidate.CanonicalPath.Should().Be("/canonical/game");
+        session.Disposed.Should().BeTrue();
+    }
+
     [TestCase(ProtocolJsonSerializer.MaxLineBytes - 1, true)]
     [TestCase(ProtocolJsonSerializer.MaxLineBytes, true)]
     [TestCase(ProtocolJsonSerializer.MaxLineBytes + 1, false)]

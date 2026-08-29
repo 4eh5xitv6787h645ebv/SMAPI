@@ -29,6 +29,10 @@ internal sealed class ProtocolSessionStateMachineTests
         GameDiscoveryEvent discovery = machine.RecordDiscovery(new(machine.SessionId), candidates); candidates[0] = new("/other", LinuxGameFolderStatus.InvalidGameAssembly, "Other");
         discovery.Candidates.Should().ContainSingle().Which.CanonicalPath.Should().Be("/game");
         ProtocolGameCandidate[] returnedCandidates = discovery.Candidates; returnedCandidates[0] = new("/mutated", LinuxGameFolderStatus.InvalidGameAssembly, "Mutated"); discovery.Candidates.Single().CanonicalPath.Should().Be("/game");
+        ValidateGameRequest validationRequest = new(machine.SessionId, "/selected/game");
+        GameValidationEvent validation = machine.RecordGameValidation(validationRequest, new("/canonical/game", LinuxGameFolderStatus.Valid, "Game"));
+        validation.CommandId.Should().Be(validationRequest.CommandId);
+        validation.Candidate.CanonicalPath.Should().Be("/canonical/game");
     }
 
     [Test]
@@ -36,8 +40,10 @@ internal sealed class ProtocolSessionStateMachineTests
     {
         ProtocolSessionStateMachine machine = new();
         FluentActions.Invoking(() => machine.RecordDiscovery(new(ProtocolSessionId.CreateRandom()), [])).Should().Throw<ProtocolException>().WithMessage("*Expected protocol state 'Ready'*");
+        FluentActions.Invoking(() => machine.RecordGameValidation(new(machine.SessionId, "/game"), new("/game", LinuxGameFolderStatus.Valid, "Game"))).Should().Throw<ProtocolException>().WithMessage("*Expected protocol state 'Ready'*");
         machine.AcceptHandshake(new("gui", "1"), "server");
         FluentActions.Invoking(() => machine.RecordDiscovery(new(ProtocolSessionId.CreateRandom()), [])).Should().Throw<ProtocolException>().WithMessage("*session ID*");
+        FluentActions.Invoking(() => machine.RecordGameValidation(new(ProtocolSessionId.CreateRandom(), "/game"), new("/game", LinuxGameFolderStatus.Valid, "Game"))).Should().Throw<ProtocolException>().WithMessage("*session ID*");
         FluentActions.Invoking(() => machine.AcceptHandshake(new("again", "1"), "server")).Should().Throw<ProtocolException>().WithMessage("*Ready*");
     }
 

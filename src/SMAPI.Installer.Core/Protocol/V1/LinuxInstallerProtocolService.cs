@@ -34,6 +34,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
     private static readonly string[] Capabilities =
     [
         "linux-game-discovery",
+        "linux-game-validation",
         "verified-local-package",
         "install-update-repair-uninstall-backup-rollback",
         "candidate-approval",
@@ -147,6 +148,8 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                     return this.Emit(this.WithSession(() => this.Session.AcceptHandshake(value, this.ServerVersion, Capabilities)));
                 case DiscoverGamesRequest value:
                     return await this.DiscoverAsync(value, cancellationToken).ConfigureAwait(false);
+                case ValidateGameRequest value:
+                    return await this.ValidateGameAsync(value, cancellationToken).ConfigureAwait(false);
                 case RecoverInterruptedRequest value:
                     Task<ProtocolEvent> recovery = this.StartRecovery(value, cancellationToken);
                     longOperationStarted = true;
@@ -202,6 +205,14 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         IReadOnlyList<LinuxGameFolderCandidate> discovered = await this.Discovery.DiscoverAsync(cancellationToken).ConfigureAwait(false);
         ProtocolGameCandidate[] candidates = discovered.Select(candidate => new ProtocolGameCandidate(candidate.CanonicalPath, candidate.Status, GetGameDisplayName(candidate))).ToArray();
         return this.Emit(this.WithSession(() => this.Session.RecordDiscovery(request, candidates)));
+    }
+
+    private async Task<GameValidationEvent> ValidateGameAsync(ValidateGameRequest request, CancellationToken cancellationToken)
+    {
+        this.WithSession(() => this.Session.ValidateReadyRequest(request.SessionId));
+        LinuxGameFolderCandidate candidate = await this.Discovery.ValidateAsync(request.GamePath, cancellationToken).ConfigureAwait(false);
+        ProtocolGameCandidate result = new(candidate.CanonicalPath, candidate.Status, GetGameDisplayName(candidate));
+        return this.Emit(this.WithSession(() => this.Session.RecordGameValidation(request, result)));
     }
 
     private async Task<PackageOpenedEvent> OpenPackageAsync(OpenPackageRequest request, CancellationToken cancellationToken)
@@ -736,11 +747,13 @@ internal sealed class LinuxInstallerProtocolEngine(LinuxInstallerEngine engine) 
 internal interface ILinuxInstallerProtocolDiscovery
 {
     Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken);
+    Task<LinuxGameFolderCandidate> ValidateAsync(string gameRoot, CancellationToken cancellationToken);
 }
 
 internal sealed class LinuxInstallerProtocolDiscovery(LinuxGameDiscovery discovery) : ILinuxInstallerProtocolDiscovery
 {
     public Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken) => discovery.DiscoverAsync(cancellationToken: cancellationToken);
+    public Task<LinuxGameFolderCandidate> ValidateAsync(string gameRoot, CancellationToken cancellationToken) => discovery.ValidateAsync(gameRoot, cancellationToken);
 }
 
 internal interface ILinuxInstallerProtocolPackageOpener : IDisposable

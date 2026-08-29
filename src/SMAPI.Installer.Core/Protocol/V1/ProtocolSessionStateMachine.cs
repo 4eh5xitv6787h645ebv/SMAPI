@@ -80,6 +80,13 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         return new GameDiscoveryEvent(result.SessionId, result.Candidates.ToArray()) { CommandId = request.CommandId };
     }
 
+    public GameValidationEvent RecordGameValidation(ValidateGameRequest request, ProtocolGameCandidate candidate)
+    {
+        this.AssertUsable(); this.RequireReadyLookup(request.SessionId); ArgumentNullException.ThrowIfNull(candidate); ProtocolJsonSerializer.SerializeLine(request);
+        GameValidationEvent result = new(this.SessionId, candidate) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result);
+        return result;
+    }
+
     /// <summary>Validate a ready-state lookup before an orchestration service performs external bounded work.</summary>
     internal void ValidateReadyRequest(ProtocolSessionId sessionId) { this.AssertUsable(); this.RequireReadyLookup(sessionId); }
 

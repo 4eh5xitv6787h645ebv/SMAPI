@@ -246,6 +246,41 @@ internal sealed class LinuxInstallerProtocolServiceTests
     }
 
     [Test]
+    public async Task ManualValidationUsesOnlyExactCoreValidationAndReturnsOneCorrelatedCandidate()
+    {
+        FakeDiscovery discovery = new()
+        {
+            ValidationResult = new LinuxGameFolderCandidate("/canonical/game", LinuxGameFolderStatus.UnsupportedGameVersion, new Version(1, 6, 13))
+        };
+        using LinuxInstallerProtocolService service = Create(new FakeEngine(), new FakePackageOpener(), discovery: discovery);
+        HandshakeEvent handshake = (HandshakeEvent)await service.HandleAsync(new HandshakeRequest("gui", "1"));
+        handshake.Capabilities.Should().Contain(["linux-game-discovery", "linux-game-validation"]);
+        using CancellationTokenSource cancellation = new();
+        ValidateGameRequest request = new(handshake.SessionId, "/selected/game");
+
+        GameValidationEvent validation = (GameValidationEvent)await service.HandleAsync(request, cancellation.Token);
+
+        validation.CommandId.Should().Be(request.CommandId);
+        validation.Candidate.Should().BeEquivalentTo(new ProtocolGameCandidate("/canonical/game", LinuxGameFolderStatus.UnsupportedGameVersion, "Stardew Valley 1.6.13 (UnsupportedGameVersion)"));
+        discovery.ValidatedPaths.Should().Equal("/selected/game");
+        discovery.ValidationTokens.Should().ContainSingle().Which.Should().Be(cancellation.Token);
+        discovery.DiscoverCalls.Should().Be(0);
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(validation)).Should().BeEquivalentTo(validation);
+    }
+
+    [Test]
+    public async Task ManualValidationRequiresReadyStateBeforeCallingCore()
+    {
+        FakeDiscovery discovery = new();
+        using LinuxInstallerProtocolService service = Create(new FakeEngine(), new FakePackageOpener(), discovery: discovery);
+
+        Func<Task> validate = async () => await service.HandleAsync(new ValidateGameRequest(service.SessionId, "/game"));
+
+        await validate.Should().ThrowAsync<ProtocolException>().WithMessage("*Expected protocol state 'Ready'*");
+        discovery.ValidatedPaths.Should().BeEmpty();
+    }
+
+    [Test]
     public async Task InterruptedRecoveryUsesCoreAuthorityInvalidatesPriorStateAndReturnsBoundedExactResult()
     {
         List<ProtocolEvent> emitted = []; FakeEngine engine = new();
@@ -956,8 +991,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await stale.Should().ThrowAsync<ProtocolException>().WithMessage("*stale*");
     }
 
-    private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null, Action? terminalCompletionStarting = null, Action? disposalPublished = null, string? sanitizedLogPath = null) =>
-        new("test", progress => { engine.Progress = progress; return engine; }, new FakeDiscovery(), opener, sink, sanitizedLogPath, terminalCompletionStarting, disposalPublished);
+    private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null, Action? terminalCompletionStarting = null, Action? disposalPublished = null, string? sanitizedLogPath = null, FakeDiscovery? discovery = null) =>
+        new("test", progress => { engine.Progress = progress; return engine; }, discovery ?? new FakeDiscovery(), opener, sink, sanitizedLogPath, terminalCompletionStarting, disposalPublished);
     private static Task<ProtocolEvent> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
     private static async Task<PackageOpenedEvent> Open(LinuxInstallerProtocolService service) => (PackageOpenedEvent)(await service.HandleAsync(new OpenPackageRequest(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest", "/tmp/bundle", "/tmp/bundle-checksum")))!;
     private static string CreateTemporaryDirectory() { string path = Path.Combine(Path.GetTempPath(), $"smapi-protocol-opener-{Guid.NewGuid():N}"); Directory.CreateDirectory(path); return path; }
@@ -1034,7 +1069,12 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
     private sealed class FakeDiscovery : ILinuxInstallerProtocolDiscovery
     {
-        public Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<LinuxGameFolderCandidate>>([new("/game", LinuxGameFolderStatus.UnsafeLauncher)]);
+        public LinuxGameFolderCandidate ValidationResult { get; set; } = new("/game", LinuxGameFolderStatus.Valid);
+        public List<string> ValidatedPaths { get; } = [];
+        public List<CancellationToken> ValidationTokens { get; } = [];
+        public int DiscoverCalls { get; private set; }
+        public Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken) { this.DiscoverCalls++; return Task.FromResult<IReadOnlyList<LinuxGameFolderCandidate>>([new("/game", LinuxGameFolderStatus.UnsafeLauncher)]); }
+        public Task<LinuxGameFolderCandidate> ValidateAsync(string gameRoot, CancellationToken cancellationToken) { this.ValidatedPaths.Add(gameRoot); this.ValidationTokens.Add(cancellationToken); return Task.FromResult(this.ValidationResult); }
     }
 
     private sealed class FakePackageOpener : ILinuxInstallerProtocolPackageOpener, IDisposable
