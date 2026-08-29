@@ -71,7 +71,8 @@ public sealed class ProcessInstallerProtocolClientTests
         await using ProcessInstallerProtocolClient client = Create(process);
 
         await client.HandshakeAsync("SMAPI GUI", "1");
-        PackageOpenedEvent opened = await client.OpenPackageAsync(CreatePackage());
+        InstallerPackageOpenSuccess result = (await client.OpenPackageAsync(CreatePackage())).Should().BeOfType<InstallerPackageOpenSuccess>().Subject;
+        PackageOpenedEvent opened = result.Opened;
 
         opened.SessionId.Should().Be(Session);
         process.Requests.Select(request => request.Kind).Should().Equal(ProtocolMessageKind.HandshakeRequest, ProtocolMessageKind.OpenPackageRequest);
@@ -107,6 +108,40 @@ public sealed class ProcessInstallerProtocolClientTests
         process.Terminated.Should().BeTrue();
     }
 
+    [Test]
+    public async Task SurfacesNormalCorrelatedPackageRejectionWithoutPrivateLogOrFailStop()
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            OpenPackageRequest => Serialize(new PrePlanRejectedEvent(
+                Session,
+                ProtocolPrePlanErrorCode.PackageRejected,
+                "The selected release asset set failed strict package verification.",
+                ProtocolNextAction.ReopenVerifiedPackage,
+                false,
+                "/private/log/which-must-not-cross-the-interface"
+            )
+            {
+                CommandId = request.CommandId
+            }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        InstallerPackageOpenResult result = await client.OpenPackageAsync(CreatePackage());
+
+        InstallerPackageOpenRejection rejection = result.Should().BeOfType<InstallerPackageOpenRejection>().Subject;
+        rejection.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.PackageRejected);
+        rejection.NextAction.Should().Be(ProtocolNextAction.ReopenVerifiedPackage);
+        rejection.Message.Should().Be("The selected release asset set failed strict package verification.");
+        rejection.IsTerminal.Should().BeFalse();
+        result.ToString().Should().NotContain("/private/log");
+        process.Terminated.Should().BeFalse();
+        process.Disposed.Should().BeFalse();
+    }
+
     [TestCase(true)]
     [TestCase(false)]
     public async Task RejectsWrongCommandOrSessionCorrelationAndTerminates(bool wrongCommand)
@@ -137,6 +172,59 @@ public sealed class ProcessInstallerProtocolClientTests
 
         process.Terminated.Should().BeTrue();
         process.Disposed.Should().BeTrue();
+    }
+
+    [TestCase("tag")]
+    [TestCase("commit")]
+    [TestCase("asset")]
+    public async Task RejectsCorrelatedPackageOpenedEventWithWrongReleaseBinding(string mismatch)
+    {
+        InstallerPackageOpenInput package = mismatch switch
+        {
+            // Keep the response's asset name and commit bound to the input so this isolates the tag check.
+            "tag" => CreatePackage(packageAssetName: PackageName(3)),
+            "commit" => CreatePackage(),
+            // Keep the response's tag and commit bound to the input so this isolates the basename check.
+            "asset" => CreatePackage(packageAssetName: PackageName(3)),
+            _ => throw new AssertionException("Unknown mismatch fixture.")
+        };
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            OpenPackageRequest => mismatch switch
+            {
+                "tag" => Serialize(CreateOpened(Session, request.CommandId, alpha: 3)),
+                "commit" => Serialize(CreateOpened(Session, request.CommandId, sourceCommit: new string('3', 40))),
+                "asset" => Serialize(CreateOpened(Session, request.CommandId)),
+                _ => throw new AssertionException("Unknown mismatch fixture.")
+            },
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        Func<Task> action = () => client.OpenPackageAsync(package);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+        process.Disposed.Should().BeTrue();
+    }
+
+    [TestCase("/tmp/package/")]
+    [TestCase("/tmp/package/.")]
+    [TestCase("/tmp/package/..")]
+    [TestCase("/tmp/package/unsafe\\name.zip")]
+    public async Task RejectsUnsafePackageBasenameBeforeSendingOpenRequest(string packagePath)
+    {
+        ScriptedProcess process = new(CorrectResponse);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        InstallerPackageOpenInput package = CreatePackage() with { PackagePath = packagePath };
+
+        Func<Task> action = () => client.OpenPackageAsync(package);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>().WithMessage("*safe absolute Linux filename*");
+        process.Requests.Should().ContainSingle().Which.Should().BeOfType<HandshakeRequest>();
     }
 
     [Test]
@@ -254,6 +342,25 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    public async Task EveryConcurrentDisposeCallerAwaitsTheSameCleanupAndReap()
+    {
+        ScriptedProcess process = new(CorrectResponse, completeWaitInitially: false);
+        ProcessInstallerProtocolClient client = Create(process, TimeSpan.FromMilliseconds(200));
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        Task first = client.DisposeAsync().AsTask();
+        Task second = client.DisposeAsync().AsTask();
+        await Task.Delay(30);
+
+        first.IsCompleted.Should().BeFalse();
+        second.IsCompleted.Should().BeFalse();
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(2));
+        process.Terminated.Should().BeTrue();
+        process.WaitObserved.Should().BeTrue();
+        process.Disposed.Should().BeTrue();
+    }
+
+    [Test]
     public async Task MalformedBackendDiagnosticsAndPackagePathsAreNeverReflected()
     {
         const string privatePath = "/home/private-user/download/token-package.zip";
@@ -274,13 +381,13 @@ public sealed class ProcessInstallerProtocolClientTests
             reap ?? TimeSpan.FromMilliseconds(250)
         );
 
-    private static InstallerPackageOpenInput CreatePackage()
+    private static InstallerPackageOpenInput CreatePackage(string? packageAssetName = null)
     {
         string root = "/tmp/package set ;$[]";
         return new(
             "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2",
             new string('1', 40),
-            Path.Combine(root, "installer.zip"),
+            Path.Combine(root, packageAssetName ?? PackageName(2)),
             Path.Combine(root, "SHA256SUMS"),
             Path.Combine(root, "build-metadata.json"),
             Path.Combine(root, "install-manifest.json"),
@@ -296,19 +403,19 @@ public sealed class ProcessInstallerProtocolClientTests
         _ => throw new AssertionException("The GUI bridge sent a command outside this slice.")
     };
 
-    private static PackageOpenedEvent CreateOpened(ProtocolSessionId session, ProtocolCommandId command) => new(
+    private static PackageOpenedEvent CreateOpened(ProtocolSessionId session, ProtocolCommandId command, int alpha = 2, string? sourceCommit = null) => new(
         session,
         ProtocolPackageId.Parse("22222222222222222222222222222222"),
         new(
             "https://github.com/4eh5xitv6787h645ebv/SMAPI",
-            "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2",
-            "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2",
-            "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip",
-            new string('1', 40),
+            $"fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.{alpha}",
+            $"4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}",
+            PackageName(alpha),
+            sourceCommit ?? new string('1', 40),
             new string('2', 40),
             new string('a', 64),
             123,
-            "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2",
+            $"4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.{alpha}",
             "Release",
             "linux-x64"
         )
@@ -316,6 +423,8 @@ public sealed class ProcessInstallerProtocolClientTests
     {
         CommandId = command
     };
+
+    private static string PackageName(int alpha) => $"SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}-linux-x64-installer.zip";
 
     private static byte[] Serialize(ProtocolEvent value) => Encoding.UTF8.GetBytes(ProtocolJsonSerializer.SerializeLine(value) + "\n");
 

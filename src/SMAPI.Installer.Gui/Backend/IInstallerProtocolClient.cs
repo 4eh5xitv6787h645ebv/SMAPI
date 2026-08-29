@@ -9,7 +9,7 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
     Task<HandshakeEvent> HandshakeAsync(string clientName, string clientVersion, CancellationToken cancellationToken = default);
 
     /// <summary>Ask the backend to independently verify and open one complete local package set.</summary>
-    Task<PackageOpenedEvent> OpenPackageAsync(InstallerPackageOpenInput package, CancellationToken cancellationToken = default);
+    Task<InstallerPackageOpenResult> OpenPackageAsync(InstallerPackageOpenInput package, CancellationToken cancellationToken = default);
 }
 
 /// <summary>The six downloaded paths and reviewed release identity needed for package verification.</summary>
@@ -23,6 +23,19 @@ internal sealed record InstallerPackageOpenInput(
     string AttestationBundlePath,
     string AttestationBundleChecksumPath
 );
+
+/// <summary>A sanitized, typed outcome from local package verification.</summary>
+internal abstract record InstallerPackageOpenResult;
+
+internal sealed record InstallerPackageOpenSuccess(PackageOpenedEvent Opened) : InstallerPackageOpenResult;
+
+/// <summary>A normal backend domain rejection with no private log path or raw exception detail.</summary>
+internal sealed record InstallerPackageOpenRejection(
+    ProtocolPrePlanErrorCode ErrorCode,
+    ProtocolNextAction NextAction,
+    string Message,
+    bool IsTerminal
+) : InstallerPackageOpenResult;
 
 internal sealed class InstallerProtocolClientException : Exception
 {

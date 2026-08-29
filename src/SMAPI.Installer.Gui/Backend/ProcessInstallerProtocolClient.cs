@@ -21,6 +21,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private readonly SemaphoreSlim CommandGate = new(1, 1);
     private readonly CancellationTokenSource Lifetime = new();
     private readonly object CleanupLock = new();
+    private readonly object DisposeLock = new();
     private IInstallerProtocolProcess? Process;
     private StrictJsonLineReader? Reader;
     private Task? StderrDrain;
@@ -30,6 +31,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private int DisposeStarted;
     private int ObservedStderrBytesValue;
     private Task? CleanupTask;
+    private Task? DisposalTask;
 
     internal int ObservedStderrBytes => Volatile.Read(ref this.ObservedStderrBytesValue);
 
@@ -83,7 +85,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         }
     }
 
-    public async Task<PackageOpenedEvent> OpenPackageAsync(InstallerPackageOpenInput package, CancellationToken cancellationToken = default)
+    public async Task<InstallerPackageOpenResult> OpenPackageAsync(InstallerPackageOpenInput package, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(package);
         await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -94,6 +96,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
             if (this.PackageOpened)
                 throw new InstallerProtocolClientException("A package was already opened in this installer backend session.");
+            string packageAssetName = GetSafeLinuxFileName(package.PackagePath);
 
             OpenPackageRequest request = new(
                 session,
@@ -106,11 +109,23 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 package.AttestationBundlePath,
                 package.AttestationBundleChecksumPath
             );
-            PackageOpenedEvent response = await this.ExchangeAsync<PackageOpenedEvent>(request, cancellationToken).ConfigureAwait(false);
-            if (response.SessionId != session)
-                await this.FailProtocolAsync().ConfigureAwait(false);
-            this.PackageOpened = true;
-            return response;
+            ProtocolEvent response = await this.ExchangeAsync<ProtocolEvent>(request, cancellationToken).ConfigureAwait(false);
+            switch (response)
+            {
+                case PackageOpenedEvent opened when
+                    opened.SessionId == session
+                    && string.Equals(opened.Release.Tag, package.ReleaseTag, StringComparison.Ordinal)
+                    && string.Equals(opened.Release.SourceCommit, package.ExpectedSourceCommit, StringComparison.Ordinal)
+                    && string.Equals(opened.Release.PackageAssetName, packageAssetName, StringComparison.Ordinal):
+                    this.PackageOpened = true;
+                    return new InstallerPackageOpenSuccess(opened);
+
+                case PrePlanRejectedEvent rejected when rejected.SessionId == session:
+                    return new InstallerPackageOpenRejection(rejected.ErrorCode, rejected.NextAction, rejected.Message, rejected.IsTerminal);
+
+                default:
+                    return await this.FailProtocolAsync<InstallerPackageOpenResult>().ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -118,10 +133,19 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref this.DisposeStarted, 1) != 0)
-            return;
+        lock (this.DisposeLock)
+        {
+            if (this.DisposalTask is not null)
+                return new ValueTask(this.DisposalTask);
+            Volatile.Write(ref this.DisposeStarted, 1);
+            return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
         await this.CleanupAsync(allowCleanExit: true).ConfigureAwait(false);
         await this.CommandGate.WaitAsync().ConfigureAwait(false);
         this.CommandGate.Release();
@@ -179,6 +203,23 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
             throw new InstallerProtocolClientException("The installer backend transport stopped safely.");
         }
+    }
+
+    private static string GetSafeLinuxFileName(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !Path.IsPathFullyQualified(path))
+            throw new InstallerProtocolClientException("The local installer package path isn't a safe absolute Linux filename.");
+        string fileName = Path.GetFileName(path);
+        if (
+            string.IsNullOrEmpty(fileName)
+            || fileName is "." or ".."
+            || fileName.IndexOfAny(['/', '\\']) >= 0
+            || fileName.Any(char.IsControl)
+        )
+        {
+            throw new InstallerProtocolClientException("The local installer package path isn't a safe absolute Linux filename.");
+        }
+        return fileName;
     }
 
     private void EnsureStarted()
