@@ -2,8 +2,8 @@ using System.Text.RegularExpressions;
 
 namespace StardewModdingAPI.Installer.Core.Ownership;
 
-/// <summary>The complete immutable identity bound into a package manifest and installation receipt.</summary>
-public sealed class InstallationReleaseIdentity : IEquatable<InstallationReleaseIdentity>
+/// <summary>The complete immutable identity of an exact reviewed tagged release package.</summary>
+public sealed class InstallationReleaseIdentity : InstallationPackageIdentity, IEquatable<InstallationReleaseIdentity>
 {
     /// <summary>The reviewed release repository.</summary>
     public const string ReviewedRepository = "https://github.com/4eh5xitv6787h645ebv/SMAPI";
@@ -21,23 +21,11 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
     /// <summary>The immutable fork release tag.</summary>
     public string Tag { get; }
 
-    /// <summary>The embedded assembly/package version.</summary>
-    public string EmbeddedVersion { get; }
-
-    /// <summary>The exact package asset name.</summary>
-    public string PackageAssetName { get; }
-
     /// <summary>The exact source commit.</summary>
     public string SourceCommit { get; }
 
     /// <summary>The exact source tree.</summary>
     public string SourceTree { get; }
-
-    /// <summary>The verified package digest.</summary>
-    public Sha256Digest PackageSha256 { get; }
-
-    /// <summary>The verified package byte length.</summary>
-    public long PackageSizeBytes { get; }
 
     /// <summary>The exact GitHub Actions workflow reference which built the package.</summary>
     public string BuildWorkflow { get; }
@@ -62,13 +50,20 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
         string buildConfiguration,
         string runtimeIdentifier
     )
+        : base(
+            InstallationPackageOrigin.TaggedRelease,
+            embeddedVersion,
+            packageAssetName,
+            packageSha256,
+            packageSizeBytes
+        )
     {
-        ArgumentNullException.ThrowIfNull(packageSha256);
         if (!string.Equals(repository, InstallationReleaseIdentity.ReviewedRepository, StringComparison.Ordinal))
             throw new ArgumentException("The release repository isn't the reviewed SMAPI fork.", nameof(repository));
 
-        if (tag == null)
-            throw new ArgumentNullException(nameof(tag));
+        ArgumentNullException.ThrowIfNull(tag);
+        if (tag.Length > 160)
+            throw new ArgumentException("The release tag isn't a bounded canonical Linux fork alpha tag.", nameof(tag));
         Match match = InstallationReleaseIdentity.TagPattern.Match(tag);
         if (!match.Success || !int.TryParse(match.Groups["alpha"].Value, out int alpha))
             throw new ArgumentException("The release tag isn't a canonical Linux fork alpha tag.", nameof(tag));
@@ -83,9 +78,6 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
             throw new ArgumentException("The source commit must be a full lowercase Git object ID.", nameof(sourceCommit));
         if (sourceTree == null || !InstallationReleaseIdentity.GitObjectPattern.IsMatch(sourceTree))
             throw new ArgumentException("The source tree must be a full lowercase Git object ID.", nameof(sourceTree));
-        if (packageSizeBytes <= 0)
-            throw new ArgumentOutOfRangeException(nameof(packageSizeBytes), "The verified package size must be positive.");
-
         string expectedWorkflow = $"4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/{tag}";
         if (!string.Equals(buildWorkflow, expectedWorkflow, StringComparison.Ordinal))
             throw new ArgumentException("The build workflow doesn't match the exact reviewed release tag.", nameof(buildWorkflow));
@@ -96,12 +88,8 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
 
         this.Repository = repository;
         this.Tag = tag;
-        this.EmbeddedVersion = embeddedVersion;
-        this.PackageAssetName = packageAssetName;
         this.SourceCommit = sourceCommit;
         this.SourceTree = sourceTree;
-        this.PackageSha256 = packageSha256;
-        this.PackageSizeBytes = packageSizeBytes;
         this.BuildWorkflow = buildWorkflow;
         this.BuildConfiguration = buildConfiguration;
         this.RuntimeIdentifier = runtimeIdentifier;
@@ -110,41 +98,29 @@ public sealed class InstallationReleaseIdentity : IEquatable<InstallationRelease
     /// <inheritdoc />
     public bool Equals(InstallationReleaseIdentity? other)
     {
-        return other != null
-            && this.Repository == other.Repository
-            && this.Tag == other.Tag
-            && this.EmbeddedVersion == other.EmbeddedVersion
-            && this.PackageAssetName == other.PackageAssetName
-            && this.SourceCommit == other.SourceCommit
-            && this.SourceTree == other.SourceTree
-            && this.PackageSha256 == other.PackageSha256
-            && this.PackageSizeBytes == other.PackageSizeBytes
-            && this.BuildWorkflow == other.BuildWorkflow
-            && this.BuildConfiguration == other.BuildConfiguration
-            && this.RuntimeIdentifier == other.RuntimeIdentifier;
+        return base.Equals(other);
     }
 
-    /// <inheritdoc />
-    public override bool Equals(object? obj)
+    private protected override bool EqualsOrigin(InstallationPackageIdentity other)
     {
-        return obj is InstallationReleaseIdentity other && this.Equals(other);
+        InstallationReleaseIdentity release = (InstallationReleaseIdentity)other;
+        return this.Repository == release.Repository
+            && this.Tag == release.Tag
+            && this.SourceCommit == release.SourceCommit
+            && this.SourceTree == release.SourceTree
+            && this.BuildWorkflow == release.BuildWorkflow
+            && this.BuildConfiguration == release.BuildConfiguration
+            && this.RuntimeIdentifier == release.RuntimeIdentifier;
     }
 
-    /// <inheritdoc />
-    public override int GetHashCode()
+    private protected override void AddOriginHash(ref HashCode hash)
     {
-        HashCode result = new();
-        result.Add(this.Repository, StringComparer.Ordinal);
-        result.Add(this.Tag, StringComparer.Ordinal);
-        result.Add(this.EmbeddedVersion, StringComparer.Ordinal);
-        result.Add(this.PackageAssetName, StringComparer.Ordinal);
-        result.Add(this.SourceCommit, StringComparer.Ordinal);
-        result.Add(this.SourceTree, StringComparer.Ordinal);
-        result.Add(this.PackageSha256);
-        result.Add(this.PackageSizeBytes);
-        result.Add(this.BuildWorkflow, StringComparer.Ordinal);
-        result.Add(this.BuildConfiguration, StringComparer.Ordinal);
-        result.Add(this.RuntimeIdentifier, StringComparer.Ordinal);
-        return result.ToHashCode();
+        hash.Add(this.Repository, StringComparer.Ordinal);
+        hash.Add(this.Tag, StringComparer.Ordinal);
+        hash.Add(this.SourceCommit, StringComparer.Ordinal);
+        hash.Add(this.SourceTree, StringComparer.Ordinal);
+        hash.Add(this.BuildWorkflow, StringComparer.Ordinal);
+        hash.Add(this.BuildConfiguration, StringComparer.Ordinal);
+        hash.Add(this.RuntimeIdentifier, StringComparer.Ordinal);
     }
 }
