@@ -1,4 +1,3 @@
-using System.Text;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Packages;
@@ -748,9 +747,7 @@ internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProto
     public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
     {
         ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(request.ReleaseTag);
-        string checksums = await ReadBoundedTextAsync(request.ChecksumsPath, PackageVerificationLimits.Default.MaxChecksumBytes, cancellationToken).ConfigureAwait(false);
-        string metadata = await ReadBoundedTextAsync(request.BuildMetadataPath, PackageVerificationLimits.Default.MaxMetadataBytes, cancellationToken).ConfigureAwait(false);
-        VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyAsync(request.PackagePath, checksums, metadata, identity, request.ExpectedSourceCommit, cancellationToken: cancellationToken).ConfigureAwait(false);
+        VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyFilesAsync(request.PackagePath, request.ChecksumsPath, request.BuildMetadataPath, identity, request.ExpectedSourceCommit, cancellationToken: cancellationToken).ConfigureAwait(false);
         try
         {
             VerifiedInstallerPackage? installer = await new VerifiedInstallerPackageFactory().VerifyAsync(release, request.InstallManifestPath, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -766,13 +763,4 @@ internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProto
         finally { release?.Dispose(); }
     }
 
-    private static async Task<string> ReadBoundedTextAsync(string path, int maxBytes, CancellationToken cancellationToken)
-    {
-        await using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        if (stream.Length < 0 || stream.Length > maxBytes) throw new PackageSecurityException("A selected release metadata document exceeds its configured bound.");
-        byte[] bytes = new byte[checked((int)stream.Length)]; int total = 0;
-        while (total < bytes.Length) { int read = await stream.ReadAsync(bytes.AsMemory(total), cancellationToken).ConfigureAwait(false); if (read == 0) throw new PackageSecurityException("A selected release metadata document ended early."); total += read; }
-        if (await stream.ReadAsync(new byte[1], cancellationToken).ConfigureAwait(false) != 0 || stream.Length != bytes.Length) throw new PackageSecurityException("A selected release metadata document changed while it was read.");
-        return new UTF8Encoding(false, true).GetString(bytes);
-    }
 }

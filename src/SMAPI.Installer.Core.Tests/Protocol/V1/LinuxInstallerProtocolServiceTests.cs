@@ -62,6 +62,54 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await duplicateLong.Should().ThrowAsync<ProtocolException>().WithMessage("*can't be reused*");
     }
 
+    [TestCase("checksums", "checksums.txt")]
+    [TestCase("metadata", "metadata.json")]
+    public async Task ActualPackageOpenerRejectsNonExactReleaseMetadataFilenames(string selectedAsset, string wrongFilename)
+    {
+        string root = CreateTemporaryDirectory();
+        try
+        {
+            OpenPackageRequest request = CreateActualPackageRequest(root);
+            string wrongPath = Path.Combine(root, wrongFilename);
+            File.WriteAllText(wrongPath, "untrusted");
+            request = selectedAsset == "checksums" ? request with { ChecksumsPath = wrongPath } : request with { BuildMetadataPath = wrongPath };
+
+            Func<Task> open = async () => await new LinuxInstallerProtocolPackageOpener().OpenAsync(request, CancellationToken.None);
+
+            await open.Should().ThrowAsync<PackageSecurityException>().WithMessage("*filename*");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestCase("checksums")]
+    [TestCase("metadata")]
+    [Platform("Linux")]
+    public async Task ActualPackageOpenerRejectsReleaseMetadataPathSubstitution(string selectedAsset)
+    {
+        string root = CreateTemporaryDirectory();
+        try
+        {
+            OpenPackageRequest request = CreateActualPackageRequest(root);
+            File.WriteAllText(request.ChecksumsPath, "untrusted");
+            File.WriteAllText(request.BuildMetadataPath, "untrusted");
+            string selectedPath = selectedAsset == "checksums" ? request.ChecksumsPath : request.BuildMetadataPath;
+            string movedPath = selectedPath + ".substituted-target";
+            File.Move(selectedPath, movedPath);
+            File.CreateSymbolicLink(selectedPath, movedPath);
+
+            Func<Task> open = async () => await new LinuxInstallerProtocolPackageOpener().OpenAsync(request, CancellationToken.None);
+
+            await open.Should().ThrowAsync<PackageSecurityException>().WithMessage("*safe accessible single-link regular file*");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [TestCase(null, ProtocolNextAction.StartNewSession)]
     [TestCase("/tmp/sanitized-installer.log", ProtocolNextAction.ViewPrivateLog)]
     public async Task UnexpectedPrePlanFailureOffersOnlyAnActuallyAvailableRecoveryAction(string? sanitizedLogPath, ProtocolNextAction expectedAction)
@@ -768,6 +816,12 @@ internal sealed class LinuxInstallerProtocolServiceTests
         new("test", progress => { engine.Progress = progress; return engine; }, new FakeDiscovery(), opener, sink, sanitizedLogPath, terminalCompletionStarting, disposalPublished);
     private static Task<ProtocolEvent> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
     private static async Task<PackageOpenedEvent> Open(LinuxInstallerProtocolService service) => (PackageOpenedEvent)(await service.HandleAsync(new OpenPackageRequest(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest")))!;
+    private static string CreateTemporaryDirectory() { string path = Path.Combine(Path.GetTempPath(), $"smapi-protocol-opener-{Guid.NewGuid():N}"); Directory.CreateDirectory(path); return path; }
+    private static OpenPackageRequest CreateActualPackageRequest(string root)
+    {
+        InstallationReleaseIdentity release = CreateRelease(); ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(release.Tag);
+        return new(ProtocolSessionId.CreateRandom(), release.Tag, release.SourceCommit, Path.Combine(root, identity.PackageAssetName), Path.Combine(root, ReleasePackageVerifier.ChecksumAssetName), Path.Combine(root, ReleasePackageVerifier.BuildMetadataAssetName), Path.Combine(root, VerifiedInstallerPackageFactory.GetManifestAssetName(identity)));
+    }
 
     private static InstallationExecutionOutcome CreateOutcome(InstallationExecutionStatus status, TransactionErrorCode? errorOverride = null)
     {
