@@ -20,8 +20,21 @@ if [[ ! -f "$archive_input" || -L "$archive_input" || "$(stat -c %h -- "$archive
     echo "The pinned GitHub CLI archive must be one single-link ordinary file." >&2
     exit 1
 fi
+output_name="$(basename -- "$output_directory")"
+output_parent_input="$(dirname -- "$output_directory")"
+if [[ "$output_name" == "." || "$output_name" == ".." || ! -d "$output_parent_input" || -L "$output_parent_input" ]]; then
+    echo "The pinned GitHub CLI output must name a new child of an existing ordinary directory." >&2
+    exit 1
+fi
+output_parent="$(realpath -- "$output_parent_input")"
+output_directory="$output_parent/$output_name"
 if [[ -e "$output_directory" || -L "$output_directory" ]]; then
     echo "The pinned GitHub CLI output path must not already exist: $output_directory" >&2
+    exit 1
+fi
+if [[ "$(mv --version | sed -n '1p')" != *"GNU coreutils"* \
+    || "$(stat --version | sed -n '1p')" != *"GNU coreutils"* ]]; then
+    echo "Pinned-verifier staging requires GNU coreutils mv and stat on Linux." >&2
     exit 1
 fi
 
@@ -32,8 +45,20 @@ if [[ "$(stat -c %s -- "$archive_path")" != "$expected_archive_size" \
     exit 1
 fi
 
-temp_root="$(mktemp -d)"
-trap 'rm -rf -- "$temp_root"' EXIT
+# Build in a private directory on the destination filesystem, then place the
+# complete directory with GNU rename-no-replace semantics. This ensures a
+# caller-path symlink/directory substituted during validation receives no
+# writes. The release workflow trusts its same-UID process environment; a
+# hostile same-UID process could still mutate final files after this returns,
+# so package construction independently revalidates their exact bytes.
+temp_root="$(mktemp -d --tmpdir="$output_parent" .smapi-pinned-gh.XXXXXXXX)"
+temp_identity="$(stat -c '%d:%i' -- "$temp_root")"
+cleanup() {
+    if [[ -d "$temp_root" && ! -L "$temp_root" && "$(stat -c '%d:%i' -- "$temp_root")" == "$temp_identity" ]]; then
+        rm -rf --one-file-system -- "$temp_root"
+    fi
+}
+trap cleanup EXIT
 member_list="$temp_root/archive-members.txt"
 tar -tzf "$archive_path" > "$member_list"
 for required_member in "$archive_root/bin/gh" "$archive_root/LICENSE"; do
@@ -66,18 +91,33 @@ if [[ ! -f "$license_source" || -L "$license_source" || "$(stat -c %h -- "$licen
     exit 1
 fi
 
-install -d -m 0700 -- "$output_directory"
-install -m 0555 -- "$binary_source" "$output_directory/gh"
-install -m 0444 -- "$license_source" "$output_directory/gh-LICENSE.txt"
+staged_directory="$temp_root/publish"
+install -d -m 0700 -- "$staged_directory"
+install -m 0555 -- "$binary_source" "$staged_directory/gh"
+install -m 0444 -- "$license_source" "$staged_directory/gh-LICENSE.txt"
 
-if [[ "$(find "$output_directory" -mindepth 1 -maxdepth 1 -printf . | wc -c)" != 2 \
-    || ! -f "$output_directory/gh" || -L "$output_directory/gh" || "$(stat -c %h -- "$output_directory/gh")" != 1 \
-    || ! -f "$output_directory/gh-LICENSE.txt" || -L "$output_directory/gh-LICENSE.txt" || "$(stat -c %h -- "$output_directory/gh-LICENSE.txt")" != 1 \
-    || "$(stat -c %s -- "$output_directory/gh")" != "$expected_binary_size" \
-    || "$(sha256sum -- "$output_directory/gh" | cut -d ' ' -f 1)" != "$expected_binary_sha256" \
-    || "$(stat -c %s -- "$output_directory/gh-LICENSE.txt")" != "$expected_license_size" \
-    || "$(sha256sum -- "$output_directory/gh-LICENSE.txt" | cut -d ' ' -f 1)" != "$expected_license_sha256" ]]; then
+if [[ "$(find "$staged_directory" -mindepth 1 -maxdepth 1 -printf . | wc -c)" != 2 \
+    || ! -f "$staged_directory/gh" || -L "$staged_directory/gh" || "$(stat -c %h -- "$staged_directory/gh")" != 1 \
+    || ! -f "$staged_directory/gh-LICENSE.txt" || -L "$staged_directory/gh-LICENSE.txt" || "$(stat -c %h -- "$staged_directory/gh-LICENSE.txt")" != 1 \
+    || "$(stat -c %a -- "$staged_directory/gh")" != 555 \
+    || "$(stat -c %a -- "$staged_directory/gh-LICENSE.txt")" != 444 \
+    || "$(stat -c %s -- "$staged_directory/gh")" != "$expected_binary_size" \
+    || "$(sha256sum -- "$staged_directory/gh" | cut -d ' ' -f 1)" != "$expected_binary_sha256" \
+    || "$(stat -c %s -- "$staged_directory/gh-LICENSE.txt")" != "$expected_license_size" \
+    || "$(sha256sum -- "$staged_directory/gh-LICENSE.txt" | cut -d ' ' -f 1)" != "$expected_license_sha256" ]]; then
     echo "The staged pinned GitHub CLI directory failed its final validation." >&2
+    exit 1
+fi
+
+staged_identity="$(stat -c '%d:%i' -- "$staged_directory")"
+if [[ -n "${SMAPI_TEST_PINNED_GH_BEFORE_PUBLISH_HOOK:-}" ]]; then
+    "$SMAPI_TEST_PINNED_GH_BEFORE_PUBLISH_HOOK" "$output_directory"
+fi
+mv --no-clobber --no-target-directory -- "$staged_directory" "$output_directory"
+if [[ -e "$staged_directory" || -L "$staged_directory" \
+    || ! -d "$output_directory" || -L "$output_directory" \
+    || "$(stat -c '%d:%i' -- "$output_directory")" != "$staged_identity" ]]; then
+    echo "The pinned GitHub CLI output path was substituted before atomic placement." >&2
     exit 1
 fi
 

@@ -22,7 +22,7 @@ This document is about SMAPI itself; see also [mod build package](mod-package.md
 * [Version format](#version-format)
 * [Prepare a release](#prepare-a-release)
   * [Automated build pipeline](#automated-build-pipeline)
-  * [Manual release on any platform](#manual-release-on-any-platform)
+  * [Manual Linux release](#manual-linux-release)
   * [Manual release On Windows](#manual-release-on-windows)
 * [Release notes](#release-notes)
 
@@ -124,14 +124,14 @@ each workflow-artifact download, then attests both the ZIP and manifest; verifyi
 attestations against the repository, tagged workflow, and selected commit establishes published
 release authority.
 
-### Manual release on any platform
+### Manual Linux release
 > [!WARNING]  
 > This lets you manually prepare a release, which is fine for personal use. However, official
 > releases should use the [automated build pipeline](#automated-build-pipeline) instead.
 
-> [!TIP]
-> This approach works on any platform, but it's a bit complicated on Windows. See also [_Manual
-> release on Windows_](#manual-release-on-windows) for a simpler approach.
+> [!IMPORTANT]
+> This fork Linux-package path must run on Linux or inside WSL. See also [_Manual release on
+> Windows_](#manual-release-on-windows) for the separate upstream-compatible multi-platform path.
 
 First-time setup:
 1. On Windows only:
@@ -141,6 +141,7 @@ First-time setup:
    - [.NET 10 and .NET 6 SDKs](https://learn.microsoft.com/dotnet/core/install/linux) (run
      `lsb_release -a` if you need the Ubuntu version number);
    - [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell);
+   - Bash, curl, GNU coreutils, GNU tar, GNU findutils, grep, sed, zip, and unzip;
    - and Steam (see [Linux instructions](https://linuxconfig.org/how-to-install-steam-on-ubuntu-20-04-focal-fossa-linux)).
 3. Launch `steam` and install the game like usual.
 4. Clone the SMAPI repo:
@@ -149,8 +150,23 @@ First-time setup:
    ```
 
 To prepare the release:
-1. Run `pwsh build/scripts/prepare-install-package.ps1 VERSION_HERE --linux-only
-   --game-path=/absolute/reference/path` to create the Linux package in the root `bin` folder. Use
+1. Download and validate the exact pinned GitHub CLI binary and license, then pass the staged
+   directory to the package builder:
+   ```sh
+   verifier_work="$(mktemp -d)"
+   curl -fsSL --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
+       https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_linux_amd64.tar.gz \
+       -o "$verifier_work/gh_2.92.0_linux_amd64.tar.gz"
+   build/scripts/stage-pinned-github-cli.sh \
+       "$verifier_work/gh_2.92.0_linux_amd64.tar.gz" \
+       "$verifier_work/pinned-github-cli"
+   pwsh build/scripts/prepare-install-package.ps1 VERSION_HERE \
+       --linux-only \
+       --game-path=/absolute/reference/path \
+       "--github-cli-directory=$verifier_work/pinned-github-cli"
+   ```
+   The staging helper rejects any archive, binary, or license bytes other than the reviewed GitHub
+   CLI 2.92.0 Linux x86_64 release. The resulting package is created in the root `bin` folder. Use
    the documented [fork release identity](linux-alpha-release.md#release-identity). Personal local
    builds are not public release candidates and don't have GitHub provenance. The release-only
    package tool's environment guard rejects contexts other than the exact reviewed annotated-tag

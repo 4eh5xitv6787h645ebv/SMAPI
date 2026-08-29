@@ -124,6 +124,8 @@ jobs:
                     build/scripts/test-finalize-install-package-inputs.sh
                     bash -n build/scripts/stage-pinned-github-cli.sh
                     bash -n build/scripts/test-stage-pinned-github-cli.sh
+                    bash -n build/scripts/test-pinned-github-cli-callers.sh
+                    build/scripts/test-pinned-github-cli-callers.sh
                     bash -n build/scripts/finalize-install-package.sh
                     bash -n src/SMAPI.Installer/assets/smapi-runtime-dispatcher.sh
                     bash -n src/SMAPI.Installer/assets/unix-launcher.sh

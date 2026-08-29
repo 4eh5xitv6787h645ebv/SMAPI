@@ -56,4 +56,51 @@ mkdir "$temp_root/existing-output"
 expect_failure existing-output "$stager" "$archive_path" "$temp_root/existing-output"
 test "$(find "$temp_root/existing-output" -mindepth 1 -printf . | wc -c)" = 0
 
+substitution_hook="$temp_root/substitute-output.sh"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'case "$SMAPI_TEST_SUBSTITUTION_KIND" in' \
+    '    symlink) ln -s -- "$SMAPI_TEST_SUBSTITUTION_TARGET" "$1" ;;' \
+    '    directory) mkdir -- "$1"; printf "attacker marker\\n" > "$1/marker" ;;' \
+    '    *) exit 2 ;;' \
+    'esac' \
+    > "$substitution_hook"
+chmod 0700 "$substitution_hook"
+
+substitution_target="$temp_root/substitution-target"
+mkdir "$substitution_target"
+printf 'unrelated marker\n' > "$substitution_target/marker"
+symlink_output="$temp_root/symlink-race-output"
+expect_failure symlink-substitution \
+    env \
+        SMAPI_TEST_PINNED_GH_BEFORE_PUBLISH_HOOK="$substitution_hook" \
+        SMAPI_TEST_SUBSTITUTION_KIND=symlink \
+        SMAPI_TEST_SUBSTITUTION_TARGET="$substitution_target" \
+        "$stager" "$archive_path" "$symlink_output"
+test -L "$symlink_output"
+test "$(cat "$substitution_target/marker")" = "unrelated marker"
+test "$(find "$substitution_target" -mindepth 1 -maxdepth 1 -printf . | wc -c)" = 1
+test ! -e "$substitution_target/gh"
+test ! -e "$substitution_target/gh-LICENSE.txt"
+unlink "$symlink_output"
+
+directory_output="$temp_root/directory-race-output"
+expect_failure directory-substitution \
+    env \
+        SMAPI_TEST_PINNED_GH_BEFORE_PUBLISH_HOOK="$substitution_hook" \
+        SMAPI_TEST_SUBSTITUTION_KIND=directory \
+        SMAPI_TEST_SUBSTITUTION_TARGET="$substitution_target" \
+        "$stager" "$archive_path" "$directory_output"
+test -d "$directory_output"
+test "$(cat "$directory_output/marker")" = "attacker marker"
+test "$(find "$directory_output" -mindepth 1 -maxdepth 1 -printf . | wc -c)" = 1
+test ! -e "$directory_output/gh"
+test ! -e "$directory_output/gh-LICENSE.txt"
+
+if find "$temp_root" -mindepth 1 -maxdepth 1 -type d -name '.smapi-pinned-gh.*' -print -quit | grep -q .; then
+    echo "The staging helper left a private partial directory after output substitution." >&2
+    exit 1
+fi
+
 echo "Pinned GitHub CLI staging tests passed."

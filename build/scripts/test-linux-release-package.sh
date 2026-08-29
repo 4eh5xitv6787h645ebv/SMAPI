@@ -48,11 +48,13 @@ test -f "$package_root/internal/linux/gh"
 test ! -L "$package_root/internal/linux/gh"
 test "$(stat -c %h -- "$package_root/internal/linux/gh")" = 1
 test -x "$package_root/internal/linux/gh"
+test "$(stat -c %a -- "$package_root/internal/linux/gh")" = 555
 test "$(stat -c %s -- "$package_root/internal/linux/gh")" = 39805090
 test "$(sha256sum -- "$package_root/internal/linux/gh" | cut -d ' ' -f 1)" = b58e487e37c00c114aa07f14987ce12f5e5abf12b9da8a38937b65ef218f6772
 test -f "$package_root/internal/linux/gh-LICENSE.txt"
 test ! -L "$package_root/internal/linux/gh-LICENSE.txt"
 test "$(stat -c %h -- "$package_root/internal/linux/gh-LICENSE.txt")" = 1
+test "$(stat -c %a -- "$package_root/internal/linux/gh-LICENSE.txt")" = 444
 test "$(stat -c %s -- "$package_root/internal/linux/gh-LICENSE.txt")" = 1068
 test "$(sha256sum -- "$package_root/internal/linux/gh-LICENSE.txt" | cut -d ' ' -f 1)" = 6da4adc42392c8485e40b4251c7e332fc3352df1947c9ffade71dd60b14a7a4f
 test ! -e "$package_root/internal/macOS"
