@@ -264,6 +264,22 @@ Scope constraints apply throughout:
 - [x] Pass required CI on the exact reviewed head ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33223747914); [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33223747770)).
 - [x] Merge and close focused [PR #181](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/181), delete its feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` ([merge commit `2283994a`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/2283994a39aeeee591b0da016ba24769b09fe662)).
 
+### Exact tagged-release attestation authority
+
+- [x] Retain the exact package, manifest, local attestation bundle, and pinned verifier bytes as immutable authorities without reopening caller-controlled paths ([merged PR #184](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184); [`0bd90bc6`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/0bd90bc6268738e67f49685646a41b42b8fbd916)).
+- [x] Accept exactly one bounded GitHub Actions attestation statement whose ordered subjects are the canonical install manifest and installer package, and reject malformed, duplicate, missing, extra, or reversed subjects ([implementation and validation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184)).
+- [x] Pin the verifier to GitHub CLI 2.92.0 by official archive digest, extracted binary size, and binary digest; run it without a shell or ambient credentials and with private HOME, XDG runtime, and D-Bus endpoints ([security boundary and validation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184)).
+- [x] Bridge the sealed bundle through a retained, extension-bearing `.jsonl` descriptor and revalidate its identity, size, seals, and lifetime before and after verification ([merged implementation](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184)).
+- [x] Gate verifier execution until exact pidfd, executable, session-leader, and unique retained-gate authority is established; use bounded exact-pidfd cleanup and fail closed without numeric PID signaling on pre-authority failures ([resolved security finding](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184#issuecomment-5460091795)).
+- [x] Prepare the annotated-tag workflow to emit a separately checksummed local attestation-bundle pair and cryptographically verify the exact produced bundle with the pinned policy before publication; retain tag-only publication as unexecuted until the next exact tag ([exact-head Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33231854458)).
+- [x] Verify the implementation against a real public prior-alpha package and bundle without committing fixture data, while keeping the prior one-subject alpha outside the new two-subject policy claim ([fixture-free validation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184)).
+- [x] Pass 820/820 Installer Core tests in Debug and Release, 41/41 repeated execution-gate tests, 131/131 focused attestation tests, Release warnings-as-errors, formatting, diff, and actionlint checks ([validation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184)).
+- [x] Pass exact-head Linux qualification and deterministic performance checks; verify that tag-only attestation and publication jobs skip on the pull-request path ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33231854458); [performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33231854483)).
+- [x] Address every actionable attestation, workflow, package, process-boundary, security/privacy, architecture, testing, and final-diff finding before merging ([finding and resolution record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184#issuecomment-5460091795)).
+- [x] Merge and close focused [PR #184](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/184), delete its feature branch locally and on `origin`, and verify local `develop` equals `origin/develop` ([merge commit `0bd90bc6`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/0bd90bc6268738e67f49685646a41b42b8fbd916)).
+
+The attestation verifier remains an internal foundation at this point. Its public Core facade, persisted release authority, packaged pinned verifier binary, console/GUI wiring, and an actual tagged next-alpha publication remain unchecked below and must not be inferred from these completed items.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
