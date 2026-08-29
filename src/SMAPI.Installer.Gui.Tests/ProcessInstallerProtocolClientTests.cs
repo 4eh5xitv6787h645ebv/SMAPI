@@ -95,6 +95,18 @@ public sealed class ProcessInstallerProtocolClientTests
         factory.StartInfo.Should().BeNull();
     }
 
+    [Test]
+    public async Task RejectsHandshakeWithoutVerifiedPackageCapability()
+    {
+        ScriptedProcess process = new(request => Serialize(new HandshakeEvent(Session, "1", ["linux-game-discovery"]) { CommandId = request.CommandId }));
+        await using ProcessInstallerProtocolClient client = Create(process);
+
+        Func<Task> action = () => client.HandshakeAsync("SMAPI GUI", "1");
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
     [TestCase(true)]
     [TestCase(false)]
     public async Task RejectsWrongCommandOrSessionCorrelationAndTerminates(bool wrongCommand)
