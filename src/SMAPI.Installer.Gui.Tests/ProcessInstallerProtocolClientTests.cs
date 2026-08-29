@@ -202,6 +202,60 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    public async Task DribbledPartialUnsolicitedFrameCannotExtendAbsoluteDeadline()
+    {
+        ScriptedProcess process = new(CorrectResponse);
+        await using ProcessInstallerProtocolClient client = Create(
+            process,
+            partialFrame: TimeSpan.FromMilliseconds(100)
+        );
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        (await client.OpenPackageAsync(CreatePackage())).Should().BeOfType<InstallerPackageOpenSuccess>();
+
+        using CancellationTokenSource stopDribble = new();
+        Task dribble = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    process.Publish([(byte)'{']);
+                    await Task.Delay(TimeSpan.FromMilliseconds(30), stopDribble.Token);
+                }
+            }
+            catch (OperationCanceledException) when (stopDribble.IsCancellationRequested) { }
+        });
+        try
+        {
+            InstallerProtocolClientException fault = await client.SessionFaulted.WaitAsync(TimeSpan.FromMilliseconds(250));
+            fault.Message.Should().Contain("bounded deadline").And.NotContain("{");
+            client.HasRetainedPackageAuthority.Should().BeFalse();
+        }
+        finally
+        {
+            stopDribble.Cancel();
+            await dribble;
+        }
+    }
+
+    [Test]
+    public async Task ValidSplitFrameCompletingWithinAbsoluteDeadlineIsAccepted()
+    {
+        ResponseStream responses = new();
+        StrictJsonLineReader reader = new(responses, TimeSpan.FromMilliseconds(500));
+        ValueTask<string?> pending = reader.ReadLineAsync(CancellationToken.None);
+
+        responses.Set([(byte)'a']);
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        responses.Set([(byte)'b']);
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        responses.Set([(byte)'c', (byte)'\n']);
+
+        (await pending).Should().Be("abc");
+        reader.HasBufferedFrameData.Should().BeFalse();
+    }
+
+    [Test]
     public async Task FaultBetweenResponseAndAuthorityCommitCannotResurrectPackageAuthority()
     {
         ScriptedProcess process = new(CorrectResponse);

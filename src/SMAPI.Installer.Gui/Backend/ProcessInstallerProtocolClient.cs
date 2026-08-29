@@ -747,6 +747,7 @@ internal sealed class StrictJsonLineReader
     private int ReadOffset;
     private int ReadLength;
     private int LineLength;
+    private long PartialFrameStarted;
 
     public StrictJsonLineReader(Stream input, TimeSpan partialFrameTimeout)
     {
@@ -767,6 +768,7 @@ internal sealed class StrictJsonLineReader
                 this.ReadOffset = newline + 1;
                 string result = this.Decode();
                 this.LineLength = 0;
+                this.PartialFrameStarted = 0;
                 return result;
             }
             if (this.ReadOffset < this.ReadLength)
@@ -787,7 +789,10 @@ internal sealed class StrictJsonLineReader
         if (this.LineLength == 0)
             return await read.ConfigureAwait(false);
 
-        Task deadline = Task.Delay(this.PartialFrameTimeout, cancellationToken);
+        TimeSpan remaining = this.PartialFrameTimeout - Stopwatch.GetElapsedTime(this.PartialFrameStarted);
+        if (remaining <= TimeSpan.Zero)
+            throw new InstallerProtocolClientException("The installer backend left a partial response incomplete beyond its bounded deadline.");
+        Task deadline = Task.Delay(remaining, cancellationToken);
         Task completed = await Task.WhenAny(read, deadline).ConfigureAwait(false);
         if (ReferenceEquals(completed, read))
             return await read.ConfigureAwait(false);
@@ -811,6 +816,8 @@ internal sealed class StrictJsonLineReader
     {
         if (bytes.Length > this.LineBuffer.Length - this.LineLength)
             throw new InstallerProtocolClientException("The installer backend response exceeded its bounded framing limit.");
+        if (this.LineLength == 0 && bytes.Length != 0)
+            this.PartialFrameStarted = Stopwatch.GetTimestamp();
         bytes.CopyTo(this.LineBuffer.AsSpan(this.LineLength));
         this.LineLength += bytes.Length;
     }
