@@ -156,12 +156,11 @@ jobs:
                     --no-build
                     -- RunConfiguration.TreatNoTestsAsError=true
 
-            -   name: Run Linux install-manifest builder tests
+            -   name: Run complete fixture-free installer core tests
                 run: >-
                     dotnet test src/SMAPI.Installer.Core.Tests/SMAPI.Installer.Core.Tests.csproj
                     --configuration Release
                     --no-build
-                    --filter FullyQualifiedName~LinuxInstallManifestBuilderTests
                     -- RunConfiguration.TreatNoTestsAsError=true
 
             -   name: Run release-asset quartet tests
