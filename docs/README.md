@@ -31,6 +31,8 @@ This directory contains the source for the
 
 - [SMAPI technical documentation](technical/smapi.md)
 - [SMAPI web services](technical/web.md)
+- [Linux GUI installer architecture](technical/linux-gui-installer-architecture.md)
+- [Pending Linux GUI screenshot evidence plan](technical/linux-gui-screenshot-evidence.md)
 - [Mod Health Report implementation plan](technical/mod-health-report-plan.md)
 - [Mod Health Report schema](technical/mod-health-report-schema-v1.json)
 

@@ -207,15 +207,36 @@ Scope constraints apply throughout:
 
 ### GUI screenshots and visual documentation
 
-- [ ] Capture current screenshots from the exact reviewed GUI build, without private fixture names, paths, or other personal data.
-- [ ] Document game-folder detection and manual selection with screenshots.
-- [ ] Document install, update, repair, and uninstall states with screenshots.
-- [ ] Document backup, recovery selection, and rollback states with screenshots.
-- [ ] Document download progress, checksum verification, and successful completion with screenshots.
-- [ ] Document understandable error, modified/unknown-file protection, and detailed-log views with screenshots.
-- [ ] Document keyboard focus, practical screen scaling, X11, and Wayland behavior with screenshots.
-- [ ] Add the current screenshot set to both repository user documentation and GitHub Pages.
-- [ ] Verify every published screenshot and its containing documentation page returns HTTP 200.
+- [ ] Follow the complete [Linux GUI screenshot evidence matrix](linux-gui-screenshot-evidence.md), label every image as real qualification or controlled fixture, and never present a mockup, generated image, or safe-demo capture as production evidence.
+- [ ] Capture every production screenshot from the exact reviewed packaged GUI build without private fixture names, paths, or personal data.
+- [ ] Document one automatically detected valid game, no-game and multiple-game detection states, and manual invalid/valid folder selection (D1–D4).
+- [ ] Document packaged effective-UID-0 refusal before discovery, download, logging, or mutation (D5).
+- [ ] Document current, upgrade, prerelease, downgrade, and local-package release-selection labels (R1).
+- [ ] Document real public-package download progress and controlled cancellation/interruption with retry and incomplete-file cleanup (R2–R3).
+- [ ] Document real checksum/release-metadata verification in progress and successful checksum plus attestation/provenance without conflating integrity and provenance (R4–R5).
+- [ ] Document corrupt checksum/metadata/package and attestation/provenance/release-identity failures blocking mutation with safe next steps (R6–R7).
+- [ ] Document fresh-install plan, confirmation, meaningful progress, and real successful completion (I1–I4).
+- [ ] Document update plan, update or explicit downgrade confirmation, and real successful completion (U1–U3).
+- [ ] Document repair of missing and modified receipt-owned files, exact opt-in replacement confirmation, and real successful completion (P1–P4).
+- [ ] Document unknown, legacy, hard-linked, special-file, and ambiguous-launcher collision protection (X1).
+- [ ] Document uninstall plan, destructive confirmation with default focus on Cancel, and real successful completion preserving unrelated files (N1–N3).
+- [ ] Document backup plan and real success, a full recovery store/prune-required state, and destructive prune confirmation with default focus on Cancel (B1–B4).
+- [ ] Document authenticated rollback/recovery selection, destructive confirmation with default focus on Cancel, progress, and real successful durable result (L1–L3).
+- [ ] Document an active Cancel action, Cancel requested/rollback/Finishing safely behavior, and a real cancelled-and-rolled-back durable result (C1–C3).
+- [ ] Document network/timeout, permission/read-only, disk-full, cross-device, stale-plan, root-replacement, concurrent-installer, and backend/protocol/writer errors (E1–E4).
+- [ ] Document a real interrupted mutation requiring restart recovery and successful automatic recovery requiring fresh inspection (E5–E6).
+- [ ] Document a real detailed local log, expanded technical error details, Copy sanitized diagnostics, and hostile-string privacy redaction (G1–G3).
+- [ ] Document readable keyboard focus on the primary action and default visible Cancel focus for destructive dialogs (A1–A2).
+- [ ] Document the 420-DIP layout at 200% and 100%, 125%, 150%, and 200% scale variants without hidden actions or horizontal page scrolling (A3–A4).
+- [ ] Document light, dark, and high-contrast focus/error states and link representative live-status imagery to separate AT-SPI/Orca evidence (A5 and A8).
+- [ ] Document the packaged GUI on GNOME and KDE under X11 and through XWayland in Wayland sessions (A6–A7).
+- [ ] Document GUI manual-installation help plus real manual console launch and install or rollback completion from the same verified public package (M1–M3).
+- [ ] Require real clean isolated qualification for every success, mutation, cancellation/recovery, public verification, real-log, root-refusal, and manual-lifecycle image identified by the matrix.
+- [ ] Publish a machine-readable screenshot manifest and readable provenance record with exact source/artifact/binary hashes, capture environment and method, evidence class, durable-state context, privacy review, dimensions, and final PNG hashes.
+- [ ] Retain and hash every individual source PNG used in a crop or contact sheet, strip incidental metadata, and record that application pixels were not altered.
+- [ ] Add a representative screenshot-led user guide and linked qualification gallery to both repository documentation and GitHub Pages with accurate captions and descriptive alt text.
+- [ ] Pass automated screenshot manifest, coverage, hash, privacy, link, and documentation checks.
+- [ ] Build and deploy GitHub Pages successfully, then verify every important screenshot, manifest/provenance asset, and containing documentation page returns HTTP 200.
 
 ### Shared installer core foundation
 
