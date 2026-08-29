@@ -253,6 +253,15 @@ public sealed record RecoverInterruptedRequest(ProtocolSessionId SessionId, stri
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoverInterruptedRequest;
 }
 
+/// <summary>The asserted kernel identity of a nonforgeable retained parent-process workspace.</summary>
+public sealed record ProtocolProcWorkspaceIdentity(
+    uint DeviceMajor,
+    uint DeviceMinor,
+    ulong Inode,
+    long ChangeSeconds,
+    uint ChangeNanoseconds
+);
+
 /// <summary>Ask the backend to independently verify one complete local release asset set.</summary>
 public sealed record OpenPackageRequest(
     ProtocolSessionId SessionId,
@@ -263,7 +272,8 @@ public sealed record OpenPackageRequest(
     string BuildMetadataPath,
     string InstallManifestPath,
     string AttestationBundlePath,
-    string AttestationBundleChecksumPath
+    string AttestationBundleChecksumPath,
+    ProtocolProcWorkspaceIdentity? ProcWorkspaceIdentity = null
 ) : ProtocolRequest
 {
     [JsonIgnore]

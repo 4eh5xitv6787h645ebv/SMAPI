@@ -153,6 +153,44 @@ public sealed class VerifiedInstallerPackageFactory
             bytes = await file.ReadAllBytesAsync(limits.MaxDocumentBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
         }
 
+        return await this.VerifyBytesAsync(package, expected, expectedName, bytes, limits, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<VerifiedInstallerPackage> VerifyAsync(
+        VerifiedReleasePackage package,
+        IRetainedReleaseAssetSource source,
+        OwnershipPersistenceLimits? limits = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(package);
+        ArgumentNullException.ThrowIfNull(source);
+        limits ??= OwnershipPersistenceLimits.Default;
+        string expectedName = GetManifestAssetName(package.Identity);
+        VerifiedReleaseArtifactIdentity expected = package.GetArtifact(expectedName);
+        if (expected.SizeBytes > limits.MaxDocumentBytes)
+            throw new PackageSecurityException("The verified install manifest exceeds its configured size limit.");
+        byte[] bytes;
+        using (RetainedReleaseAssetFile file = source.Open(expectedName, "install manifest"))
+        {
+            if (file.Size != expected.SizeBytes || file.Size <= 0 || file.Size > limits.MaxDocumentBytes)
+                throw new PackageSecurityException("The selected install manifest doesn't match its verified size.");
+            bytes = await file.ReadAllBytesAsync(limits.MaxDocumentBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
+        }
+        return await this.VerifyBytesAsync(package, expected, expectedName, bytes, limits, cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task<VerifiedInstallerPackage> VerifyBytesAsync(
+        VerifiedReleasePackage package,
+        VerifiedReleaseArtifactIdentity expected,
+        string expectedName,
+        byte[] bytes,
+        OwnershipPersistenceLimits limits,
+        CancellationToken cancellationToken
+    )
+    {
+
         string actualSha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         if (!string.Equals(actualSha256, expected.Sha256, StringComparison.Ordinal))
             throw new PackageSecurityException("The selected install manifest doesn't match SHA256SUMS and build-metadata.json.");
@@ -184,7 +222,7 @@ public sealed class VerifiedInstallerPackageFactory
                 retainedManifest
             );
             retainedManifest = null;
-            return result;
+            return Task.FromResult(result);
         }
         catch (OwnershipDocumentException ex)
         {

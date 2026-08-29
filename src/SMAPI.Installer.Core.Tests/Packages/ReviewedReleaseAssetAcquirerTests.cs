@@ -36,7 +36,29 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
         );
         typeof(IReviewedReleaseAssetTransport).IsPublic.Should().BeFalse();
         typeof(AnchoredDownloadTarget).IsPublic.Should().BeFalse();
-        typeof(ReviewedReleaseProtocolAssetPaths).IsPublic.Should().BeFalse();
+        typeof(ReviewedReleaseProtocolAssetPaths).IsPublic.Should().BeTrue();
+        typeof(ReviewedReleaseProtocolAssetPaths).GetConstructors(BindingFlags.Public | BindingFlags.Instance).Should().BeEmpty();
+        typeof(ReviewedReleaseProtocolAssetPaths).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(property => (property.Name, property.PropertyType, property.SetMethod))
+            .Should().Equal(
+                (nameof(ReviewedReleaseProtocolAssetPaths.ReleaseTag), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.SourceCommit), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.InstallerPackagePath), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.InstallManifestPath), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.ChecksumsPath), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.BuildMetadataPath), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.AttestationBundlePath), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.AttestationBundleChecksumPath), typeof(string), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.WorkspaceDeviceMajor), typeof(uint), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.WorkspaceDeviceMinor), typeof(uint), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.WorkspaceInode), typeof(ulong), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.WorkspaceChangeSeconds), typeof(long), null),
+                (nameof(ReviewedReleaseProtocolAssetPaths.WorkspaceChangeNanoseconds), typeof(uint), null)
+            );
+        typeof(ReviewedReleaseAssetLease).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(method => !method.IsSpecialName)
+            .Select(method => method.Name)
+            .Should().Equal(nameof(ReviewedReleaseAssetLease.Bind), nameof(ReviewedReleaseAssetLease.DisposeAsync));
     }
 
     [Test]
@@ -99,6 +121,12 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
         values.Select(Path.GetFileName).Should().Equal(candidate.Assets.Select(asset => asset.Name));
         string namedDirectory = ResolveProcTarget(Path.GetDirectoryName(values[0])!);
         using LinuxAnchoredFileSystem retainedFiles = new(namedDirectory);
+        LinuxFileIdentity retainedWorkspaceIdentity = retainedFiles.GetCurrentRootIdentity();
+        paths.WorkspaceDeviceMajor.Should().Be(retainedWorkspaceIdentity.DeviceMajor);
+        paths.WorkspaceDeviceMinor.Should().Be(retainedWorkspaceIdentity.DeviceMinor);
+        paths.WorkspaceInode.Should().Be(retainedWorkspaceIdentity.Inode);
+        paths.WorkspaceChangeSeconds.Should().Be(retainedWorkspaceIdentity.ChangeSeconds);
+        paths.WorkspaceChangeNanoseconds.Should().Be(retainedWorkspaceIdentity.ChangeNanoseconds);
         foreach (string path in values)
         {
             File.ReadAllBytes(path).Should().HaveCount(7);

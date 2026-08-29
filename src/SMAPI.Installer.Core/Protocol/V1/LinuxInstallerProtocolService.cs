@@ -93,16 +93,24 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         Action? disposalPublished = null
     )
     {
-        if (string.IsNullOrWhiteSpace(serverVersion)) throw new ArgumentException("A bounded server version is required.", nameof(serverVersion));
-        ArgumentNullException.ThrowIfNull(engineFactory);
-        this.ServerVersion = serverVersion;
-        this.Discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
-        this.PackageOpener = packageOpener ?? throw new ArgumentNullException(nameof(packageOpener));
-        this.EventSink = eventSink;
-        this.TerminalCompletionStarting = terminalCompletionStarting;
-        this.DisposalPublished = disposalPublished;
-        this.SanitizedLogPath = sanitizedLogPath;
-        this.Engine = engineFactory(new CallbackProgressSink(this.RecordProgress)) ?? throw new ArgumentException("The engine factory returned null.", nameof(engineFactory));
+        try
+        {
+            if (string.IsNullOrWhiteSpace(serverVersion)) throw new ArgumentException("A bounded server version is required.", nameof(serverVersion));
+            ArgumentNullException.ThrowIfNull(engineFactory);
+            this.ServerVersion = serverVersion;
+            this.Discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
+            this.PackageOpener = packageOpener ?? throw new ArgumentNullException(nameof(packageOpener));
+            this.EventSink = eventSink;
+            this.TerminalCompletionStarting = terminalCompletionStarting;
+            this.DisposalPublished = disposalPublished;
+            this.SanitizedLogPath = sanitizedLogPath;
+            this.Engine = engineFactory(new CallbackProgressSink(this.RecordProgress)) ?? throw new ArgumentException("The engine factory returned null.", nameof(engineFactory));
+        }
+        catch
+        {
+            packageOpener?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The session-local identifier which every post-handshake request must carry.</summary>
@@ -664,7 +672,15 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
             {
                 if (!this.Disposed)
                 {
-                    this.Disposed = true; this.ActiveCancellation?.Dispose(); this.ActiveCancellation = null; this.Session.Dispose();
+                    this.Disposed = true; this.ActiveCancellation?.Dispose(); this.ActiveCancellation = null;
+                    try
+                    {
+                        this.Session.Dispose();
+                    }
+                    finally
+                    {
+                        this.PackageOpener.Dispose();
+                    }
                 }
             }
             completion.TrySetResult();
@@ -727,7 +743,7 @@ internal sealed class LinuxInstallerProtocolDiscovery(LinuxGameDiscovery discove
     public Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken) => discovery.DiscoverAsync(cancellationToken: cancellationToken);
 }
 
-internal interface ILinuxInstallerProtocolPackageOpener
+internal interface ILinuxInstallerProtocolPackageOpener : IDisposable
 {
     Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken);
 }
@@ -743,34 +759,100 @@ internal sealed class ProtocolPackageRegistration : IDisposable
     public void Dispose() { if (!this.Transferred) this.Owner.Dispose(); }
 }
 
-internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProtocolPackageOpener
+internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProtocolPackageOpener, IDisposable
 {
     private readonly string GitHubCliPath;
+    private readonly LinuxParentProcFdAuthority? ParentProcAuthority;
+    private readonly PackageSecurityException? ParentProcUnavailable;
+    private bool Disposed;
 
     public LinuxInstallerProtocolPackageOpener(string githubCliPath)
+        : this(githubCliPath, () => new LinuxParentProcFdAuthority())
+    {
+    }
+
+    internal LinuxInstallerProtocolPackageOpener(string githubCliPath, LinuxParentProcFdAuthority? parentProcAuthority)
+        : this(githubCliPath, () => parentProcAuthority ?? new LinuxParentProcFdAuthority())
+    {
+    }
+
+    internal LinuxInstallerProtocolPackageOpener(
+        string githubCliPath,
+        Func<LinuxParentProcFdAuthority> parentProcAuthorityFactory
+    )
     {
         if (string.IsNullOrWhiteSpace(githubCliPath) || !Path.IsPathFullyQualified(githubCliPath))
             throw new ArgumentException("An absolute host-owned GitHub CLI path is required.", nameof(githubCliPath));
+        ArgumentNullException.ThrowIfNull(parentProcAuthorityFactory);
         this.GitHubCliPath = githubCliPath;
+        try
+        {
+            this.ParentProcAuthority = parentProcAuthorityFactory()
+                ?? throw new PackageSecurityException("The controller proc authority factory returned no authority.");
+        }
+        catch (PackageSecurityException)
+        {
+            this.ParentProcUnavailable = new PackageSecurityException("The controller proc authority was unavailable at session creation.");
+        }
     }
 
     public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
     {
-        VerifiedPackageContent content = await new LinuxTaggedReleasePackageOpener().OpenAsync(
-            new LinuxTaggedReleaseAssetSet(
-                request.ReleaseTag,
-                request.ExpectedSourceCommit,
-                request.PackagePath,
-                request.ChecksumsPath,
-                request.BuildMetadataPath,
-                request.InstallManifestPath,
-                request.AttestationBundlePath,
-                request.AttestationBundleChecksumPath,
-                this.GitHubCliPath
-            ),
-            cancellationToken
-        ).ConfigureAwait(false);
+        if (this.Disposed)
+            throw new ObjectDisposedException(nameof(LinuxInstallerProtocolPackageOpener));
+        LinuxTaggedReleaseAssetSet assets = new(
+            request.ReleaseTag,
+            request.ExpectedSourceCommit,
+            request.PackagePath,
+            request.ChecksumsPath,
+            request.BuildMetadataPath,
+            request.InstallManifestPath,
+            request.AttestationBundlePath,
+            request.AttestationBundleChecksumPath,
+            this.GitHubCliPath
+        );
+        string[] paths =
+        [
+            assets.PackagePath,
+            assets.ChecksumsPath,
+            assets.BuildMetadataPath,
+            assets.InstallManifestPath,
+            assets.AttestationBundlePath,
+            assets.AttestationBundleChecksumPath
+        ];
+        bool[] procPaths = paths.Select(LinuxParentProcFdAuthority.IsProcProjectionPath).ToArray();
+        if (procPaths.Any(value => value) && procPaths.Any(value => !value))
+            throw new PackageSecurityException("The selected release asset paths don't share one supported authority type.");
+        if (procPaths.All(value => value) != (request.ProcWorkspaceIdentity is not null))
+            throw new PackageSecurityException("The selected release asset authority binding is incomplete or unexpected.");
+
+        VerifiedPackageContent content;
+        if (procPaths.All(value => value))
+        {
+            if (this.ParentProcAuthority is null)
+                throw this.ParentProcUnavailable ?? new PackageSecurityException("The controller proc authority is unavailable.");
+            ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(assets.ReleaseTag);
+            using LinuxParentProcAssetSource source = this.ParentProcAuthority.Capture(
+                assets,
+                identity,
+                request.ProcWorkspaceIdentity!,
+                cancellationToken
+            );
+            content = await new LinuxTaggedReleasePackageOpener().OpenAsync(assets, source, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            content = await new LinuxTaggedReleasePackageOpener().OpenAsync(assets, cancellationToken).ConfigureAwait(false);
+        }
         return new(content.Release, content, content);
+    }
+
+    public void Dispose()
+    {
+        if (this.Disposed)
+            return;
+        this.Disposed = true;
+        this.ParentProcAuthority?.Dispose();
     }
 
 }

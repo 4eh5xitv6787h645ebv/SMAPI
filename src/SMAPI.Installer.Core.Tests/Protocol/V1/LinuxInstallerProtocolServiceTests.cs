@@ -21,6 +21,100 @@ internal sealed class LinuxInstallerProtocolServiceTests
             .Should().Throw<ArgumentException>().WithParameterName("githubCliPath");
     }
 
+    [Test]
+    [Platform("Linux")]
+    public async Task ActualPackageOpener_RequiresExactProcIdentityPairingAndRejectsMixedAuthorities()
+    {
+        string root = CreateTemporaryDirectory();
+        try
+        {
+            using LinuxParentProcFdAuthority parent = new(
+                () => Environment.ProcessId,
+                path => new LinuxAnchoredFileSystem(path)
+            );
+            using LinuxInstallerProtocolPackageOpener opener = new(Path.Combine(root, "gh"), parent);
+            OpenPackageRequest ordinary = CreateActualPackageRequest(root);
+            ProtocolProcWorkspaceIdentity asserted = new(1, 2, 3, 4, 5);
+            OpenPackageRequest proc = ordinary with
+            {
+                PackagePath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.PackagePath)}",
+                ChecksumsPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.ChecksumsPath)}",
+                BuildMetadataPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.BuildMetadataPath)}",
+                InstallManifestPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.InstallManifestPath)}",
+                AttestationBundlePath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.AttestationBundlePath)}",
+                AttestationBundleChecksumPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.AttestationBundleChecksumPath)}"
+            };
+
+            await FluentActions.Awaiting(() => opener.OpenAsync(proc, CancellationToken.None))
+                .Should().ThrowAsync<PackageSecurityException>().WithMessage("*binding is incomplete or unexpected*");
+            await FluentActions.Awaiting(() => opener.OpenAsync(ordinary with { ProcWorkspaceIdentity = asserted }, CancellationToken.None))
+                .Should().ThrowAsync<PackageSecurityException>().WithMessage("*binding is incomplete or unexpected*");
+            await FluentActions.Awaiting(() => opener.OpenAsync(
+                proc with { ChecksumsPath = ordinary.ChecksumsPath, ProcWorkspaceIdentity = asserted },
+                CancellationToken.None
+            )).Should().ThrowAsync<PackageSecurityException>().WithMessage("*don't share one supported authority type*");
+            await FluentActions.Awaiting(() => opener.OpenAsync(ordinary, CancellationToken.None))
+                .Should().ThrowAsync<PackageSecurityException>().WithMessage("*safe accessible single-link regular file*");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Test]
+    [Platform("Linux")]
+    public async Task ActualPackageOpener_OneShotProcCaptureFailureDoesNotBlockOrdinaryPathsOrReanchor()
+    {
+        string root = CreateTemporaryDirectory();
+        int captureCalls = 0;
+        try
+        {
+            using LinuxInstallerProtocolPackageOpener opener = new(
+                Path.Combine(root, "gh"),
+                () =>
+                {
+                    captureCalls++;
+                    throw new PackageSecurityException("private proc detail");
+                }
+            );
+            OpenPackageRequest ordinary = CreateActualPackageRequest(root);
+            OpenPackageRequest proc = ordinary with
+            {
+                PackagePath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.PackagePath)}",
+                ChecksumsPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.ChecksumsPath)}",
+                BuildMetadataPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.BuildMetadataPath)}",
+                InstallManifestPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.InstallManifestPath)}",
+                AttestationBundlePath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.AttestationBundlePath)}",
+                AttestationBundleChecksumPath = $"/proc/{Environment.ProcessId}/fd/1/{Path.GetFileName(ordinary.AttestationBundleChecksumPath)}",
+                ProcWorkspaceIdentity = new ProtocolProcWorkspaceIdentity(1, 2, 3, 4, 5)
+            };
+
+            await FluentActions.Awaiting(() => opener.OpenAsync(ordinary, CancellationToken.None))
+                .Should().ThrowAsync<PackageSecurityException>().WithMessage("*safe accessible single-link regular file*");
+            PackageSecurityException unavailable = (await FluentActions.Awaiting(() => opener.OpenAsync(proc, CancellationToken.None))
+                .Should().ThrowAsync<PackageSecurityException>().WithMessage("*unavailable at session creation*")).Which;
+            unavailable.Message.Should().NotContain("private proc detail");
+            unavailable.InnerException.Should().BeNull();
+            captureCalls.Should().Be(1);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ActualPackageOpener_DoesNotSuppressPrivilegeRefusalFromProcCapture()
+    {
+        Action construct = () => _ = new LinuxInstallerProtocolPackageOpener(
+            "/tmp/gh",
+            () => throw new PrivilegedInstallerException("root refused")
+        );
+
+        construct.Should().Throw<PrivilegedInstallerException>();
+    }
+
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private static readonly GameRootIdentity Root = new("/game", 1, 2, 3);
@@ -81,7 +175,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
             File.WriteAllText(wrongPath, "untrusted");
             request = selectedAsset == "checksums" ? request with { ChecksumsPath = wrongPath } : request with { BuildMetadataPath = wrongPath };
 
-            Func<Task> open = async () => await new LinuxInstallerProtocolPackageOpener(Path.Combine(root, "gh")).OpenAsync(request, CancellationToken.None);
+            using LinuxInstallerProtocolPackageOpener opener = new(Path.Combine(root, "gh"));
+            Func<Task> open = async () => await opener.OpenAsync(request, CancellationToken.None);
 
             await open.Should().ThrowAsync<PackageSecurityException>().WithMessage("*filename*");
         }
@@ -107,7 +202,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
             File.Move(selectedPath, movedPath);
             File.CreateSymbolicLink(selectedPath, movedPath);
 
-            Func<Task> open = async () => await new LinuxInstallerProtocolPackageOpener(Path.Combine(root, "gh")).OpenAsync(request, CancellationToken.None);
+            using LinuxInstallerProtocolPackageOpener opener = new(Path.Combine(root, "gh"));
+            Func<Task> open = async () => await opener.OpenAsync(request, CancellationToken.None);
 
             await open.Should().ThrowAsync<PackageSecurityException>().WithMessage("*safe accessible single-link regular file*");
         }
@@ -806,6 +902,47 @@ internal sealed class LinuxInstallerProtocolServiceTests
     }
 
     [Test]
+    public async Task ServiceDisposesOwnedPackageOpenerExactlyOnceOnSyncAndAsyncDisposal()
+    {
+        FakePackageOpener opener = new();
+        LinuxInstallerProtocolService service = Create(new FakeEngine(), opener);
+
+        service.Dispose();
+        await service.DisposeAsync();
+
+        opener.DisposeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ServiceStillDisposesPackageOpenerWhenSessionAuthorityDisposalThrows()
+    {
+        FakePackageOpener opener = new();
+        LinuxInstallerProtocolService service = Create(new FakeEngine(), opener);
+        await Handshake(service);
+        await Open(service);
+        opener.Owners.Single().ThrowOnDispose = true;
+
+        await FluentActions.Awaiting(() => service.DisposeAsync().AsTask()).Should().ThrowAsync<InvalidOperationException>();
+
+        opener.DisposeCount.Should().Be(1);
+    }
+
+    [Test]
+    public void ServiceConstructionFailureDisposesTransferredPackageOpener()
+    {
+        FakePackageOpener opener = new();
+        Action construct = () => _ = new LinuxInstallerProtocolService(
+            "test",
+            _ => throw new InvalidOperationException("engine failed"),
+            new FakeDiscovery(),
+            opener
+        );
+
+        construct.Should().Throw<InvalidOperationException>();
+        opener.DisposeCount.Should().Be(1);
+    }
+
+    [Test]
     public async Task CandidateApprovalUsesCurrentOpaqueIdsAndReturnsPartialReplacementPlan()
     {
         FakeEngine engine = new() { CandidateApprovalMode = true }; FakePackageOpener opener = new();
@@ -900,7 +1037,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<LinuxGameFolderCandidate>>([new("/game", LinuxGameFolderStatus.UnsafeLauncher)]);
     }
 
-    private sealed class FakePackageOpener : ILinuxInstallerProtocolPackageOpener
+    private sealed class FakePackageOpener : ILinuxInstallerProtocolPackageOpener, IDisposable
     {
         public List<FakePackageAuthority> Authorities { get; } = [];
         public List<FakeOwner> Owners { get; } = [];
@@ -909,6 +1046,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public bool BlockOpen { get; set; }
         public TaskCompletionSource OpenStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ContinueOpen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int DisposeCount { get; private set; }
         public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
         {
             if (this.ThrowUnexpected) throw new InvalidOperationException("private-package-opener-detail");
@@ -919,6 +1057,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
                 : CreateRelease();
             return new ProtocolPackageRegistration(release, authority, owner);
         }
+        public void Dispose() => this.DisposeCount++;
     }
 
     private sealed class FakeEngine : ILinuxInstallerProtocolEngine
@@ -1108,5 +1247,15 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public void Dispose() => this.DisposeCount++;
     }
 
-    private sealed class FakeOwner : IDisposable { public int DisposeCount { get; private set; } public void Dispose() => this.DisposeCount++; }
+    private sealed class FakeOwner : IDisposable
+    {
+        public int DisposeCount { get; private set; }
+        public bool ThrowOnDispose { get; set; }
+        public void Dispose()
+        {
+            this.DisposeCount++;
+            if (this.ThrowOnDispose)
+                throw new InvalidOperationException("owner disposal failed");
+        }
+    }
 }

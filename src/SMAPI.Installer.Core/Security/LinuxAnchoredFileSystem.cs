@@ -104,6 +104,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     private const int LockExclusive = 2;
     private const int LockNonBlocking = 4;
     private const int AtRemoveDirectory = 0x200;
+    private const long ProcSuperMagic = 0x9fa0;
 
     private readonly SafeFileHandle RootHandle;
     private readonly LinuxFileIdentity RootIdentity;
@@ -120,6 +121,35 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             this.AssertUsable();
             return $"/proc/{Environment.ProcessId}/fd/{checked((int)this.RootHandle.DangerousGetHandle())}";
         }
+    }
+
+    /// <summary>Whether this retained directory is hosted by Linux procfs.</summary>
+    internal bool IsProcFileSystem
+    {
+        get
+        {
+            this.AssertUsable();
+            if (fstatfs(this.RootHandle, out StatFs fileSystem) != 0)
+                throw new LinuxNativeIOException("Couldn't identify an anchored filesystem", Marshal.GetLastWin32Error());
+            return fileSystem.Type == ProcSuperMagic;
+        }
+    }
+
+    /// <summary>Follow exactly one canonical numeric proc-fd magic link below a retained proc fd directory.</summary>
+    internal LinuxAnchoredFileSystem OpenProcFileDescriptorDirectory(string canonicalDescriptor)
+    {
+        this.AssertUsable();
+        if (!this.IsProcFileSystem || !IsCanonicalNonNegativeDecimal(canonicalDescriptor))
+            throw new IOException("The retained proc descriptor authority is invalid.");
+
+        SafeFileHandle handle = OpenAt(
+            this.RootHandle,
+            canonicalDescriptor,
+            OpenReadOnly | OpenDirectory | OpenCloseOnExec,
+            0,
+            "Couldn't open the retained proc descriptor directory"
+        );
+        return new LinuxAnchoredFileSystem(handle);
     }
 
     /// <summary>Observe the current metadata for the captured root handle after verifying its stable object identity.</summary>
@@ -464,6 +494,25 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         CancellationToken cancellationToken = default
     )
     {
+        return this.ReadAllBytes(file, maximumBytes, requireExactCapturedIdentity: false, cancellationToken);
+    }
+
+    internal byte[] ReadAllBytesExact(
+        LinuxAnchoredFile file,
+        int maximumBytes,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return this.ReadAllBytes(file, maximumBytes, requireExactCapturedIdentity: true, cancellationToken);
+    }
+
+    private byte[] ReadAllBytes(
+        LinuxAnchoredFile file,
+        int maximumBytes,
+        bool requireExactCapturedIdentity,
+        CancellationToken cancellationToken
+    )
+    {
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(file);
         if (maximumBytes < 0)
@@ -472,7 +521,10 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         file.AssertOpen();
 
         LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
-        if (!before.IsSameObject(file.Identity) || before.Size > maximumBytes)
+        if (
+            (requireExactCapturedIdentity ? before != file.Identity : !before.IsSameObject(file.Identity))
+            || before.Size > maximumBytes
+        )
             throw new IOException("The open file is too large or no longer refers to its captured object.");
         byte[] result = new byte[(int)before.Size];
         int offset = 0;
@@ -504,6 +556,27 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         CancellationToken cancellationToken = default
     )
     {
+        return await this.CopyAndHashAsync(file, destination, maximumBytes, requireExactCapturedIdentity: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<string> CopyAndHashExactAsync(
+        LinuxAnchoredFile file,
+        Stream destination,
+        long maximumBytes,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return await this.CopyAndHashAsync(file, destination, maximumBytes, requireExactCapturedIdentity: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string> CopyAndHashAsync(
+        LinuxAnchoredFile file,
+        Stream destination,
+        long maximumBytes,
+        bool requireExactCapturedIdentity,
+        CancellationToken cancellationToken
+    )
+    {
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(destination);
@@ -515,7 +588,11 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         file.AssertOpen();
 
         LinuxFileIdentity before = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
-        if (!before.IsSameObject(file.Identity) || before.Size <= 0 || before.Size > maximumBytes)
+        if (
+            (requireExactCapturedIdentity ? before != file.Identity : !before.IsSameObject(file.Identity))
+            || before.Size <= 0
+            || before.Size > maximumBytes
+        )
             throw new IOException("The open file is empty, too large, or no longer refers to its captured object.");
         using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         byte[] buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
@@ -1151,6 +1228,27 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         return NormalizedRelativePath.Parse(relativePath).Value.Split('/');
     }
 
+    private static bool IsCanonicalNonNegativeDecimal(string value)
+    {
+        if (string.IsNullOrEmpty(value) || (value.Length > 1 && value[0] == '0'))
+            return false;
+        uint parsed = 0;
+        foreach (char character in value)
+        {
+            if (character is < '0' or > '9')
+                return false;
+            try
+            {
+                parsed = checked((parsed * 10) + (uint)(character - '0'));
+            }
+            catch (OverflowException)
+            {
+                return false;
+            }
+        }
+        return parsed <= int.MaxValue;
+    }
+
     private static void RenameAtNoReplace(SafeFileHandle sourceParent, string source, SafeFileHandle destinationParent, string destination)
     {
         try
@@ -1283,6 +1381,9 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     [DllImport("libc", SetLastError = true)]
     private static extern int fsync(SafeFileHandle descriptor);
 
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fstatfs(SafeFileHandle descriptor, out StatFs data);
+
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int statx(SafeFileHandle directory, string path, int flags, uint mask, out Statx data);
 
@@ -1329,6 +1430,27 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         public long Seconds;
         public uint Nanoseconds;
         public int Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StatFs
+    {
+        public long Type;
+        public long BlockSize;
+        public ulong Blocks;
+        public ulong BlocksFree;
+        public ulong BlocksAvailable;
+        public ulong Files;
+        public ulong FilesFree;
+        public int FileSystemIdFirst;
+        public int FileSystemIdSecond;
+        public long MaximumNameLength;
+        public long FragmentSize;
+        public long MountFlags;
+        public long Spare0;
+        public long Spare1;
+        public long Spare2;
+        public long Spare3;
     }
 
     private sealed class ParentAndLeaf : IDisposable

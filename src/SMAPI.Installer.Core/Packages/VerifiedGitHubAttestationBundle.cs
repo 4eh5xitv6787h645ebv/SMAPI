@@ -188,6 +188,55 @@ public sealed class VerifiedGitHubAttestationBundleFactory
             bytes = await bundle.ReadAllBytesAsync(MaximumBundleBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
         }
 
+        return this.VerifyBytes(package, expectedBundleName, checksumDocument, bytes, cancellationToken);
+    }
+
+    internal async Task<VerifiedGitHubAttestationBundle> VerifyAsync(
+        VerifiedInstallerPackage package,
+        IRetainedReleaseAssetSource source,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(package);
+        ArgumentNullException.ThrowIfNull(source);
+        package.AssertUsable();
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Local attestation-bundle authority is only supported on Linux.");
+
+        string expectedBundleName = GetBundleAssetName(package.Release);
+        string expectedChecksumName = GetChecksumAssetName(package.Release);
+        string checksumDocument;
+        using (RetainedReleaseAssetFile checksum = source.Open(expectedChecksumName, "attestation-bundle checksum"))
+            checksumDocument = await checksum.ReadUtf8TextAsync(MaximumChecksumBytes, cancellationToken).ConfigureAwait(false);
+        byte[] bytes;
+        using (RetainedReleaseAssetFile bundle = source.Open(expectedBundleName, "local attestation bundle"))
+            bytes = await bundle.ReadAllBytesAsync(MaximumBundleBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
+        return this.VerifyBytes(package, expectedBundleName, checksumDocument, bytes, cancellationToken);
+    }
+
+    private VerifiedGitHubAttestationBundle VerifyBytes(
+        VerifiedInstallerPackage package,
+        string expectedBundleName,
+        string checksumDocument,
+        byte[] bytes,
+        CancellationToken cancellationToken
+    )
+    {
+        InstallationReleaseIdentity release = package.Release;
+        string suffix = $"  {expectedBundleName}\n";
+        if (checksumDocument.Length != 64 + suffix.Length || !checksumDocument.EndsWith(suffix, StringComparison.Ordinal))
+            throw new PackageSecurityException("The attestation-bundle checksum sidecar isn't canonical.");
+        Sha256Digest expectedSha256;
+        try
+        {
+            expectedSha256 = Sha256Digest.Parse(checksumDocument[..64]);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new PackageSecurityException("The attestation-bundle checksum sidecar isn't canonical.", ex);
+        }
+
         SafeFileHandle? retained = null;
         try
         {

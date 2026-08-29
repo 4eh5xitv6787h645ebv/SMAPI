@@ -96,7 +96,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.HandshakeRequest] = C("handshake.request", typeof(HandshakeRequest), true, "clientName", "clientVersion"),
         [ProtocolMessageKind.DiscoverGamesRequest] = C("discover-games.request", typeof(DiscoverGamesRequest), true, "sessionId"),
         [ProtocolMessageKind.RecoverInterruptedRequest] = C("recover-interrupted.request", typeof(RecoverInterruptedRequest), true, "sessionId", "gamePath"),
-        [ProtocolMessageKind.OpenPackageRequest] = C("open-package.request", typeof(OpenPackageRequest), true, "sessionId", "releaseTag", "expectedSourceCommit", "packagePath", "checksumsPath", "buildMetadataPath", "installManifestPath", "attestationBundlePath", "attestationBundleChecksumPath"),
+        [ProtocolMessageKind.OpenPackageRequest] = C("open-package.request", typeof(OpenPackageRequest), true, "sessionId", "releaseTag", "expectedSourceCommit", "packagePath", "checksumsPath", "buildMetadataPath", "installManifestPath", "attestationBundlePath", "attestationBundleChecksumPath", "procWorkspaceIdentity"),
         [ProtocolMessageKind.ListRecoveriesRequest] = C("list-recoveries.request", typeof(ListRecoveriesRequest), true, "sessionId", "gamePath"),
         [ProtocolMessageKind.InspectPlanRequest] = C("inspect-plan.request", typeof(InspectPlanRequest), true, "sessionId", "gamePath", "operation", "packageId", "recoverySelectionId"),
         [ProtocolMessageKind.SelectPlanCandidatesRequest] = C("select-plan-candidates.request", typeof(SelectPlanCandidatesRequest), true, "sessionId", "planId", "planDigest", "selectedCandidateIds"),
@@ -138,6 +138,8 @@ public static class ProtocolJsonSerializer
     {
         switch (kind)
         {
+            case ProtocolMessageKind.OpenPackageRequest:
+                AssertOptionalObject(payload.GetProperty("procWorkspaceIdentity"), ["deviceMajor", "deviceMinor", "inode", "changeSeconds", "changeNanoseconds"], "proc workspace identity"); break;
             case ProtocolMessageKind.GameDiscoveryEvent:
                 AssertObjectArray(payload.GetProperty("candidates"), ["canonicalPath", "state", "displayName"], "game candidate", MaxGameCandidates); break;
             case ProtocolMessageKind.PackageOpenedEvent:
@@ -185,7 +187,9 @@ public static class ProtocolJsonSerializer
             case RecoverInterruptedRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); break;
             case OpenPackageRequest v:
                 Session(v.SessionId); Text(v.ReleaseTag, "releaseTag"); Hex(v.ExpectedSourceCommit, 40, "expectedSourceCommit");
-                AbsolutePath(v.PackagePath, "packagePath"); AbsolutePath(v.ChecksumsPath, "checksumsPath"); AbsolutePath(v.BuildMetadataPath, "buildMetadataPath"); AbsolutePath(v.InstallManifestPath, "installManifestPath"); AbsolutePath(v.AttestationBundlePath, "attestationBundlePath"); AbsolutePath(v.AttestationBundleChecksumPath, "attestationBundleChecksumPath"); break;
+                AbsolutePath(v.PackagePath, "packagePath"); AbsolutePath(v.ChecksumsPath, "checksumsPath"); AbsolutePath(v.BuildMetadataPath, "buildMetadataPath"); AbsolutePath(v.InstallManifestPath, "installManifestPath"); AbsolutePath(v.AttestationBundlePath, "attestationBundlePath"); AbsolutePath(v.AttestationBundleChecksumPath, "attestationBundleChecksumPath");
+                if (v.ProcWorkspaceIdentity is { } proc && (proc.Inode == 0 || proc.ChangeSeconds < 0 || proc.ChangeNanoseconds >= 1_000_000_000)) throw new ProtocolException("The proc workspace identity is outside its canonical bounds.");
+                break;
             case ListRecoveriesRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); break;
             case InspectPlanRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); Defined(v.Operation, "operation"); ValidateInspectAuthorities(v); break;
             case SelectPlanCandidatesRequest v: PlanBinding(v.SessionId, v.PlanId, v.PlanDigest); IdArray(v.SelectedCandidateIds, "selectedCandidateIds", MaxPlanCandidates); break;
