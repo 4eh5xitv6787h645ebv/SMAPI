@@ -34,6 +34,8 @@ public sealed class LinuxInstallerProtocolJsonlHost
     /// <remarks>
     /// Standard output is reserved exclusively for complete protocol event lines. Diagnostics are bounded, generic,
     /// and written only to <paramref name="diagnostics"/> so rejected input, paths, and tokens aren't reflected.
+    /// A cancellation or fail-stop error may dispose <paramref name="input"/> to interrupt operating-system streams
+    /// whose asynchronous reads don't observe cancellation until their descriptor is closed.
     /// </remarks>
     public async Task<int> RunAsync(Stream input, Stream output, TextWriter diagnostics, CancellationToken cancellationToken = default)
     {
@@ -44,6 +46,14 @@ public sealed class LinuxInstallerProtocolJsonlHost
         if (!output.CanWrite) throw new ArgumentException("The protocol output stream must be writable.", nameof(output));
 
         using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using CancellationTokenRegistration inputInterruption = lifetime.Token.Register(() =>
+        {
+            try { input.Dispose(); }
+            catch { }
+        });
+        // Request cancellation is separate from transport cancellation. Controller EOF must stop admitted
+        // backend work while leaving the output writer alive long enough to drain a safe terminal response.
+        using CancellationTokenSource admittedRequests = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         int failureCode = 0;
         using CancellationTokenRegistration externalCancellation = cancellationToken.Register(() =>
         {
@@ -73,27 +83,31 @@ public sealed class LinuxInstallerProtocolJsonlHost
         ILinuxInstallerProtocolHostSession? session = null;
         Task writer = WriteEventsAsync(output, outbound.Reader, Fail, lifetime.Token);
         List<Task> requests = new(MaximumInFlightRequests);
+        Task<string?>? read = null;
+        Task cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, lifetime.Token);
         bool sessionDisposed = false;
         try
         {
             session = this.CreateSession(PublishProgress) ?? throw new InvalidOperationException("The protocol session factory returned null.");
             BoundedJsonLineReader reader = new(input);
-            Task<string?>? read = reader.ReadLineAsync(lifetime.Token).AsTask();
+            read = reader.ReadLineAsync(lifetime.Token).AsTask();
             bool eof = false;
 
             while (!eof && Volatile.Read(ref failureCode) == 0)
             {
                 if (requests.Count == MaximumInFlightRequests)
                 {
-                    Task completed = await Task.WhenAny(requests).ConfigureAwait(false);
+                    Task completed = await Task.WhenAny(requests.Append(cancellationSignal)).ConfigureAwait(false);
+                    if (ReferenceEquals(completed, cancellationSignal))
+                        await cancellationSignal.ConfigureAwait(false);
                     requests.Remove(completed);
                     await completed.ConfigureAwait(false);
                     continue;
                 }
 
-                Task completedWork = requests.Count == 0
-                    ? read!
-                    : await Task.WhenAny(requests.Append(read!)).ConfigureAwait(false);
+                Task completedWork = await Task.WhenAny(requests.Append(read!).Append(cancellationSignal)).ConfigureAwait(false);
+                if (ReferenceEquals(completedWork, cancellationSignal))
+                    await cancellationSignal.ConfigureAwait(false);
                 if (!ReferenceEquals(completedWork, read))
                 {
                     requests.Remove(completedWork);
@@ -104,6 +118,7 @@ public sealed class LinuxInstallerProtocolJsonlHost
                 string? line = await read!.ConfigureAwait(false);
                 if (line is null)
                 {
+                    read = null;
                     eof = true;
                     break;
                 }
@@ -116,15 +131,16 @@ public sealed class LinuxInstallerProtocolJsonlHost
                 }
                 if (requests.Count != 0 && request is not CancelPlanRequest and not CancelPruneRequest)
                     throw new ProtocolException("Only a cancellation command may overlap an active command.");
-                requests.Add(ProcessRequestAsync(session, request, outbound.Writer, lifetime.Token));
+                requests.Add(ProcessRequestAsync(session, request, outbound.Writer, admittedRequests.Token, lifetime.Token));
                 read = reader.ReadLineAsync(lifetime.Token).AsTask();
             }
 
-            // EOF means the controller has disappeared. Stop the service (which cancels and durably
-            // settles any active operation) before awaiting admitted command tasks; never let an
-            // orphaned frontend leave the backend mutating indefinitely.
-            if (eof && requests.Count != 0 && Volatile.Read(ref failureCode) == 0)
+            // EOF means the controller has disappeared. Cancel every admitted caller token first, then
+            // dispose the session so both CommandGate-held calls and tracked long operations durably settle.
+            // Keep the separate transport token live so any resulting safe terminal response can drain.
+            if (eof && Volatile.Read(ref failureCode) == 0)
             {
+                admittedRequests.Cancel();
                 await session.DisposeAsync().ConfigureAwait(false);
                 sessionDisposed = true;
             }
@@ -142,6 +158,11 @@ public sealed class LinuxInstallerProtocolJsonlHost
             await WriteDiagnosticAsync(diagnostics, "Protocol input was rejected.").ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            if (Volatile.Read(ref failureCode) == 0)
+                Fail(cancellationToken.IsCancellationRequested ? CancelledExitCode : FailureExitCode);
+        }
+        catch (Exception) when (lifetime.IsCancellationRequested)
         {
             if (Volatile.Read(ref failureCode) == 0)
                 Fail(cancellationToken.IsCancellationRequested ? CancelledExitCode : FailureExitCode);
@@ -165,9 +186,17 @@ public sealed class LinuxInstallerProtocolJsonlHost
             try { await Task.WhenAll(requests).ConfigureAwait(false); }
             catch { if (Volatile.Read(ref failureCode) == 0) Fail(FailureExitCode); }
 
+            if (read is not null)
+                ObserveAbandonedRead(read);
+
             outbound.Writer.TryComplete();
             try { await writer.ConfigureAwait(false); }
             catch { Fail(FailureExitCode); }
+
+            // Release the infinite cancellation race task without changing the established exit result.
+            // On clean EOF the read has completed, so don't dispose the caller's input just for this cleanup.
+            inputInterruption.Dispose();
+            lifetime.Cancel();
         }
 
         int result = Volatile.Read(ref failureCode);
@@ -178,10 +207,30 @@ public sealed class LinuxInstallerProtocolJsonlHost
         return result;
     }
 
-    private static async Task ProcessRequestAsync(ILinuxInstallerProtocolHostSession session, ProtocolRequest request, ChannelWriter<ProtocolEvent> outbound, CancellationToken cancellationToken)
+    private static async Task ProcessRequestAsync(
+        ILinuxInstallerProtocolHostSession session,
+        ProtocolRequest request,
+        ChannelWriter<ProtocolEvent> outbound,
+        CancellationToken requestCancellationToken,
+        CancellationToken transportCancellationToken
+    )
     {
-        ProtocolEvent response = await session.HandleAsync(request, cancellationToken).ConfigureAwait(false);
-        await outbound.WriteAsync(response, cancellationToken).ConfigureAwait(false);
+        ProtocolEvent response;
+        try
+        {
+            response = await session.HandleAsync(request, requestCancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (
+            requestCancellationToken.IsCancellationRequested
+            && !transportCancellationToken.IsCancellationRequested
+        )
+        {
+            // Clean controller EOF owns the admitted request token. A call cancelled before entering the
+            // service CommandGate has no typed terminal response, but it is safely settled and must not
+            // turn clean EOF into a transport failure.
+            return;
+        }
+        await outbound.WriteAsync(response, transportCancellationToken).ConfigureAwait(false);
     }
 
     private static async Task WriteEventsAsync(Stream output, ChannelReader<ProtocolEvent> outbound, Action<int> fail, CancellationToken cancellationToken)
@@ -208,6 +257,16 @@ public sealed class LinuxInstallerProtocolJsonlHost
     {
         try { await diagnostics.WriteLineAsync(message).ConfigureAwait(false); }
         catch { }
+    }
+
+    private static void ObserveAbandonedRead(Task<string?> read)
+    {
+        _ = read.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default
+        );
     }
 }
 

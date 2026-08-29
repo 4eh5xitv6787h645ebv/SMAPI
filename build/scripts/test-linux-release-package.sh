@@ -16,7 +16,17 @@ if [[ ! -f "$archive_path" ]]; then
 fi
 
 temp_root="$(mktemp -d)"
-trap 'rm -rf -- "$temp_root"' EXIT
+protocol_pid=""
+cleanup() {
+    set +e
+    if [[ -n "$protocol_pid" ]]; then
+        kill -KILL "$protocol_pid" 2>/dev/null
+        wait "$protocol_pid" 2>/dev/null
+    fi
+    exec 9>&- 2>/dev/null
+    rm -rf -- "$temp_root"
+}
+trap cleanup EXIT
 
 entries_path="$temp_root/entries.txt"
 zipinfo -1 "$archive_path" > "$entries_path"
@@ -101,6 +111,58 @@ set -e
 test "$mixed_exit" = 2
 test ! -s "$temp_root/protocol-mixed.stdout"
 grep -Fx 'The Linux protocol host requires exactly --linux-protocol-v1-jsonl on Linux.' "$temp_root/protocol-mixed.stderr" >/dev/null
+
+# A packaged host blocked on controller input must handle SIGTERM through its graceful cancellation
+# path, without extracting install.dat, polluting stdout, or leaving a child process behind.
+protocol_fifo="$temp_root/protocol-input.fifo"
+protocol_tmp="$temp_root/protocol-tmp"
+mkdir "$protocol_tmp"
+mkfifo "$protocol_fifo"
+exec 9<> "$protocol_fifo"
+TMPDIR="$protocol_tmp" "$protocol_root/SMAPI.Installer" --linux-protocol-v1-jsonl \
+    < "$protocol_fifo" > "$temp_root/protocol-sigterm.stdout" 2> "$temp_root/protocol-sigterm.stderr" &
+protocol_pid=$!
+for _ in {1..100}; do
+    [[ -e "/proc/$protocol_pid/status" ]] && break
+    sleep 0.01
+done
+test -e "/proc/$protocol_pid/status"
+printf '%s\n' "$protocol_request" >&9
+for _ in {1..500}; do
+    [[ -s "$temp_root/protocol-sigterm.stdout" ]] && break
+    kill -0 "$protocol_pid" 2>/dev/null || break
+    sleep 0.01
+done
+test -s "$temp_root/protocol-sigterm.stdout"
+mapfile -t protocol_children < <(pgrep -P "$protocol_pid" || true)
+kill -TERM "$protocol_pid"
+set +e
+wait "$protocol_pid"
+sigterm_exit=$?
+set -e
+protocol_pid=""
+exec 9>&-
+test "$sigterm_exit" = 130
+grep -Fx 'Protocol host was cancelled.' "$temp_root/protocol-sigterm.stderr" >/dev/null
+python3 - "$temp_root/protocol-sigterm.stdout" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_bytes().splitlines()
+assert len(lines) == 1
+message = json.loads(lines[0].decode("utf-8", errors="strict"))
+assert message["protocolVersion"] == 1
+assert message["messageType"] == "handshake.event"
+assert message["payload"]["commandId"] == "11111111111111111111111111111111"
+PY
+test -z "$(find "$protocol_tmp" -mindepth 1 -print -quit)"
+for child in "${protocol_children[@]}"; do
+    if kill -0 "$child" 2>/dev/null; then
+        echo "Protocol host left child process $child after SIGTERM." >&2
+        exit 1
+    fi
+done
 
 mkdir "$temp_root/bundle"
 unzip -q "$package_root/internal/linux/install.dat" -d "$temp_root/bundle"

@@ -87,7 +87,7 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
     }
 
     [Test]
-    public async Task RunAsync_AdmitsCancellationBesideActiveRequest_AndSerializesProgressBeforeResponses()
+    public async Task RunAsync_AdmitsCancellationBesideActiveRequest_AndPreservesTypedTerminalOrderingWithSlowOutput()
     {
         TaskCompletionSource cancelSeen = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Action<ProtocolEvent>? sink = null;
@@ -95,15 +95,37 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         {
             if (request is ExecutePlanRequest)
             {
-                sink!(new RecoveryProgressEvent(Session, 1, TransactionStage.Recovering, 0, 1, "Recovering."));
-                await cancelSeen.Task.WaitAsync(token);
+                sink!(new ProgressEvent(Session, Plan, Digest, 1, TransactionStage.Applying, 0, 1, "Applying.")
+                {
+                    CommandId = request.CommandId
+                });
+                await cancelSeen.Task;
+                return new CancelledEvent(
+                    Session,
+                    Plan,
+                    Digest,
+                    ProtocolExecutionOutcome.CancelledBeforeMutation,
+                    new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain),
+                    new(0, 0, 0, 0, 0, 0),
+                    "Cancelled.",
+                    null
+                )
+                {
+                    CommandId = request.CommandId
+                };
             }
-            else if (request is CancelPlanRequest)
+            if (request is CancelPlanRequest)
+            {
                 cancelSeen.TrySetResult();
-            return Response(request);
+                return new CommandAcknowledgedEvent(Session, ProtocolAcknowledgementKind.PlanCancellationRequested, Plan, null)
+                {
+                    CommandId = request.CommandId
+                };
+            }
+            throw new AssertionException("Unexpected request type.");
         });
         LinuxInstallerProtocolJsonlHost host = new(value => { sink = value; return session; });
-        using MemoryStream output = new();
+        using SlowWriteStream output = new();
         using StringWriter diagnostics = new();
         ExecutePlanRequest execute = new(Session, Plan, Digest);
         CancelPlanRequest cancel = new(Session, Plan, Digest);
@@ -114,19 +136,33 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         exit.Should().Be(0);
         ProtocolEvent[] events = ParseEvents(output.ToArray());
         events.Should().HaveCount(3);
-        events[0].Should().BeOfType<RecoveryProgressEvent>();
-        events.Skip(1).Select(value => value.CommandId).Should().BeEquivalentTo([execute.CommandId, cancel.CommandId]);
+        events[0].Should().BeOfType<ProgressEvent>().Which.CommandId.Should().Be(execute.CommandId);
+        events.OfType<CommandAcknowledgedEvent>().Should().ContainSingle().Which.CommandId.Should().Be(cancel.CommandId);
+        events.OfType<CancelledEvent>().Should().ContainSingle().Which.CommandId.Should().Be(execute.CommandId);
+        int terminalIndex = Array.FindIndex(events, value => value is CancelledEvent);
+        events.Skip(terminalIndex + 1).Should().NotContain(value => value is ProgressEvent);
     }
 
     [Test]
-    public async Task RunAsync_EofWithActiveRequest_DisposesSessionBeforeAwaitingAndFlushesTerminalResponse()
+    public async Task RunAsync_EofWithActiveRequest_CancelsRequestBeforeDisposalAndFlushesTerminalResponse()
     {
-        TaskCompletionSource disposed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        FakeSession session = new(async (request, _) =>
+        TaskCompletionSource settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool cancellationObservedAtDispose = false;
+        CancellationToken admittedToken = default;
+        FakeSession session = new(async (request, token) =>
         {
-            await disposed.Task;
+            admittedToken = token;
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                settled.TrySetResult();
+            }
             return Response(request);
-        }, dispose: () => { disposed.TrySetResult(); return ValueTask.CompletedTask; });
+        }, dispose: () =>
+        {
+            cancellationObservedAtDispose = admittedToken.IsCancellationRequested;
+            return new ValueTask(settled.Task);
+        });
         ExecutePlanRequest request = new(Session, Plan, Digest);
 
         (int exit, byte[] output, string diagnostics) = await RunAsync(
@@ -137,15 +173,56 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         exit.Should().Be(0);
         diagnostics.Should().BeEmpty();
         session.Disposed.Should().BeTrue();
+        cancellationObservedAtDispose.Should().BeTrue();
         ParseEvents(output).Should().ContainSingle().Which.CommandId.Should().Be(request.CommandId);
+    }
+
+    [Test]
+    public async Task RunAsync_EofBeforeRequestAdmission_ObservesPropagatedTokenCancellationAsCleanSettlement()
+    {
+        CancellationToken admittedToken = default;
+        FakeSession session = new(async (_, token) =>
+        {
+            admittedToken = token;
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            throw new AssertionException("The admitted request should only finish through cancellation.");
+        }, dispose: () =>
+        {
+            admittedToken.IsCancellationRequested.Should().BeTrue();
+            return ValueTask.CompletedTask;
+        });
+        DiscoverGamesRequest request = new(Session);
+
+        (int exit, byte[] output, string diagnostics) = await RunAsync(
+            new MemoryStream(Encoding.UTF8.GetBytes(ProtocolJsonSerializer.SerializeLine(request) + "\n")),
+            session
+        );
+
+        exit.Should().Be(0);
+        output.Should().BeEmpty();
+        diagnostics.Should().BeEmpty();
+        session.Disposed.Should().BeTrue();
     }
 
     [Test]
     public async Task RunAsync_OutputFailure_CancelsAndDisposesWithoutWritingDiagnosticsToStdout()
     {
         HandshakeRequest request = new("gui", "1");
-        FakeSession session = new((value, _) => Task.FromResult<ProtocolEvent>(Response(value)));
-        LinuxInstallerProtocolJsonlHost host = new(_ => session);
+        Action<ProtocolEvent>? sink = null;
+        TaskCompletionSource settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool requestCancelled = false;
+        FakeSession session = new(async (value, token) =>
+        {
+            sink!(new RecoveryProgressEvent(Session, 1, TransactionStage.Recovering, 0, 1, "Recovering."));
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                requestCancelled = true;
+                settled.TrySetResult();
+            }
+            return Response(value);
+        }, dispose: () => new ValueTask(settled.Task));
+        LinuxInstallerProtocolJsonlHost host = new(value => { sink = value; return session; });
         using StringWriter diagnostics = new();
 
         int exit = await host.RunAsync(
@@ -155,6 +232,7 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         );
 
         exit.Should().Be(LinuxInstallerProtocolJsonlHost.FailureExitCode);
+        requestCancelled.Should().BeTrue();
         session.Disposed.Should().BeTrue();
         diagnostics.ToString().Should().Be("Protocol transport stopped safely." + Environment.NewLine);
     }
@@ -163,13 +241,21 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
     public async Task RunAsync_ProgressOverflow_FailsStopAndCancelsInsteadOfGrowingUnbounded()
     {
         Action<ProtocolEvent>? sink = null;
-        FakeSession session = new((request, _) =>
+        TaskCompletionSource settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool requestCancelled = false;
+        FakeSession session = new(async (request, token) =>
         {
             int total = LinuxInstallerProtocolJsonlHost.OutboundEventCapacity + 2;
             for (int index = 1; index <= total; index++)
                 sink!(new RecoveryProgressEvent(Session, index, TransactionStage.Recovering, index, total, "Recovering."));
-            return Task.FromResult<ProtocolEvent>(Response(request));
-        });
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                requestCancelled = true;
+                settled.TrySetResult();
+            }
+            return Response(request);
+        }, dispose: () => new ValueTask(settled.Task));
         LinuxInstallerProtocolJsonlHost host = new(value => { sink = value; return session; });
         using StringWriter diagnostics = new();
         string input = ProtocolJsonSerializer.SerializeLine(new HandshakeRequest("gui", "1")) + "\n";
@@ -177,6 +263,7 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         int exit = await host.RunAsync(new MemoryStream(Encoding.UTF8.GetBytes(input)), new BlockingWriteStream(), diagnostics);
 
         exit.Should().Be(LinuxInstallerProtocolJsonlHost.FailureExitCode);
+        requestCancelled.Should().BeTrue();
         session.Disposed.Should().BeTrue();
         diagnostics.ToString().Should().Be("Protocol transport stopped safely." + Environment.NewLine);
     }
@@ -251,13 +338,20 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
 
     private sealed class BlockingReadStream : Stream
     {
+        private readonly TaskCompletionSource<int> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public override bool CanRead => true;
         public override bool CanSeek => false;
         public override bool CanWrite => false;
         public override long Length => throw new NotSupportedException();
         public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ContinueWith(_ => 0, cancellationToken));
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => new(this.Completion.Task);
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                this.Completion.TrySetException(new ObjectDisposedException(nameof(BlockingReadStream)));
+            base.Dispose(disposing);
+        }
         public override void Flush() { }
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
@@ -292,5 +386,14 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) => new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+    }
+
+    private sealed class SlowWriteStream : MemoryStream
+    {
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(5, cancellationToken);
+            await base.WriteAsync(buffer, cancellationToken);
+        }
     }
 }
