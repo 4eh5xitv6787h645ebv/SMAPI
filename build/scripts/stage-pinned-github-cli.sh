@@ -32,9 +32,21 @@ if [[ -e "$output_directory" || -L "$output_directory" ]]; then
     echo "The pinned GitHub CLI output path must not already exist: $output_directory" >&2
     exit 1
 fi
-if [[ "$(mv --version | sed -n '1p')" != *"GNU coreutils"* \
-    || "$(stat --version | sed -n '1p')" != *"GNU coreutils"* ]]; then
-    echo "Pinned-verifier staging requires GNU coreutils mv and stat on Linux." >&2
+mv_version_line="$(mv --version | sed -n '1p')"
+if [[ "$mv_version_line" != *"GNU coreutils"* \
+    || ! "$mv_version_line" =~ \ ([0-9]+)\.([0-9]+)(\.|[[:space:]]|$) ]]; then
+    echo "Pinned-verifier staging requires GNU coreutils mv 8.30 or later and GNU stat on Linux." >&2
+    exit 1
+fi
+mv_version_major="${BASH_REMATCH[1]}"
+mv_version_minor="${BASH_REMATCH[2]}"
+if (( mv_version_major < 8 || (mv_version_major == 8 && mv_version_minor < 30) )) \
+    || [[ "$(stat --version | sed -n '1p')" != *"GNU coreutils"* ]]; then
+    echo "Pinned-verifier staging requires GNU coreutils mv 8.30 or later and GNU stat on Linux." >&2
+    exit 1
+fi
+if ! command -v python3 >/dev/null; then
+    echo "Pinned-verifier staging requires Python 3 for the atomic no-replace capability probe." >&2
     exit 1
 fi
 
@@ -59,6 +71,46 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+# Coreutils 8.30 fixed mv -n's lookup/rename race when the platform supplies an
+# atomic no-replace rename. Probe that exact syscall and destination filesystem;
+# EEXIST with both directory identities unchanged proves no replacement occurred.
+python3 - "$temp_root" <<'PY'
+import ctypes
+import errno
+import os
+import sys
+
+root = sys.argv[1]
+source = os.path.join(root, "rename-noreplace-source")
+destination = os.path.join(root, "rename-noreplace-destination")
+os.mkdir(source, 0o700)
+os.mkdir(destination, 0o700)
+source_identity = (os.stat(source).st_dev, os.stat(source).st_ino)
+destination_identity = (os.stat(destination).st_dev, os.stat(destination).st_ino)
+
+libc = ctypes.CDLL(None, use_errno=True)
+try:
+    renameat2 = libc.renameat2
+except AttributeError:
+    raise SystemExit("The C library does not expose renameat2 for atomic verifier staging.")
+renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+renameat2.restype = ctypes.c_int
+at_fdcwd = -100
+rename_noreplace = 1
+result = renameat2(at_fdcwd, os.fsencode(source), at_fdcwd, os.fsencode(destination), rename_noreplace)
+error = ctypes.get_errno()
+if result != -1 or error != errno.EEXIST:
+    raise SystemExit(f"The destination filesystem rejected atomic no-replace rename (errno {error}).")
+if (
+    (os.stat(source).st_dev, os.stat(source).st_ino) != source_identity
+    or (os.stat(destination).st_dev, os.stat(destination).st_ino) != destination_identity
+):
+    raise SystemExit("The atomic no-replace capability probe changed a directory identity.")
+os.rmdir(source)
+os.rmdir(destination)
+PY
+
 member_list="$temp_root/archive-members.txt"
 tar -tzf "$archive_path" > "$member_list"
 for required_member in "$archive_root/bin/gh" "$archive_root/LICENSE"; do

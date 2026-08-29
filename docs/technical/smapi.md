@@ -141,7 +141,8 @@ First-time setup:
    - [.NET 10 and .NET 6 SDKs](https://learn.microsoft.com/dotnet/core/install/linux) (run
      `lsb_release -a` if you need the Ubuntu version number);
    - [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell);
-   - Bash, curl, GNU coreutils, GNU tar, GNU findutils, grep, sed, zip, and unzip;
+   - Bash, curl, Python 3, GNU coreutils 8.30 or later, GNU tar, GNU findutils, grep, sed, zip, and
+     unzip;
    - and Steam (see [Linux instructions](https://linuxconfig.org/how-to-install-steam-on-ubuntu-20-04-focal-fossa-linux)).
 3. Launch `steam` and install the game like usual.
 4. Clone the SMAPI repo:
@@ -166,8 +167,10 @@ To prepare the release:
        "--github-cli-directory=$verifier_work/pinned-github-cli"
    ```
    The staging helper rejects any archive, binary, or license bytes other than the reviewed GitHub
-   CLI 2.92.0 Linux x86_64 release. The resulting package is created in the root `bin` folder. Use
-   the documented [fork release identity](linux-alpha-release.md#release-identity). Personal local
+   CLI 2.92.0 Linux x86_64 release. It also requires a recent Linux/WSL kernel and destination
+   filesystem with `renameat2(RENAME_NOREPLACE)` support, which it probes before writing the final
+   directory and rejects if unavailable. The resulting package is created in the root `bin` folder.
+   Use the documented [fork release identity](linux-alpha-release.md#release-identity). Personal local
    builds are not public release candidates and don't have GitHub provenance. The release-only
    package tool's environment guard rejects contexts other than the exact reviewed annotated-tag
    workflow to prevent accidental misuse, but it is not a cryptographic boundary. Local builds

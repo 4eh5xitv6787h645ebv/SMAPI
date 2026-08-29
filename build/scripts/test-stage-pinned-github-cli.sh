@@ -56,6 +56,33 @@ mkdir "$temp_root/existing-output"
 expect_failure existing-output "$stager" "$archive_path" "$temp_root/existing-output"
 test "$(find "$temp_root/existing-output" -mindepth 1 -printf . | wc -c)" = 0
 
+old_coreutils="$temp_root/old-coreutils"
+mkdir "$old_coreutils"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--version" ]]; then' \
+    '    echo "mv (GNU coreutils) 8.29"' \
+    '    exit 0' \
+    'fi' \
+    'exec /usr/bin/mv "$@"' \
+    > "$old_coreutils/mv"
+chmod 0700 "$old_coreutils/mv"
+expect_failure old-coreutils \
+    env PATH="$old_coreutils:$PATH" "$stager" "$archive_path" "$temp_root/old-coreutils-output"
+test ! -e "$temp_root/old-coreutils-output"
+
+failed_capability_probe="$temp_root/failed-capability-probe"
+mkdir "$failed_capability_probe"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 72' > "$failed_capability_probe/python3"
+chmod 0700 "$failed_capability_probe/python3"
+expect_failure failed-capability-probe \
+    env PATH="$failed_capability_probe:$PATH" "$stager" "$archive_path" "$temp_root/failed-capability-output"
+test ! -e "$temp_root/failed-capability-output"
+if find "$temp_root" -mindepth 1 -maxdepth 1 -type d -name '.smapi-pinned-gh.*' -print -quit | grep -q .; then
+    echo "The staging helper left a private partial directory after a failed capability probe." >&2
+    exit 1
+fi
+
 substitution_hook="$temp_root/substitute-output.sh"
 printf '%s\n' \
     '#!/usr/bin/env bash' \
