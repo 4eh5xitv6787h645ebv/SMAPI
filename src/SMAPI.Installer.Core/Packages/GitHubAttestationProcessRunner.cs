@@ -146,6 +146,7 @@ internal interface IGitHubAttestationProcessRunner
 internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcessRunner
 {
     private const string DefaultSetSidPath = "/usr/bin/setsid";
+    private const string DefaultFlockPath = "/usr/bin/flock";
     private const string BundleBridgeFileName = "verified-attestation-bundle.jsonl";
     private const int AtEmptyPath = 0x1000;
     private const int AtSymlinkNoFollow = 0x100;
@@ -153,6 +154,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     private const ushort FileTypeMask = 0xf000;
     private const ushort FileTypeRegular = 0x8000;
     private const int GetSeals = 1034;
+    private const int GateHelperTimeoutSeconds = 3;
     private const int RequiredImmutableSeals = 0x0f;
     private const int SignalKill = 9;
     private const int ErrorNoProcess = 3;
@@ -162,25 +164,36 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     private const long SystemCallPidfdOpen = 434;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly TimeSpan TeardownTimeout = TimeSpan.FromSeconds(5);
+    private static readonly SemaphoreSlim StartupBoundary = new(1, 1);
+    private static readonly object QuarantinedGateLock = new();
+    // Catastrophic gated-helper retention is intentionally fail-stop: one locked FD is kept for the process lifetime,
+    // every later launch requires a restart, and containment after this parent process itself exits isn't claimed.
+    private static SafeFileHandle? QuarantinedGate;
     private readonly string SetSidPath;
+    private readonly string FlockPath;
     private readonly Action<string>? AfterPrivateDirectoryCreatedForTesting;
     private readonly Action<string>? AfterBundleBridgeCreatedForTesting;
     private readonly Action<string>? BeforeProcessStartForTesting;
-    private readonly Func<int, SafeFileHandle>? OpenLeaderPidfdForTesting;
+    private readonly Action<int>? BeforeLeaderPidfdOpenForTesting;
+    private readonly Func<ProcessSessionIdentity, ProcessSessionIdentity>? TransformGateHelperIdentityForTesting;
 
     internal GitHubAttestationProcessRunner(
         string setSidPath = DefaultSetSidPath,
+        string flockPath = DefaultFlockPath,
         Action<string>? afterPrivateDirectoryCreatedForTesting = null,
         Action<string>? afterBundleBridgeCreatedForTesting = null,
         Action<string>? beforeProcessStartForTesting = null,
-        Func<int, SafeFileHandle>? openLeaderPidfdForTesting = null
+        Action<int>? beforeLeaderPidfdOpenForTesting = null,
+        Func<ProcessSessionIdentity, ProcessSessionIdentity>? transformGateHelperIdentityForTesting = null
     )
     {
         this.SetSidPath = setSidPath ?? throw new ArgumentNullException(nameof(setSidPath));
+        this.FlockPath = flockPath ?? throw new ArgumentNullException(nameof(flockPath));
         this.AfterPrivateDirectoryCreatedForTesting = afterPrivateDirectoryCreatedForTesting;
         this.AfterBundleBridgeCreatedForTesting = afterBundleBridgeCreatedForTesting;
         this.BeforeProcessStartForTesting = beforeProcessStartForTesting;
-        this.OpenLeaderPidfdForTesting = openLeaderPidfdForTesting;
+        this.BeforeLeaderPidfdOpenForTesting = beforeLeaderPidfdOpenForTesting;
+        this.TransformGateHelperIdentityForTesting = transformGateHelperIdentityForTesting;
     }
 
     public async Task<GitHubAttestationProcessResult> RunAsync(
@@ -189,6 +202,29 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     )
     {
         ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!StartupBoundary.Wait(0))
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        try
+        {
+            lock (QuarantinedGateLock)
+            {
+                if (QuarantinedGate is not null)
+                    throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+            }
+            return await this.RunSerializedAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            StartupBoundary.Release();
+        }
+    }
+
+    private async Task<GitHubAttestationProcessResult> RunSerializedAsync(
+        GitHubAttestationProcessRequest request,
+        CancellationToken cancellationToken
+    )
+    {
         cancellationToken.ThrowIfCancellationRequested();
         if (!File.Exists(request.ExecutablePath))
         {
@@ -236,26 +272,41 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
             }
 
-            SystemSetSidAuthority setSid;
+            SystemExecutableAuthority setSid;
+            SystemExecutableAuthority flock;
             try
             {
-                setSid = SystemSetSidAuthority.Open(this.SetSidPath);
+                setSid = SystemExecutableAuthority.Open(this.SetSidPath);
+                try
+                {
+                    flock = SystemExecutableAuthority.Open(this.FlockPath);
+                }
+                catch
+                {
+                    setSid.Dispose();
+                    throw;
+                }
             }
             catch (PackageSecurityException)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 throw;
             }
-            using SystemSetSidAuthority retainedSetSid = setSid;
+            using SystemExecutableAuthority retainedSetSid = setSid;
+            using SystemExecutableAuthority retainedFlock = flock;
+            using PreExecGate gate = PreExecGate.CreateLocked();
             ProcessStartInfo startInfo = CreateStartInfo(
                 request,
                 processArguments,
                 privateDirectory.ProcPath,
-                retainedSetSid.ProcPath
+                retainedSetSid.ProcPath,
+                retainedFlock.ProcPath,
+                gate.ProcPath,
+                GateHelperTimeoutSeconds
             );
             // Prove pidfd support before spawning and reserve one descriptor slot for the exact leader handle.
             using SafeFileHandle leaderPidfdReservation = OpenRequiredPidfd(Environment.ProcessId);
-            // Retain the exact child before WaitForExitAsync enables asynchronous reaping and numeric PID reuse.
+            // The retained gate prevents the verifier from executing until its exact leader pidfd is acquired.
             using Process process = new() { StartInfo = startInfo, EnableRaisingEvents = false };
             int? startedSessionId = null;
             SafeFileHandle? leaderPidfd = null;
@@ -273,16 +324,30 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 try
                 {
                     startedSessionId = process.Id;
-                    leaderPidfd = this.OpenLeaderPidfdForTesting is null
-                        ? OpenRequiredPidfd(startedSessionId.Value)
-                        : this.OpenLeaderPidfdForTesting(startedSessionId.Value);
-                    if (leaderPidfd is null || leaderPidfd.IsInvalid || leaderPidfd.IsClosed)
+                    this.BeforeLeaderPidfdOpenForTesting?.Invoke(startedSessionId.Value);
+                    leaderPidfd = OpenRequiredPidfd(startedSessionId.Value);
+                    bool exactGateHelper = await WaitForExactGateHelperAsync(
+                        startedSessionId.Value,
+                        leaderPidfd,
+                        retainedFlock.Identity,
+                        gate.Identity,
+                        TimeSpan.FromMilliseconds((GateHelperTimeoutSeconds * 1000) - 250),
+                        this.TransformGateHelperIdentityForTesting
+                    ).ConfigureAwait(false);
+                    if (!exactGateHelper)
                         throw new PackageSecurityException("The GitHub attestation verifier couldn't retain exact process authority.");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    gate.Release();
                 }
                 catch (Exception)
                 {
+                    bool cleaned = await ReapGatedStartupProcessAsync(
+                        process,
+                        TeardownTimeout
+                    ).ConfigureAwait(false);
+                    if (!cleaned)
+                        gate.QuarantineLocked();
                     leaderPidfd?.Dispose();
-                    bool cleaned = await TerminateUnretainedStartupProcessAsync(process, startedSessionId).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     throw new PackageSecurityException(
                         cleaned
@@ -435,7 +500,10 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         GitHubAttestationProcessRequest request,
         IReadOnlyList<string> processArguments,
         string privateDirectory,
-        string setSidProcPath
+        string setSidProcPath,
+        string flockProcPath,
+        string gateProcPath,
+        int gateHelperTimeoutSeconds
     )
     {
         ProcessStartInfo startInfo = new()
@@ -448,7 +516,15 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             RedirectStandardError = true,
             CreateNoWindow = true
         };
+        startInfo.ArgumentList.Add("--wait");
         startInfo.ArgumentList.Add("--");
+        startInfo.ArgumentList.Add(flockProcPath);
+        startInfo.ArgumentList.Add("--exclusive");
+        startInfo.ArgumentList.Add("--close");
+        startInfo.ArgumentList.Add("--timeout");
+        startInfo.ArgumentList.Add(gateHelperTimeoutSeconds.ToString(CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("--");
+        startInfo.ArgumentList.Add(gateProcPath);
         startInfo.ArgumentList.Add(request.ExecutablePath);
         foreach (string argument in processArguments)
             startInfo.ArgumentList.Add(argument);
@@ -563,58 +639,139 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     }
 
     /// <summary>
-    /// Terminate a child whose pidfd acquisition failed before any asynchronous wait could reap it. The direct
-    /// child's numeric PID can't be recycled while it remains our unreaped child; every discovered session descendant
-    /// is signaled only after exact pidfd acquisition and identity revalidation. Reaping happens last.
+    /// Wait until the pidfd-retained session leader is the exact retained flock executable and has opened the exact
+    /// parent-locked gate. Signal-zero checks on both sides bind the numeric proc observations to the live pidfd task.
     /// </summary>
-    private static async Task<bool> TerminateUnretainedStartupProcessAsync(Process process, int? sessionId)
+    private static async Task<bool> WaitForExactGateHelperAsync(
+        int processId,
+        SafeFileHandle leaderPidfd,
+        KernelFileIdentity expectedExecutable,
+        KernelFileIdentity expectedGate,
+        TimeSpan timeout,
+        Func<ProcessSessionIdentity, ProcessSessionIdentity>? transformIdentityForTesting
+    )
     {
         Stopwatch deadline = Stopwatch.StartNew();
-        try
+        while (deadline.Elapsed < timeout)
         {
-            // Process remains our known unreaped child, so its numeric PID cannot identify an unrelated task here.
-            process.Kill();
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-            // An already exited but unreaped direct child is also safe to reap below.
-        }
+            if (!IsPidfdAlive(leaderPidfd))
+                return false;
 
-        bool sessionClean = !sessionId.HasValue;
-        while (sessionId.HasValue && deadline.Elapsed < TeardownTimeout)
-        {
-            bool? sessionExists = TrySignalExactSessionMembers(
-                sessionId.Value,
-                deadline,
-                ignoredForExistence: sessionId.Value
-            );
-            if (!sessionExists.HasValue)
-                break;
-            if (!sessionExists.Value)
+            ProcessSessionIdentity? process = ReadProcessIdentity(processId);
+            if (process is not null && transformIdentityForTesting is not null)
+                process = transformIdentityForTesting(process.Value);
+            KernelFileIdentity? executable = TryReadPathIdentity($"/proc/{processId}/exe");
+            int? gateDescriptorCount = CountExactOpenDescriptors(processId, expectedGate);
+            if (IsExactGateHelperSnapshot(
+                processId,
+                process,
+                expectedExecutable,
+                executable,
+                gateDescriptorCount,
+                IsPidfdAlive(leaderPidfd)
+            ))
             {
-                sessionClean = true;
-                break;
+                return true;
             }
 
-            TimeSpan remaining = TeardownTimeout - deadline.Elapsed;
+            TimeSpan remaining = timeout - deadline.Elapsed;
             if (remaining <= TimeSpan.Zero)
                 break;
-            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, remaining.TotalMilliseconds))).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(10, remaining.TotalMilliseconds))).ConfigureAwait(false);
         }
+        return false;
+    }
 
+    internal static bool IsExactGateHelperSnapshot(
+        int processId,
+        ProcessSessionIdentity? process,
+        KernelFileIdentity expectedExecutable,
+        KernelFileIdentity? executable,
+        int? gateDescriptorCount,
+        bool pidfdAliveAfter
+    )
+    {
+        return process is not null
+            && process.Value.ProcessId == processId
+            && process.Value.ProcessGroupId == processId
+            && process.Value.SessionId == processId
+            && executable == expectedExecutable
+            && gateDescriptorCount == 1
+            && pidfdAliveAfter;
+    }
+
+    private static int? CountExactOpenDescriptors(int processId, KernelFileIdentity expected)
+    {
+        try
+        {
+            int count = 0;
+            int matches = 0;
+            foreach (string path in Directory.EnumerateFileSystemEntries($"/proc/{processId}/fd"))
+            {
+                if (++count > 1024)
+                    return null;
+                if (TryReadPathIdentity(path) == expected)
+                    matches++;
+            }
+            return matches;
+        }
+        catch (Exception exception) when (
+            exception is DirectoryNotFoundException
+                or IOException
+                or UnauthorizedAccessException
+        )
+        {
+        }
+        return null;
+    }
+
+    private static KernelFileIdentity? TryReadPathIdentity(string path)
+    {
+        try
+        {
+            if (statx_path(-100, path, 0, StatxBasicStats, out BundleStatx metadata) != 0)
+                return null;
+            return new KernelFileIdentity(metadata.Inode, metadata.DeviceMajor, metadata.DeviceMinor);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or IOException
+                or UnauthorizedAccessException
+        )
+        {
+            return null;
+        }
+    }
+
+    private static KernelFileIdentity GetKernelFileIdentity(SafeFileHandle handle)
+    {
+        if (statx(handle, "", AtEmptyPath | AtSymlinkNoFollow, StatxBasicStats, out BundleStatx metadata) != 0)
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        return new KernelFileIdentity(metadata.Inode, metadata.DeviceMajor, metadata.DeviceMinor);
+    }
+
+    private static bool IsPidfdAlive(SafeFileHandle pidfd)
+    {
+        long result = syscall_pidfd_send_signal(SystemCallPidfdSendSignal, pidfd, 0, IntPtr.Zero, 0);
+        return result == 0;
+    }
+
+    /// <summary>
+    /// Reap the retained system helper while the pre-exec gate stays locked. Its bounded flock timeout is the only
+    /// termination mechanism here; no numeric process authority or descendant scan is used before exact validation.
+    /// </summary>
+    private static async Task<bool> ReapGatedStartupProcessAsync(Process process, TimeSpan timeout)
+    {
         TryClose(process.StandardInput);
         TryClose(process.StandardOutput);
         TryClose(process.StandardError);
-        TimeSpan reapRemaining = TeardownTimeout - deadline.Elapsed;
-        if (reapRemaining <= TimeSpan.Zero)
-            return false;
         Task<bool> reaped = ReapStartupAsync(process);
-        if (await Task.WhenAny(reaped, Task.Delay(reapRemaining)).ConfigureAwait(false) != reaped)
+        if (await Task.WhenAny(reaped, Task.Delay(timeout)).ConfigureAwait(false) != reaped)
         {
             ObserveEventually(reaped);
             return false;
         }
-        return sessionClean && await reaped.ConfigureAwait(false);
+        return await reaped.ConfigureAwait(false);
     }
 
     private static async Task<bool> ReapStartupAsync(Process process)
@@ -677,11 +834,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     /// numeric /proc lookup. A wholly new same-UID session can theoretically reuse the numeric session ID between
     /// bounded scans; that non-hostile-same-UID residual is not claimed as race-free process containment.
     /// </summary>
-    private static bool? TrySignalExactSessionMembers(
-        int sessionId,
-        Stopwatch deadline,
-        int? ignoredForExistence = null
-    )
+    private static bool? TrySignalExactSessionMembers(int sessionId, Stopwatch deadline)
     {
         if (sessionId <= 0)
             return false;
@@ -704,10 +857,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 );
                 if (result == SessionMemberSignalResult.Failed)
                     return null;
-                if (
-                    processId != ignoredForExistence
-                    && result is (SessionMemberSignalResult.Signaled or SessionMemberSignalResult.GoneOrStale)
-                )
+                if (result is SessionMemberSignalResult.Signaled or SessionMemberSignalResult.GoneOrStale)
                     found = true;
             }
             return found;
@@ -897,8 +1047,20 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         out BundleStatx data
     );
 
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int statx_path(
+        int directory,
+        string path,
+        int flags,
+        uint mask,
+        out BundleStatx data
+    );
+
     [DllImport("libc", SetLastError = true)]
     private static extern int fcntl(SafeFileHandle descriptor, int command, int argument);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int flock(SafeFileHandle descriptor, int operation);
 
     private readonly record struct BundleFileIdentity(
         ulong Inode,
@@ -908,6 +1070,8 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         ushort Mode,
         int Seals
     );
+
+    internal readonly record struct KernelFileIdentity(ulong Inode, uint DeviceMajor, uint DeviceMinor);
 
     [StructLayout(LayoutKind.Sequential, Size = 256)]
     private struct BundleStatx
@@ -964,7 +1128,95 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         Failed
     }
 
-    private sealed class SystemSetSidAuthority : IDisposable
+    /// <summary>
+    /// A parent-held anonymous advisory lock which prevents the retained flock helper from executing the verifier
+    /// until exact pidfd authority has been acquired for the new session leader.
+    /// </summary>
+    private sealed class PreExecGate : IDisposable
+    {
+        private const int LockExclusive = 2;
+        private const int LockNonBlocking = 4;
+        private const int LockUnlock = 8;
+        private const int GetDescriptorFlags = 1;
+        private const int CloseOnExec = 1;
+
+        private readonly SafeFileHandle Handle;
+        private bool Released;
+        private bool Quarantined;
+
+        public string ProcPath { get; }
+        public KernelFileIdentity Identity { get; }
+
+        private PreExecGate(SafeFileHandle handle)
+        {
+            int descriptorFlags = fcntl(handle, GetDescriptorFlags, 0);
+            if (descriptorFlags < 0 || (descriptorFlags & CloseOnExec) == 0)
+                throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+            this.Handle = handle;
+            this.ProcPath = $"/proc/{Environment.ProcessId}/fd/{checked((int)handle.DangerousGetHandle())}";
+            this.Identity = GetKernelFileIdentity(handle);
+        }
+
+        public static PreExecGate CreateLocked()
+        {
+            SafeFileHandle? handle = null;
+            try
+            {
+                handle = LinuxSealedFile.CreateAnonymous("smapi-attestation-pre-exec-gate");
+                if (flock(handle, LockExclusive | LockNonBlocking) != 0)
+                    throw new LinuxNativeIOException("flock failed", Marshal.GetLastWin32Error());
+                PreExecGate result = new(handle);
+                handle = null;
+                return result;
+            }
+            catch (PackageSecurityException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or NotSupportedException
+                    or UnauthorizedAccessException
+            )
+            {
+                throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+            }
+            finally
+            {
+                handle?.Dispose();
+            }
+        }
+
+        public void Release()
+        {
+            if (this.Released)
+                return;
+            if (flock(this.Handle, LockUnlock) != 0)
+                throw new PackageSecurityException("The GitHub attestation verifier couldn't retain exact process authority.");
+            this.Released = true;
+        }
+
+        public void QuarantineLocked()
+        {
+            if (this.Released || this.Quarantined)
+                return;
+            lock (QuarantinedGateLock)
+            {
+                if (QuarantinedGate is not null)
+                    throw new PackageSecurityException("The GitHub attestation verifier couldn't retain or terminate exact process authority.");
+                QuarantinedGate = this.Handle;
+                this.Quarantined = true;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (!this.Quarantined)
+                this.Handle.Dispose();
+        }
+    }
+
+    private sealed class SystemExecutableAuthority : IDisposable
     {
         private const int AtEmptyPath = 0x1000;
         private const int AtSymlinkNoFollow = 0x100;
@@ -974,21 +1226,23 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         private const int RequiredReadExecuteMode = 0x16d; // 0555
         private const int GroupOtherWriteMode = 0x12; // 0022
         private const int SpecialMode = 0xe00; // 07000
-        private const long MaximumSetSidBytes = 4L * 1024 * 1024;
+        private const long MaximumExecutableBytes = 4L * 1024 * 1024;
 
         private readonly LinuxAnchoredFileSystem FileSystem;
         private readonly LinuxAnchoredFile File;
 
         public string ProcPath { get; }
+        public KernelFileIdentity Identity { get; }
 
-        private SystemSetSidAuthority(LinuxAnchoredFileSystem fileSystem, LinuxAnchoredFile file)
+        private SystemExecutableAuthority(LinuxAnchoredFileSystem fileSystem, LinuxAnchoredFile file)
         {
             this.FileSystem = fileSystem;
             this.File = file;
             this.ProcPath = $"/proc/{Environment.ProcessId}/fd/{checked((int)file.Handle.DangerousGetHandle())}";
+            this.Identity = GetKernelFileIdentity(file.Handle);
         }
 
-        public static SystemSetSidAuthority Open(string path)
+        public static SystemExecutableAuthority Open(string path)
         {
             if (!OperatingSystem.IsLinux() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
                 throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
@@ -1017,7 +1271,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                         "",
                         AtEmptyPath | AtSymlinkNoFollow,
                         StatxBasicStats,
-                        out SystemSetSidStatx metadata
+                        out SystemExecutableStatx metadata
                     ) != 0
                 )
                 {
@@ -1029,7 +1283,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                     (mode & FileTypeMask) != FileTypeRegular
                     || metadata.UserId != 0
                     || metadata.LinkCount != 1
-                    || metadata.Size is 0 or > MaximumSetSidBytes
+                    || metadata.Size is 0 or > MaximumExecutableBytes
                     || (mode & RequiredReadExecuteMode) != RequiredReadExecuteMode
                     || (mode & GroupOtherWriteMode) != 0
                     || (mode & SpecialMode) != 0
@@ -1038,7 +1292,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                     throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
                 }
 
-                SystemSetSidAuthority result = new(fileSystem, file);
+                SystemExecutableAuthority result = new(fileSystem, file);
                 fileSystem = null;
                 file = null;
                 return result;
@@ -1076,11 +1330,11 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             string path,
             int flags,
             uint mask,
-            out SystemSetSidStatx data
+            out SystemExecutableStatx data
         );
 
         [StructLayout(LayoutKind.Sequential, Size = 256)]
-        private struct SystemSetSidStatx
+        private struct SystemExecutableStatx
         {
             public uint Mask;
             public uint BlockSize;

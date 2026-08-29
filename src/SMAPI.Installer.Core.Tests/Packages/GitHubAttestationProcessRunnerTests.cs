@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Text;
 using FluentAssertions;
@@ -404,43 +403,150 @@ internal sealed class GitHubAttestationProcessRunnerTests
     }
 
     [Test]
-    public async Task RunAsync_LeaderPidfdAcquisitionFailureTerminatesUnreapedChildAndExactDescendants()
+    public async Task RunAsync_DoesNotExecuteVerifierBeforeLeaderPidfdAcquisition()
     {
-        string leaderPidFile = Path.Combine(this.TempDirectory, "startup-failure-leader.pid");
-        string descendantPidFile = Path.Combine(this.TempDirectory, "startup-failure-descendant.pid");
-        string processMarker = Path.Combine(this.TempDirectory, "startup-failure-must-not-continue");
+        string processMarker = Path.Combine(this.TempDirectory, "pidfd-gate-success");
+        bool gateObserved = false;
+        string script = this.Script("/usr/bin/touch \"$1\"\n/usr/bin/printf 'verified-json'");
+        GitHubAttestationProcessRunner runner = new(
+            beforeLeaderPidfdOpenForTesting: pid =>
+            {
+                Directory.Exists($"/proc/{pid}").Should().BeTrue("the retained system helper should be alive behind the gate");
+                File.Exists(processMarker).Should().BeFalse("the verifier must not execute before exact pidfd acquisition");
+                gateObserved = true;
+            }
+        );
+
+        GitHubAttestationProcessResult result = await runner.RunAsync(this.Request(script, [processMarker]));
+
+        gateObserved.Should().BeTrue();
+        result.StandardOutput.Should().Be("verified-json");
+        File.Exists(processMarker).Should().BeTrue("the verifier may execute only after exact pidfd acquisition");
+    }
+
+    [Test]
+    public async Task RunAsync_RejectsConcurrentLaunchBeforeStartWithoutDisturbingActiveVerifier()
+    {
+        string firstMarker = Path.Combine(this.TempDirectory, "first-verifier-running");
+        string secondMarker = Path.Combine(this.TempDirectory, "concurrent-verifier-must-not-run");
+        string firstScript = this.Script("/usr/bin/touch \"$1\"\n/usr/bin/sleep 1\n/usr/bin/printf 'first-verified'");
+        string secondScript = this.Script("/usr/bin/touch \"$1\"");
+        string? secondPrivateDirectory = null;
+        GitHubAttestationProcessRunner secondRunner = new(
+            afterPrivateDirectoryCreatedForTesting: path => secondPrivateDirectory = path
+        );
+        Task<GitHubAttestationProcessResult> first = this.Runner.RunAsync(this.Request(firstScript, [firstMarker]));
+        await WaitForFileAsync(firstMarker);
+
+        Func<Task> second = async () => await secondRunner.RunAsync(this.Request(secondScript, [secondMarker]));
+
+        await second.Should().ThrowAsync<PackageSecurityException>()
+            .WithMessage("The GitHub attestation verifier couldn't be started safely.");
+        secondPrivateDirectory.Should().BeNull("a concurrent verifier must be rejected before any private state or process is created");
+        File.Exists(secondMarker).Should().BeFalse();
+        GitHubAttestationProcessResult firstResult = await first;
+        firstResult.StandardOutput.Should().Be("first-verified", "the rejected launch must not disturb the active verifier");
+        _ = await secondRunner.RunAsync(this.Request(secondScript, [secondMarker]));
+        File.Exists(secondMarker).Should().BeTrue("the serialized launch boundary must reopen after normal completion");
+    }
+
+    [Test]
+    public async Task RunAsync_LeaderPidfdAcquisitionFailureKeepsVerifierGatedAndReapsDirectHelper()
+    {
+        string processMarker = Path.Combine(this.TempDirectory, "pidfd-gate-failure-must-not-run");
         string privateSecret = Path.Combine(this.TempDirectory, "private-pidfd-error");
         string? privateDirectory = null;
-        string script = this.Script("""
-            /usr/bin/sleep 30 </dev/null >/dev/null 2>&1 &
-            /usr/bin/printf '%s' "$!" > "$2"
-            /usr/bin/printf '%s' "$$" > "$1"
-            /usr/bin/sleep 1
-            /usr/bin/touch "$3"
-            exec /usr/bin/sleep 30
-            """);
+        int? helperPid = null;
+        string script = this.Script("/usr/bin/touch \"$1\"\nexec /usr/bin/sleep 30");
         GitHubAttestationProcessRunner runner = new(
             afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
-            openLeaderPidfdForTesting: _ =>
+            beforeLeaderPidfdOpenForTesting: pid =>
             {
-                WaitForFileSynchronously(descendantPidFile);
+                helperPid = pid;
+                Directory.Exists($"/proc/{pid}").Should().BeTrue();
+                File.Exists(processMarker).Should().BeFalse("the verifier must remain blocked behind the parent-held gate");
                 throw new IOException($"synthetic private pidfd failure: {privateSecret}");
             }
         );
 
-        Func<Task> action = async () => await runner.RunAsync(
-            this.Request(script, [leaderPidFile, descendantPidFile, processMarker])
-        );
+        Func<Task> action = async () => await runner.RunAsync(this.Request(script, [processMarker]));
 
         PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
         exception.Message.Should().Be("The GitHub attestation verifier couldn't retain exact process authority.");
-        exception.ToString().Should().NotContain(privateSecret).And.NotContain(descendantPidFile);
-        int leaderPid = int.Parse(await File.ReadAllTextAsync(leaderPidFile));
-        int descendantPid = int.Parse(await File.ReadAllTextAsync(descendantPidFile));
-        Directory.Exists($"/proc/{leaderPid}").Should().BeFalse("the known direct child must be terminated and reaped");
-        Directory.Exists($"/proc/{descendantPid}").Should().BeFalse("session descendants must be terminated through exact pidfds");
-        File.Exists(processMarker).Should().BeFalse("the verifier must not continue after pidfd acquisition fails");
+        exception.ToString().Should().NotContain(privateSecret);
+        helperPid.Should().NotBeNull();
+        Directory.Exists($"/proc/{helperPid}").Should().BeFalse("the still-gated direct helper must be terminated and reaped");
+        File.Exists(processMarker).Should().BeFalse("the verifier must never execute after pidfd acquisition fails");
         Directory.Exists(privateDirectory).Should().BeFalse("the runner-owned private directory must still be cleaned");
+    }
+
+    [Test]
+    public async Task RunAsync_CancellationBeforeGateReleaseKeepsVerifierGatedAndReapsDirectHelper()
+    {
+        string processMarker = Path.Combine(this.TempDirectory, "cancelled-gate-must-not-run");
+        string? privateDirectory = null;
+        int? helperPid = null;
+        using CancellationTokenSource cancellation = new();
+        GitHubAttestationProcessRunner runner = new(
+            afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
+            beforeLeaderPidfdOpenForTesting: pid =>
+            {
+                helperPid = pid;
+                File.Exists(processMarker).Should().BeFalse();
+                cancellation.Cancel();
+            }
+        );
+        string script = this.Script("/usr/bin/touch \"$1\"\nexec /usr/bin/sleep 30");
+
+        Func<Task> action = async () => await runner.RunAsync(this.Request(script, [processMarker]), cancellation.Token);
+
+        await action.Should().ThrowAsync<OperationCanceledException>();
+        helperPid.Should().NotBeNull();
+        Directory.Exists($"/proc/{helperPid}").Should().BeFalse("the gated helper must be terminated and reaped before cancellation propagates");
+        File.Exists(processMarker).Should().BeFalse("the cancelled verifier must never execute");
+        Directory.Exists(privateDirectory).Should().BeFalse("the runner-owned private directory must still be cleaned");
+    }
+
+    [Test]
+    public async Task RunAsync_RejectsEarlySystemHelperExitBeforeExactGateValidation()
+    {
+        string processMarker = Path.Combine(this.TempDirectory, "early-helper-exit-must-not-run");
+        string? privateDirectory = null;
+        GitHubAttestationProcessRunner runner = new(
+            flockPath: "/usr/bin/true",
+            afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path
+        );
+        string script = this.Script("/usr/bin/touch \"$1\"");
+
+        Func<Task> action = async () => await runner.RunAsync(this.Request(script, [processMarker]));
+
+        await action.Should().ThrowAsync<PackageSecurityException>()
+            .WithMessage("The GitHub attestation verifier couldn't retain exact process authority.");
+        File.Exists(processMarker).Should().BeFalse("an exited or invalid helper must never release the verifier gate");
+        Directory.Exists(privateDirectory).Should().BeFalse("the runner-owned private directory must still be cleaned");
+    }
+
+    [Test]
+    public async Task RunAsync_LiveHelperWithRejectedSessionEvidenceNeverReleasesGate()
+    {
+        string processMarker = Path.Combine(this.TempDirectory, "invalid-live-helper-must-not-run");
+        int? helperPid = null;
+        string? privateDirectory = null;
+        GitHubAttestationProcessRunner runner = new(
+            afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
+            beforeLeaderPidfdOpenForTesting: pid => helperPid = pid,
+            transformGateHelperIdentityForTesting: identity => identity with { SessionId = identity.SessionId + 1 }
+        );
+        string script = this.Script("/usr/bin/touch \"$1\"");
+
+        Func<Task> action = async () => await runner.RunAsync(this.Request(script, [processMarker]));
+
+        await action.Should().ThrowAsync<PackageSecurityException>()
+            .WithMessage("The GitHub attestation verifier couldn't retain exact process authority.");
+        helperPid.Should().NotBeNull();
+        Directory.Exists($"/proc/{helperPid}").Should().BeFalse("the live but unvalidated helper must time out and be reaped");
+        File.Exists(processMarker).Should().BeFalse("rejected live session evidence must never unlock the verifier");
+        Directory.Exists(privateDirectory).Should().BeFalse();
     }
 
     [Test]
@@ -561,7 +667,7 @@ internal sealed class GitHubAttestationProcessRunnerTests
     }
 
     [Test]
-    public async Task RunAsync_RejectsSymlinkOrUserOwnedSetSidAuthority()
+    public async Task RunAsync_RejectsSymlinkOrUserOwnedSystemExecutableAuthority()
     {
         string symlink = Path.Combine(this.TempDirectory, "setsid-link");
         File.CreateSymbolicLink(symlink, "/usr/bin/setsid");
@@ -577,16 +683,24 @@ internal sealed class GitHubAttestationProcessRunnerTests
                 | UnixFileMode.OtherRead
                 | UnixFileMode.OtherExecute
         );
-        string script = this.Script("/usr/bin/printf 'must-not-run'");
+        string processMarker = Path.Combine(this.TempDirectory, "unsafe-system-executable-must-not-run");
+        string script = this.Script($"/usr/bin/touch '{processMarker}'");
 
-        foreach (string unsafeSetSid in new[] { symlink, userOwned })
+        foreach (string unsafeSystemExecutable in new[] { symlink, userOwned })
         {
-            GitHubAttestationProcessRunner runner = new(unsafeSetSid);
-            Func<Task> action = async () => await runner.RunAsync(this.Request(script));
+            foreach (GitHubAttestationProcessRunner runner in new[]
+            {
+                new GitHubAttestationProcessRunner(setSidPath: unsafeSystemExecutable),
+                new GitHubAttestationProcessRunner(flockPath: unsafeSystemExecutable)
+            })
+            {
+                Func<Task> action = async () => await runner.RunAsync(this.Request(script));
 
-            PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
-            exception.Message.Should().Be("The GitHub attestation verifier couldn't be started safely.");
-            exception.ToString().Should().NotContain(unsafeSetSid);
+                PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+                exception.Message.Should().Be("The GitHub attestation verifier couldn't be started safely.");
+                exception.ToString().Should().NotContain(unsafeSystemExecutable);
+                File.Exists(processMarker).Should().BeFalse("a symlink swap or user-owned helper must be rejected before process start");
+            }
         }
     }
 
@@ -597,6 +711,30 @@ internal sealed class GitHubAttestationProcessRunnerTests
         Action action = () => this.Request(executable);
 
         action.Should().Throw<ArgumentException>().WithParameterName("executablePath");
+    }
+
+    [Test]
+    public void ExactGateHelperSnapshot_RequiresLiveExactExecutableSessionAndOneGateDescriptor()
+    {
+        const int processId = 4242;
+        GitHubAttestationProcessRunner.ProcessSessionIdentity session = new(processId, processId, processId, 100);
+        GitHubAttestationProcessRunner.KernelFileIdentity flock = new(11, 8, 1);
+        GitHubAttestationProcessRunner.KernelFileIdentity other = new(12, 8, 1);
+
+        GitHubAttestationProcessRunner.IsExactGateHelperSnapshot(processId, session, flock, flock, 1, true)
+            .Should().BeTrue();
+        GitHubAttestationProcessRunner.IsExactGateHelperSnapshot(processId, session, flock, other, 1, true)
+            .Should().BeFalse("a different executable must never release the gate");
+        GitHubAttestationProcessRunner.IsExactGateHelperSnapshot(processId, session with { ProcessGroupId = 7 }, flock, flock, 1, true)
+            .Should().BeFalse("the helper must be its exact process-group and session leader");
+        GitHubAttestationProcessRunner.IsExactGateHelperSnapshot(processId, session with { SessionId = 7 }, flock, flock, 1, true)
+            .Should().BeFalse("a different session must never release the gate");
+        GitHubAttestationProcessRunner.IsExactGateHelperSnapshot(processId, session, flock, flock, 0, true)
+            .Should().BeFalse("the exact gate must already be open");
+        GitHubAttestationProcessRunner.IsExactGateHelperSnapshot(processId, session, flock, flock, 2, true)
+            .Should().BeFalse("the close-on-exec gate must have exactly one helper descriptor");
+        GitHubAttestationProcessRunner.IsExactGateHelperSnapshot(processId, session, flock, flock, 1, false)
+            .Should().BeFalse("the final pidfd liveness check must succeed");
     }
 
     [TestCase(false, GitHubAttestationProcessRunner.SessionMemberSignalResult.Signaled, 1)]
@@ -702,15 +840,6 @@ internal sealed class GitHubAttestationProcessRunnerTests
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
         while (!File.Exists(path))
             await Task.Delay(10, timeout.Token);
-    }
-
-    private static void WaitForFileSynchronously(string path)
-    {
-        Stopwatch timeout = Stopwatch.StartNew();
-        while (!File.Exists(path) && timeout.Elapsed < TimeSpan.FromSeconds(5))
-            Thread.Sleep(10);
-        if (!File.Exists(path))
-            throw new AssertionException("The startup-failure fixture didn't publish its descendant PID in time.");
     }
 
     private static async Task WaitForProcessExitAsync(int processId)
