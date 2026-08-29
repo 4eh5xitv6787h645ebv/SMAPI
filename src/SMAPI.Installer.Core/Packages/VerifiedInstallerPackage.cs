@@ -13,6 +13,7 @@ namespace StardewModdingAPI.Installer.Core.Packages;
 public sealed class VerifiedInstallerPackage : IDisposable, IAsyncDisposable
 {
     private readonly SafeFileHandle? RetainedManifest;
+    private VerifiedTaggedPackageTrust? ReleaseTrust;
     private int Disposed;
 
     /// <summary>The exact cross-verified release identity.</summary>
@@ -29,6 +30,8 @@ public sealed class VerifiedInstallerPackage : IDisposable, IAsyncDisposable
 
     internal VerifiedReleasePackage Package { get; }
     internal PackageManifest Manifest { get; }
+
+    internal VerifiedTaggedPackageTrust? Trust => Volatile.Read(ref this.ReleaseTrust);
 
     internal VerifiedInstallerPackage(
         VerifiedReleasePackage package,
@@ -62,6 +65,20 @@ public sealed class VerifiedInstallerPackage : IDisposable, IAsyncDisposable
         if (Volatile.Read(ref this.Disposed) != 0)
             throw new ObjectDisposedException(nameof(VerifiedInstallerPackage));
         _ = this.Package.GetArtifact(this.Release.PackageAssetName);
+    }
+
+    internal void BindTrust(VerifiedTaggedPackageTrust trust)
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(trust);
+        if (this.Manifest.SchemaVersion != PackageManifest.CurrentSchemaVersion || this.Manifest.ReleaseAuthorityPolicy is null)
+            throw new PackageSecurityException("Tagged release authority requires a schema-4 install manifest.");
+        if (!trust.Identity.Equals(this.Release) || !this.Manifest.ReleaseAuthorityPolicy.Matches(trust))
+            throw new PackageSecurityException("Verified release evidence doesn't match the exact manifest authority policy.");
+        if (trust.ManifestSubject.Sha256 != this.ManifestSha256 || trust.ManifestSubject.ObservedSizeBytes != this.ManifestSizeBytes)
+            throw new PackageSecurityException("Verified release evidence doesn't bind the exact retained install manifest.");
+        if (Interlocked.CompareExchange(ref this.ReleaseTrust, trust, null) is not null)
+            throw new InvalidOperationException("Release trust was already bound to this package authority.");
     }
 
     /// <summary>Lease the exact immutable manifest descriptor for an external verifier.</summary>

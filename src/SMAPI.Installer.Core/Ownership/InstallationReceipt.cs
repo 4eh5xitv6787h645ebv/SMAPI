@@ -74,11 +74,13 @@ public sealed record LauncherReceipt
 /// <summary>The immutable ownership receipt committed after a successful installation transaction.</summary>
 public sealed class InstallationReceipt
 {
-    /// <summary>The only currently supported receipt schema.</summary>
-    public const int CurrentSchemaVersion = 3;
+    /// <summary>The current release-authority receipt schema.</summary>
+    public const int CurrentSchemaVersion = 4;
+
+    internal const int LegacySchemaVersion = 3;
 
     /// <summary>The receipt schema.</summary>
-    public int SchemaVersion => InstallationReceipt.CurrentSchemaVersion;
+    public int SchemaVersion { get; }
 
     /// <summary>The exact installed release.</summary>
     public InstallationReleaseIdentity Release { get; }
@@ -95,13 +97,18 @@ public sealed class InstallationReceipt
     /// <summary>The installed and original launcher hashes.</summary>
     public LauncherReceipt Launcher { get; }
 
+    /// <summary>Curated URL-free release evidence for a schema-4 installation.</summary>
+    public VerifiedTaggedPackageTrust? ReleaseTrust { get; }
+
     /// <summary>Construct and validate an immutable installation receipt.</summary>
     internal InstallationReceipt(
         InstallationReleaseIdentity release,
         Sha256Digest manifestSha256,
         string transactionId,
         IEnumerable<InstallationReceiptEntry> entries,
-        LauncherReceipt launcher
+        LauncherReceipt launcher,
+        VerifiedTaggedPackageTrust? releaseTrust = null,
+        int? schemaVersion = null
     )
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -110,6 +117,15 @@ public sealed class InstallationReceipt
         ArgumentNullException.ThrowIfNull(launcher);
         if (!IsCanonicalTransactionId(transactionId))
             throw new ArgumentException("The transaction ID must contain 32 lowercase hexadecimal characters.", nameof(transactionId));
+        int actualSchemaVersion = schemaVersion ?? (releaseTrust is null
+            ? InstallationReceipt.LegacySchemaVersion
+            : InstallationReceipt.CurrentSchemaVersion);
+        if (actualSchemaVersion is not (InstallationReceipt.LegacySchemaVersion or InstallationReceipt.CurrentSchemaVersion))
+            throw new ArgumentOutOfRangeException(nameof(schemaVersion));
+        if ((actualSchemaVersion == InstallationReceipt.CurrentSchemaVersion) != (releaseTrust is not null))
+            throw new ArgumentException("Receipt schema 4 requires exact release evidence, and legacy schema 3 forbids it.", nameof(releaseTrust));
+        if (releaseTrust is not null && !releaseTrust.Identity.Equals(release))
+            throw new ArgumentException("The release evidence doesn't match the receipt release.", nameof(releaseTrust));
 
         InstallationReceiptEntry[] ordered = entries.OrderBy(entry => entry.Path.Value, StringComparer.Ordinal).ToArray();
         if (ordered.Length == 0)
@@ -127,11 +143,13 @@ public sealed class InstallationReceipt
             throw new ArgumentException("The receipt must contain exactly one launcher matching its launcher receipt.", nameof(entries));
         }
 
+        this.SchemaVersion = actualSchemaVersion;
         this.Release = release;
         this.ManifestSha256 = manifestSha256;
         this.TransactionId = transactionId;
         this.Entries = new ReadOnlyCollection<InstallationReceiptEntry>(ordered);
         this.Launcher = launcher;
+        this.ReleaseTrust = releaseTrust;
     }
 
     /// <summary>Serialize in canonical property and entry order.</summary>
@@ -145,6 +163,11 @@ public sealed class InstallationReceipt
             writer.WritePropertyName("release");
             CanonicalOwnershipJson.WriteRelease(writer, this.Release);
             writer.WriteString("manifest_sha256", this.ManifestSha256.Value);
+            if (this.SchemaVersion == InstallationReceipt.CurrentSchemaVersion)
+            {
+                writer.WritePropertyName("release_authority_evidence");
+                CanonicalOwnershipJson.WriteReleaseAuthorityEvidence(writer, this.ReleaseTrust!);
+            }
             writer.WriteString("transaction_id", this.TransactionId);
             writer.WriteStartArray("entries");
             foreach (InstallationReceiptEntry entry in this.Entries)

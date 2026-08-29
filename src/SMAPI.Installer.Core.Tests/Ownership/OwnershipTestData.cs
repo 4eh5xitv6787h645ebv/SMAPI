@@ -58,6 +58,60 @@ internal static class OwnershipTestData
         );
     }
 
+    public static PackageManifest AuthorityManifest(InstallationReleaseIdentity? release = null)
+    {
+        InstallationReleaseIdentity actualRelease = release ?? Release();
+        return new PackageManifest(
+            actualRelease,
+            [Entry("StardewValley", '1', OwnedEntryKind.Launcher, mode: 493)],
+            [GeneratedFileRecipe.CreateCopyGameDepsTemplate()],
+            PackageManifest.CurrentSchemaVersion,
+            TaggedReleaseAuthorityPolicy.Create(actualRelease)
+        );
+    }
+
+    public static VerifiedTaggedPackageTrust Trust(PackageManifest manifest)
+    {
+        (Sha256Digest manifestSha256, long manifestSizeBytes) = manifest.GetAttestedTemplateIdentity();
+        InstallationReleaseIdentity release = manifest.Release;
+        VerifiedGitHubWorkflowEvidence evidence = new(
+            release,
+            release.Repository,
+            $"refs/tags/{release.Tag}",
+            release.SourceCommit,
+            release.BuildWorkflow,
+            $"https://github.com/{release.BuildWorkflow}",
+            $"https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/123456/attempts/2",
+            VerifiedGitHubWorkflowEvidence.RequiredRunnerEnvironment,
+            VerifiedGitHubWorkflowEvidence.RequiredTrigger,
+            VerifiedGitHubWorkflowEvidence.ReviewedRepositoryIdentifier,
+            VerifiedGitHubWorkflowEvidence.ReviewedRepositoryOwnerIdentifier,
+            new DateTimeOffset(2026, 8, 29, 1, 2, 3, TimeSpan.Zero)
+        );
+        return new VerifiedTaggedPackageTrust(
+            release,
+            new VerifiedAttestedSubject(release.PackageAssetName, release.PackageSha256, release.PackageSizeBytes),
+            new VerifiedAttestedSubject($"SMAPI-{release.EmbeddedVersion}-linux-x64-install-manifest.json", manifestSha256, manifestSizeBytes),
+            manifestSha256,
+            manifestSizeBytes,
+            evidence
+        );
+    }
+
+    public static InstallationReceipt AuthorityReceipt(PackageManifest manifest)
+    {
+        PackageManifestEntry launcher = manifest.Entries.Single(entry => entry.Kind == OwnedEntryKind.Launcher);
+        return new InstallationReceipt(
+            manifest.Release,
+            manifest.GetCanonicalDigest(),
+            new string('d', 32),
+            manifest.Entries.Select(entry => new InstallationReceiptEntry(entry.Path, entry.Sha256, entry.UnixMode, entry.Kind)),
+            new LauncherReceipt(launcher.Sha256, Digest('f')),
+            Trust(manifest),
+            InstallationReceipt.CurrentSchemaVersion
+        );
+    }
+
     public static CurrentFile Current(PackageManifestEntry entry, char? digest = null, int? mode = null)
     {
         return new CurrentFile(entry.Path, digest.HasValue ? Digest(digest.Value) : entry.Sha256, mode ?? entry.UnixMode);

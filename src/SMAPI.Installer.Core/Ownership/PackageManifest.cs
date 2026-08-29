@@ -95,10 +95,11 @@ public sealed class PackageManifestEntry
 /// <summary>A verified package's immutable intended installation layout.</summary>
 public sealed class PackageManifest
 {
-    /// <summary>The current manifest schema. Schema 2 remains readable for existing package and installation state.</summary>
-    public const int CurrentSchemaVersion = 3;
+    /// <summary>The current release-authority manifest schema.</summary>
+    public const int CurrentSchemaVersion = 4;
 
     internal const int LegacySchemaVersion = 2;
+    internal const int GeneratedFilesSchemaVersion = 3;
 
     /// <summary>The manifest schema.</summary>
     public int SchemaVersion { get; }
@@ -112,6 +113,9 @@ public sealed class PackageManifest
     /// <summary>Descriptor-anchored game-derived files, sorted by destination.</summary>
     public IReadOnlyList<GeneratedFileRecipe> GeneratedFiles { get; }
 
+    /// <summary>The exact tagged-release policy committed by a schema-4 manifest.</summary>
+    public TaggedReleaseAuthorityPolicy? ReleaseAuthorityPolicy { get; }
+
     /// <summary>Whether every declared generated file has an exact inspected source and result entry.</summary>
     internal bool HasResolvedGeneratedFiles => this.GeneratedFiles.All(recipe => recipe.SourceIdentity is not null);
 
@@ -120,7 +124,8 @@ public sealed class PackageManifest
         InstallationReleaseIdentity release,
         IEnumerable<PackageManifestEntry> entries,
         IEnumerable<GeneratedFileRecipe>? generatedFiles = null,
-        int schemaVersion = PackageManifest.CurrentSchemaVersion
+        int? schemaVersion = null,
+        TaggedReleaseAuthorityPolicy? releaseAuthorityPolicy = null
     )
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -130,10 +135,17 @@ public sealed class PackageManifest
         GeneratedFileRecipe[] orderedGenerated = (generatedFiles ?? Array.Empty<GeneratedFileRecipe>())
             .OrderBy(entry => entry.Path.Value, StringComparer.Ordinal)
             .ToArray();
-        if (schemaVersion is not (PackageManifest.LegacySchemaVersion or PackageManifest.CurrentSchemaVersion))
+        int actualSchemaVersion = schemaVersion ?? (releaseAuthorityPolicy is null
+            ? PackageManifest.GeneratedFilesSchemaVersion
+            : PackageManifest.CurrentSchemaVersion);
+        if (actualSchemaVersion is not (PackageManifest.LegacySchemaVersion or PackageManifest.GeneratedFilesSchemaVersion or PackageManifest.CurrentSchemaVersion))
             throw new ArgumentOutOfRangeException(nameof(schemaVersion));
-        if (schemaVersion == PackageManifest.LegacySchemaVersion && orderedGenerated.Length != 0)
+        if (actualSchemaVersion == PackageManifest.LegacySchemaVersion && orderedGenerated.Length != 0)
             throw new ArgumentException("Manifest schema 2 can't contain generated-file recipes.", nameof(generatedFiles));
+        if ((actualSchemaVersion == PackageManifest.CurrentSchemaVersion) != (releaseAuthorityPolicy is not null))
+            throw new ArgumentException("Manifest schema 4 requires one exact release-authority policy, and older schemas forbid it.", nameof(releaseAuthorityPolicy));
+        if (releaseAuthorityPolicy is not null && !releaseAuthorityPolicy.Equals(TaggedReleaseAuthorityPolicy.Create(release)))
+            throw new ArgumentException("The release-authority policy doesn't match the exact manifest release.", nameof(releaseAuthorityPolicy));
         if (ordered.Length == 0)
             throw new ArgumentException("A package manifest must contain at least one owned file.", nameof(entries));
         OwnershipCollectionValidation.AssertDistinctFilePaths(ordered.Select(entry => entry.Path), nameof(entries));
@@ -153,15 +165,16 @@ public sealed class PackageManifest
             ))
                 throw new ArgumentException("A generated result entry must exactly copy its bound source identity.", nameof(entries));
         }
-        if (schemaVersion == PackageManifest.CurrentSchemaVersion && ordered.Any(entry => entry.Kind == OwnedEntryKind.GeneratedFile && orderedGenerated.All(recipe => !recipe.Path.Equals(entry.Path))))
-            throw new ArgumentException("A schema 3 generated entry must be authorized by an exact recipe.", nameof(entries));
+        if (actualSchemaVersion >= PackageManifest.GeneratedFilesSchemaVersion && ordered.Any(entry => entry.Kind == OwnedEntryKind.GeneratedFile && orderedGenerated.All(recipe => !recipe.Path.Equals(entry.Path))))
+            throw new ArgumentException("A generated entry must be authorized by an exact recipe.", nameof(entries));
         if (ordered.Count(entry => entry.Kind == OwnedEntryKind.Launcher && entry.Path.Value == "StardewValley") != 1)
             throw new ArgumentException("A Linux package manifest must contain exactly one installed launcher destination.", nameof(entries));
 
-        this.SchemaVersion = schemaVersion;
+        this.SchemaVersion = actualSchemaVersion;
         this.Release = release;
         this.Entries = new ReadOnlyCollection<PackageManifestEntry>(ordered);
         this.GeneratedFiles = new ReadOnlyCollection<GeneratedFileRecipe>(orderedGenerated);
+        this.ReleaseAuthorityPolicy = releaseAuthorityPolicy;
     }
 
     /// <summary>Serialize in canonical property and entry order.</summary>
@@ -186,7 +199,7 @@ public sealed class PackageManifest
                 writer.WriteEndObject();
             }
             writer.WriteEndArray();
-            if (this.SchemaVersion >= PackageManifest.CurrentSchemaVersion)
+            if (this.SchemaVersion >= PackageManifest.GeneratedFilesSchemaVersion)
             {
                 writer.WriteStartArray("generated_files");
                 foreach (GeneratedFileRecipe generated in this.GeneratedFiles)
@@ -209,6 +222,11 @@ public sealed class PackageManifest
                     writer.WriteEndObject();
                 }
                 writer.WriteEndArray();
+            }
+            if (this.SchemaVersion == PackageManifest.CurrentSchemaVersion)
+            {
+                writer.WritePropertyName("release_authority_policy");
+                CanonicalOwnershipJson.WriteReleaseAuthorityPolicy(writer, this.ReleaseAuthorityPolicy!);
             }
             writer.WriteEndObject();
         }
@@ -239,7 +257,24 @@ public sealed class PackageManifest
             recipe.SourceIdentity.UnixMode,
             OwnedEntryKind.GeneratedFile
         )).ToArray();
-        return new PackageManifest(this.Release, packageEntries.Concat(resultEntries), resolved);
+        return new PackageManifest(this.Release, packageEntries.Concat(resultEntries), resolved, this.SchemaVersion, this.ReleaseAuthorityPolicy);
+    }
+
+    /// <summary>Reconstruct the exact unresolved release manifest which was an attestation subject.</summary>
+    internal (Sha256Digest Sha256, long SizeBytes) GetAttestedTemplateIdentity()
+    {
+        if (this.SchemaVersion != PackageManifest.CurrentSchemaVersion || this.ReleaseAuthorityPolicy is null)
+            throw new InvalidOperationException("Only schema-4 manifests have a reconstructable attested release template.");
+
+        PackageManifest template = new(
+            this.Release,
+            this.Entries.Where(entry => entry.Kind != OwnedEntryKind.GeneratedFile),
+            this.GeneratedFiles.Select(recipe => new GeneratedFileRecipe(recipe.Path, recipe.Recipe, recipe.SourcePath)),
+            this.SchemaVersion,
+            this.ReleaseAuthorityPolicy
+        );
+        byte[] bytes = Encoding.UTF8.GetBytes(template.ToCanonicalJson());
+        return (Sha256Digest.Hash(bytes), bytes.LongLength);
     }
 }
 
@@ -307,5 +342,44 @@ internal static class CanonicalOwnershipJson
             OwnedEntryKind.GeneratedFile => "generated_file",
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
+    }
+
+    public static void WriteReleaseAuthorityPolicy(Utf8JsonWriter writer, TaggedReleaseAuthorityPolicy policy)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("kind", policy.Kind);
+        writer.WriteString("repository", policy.Repository);
+        writer.WriteString("source_reference", policy.SourceReference);
+        writer.WriteString("source_commit", policy.SourceCommit);
+        writer.WriteString("build_workflow", policy.BuildWorkflow);
+        writer.WriteString("runner_environment", policy.RunnerEnvironment);
+        writer.WriteString("trigger", policy.Trigger);
+        writer.WriteString("repository_identifier", policy.RepositoryIdentifier);
+        writer.WriteString("repository_owner_identifier", policy.RepositoryOwnerIdentifier);
+        writer.WriteString("package_subject_name", policy.PackageSubjectName);
+        writer.WriteString("manifest_subject_name", policy.ManifestSubjectName);
+        writer.WriteEndObject();
+    }
+
+    public static void WriteReleaseAuthorityEvidence(Utf8JsonWriter writer, VerifiedTaggedPackageTrust trust)
+    {
+        (ulong runId, int runAttempt) = trust.Evidence.GetRunIdentity();
+        writer.WriteStartObject();
+        writer.WriteString("kind", TaggedReleaseAuthorityPolicy.GitHubArtifactAttestationV1);
+        WriteAttestedSubject(writer, "package_subject", trust.PackageSubject);
+        WriteAttestedSubject(writer, "manifest_subject", trust.ManifestSubject);
+        writer.WriteString("run_id", runId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        writer.WriteNumber("run_attempt", runAttempt);
+        writer.WriteNumber("transparency_log_timestamp_utc_ticks", trust.Evidence.TransparencyLogTimestampUtc.UtcDateTime.Ticks);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteAttestedSubject(Utf8JsonWriter writer, string propertyName, VerifiedAttestedSubject subject)
+    {
+        writer.WriteStartObject(propertyName);
+        writer.WriteString("name", subject.Name);
+        writer.WriteString("sha256", subject.Sha256.Value);
+        writer.WriteNumber("size_bytes", subject.ObservedSizeBytes);
+        writer.WriteEndObject();
     }
 }

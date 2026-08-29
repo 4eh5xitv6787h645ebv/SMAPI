@@ -54,6 +54,22 @@ jobs:
                     git -C "$RUNNER_TEMP/StardewValley" checkout --detach FETCH_HEAD
                     [[ "$(git -C "$RUNNER_TEMP/StardewValley" rev-parse HEAD)" == "$REFERENCE_ASSEMBLIES_COMMIT" ]]
 
+            -   name: Acquire and validate pinned GitHub CLI
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    bash -n build/scripts/stage-pinned-github-cli.sh
+                    bash -n build/scripts/test-stage-pinned-github-cli.sh
+                    bash -n build/scripts/test-pinned-github-cli-callers.sh
+                    build/scripts/test-pinned-github-cli-callers.sh
+                    pinned_archive="$RUNNER_TEMP/gh_2.92.0_linux_amd64.tar.gz"
+                    pinned_root="$RUNNER_TEMP/pinned-github-cli"
+                    curl -fsSL --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
+                        https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_linux_amd64.tar.gz \
+                        -o "$pinned_archive"
+                    build/scripts/test-stage-pinned-github-cli.sh "$pinned_archive"
+                    build/scripts/stage-pinned-github-cli.sh "$pinned_archive" "$pinned_root"
+
             -   name: Build Linux installer
                 shell: pwsh
                 env:
@@ -63,6 +79,7 @@ jobs:
                     "$env:VERSION"
                     --linux-only
                     "--game-path=$env:RUNNER_TEMP/StardewValley"
+                    "--github-cli-directory=$env:RUNNER_TEMP/pinned-github-cli"
 
             -   name: Validate Linux installer
                 shell: bash
