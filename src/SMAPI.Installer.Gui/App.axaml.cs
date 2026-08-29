@@ -8,7 +8,7 @@ namespace StardewModdingAPI.Installer.Gui;
 public sealed partial class App : Application
 {
     private readonly GuiLaunchMode LaunchMode;
-    private readonly Func<GuiLaunchMode, Window> CreateMainWindow;
+    private readonly Func<GuiLaunchMode, Action<Window>, Window> CreateMainWindow;
 
     public App()
         : this(GuiLaunchMode.Demo)
@@ -16,13 +16,21 @@ public sealed partial class App : Application
     }
 
     internal App(GuiLaunchMode launchMode)
-        : this(launchMode, GuiComposition.CreateMainWindow)
+        : this(launchMode, (mode, activateNext) => GuiComposition.CreateMainWindow(mode, activateNext))
     {
     }
 
     internal App(
         GuiLaunchMode launchMode,
         Func<GuiLaunchMode, Window> createMainWindow
+    )
+        : this(launchMode, (mode, _) => createMainWindow(mode))
+    {
+    }
+
+    internal App(
+        GuiLaunchMode launchMode,
+        Func<GuiLaunchMode, Action<Window>, Window> createMainWindow
     )
     {
         if (!Enum.IsDefined(launchMode))
@@ -39,7 +47,15 @@ public sealed partial class App : Application
     public override void OnFrameworkInitializationCompleted()
     {
         if (this.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
-            desktop.MainWindow = this.CreateMainWindow(this.LaunchMode);
+        {
+            void ActivateNext(Window next)
+            {
+                next.Show();
+                desktop.MainWindow = next;
+            }
+
+            desktop.MainWindow = this.CreateMainWindow(this.LaunchMode, ActivateNext);
+        }
 
         base.OnFrameworkInitializationCompleted();
     }

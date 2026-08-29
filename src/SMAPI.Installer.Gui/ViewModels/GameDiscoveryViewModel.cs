@@ -112,6 +112,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     private EventHandler? FolderPickerRequestedValue;
     private EventHandler<GameCandidateSelectedEventArgs>? ContinueRequestedValue;
     private bool folderPickerPending;
+    private bool folderPickerFailed;
     private bool started;
     private bool disposed;
 
@@ -212,7 +213,8 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
 
     public bool IsEmptyVisible => this.snapshot.State == GameDiscoveryState.NoCandidates;
 
-    public bool IsProblemVisible => this.snapshot.SelectedCandidate is { State: not LinuxGameFolderStatus.Valid }
+    public bool IsProblemVisible => this.folderPickerFailed
+        || this.snapshot.SelectedCandidate is { State: not LinuxGameFolderStatus.Valid }
         || this.snapshot.State is GameDiscoveryState.ManualInvalid
         or GameDiscoveryState.Failed
         or GameDiscoveryState.SessionFaulted;
@@ -221,8 +223,9 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         ? AutomationLiveSetting.Off
         : AutomationLiveSetting.Polite;
 
-    public AutomationLiveSetting ProblemLiveSetting => this.snapshot.SelectedCandidate is { State: not LinuxGameFolderStatus.Valid }
-        || this.snapshot.State == GameDiscoveryState.ManualInvalid
+    public AutomationLiveSetting ProblemLiveSetting => !this.folderPickerFailed
+        && (this.snapshot.SelectedCandidate is { State: not LinuxGameFolderStatus.Valid }
+            || this.snapshot.State == GameDiscoveryState.ManualInvalid)
         ? AutomationLiveSetting.Polite
         : AutomationLiveSetting.Assertive;
 
@@ -241,6 +244,20 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public AsyncRelayCommand CancelCommand { get; }
 
     public RelayCommand ContinueCommand { get; }
+
+    /// <summary>Publish a sanitized retryable presentation failure from the desktop folder picker.</summary>
+    internal void ReportFolderPickerFailure()
+    {
+        if (this.disposed)
+            return;
+        this.folderPickerPending = false;
+        this.folderPickerFailed = true;
+        this.Heading = "The desktop folder picker could not open";
+        this.Message = "No folder was selected and no game files were changed. Try Browse again, or use the documented manual installer.";
+        this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
+        this.NotifyDerivedProperties();
+        this.FocusRequested?.Invoke(this, GameDiscoveryFocusTarget.Browse);
+    }
 
     public async Task StartAsync()
     {
@@ -313,6 +330,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         GameDiscoveryState priorState = this.snapshot.State;
         long priorGeneration = this.snapshot.Generation;
         this.snapshot = next;
+        this.folderPickerFailed = false;
         GameCandidateItem[] items = next.Candidates.Select(candidate => new GameCandidateItem(candidate)).ToArray();
         this.Candidates = items;
         GameCandidateItem? selected = next.SelectedCandidate is null
