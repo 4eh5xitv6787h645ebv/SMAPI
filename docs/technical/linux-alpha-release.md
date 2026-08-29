@@ -27,7 +27,8 @@ commit, tree, pinned game-reference commit, runner, SDKs, package size, and SHA-
 describe how the artifact was built, but only the package/manifest hashes and independently verified
 GitHub attestations establish published identity, integrity, and provenance. The workflow-run URL,
 runner, pinned reference-build commit, timestamp, and .NET details are bounded informational fields;
-clean-machine quartet verification does not authenticate them. Byte-for-byte reproducible ZIP
+clean-machine verification of the four primary package/metadata assets does not authenticate them.
+Byte-for-byte reproducible ZIP
 output is not claimed.
 
 ## Requirements and safety boundary
@@ -66,11 +67,11 @@ The checksum command must report `OK`. The attestation must identify this reposi
 `linux-alpha-release.yml` workflow. Inspect `build-metadata.json` and confirm that its package name,
 SHA-256, release tag, and full source commit match the release page.
 
-### Unreleased next-alpha quartet
+### Unreleased next-alpha six-asset set
 
 The published alpha.1 above has three assets and no install-manifest companion. A future tagged
 next-alpha build from source containing the Phase 4 package-authority work will instead publish an
-exact four-file set:
+exact six-file set. Its four primary package/metadata assets are:
 
 - the finalized installer ZIP;
 - `SMAPI-<embedded-version>-linux-x64-install-manifest.json`, a canonical external companion which
@@ -78,26 +79,52 @@ exact four-file set:
 - `SHA256SUMS`, with exactly two sorted subjects: the manifest followed by the installer ZIP; and
 - `build-metadata.json`, whose plural `artifacts` array records those same two subjects.
 
+The other two public assets are the GitHub attestation bundle
+`SMAPI-<embedded-version>-linux-x64-attestation-bundle.jsonl` and its `.sha256` sidecar. The sidecar
+detects transport corruption of the local bundle; only successful verification of the signed bundle
+under the pinned policy establishes provenance.
+
 The ZIP and manifest are both GitHub-attested. After a future release actually publishes that set,
-copy the two exact asset names from its release page and verify them together:
+copy the exact names, tag, and commit from its release page and verify them with GitHub CLI 2.92.0:
 
 ```bash
 package_name='COPY THE EXACT INSTALLER ZIP NAME HERE'
 manifest_name='COPY THE EXACT INSTALL MANIFEST NAME HERE'
+bundle_name='COPY THE EXACT ATTESTATION BUNDLE NAME HERE'
+release_tag='COPY THE EXACT RELEASE TAG HERE'
+release_commit='COPY THE EXACT 40-CHARACTER RELEASE COMMIT HERE'
 sha256sum --check --strict SHA256SUMS
-gh attestation verify "$package_name" -R 4eh5xitv6787h645ebv/SMAPI
-gh attestation verify "$manifest_name" -R 4eh5xitv6787h645ebv/SMAPI
+sha256sum --check --strict "$bundle_name.sha256"
+attestation_policy=(
+  --bundle "$bundle_name" \
+  --hostname github.com \
+  --repo 4eh5xitv6787h645ebv/SMAPI \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --cert-identity "https://github.com/4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/$release_tag" \
+  --signer-digest "$release_commit" \
+  --source-ref "refs/tags/$release_tag" \
+  --source-digest "$release_commit" \
+  --deny-self-hosted-runners \
+  --limit 2 \
+  --format json
+)
+gh attestation verify "$package_name" "${attestation_policy[@]}"
+gh attestation verify "$manifest_name" "${attestation_policy[@]}"
 ```
 
-Both checksum subjects must report `OK`, and both attestations must identify this repository, the
-tagged `linux-alpha-release.yml` workflow, and the selected release commit. A pull-request build,
-`develop` build, manual source build, or pre-tag workflow-dispatch candidate is non-authoritative:
+Both package/manifest checksum subjects and the bundle checksum must report `OK`, and both
+attestation-verification commands must succeed against the same downloaded bundle. The successful
+statement must identify this repository, the tagged `linux-alpha-release.yml` workflow, and the
+selected release commit, and contain exactly the package and manifest names and locally computed
+digests. A pull-request build, `develop` build, manual source build, or pre-tag workflow-dispatch candidate is non-authoritative:
 the production workflow records its actual identity and does not invoke the release-manifest
 creation path. The tool's tag-context check prevents accidental candidate minting, but it is not a
 cryptographic provenance boundary and its environment can be reproduced by a local caller. Only
-successful verification of both GitHub attestations against this repository, tagged workflow, and
-selected commit establishes published release authority. Do not substitute an unattested local or
-candidate quartet for the published tagged assets.
+successful verification of the GitHub attestation statement, whose subjects are exactly the package
+and manifest, against this repository, tagged workflow, and selected commit establishes published
+release authority. Do not substitute an unattested local or candidate four-primary-asset set for the
+published tagged six-asset set.
 
 ## Install
 
@@ -216,10 +243,11 @@ which the installer can accept as release authority. Only after the full test su
 lifecycle, and trusted-workload qualifications pass for that exact commit is the annotated tag
 created at the same commit.
 
-For a source revision containing the Phase 4 quartet work, the tag-triggered workflow then rebuilds
-and qualifies the finalized ZIP, creates its canonical external install manifest, emits
+For a source revision containing the Phase 4 release-authority work, the tag-triggered workflow then
+rebuilds and qualifies the finalized ZIP, creates its canonical external install manifest, emits
 `SHA256SUMS` with exactly those two sorted subjects and plural-artifact build metadata, runs the
 complete package/manifest authority verification before and after workflow-artifact transfer,
-attests both subjects, and publishes exactly the four named release files. The downloaded public
-quartet—not a local package or pre-tag candidate—is then used for final clean-room verification.
+attests both subjects, exports the local attestation bundle and its checksum sidecar, and publishes
+the exact six named release files. The downloaded public six-asset set—not a local package or pre-tag
+candidate—is then used for final clean-room verification.
 These next-alpha steps do not retroactively describe the published alpha.1 assets.

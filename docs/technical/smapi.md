@@ -116,13 +116,14 @@ candidate, review, tag, attestation, publication, and clean-room verification se
 fork-specific version, tag, title, and package must all remain visibly unofficial and Linux-only.
 Pull-request and pre-tag workflow-dispatch packages are deliberately non-authoritative candidates:
 their metadata records the actual workflow ref, and the production workflow does not invoke the
-release-manifest creation path for them. An annotated-tag run creates the exact next-alpha quartet
-of finalized ZIP, external canonical install manifest, two-subject `SHA256SUMS`, and
-plural-artifact build metadata. Its environment guard prevents accidental misuse but is not
-cryptographic provenance. The tag workflow verifies the complete quartet before upload and after
-each workflow-artifact download, then attests both the ZIP and manifest; verifying both GitHub
-attestations against the repository, tagged workflow, and selected commit establishes published
-release authority.
+release-manifest creation path for them. An annotated-tag run creates the four primary next-alpha
+package/metadata assets—finalized ZIP, external canonical install manifest, two-subject
+`SHA256SUMS`, and plural-artifact build metadata—plus the GitHub attestation bundle and its checksum
+sidecar, for six public assets total. Its environment guard prevents accidental misuse but is not
+cryptographic provenance. The tag workflow verifies the complete package/manifest authority before
+upload and after each workflow-artifact download, then attests both subjects and exports the local
+bundle; verifying that bundle against the repository, tagged workflow, selected commit, and exact
+two-subject set establishes published release authority.
 
 ### Manual Linux release
 > [!WARNING]  
