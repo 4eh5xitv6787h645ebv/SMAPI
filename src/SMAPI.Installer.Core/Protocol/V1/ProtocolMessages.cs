@@ -66,21 +66,99 @@ public enum ObservedInstallState
     Unknown
 }
 
-public enum ProtocolRecoveryResult
+public enum ProtocolDurableState
 {
-    NotNeeded,
-    Succeeded,
-    Pending,
-    Failed
+    Committed,
+    Unchanged,
+    RolledBack,
+    RecoveryRequired,
+    RecoveryCompleted,
+    Unknown,
+    PruneApplied
 }
 
-public enum InstallerRecoveryAction
+public enum ProtocolRecoveryDisposition
 {
-    Resume,
-    Retry,
-    Rollback,
-    InspectAgain
+    NotRequired,
+    CleanupPending,
+    Completed,
+    InterruptedRecoveryRequired,
+    StateRefreshRequired
 }
+
+/// <summary>Every exact transaction error the core can report, plus a conservative protocol-only fallback.</summary>
+public enum ProtocolTerminalErrorCode
+{
+    InvalidPlan,
+    UnsafePath,
+    PathChanged,
+    ExistingFileMismatch,
+    PayloadMismatch,
+    ConcurrentOperation,
+    WorkspaceConflict,
+    RecoveryFailed,
+    DiskFull,
+    ReadOnlyFileSystem,
+    PermissionDenied,
+    CrossDeviceBoundary,
+    IoFailure,
+    UnexpectedCoreFailure
+}
+
+public enum ProtocolExecutionOutcome
+{
+    Succeeded,
+    SucceededWithCleanupWarning,
+    FailedBeforeMutation,
+    CancelledBeforeMutation,
+    CancelledAndRolledBack,
+    FailedAndRolledBack,
+    InterruptedRecoveryRequired,
+    AutomaticRecoveryCompletedFreshInspectionRequired,
+    UnexpectedCoreFailure
+}
+
+public enum ProtocolPruneOutcome
+{
+    Succeeded,
+    FailedBeforePublication,
+    CancelledBeforePublication,
+    Interrupted,
+    CancelledWithCleanupPending,
+    FailedWithCleanupPending,
+    UnexpectedCoreFailure
+}
+
+public enum ProtocolInterruptedRecoveryOutcome
+{
+    RecoveryCompleted,
+    CancelledBeforeRecovery,
+    PartialFailure,
+    UnexpectedFailure
+}
+
+public sealed record ProtocolTerminalState(
+    ProtocolDurableState DurableState,
+    ProtocolTerminalErrorCode? ErrorCode,
+    ProtocolRecoveryDisposition RecoveryDisposition,
+    ProtocolNextAction NextAction
+);
+
+public sealed record ProtocolExecutionSummary(
+    int? ManagedFileChangeCount,
+    int? RolledBackManagedFileCount,
+    int? InternalStateChangeCount,
+    int? RolledBackInternalStateCount,
+    int? RecoveredTransactionCount,
+    int? RecoveredPathCount
+);
+
+public sealed record ProtocolPruneSummary(
+    int? LogicallyRemovedGenerationCount,
+    int? PhysicallyCleanedGenerationCount,
+    int? PendingCleanupGenerationCount,
+    bool? AuxiliaryCleanupPending
+);
 
 /// <summary>A closed user action which is safe after a rejected pre-plan command.</summary>
 public enum ProtocolNextAction
@@ -281,6 +359,8 @@ public sealed record CommandAcknowledgedEvent(
     ProtocolPrunePlanId? PrunePlanId
 ) : ProtocolEvent
 {
+    [JsonIgnore] public bool RequiresRecovery => false;
+    [JsonIgnore] public bool RequiresFreshInspection => true;
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.CommandAcknowledgedEvent;
 }
@@ -338,17 +418,15 @@ public sealed record RecoveryProgressEvent(
 
 public sealed record RecoveryCompletedEvent(
     ProtocolSessionId SessionId,
-    ProtocolGameRootIdentity GameRoot,
-    bool NamedRootStillSelected,
-    ulong PreviousOperationGeneration,
-    ulong CurrentOperationGeneration,
-    int RecoveredTransactionCount,
-    int RecoveredPathCount,
+    ProtocolInterruptedRecoveryOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolInterruptedRecoveryAttempt Attempt,
     string Summary,
-    string SafeNextStep,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
+    [JsonIgnore] public bool RequiresRecovery => false;
+    [JsonIgnore] public bool RequiresFreshInspection => true;
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryCompletedEvent;
 }
@@ -356,54 +434,41 @@ public sealed record RecoveryCompletedEvent(
 public sealed record ProtocolRecoveredTransactionResult(string TransactionId, int ChangedPathCount);
 
 /// <summary>Exact bounded progress preserved when interrupted-operation recovery only partially completes.</summary>
-public sealed record ProtocolInterruptedRecoveryFailureDetails
+public sealed record ProtocolInterruptedRecoveryAttempt
 {
     private readonly ProtocolRecoveredTransactionResult[] RecoveredTransactionValues;
-    public string CanonicalGamePath { get; }
-    public uint DeviceMajor { get; }
-    public uint DeviceMinor { get; }
-    public ulong Inode { get; }
+    public ProtocolGameRootIdentity GameRoot { get; }
     public ulong PreviousOperationGeneration { get; }
     public ulong? CurrentOperationGeneration { get; }
-    public bool? OperationGenerationAdvanced { get; }
     public bool? NamedRootStillSelected { get; }
-    public bool? NamedRootSelectionChanged { get; }
-    public bool RequiresRecovery { get; }
-    public bool RequiresFreshInspection { get; }
     public ProtocolRecoveredTransactionResult[] RecoveredTransactions => this.RecoveredTransactionValues.ToArray();
-    public int RecoveredTransactionCount { get; }
-    public int RecoveredPathCount { get; }
+    [JsonIgnore] public bool? OperationGenerationAdvanced => this.CurrentOperationGeneration is { } current ? current > this.PreviousOperationGeneration : null;
+    [JsonIgnore] public bool? NamedRootSelectionChanged => this.NamedRootStillSelected is { } selected ? !selected : null;
+    [JsonIgnore] public int RecoveredTransactionCount => this.RecoveredTransactionValues.Length;
+    [JsonIgnore] public int RecoveredPathCount => this.RecoveredTransactionValues.Sum(value => value.ChangedPathCount);
 
     [JsonConstructor]
-    public ProtocolInterruptedRecoveryFailureDetails(string canonicalGamePath, uint deviceMajor, uint deviceMinor, ulong inode, ulong previousOperationGeneration, ulong? currentOperationGeneration, bool? operationGenerationAdvanced, bool? namedRootStillSelected, bool? namedRootSelectionChanged, bool requiresRecovery, bool requiresFreshInspection, ProtocolRecoveredTransactionResult[] recoveredTransactions, int recoveredTransactionCount, int recoveredPathCount)
+    public ProtocolInterruptedRecoveryAttempt(ProtocolGameRootIdentity gameRoot, ulong previousOperationGeneration, ulong? currentOperationGeneration, bool? namedRootStillSelected, ProtocolRecoveredTransactionResult[] recoveredTransactions)
     {
-        this.CanonicalGamePath = canonicalGamePath;
-        this.DeviceMajor = deviceMajor;
-        this.DeviceMinor = deviceMinor;
-        this.Inode = inode;
+        this.GameRoot = gameRoot;
         this.PreviousOperationGeneration = previousOperationGeneration;
         this.CurrentOperationGeneration = currentOperationGeneration;
-        this.OperationGenerationAdvanced = operationGenerationAdvanced;
         this.NamedRootStillSelected = namedRootStillSelected;
-        this.NamedRootSelectionChanged = namedRootSelectionChanged;
-        this.RequiresRecovery = requiresRecovery;
-        this.RequiresFreshInspection = requiresFreshInspection;
         this.RecoveredTransactionValues = recoveredTransactions?.ToArray() ?? throw new ProtocolException("Interrupted-recovery transaction results can't be null.");
-        this.RecoveredTransactionCount = recoveredTransactionCount;
-        this.RecoveredPathCount = recoveredPathCount;
     }
 }
 
 public sealed record RecoveryFailureEvent(
     ProtocolSessionId SessionId,
-    string ErrorCode,
+    ProtocolInterruptedRecoveryOutcome Outcome,
+    ProtocolTerminalState TerminalState,
     string Message,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
     string? SanitizedLogPath,
-    ProtocolInterruptedRecoveryFailureDetails? Details = null
+    ProtocolInterruptedRecoveryAttempt? Attempt = null
 ) : ProtocolEvent
 {
+    [JsonIgnore] public bool RequiresRecovery => this.TerminalState.RecoveryDisposition == ProtocolRecoveryDisposition.InterruptedRecoveryRequired;
+    [JsonIgnore] public bool RequiresFreshInspection => true;
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryFailureEvent;
 }
@@ -784,10 +849,10 @@ public sealed record SuccessEvent(
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
     InstallerOperation Operation,
+    ProtocolExecutionOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolExecutionSummary ExecutionSummary,
     string Summary,
-    int FilesChanged,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
@@ -799,12 +864,11 @@ public sealed record RolledBackFailureEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
-    string ErrorCode,
+    ProtocolExecutionOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolExecutionSummary ExecutionSummary,
     string Message,
-    string RollbackSummary,
-    int FilesChanged,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
+    string Summary,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
@@ -816,13 +880,11 @@ public sealed record RecoverableInterruptionEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
-    string ErrorCode,
+    ProtocolExecutionOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolExecutionSummary ExecutionSummary,
     string Message,
-    InstallerRecoveryAction RecoveryAction,
-    string RecoverySummary,
-    int FilesChanged,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
+    string Summary,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
@@ -834,11 +896,10 @@ public sealed record CancelledEvent(
     ProtocolSessionId SessionId,
     ProtocolPlanId PlanId,
     ProtocolPlanDigest PlanDigest,
+    ProtocolExecutionOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolExecutionSummary ExecutionSummary,
     string Summary,
-    string SafeStateSummary,
-    int FilesChanged,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
@@ -850,10 +911,10 @@ public sealed record PruneSuccessEvent(
     ProtocolSessionId SessionId,
     ProtocolPrunePlanId PrunePlanId,
     ProtocolPlanDigest PruneDigest,
-    int LogicalRemovedGenerationCount,
-    int PhysicalCleanupGenerationCount,
+    ProtocolPruneOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolPruneSummary PruneSummary,
     string Summary,
-    string SafeNextStep,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
@@ -865,12 +926,10 @@ public sealed record PruneFailureEvent(
     ProtocolSessionId SessionId,
     ProtocolPrunePlanId PrunePlanId,
     ProtocolPlanDigest PruneDigest,
-    string ErrorCode,
+    ProtocolPruneOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolPruneSummary PruneSummary,
     string Message,
-    int LogicalRemovedGenerationCount,
-    int PhysicalCleanupGenerationCount,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
@@ -882,13 +941,10 @@ public sealed record PruneInterruptionEvent(
     ProtocolSessionId SessionId,
     ProtocolPrunePlanId PrunePlanId,
     ProtocolPlanDigest PruneDigest,
-    string ErrorCode,
+    ProtocolPruneOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolPruneSummary PruneSummary,
     string Message,
-    InstallerRecoveryAction RecoveryAction,
-    int LogicalRemovedGenerationCount,
-    int PhysicalCleanupGenerationCount,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {
@@ -900,12 +956,10 @@ public sealed record PruneCancelledEvent(
     ProtocolSessionId SessionId,
     ProtocolPrunePlanId PrunePlanId,
     ProtocolPlanDigest PruneDigest,
+    ProtocolPruneOutcome Outcome,
+    ProtocolTerminalState TerminalState,
+    ProtocolPruneSummary PruneSummary,
     string Summary,
-    string SafeStateSummary,
-    int LogicalRemovedGenerationCount,
-    int PhysicalCleanupGenerationCount,
-    ProtocolRecoveryResult RecoveryResult,
-    string SafeNextStep,
     string? SanitizedLogPath
 ) : ProtocolEvent
 {

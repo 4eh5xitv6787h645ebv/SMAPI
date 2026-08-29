@@ -283,7 +283,8 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         try
         {
             InterruptedOperationRecoveryResult result = await this.Engine.RecoverInterruptedOperationAsync(request.GamePath, active.Token).ConfigureAwait(false);
-            RecoveryCompletedEvent terminal = new(this.SessionId, new(result.GameRoot.CanonicalPath, result.GameRoot.DeviceMajor, result.GameRoot.DeviceMinor, result.GameRoot.Inode, result.CurrentOperationGeneration), result.NamedRootStillSelected, result.PreviousOperationGeneration, result.CurrentOperationGeneration, result.RecoveredTransactions.Count, result.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount), result.RecoveredAny ? "Interrupted installer work was recovered to a durable safe state." : "No interrupted transaction required rollback; the operation generation was refreshed.", "Discard every prior plan and inspect again.", this.SanitizedLogPath) { CommandId = request.CommandId };
+            ProtocolInterruptedRecoveryAttempt attempt = new(new(result.GameRoot.CanonicalPath, result.GameRoot.DeviceMajor, result.GameRoot.DeviceMinor, result.GameRoot.Inode, result.CurrentOperationGeneration), result.PreviousOperationGeneration, result.CurrentOperationGeneration, result.NamedRootStillSelected, result.RecoveredTransactions.Select(transaction => new ProtocolRecoveredTransactionResult(transaction.TransactionId.ToString("N"), transaction.ChangedPathCount)).ToArray());
+            RecoveryCompletedEvent terminal = new(this.SessionId, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, new(ProtocolDurableState.RecoveryCompleted, null, ProtocolRecoveryDisposition.Completed, result.NamedRootStillSelected ? ProtocolNextAction.InspectAgain : ProtocolNextAction.SelectGameFolder), attempt, result.RecoveredAny ? "Interrupted installer work was recovered to a durable safe state." : "No interrupted transaction required rollback; the operation generation was refreshed.", this.SanitizedLogPath) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.CompleteInterruptedRecovery(request, terminal));
             return this.Emit(terminal);
         }
@@ -293,25 +294,23 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
                 && active.IsCancellationRequested
                 && cancellation.CancellationToken == active.Token;
             InterruptedOperationRecoveryException? partial = exception as InterruptedOperationRecoveryException;
-            string code = cancelled ? "RecoveryCancelled" : partial?.ErrorCode.ToString() ?? "RecoveryFailed";
             string message = cancelled ? "Interrupted-operation recovery was cancelled before recovery began." : partial?.SafeMessage ?? "Interrupted-operation recovery stopped without a completed result.";
-            ProtocolInterruptedRecoveryFailureDetails? details = partial is null ? null : new(
-                partial.GameRoot.CanonicalPath,
-                partial.GameRoot.DeviceMajor,
-                partial.GameRoot.DeviceMinor,
-                partial.GameRoot.Inode,
+            ProtocolInterruptedRecoveryAttempt? attempt = partial is null ? null : new(
+                new(partial.GameRoot.CanonicalPath, partial.GameRoot.DeviceMajor, partial.GameRoot.DeviceMinor, partial.GameRoot.Inode, partial.CurrentOperationGeneration ?? partial.PreviousOperationGeneration),
                 partial.PreviousOperationGeneration,
                 partial.CurrentOperationGeneration,
-                partial.OperationGenerationAdvanced,
                 partial.NamedRootStillSelected,
-                partial.NamedRootSelectionChanged,
-                partial.RequiresRecovery,
-                partial.RequiresFreshInspection,
-                partial.RecoveredTransactions.Select(transaction => new ProtocolRecoveredTransactionResult(transaction.TransactionId.ToString("N"), transaction.ChangedPathCount)).ToArray(),
-                partial.RecoveredTransactions.Count,
-                partial.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount)
+                partial.RecoveredTransactions.Select(transaction => new ProtocolRecoveredTransactionResult(transaction.TransactionId.ToString("N"), transaction.ChangedPathCount)).ToArray()
             );
-            RecoveryFailureEvent terminal = new(this.SessionId, code, message, cancelled ? ProtocolRecoveryResult.NotNeeded : ProtocolRecoveryResult.Pending, "Retry interrupted-operation recovery before inspecting or changing the installation.", this.SanitizedLogPath, details) { CommandId = request.CommandId };
+            ProtocolInterruptedRecoveryOutcome outcome = cancelled ? ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery : partial is not null ? ProtocolInterruptedRecoveryOutcome.PartialFailure : ProtocolInterruptedRecoveryOutcome.UnexpectedFailure;
+            ProtocolTerminalState state = outcome switch
+            {
+                ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery => new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted),
+                ProtocolInterruptedRecoveryOutcome.PartialFailure => new(ProtocolDurableState.RecoveryRequired, MapError(partial!.ErrorCode), ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted),
+                ProtocolInterruptedRecoveryOutcome.UnexpectedFailure => new(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted),
+                _ => throw new ProtocolException("The interrupted-recovery exception didn't map to a typed outcome.")
+            };
+            RecoveryFailureEvent terminal = new(this.SessionId, outcome, state, message, this.SanitizedLogPath, attempt) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.FailInterruptedRecovery(terminal));
             return this.Emit(terminal);
         }
@@ -390,9 +389,9 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
             ProtocolEvent terminal = this.CreateExecutionTerminal(request, outcome);
             this.CompleteExecutionTerminal(terminal); return this.Emit(terminal);
         }
-        catch (Exception)
+        catch (Exception exception) when (exception is not ProtocolException)
         {
-            RecoverableInterruptionEvent terminal = new(request.SessionId, request.PlanId, request.PlanDigest, "UnexpectedCoreFailure", "The installer core stopped without returning a typed terminal outcome.", InstallerRecoveryAction.Resume, "Treat the installation as requiring conservative interrupted-operation recovery.", 0, ProtocolRecoveryResult.Pending, "Run interrupted-operation recovery, then inspect again.", this.SanitizedLogPath) { CommandId = request.CommandId };
+            RecoverableInterruptionEvent terminal = new(request.SessionId, request.PlanId, request.PlanDigest, ProtocolExecutionOutcome.UnexpectedCoreFailure, new(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), new(null, null, null, null, null, null), "The installer core stopped without returning a typed terminal outcome.", "Treat the installation as requiring conservative interrupted-operation recovery.", this.SanitizedLogPath) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.Complete(terminal));
             return this.Emit(terminal);
         }
@@ -412,9 +411,9 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
             ProtocolEvent terminal = this.CreatePruneTerminal(request, outcome);
             this.CompletePruneTerminal(terminal); return this.Emit(terminal);
         }
-        catch (Exception)
+        catch (Exception exception) when (exception is not ProtocolException)
         {
-            PruneInterruptionEvent terminal = new(request.SessionId, request.PrunePlanId, request.PruneDigest, "UnexpectedCoreFailure", "Recovery pruning stopped without returning a typed terminal outcome.", InstallerRecoveryAction.Retry, 0, 0, ProtocolRecoveryResult.Pending, "List recoveries to observe durable state, then inspect pruning again.", null) { CommandId = request.CommandId };
+            PruneInterruptionEvent terminal = new(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.UnexpectedCoreFailure, new(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries), new(null, null, null, null), "Recovery pruning stopped without returning a typed terminal outcome.", this.SanitizedLogPath) { CommandId = request.CommandId };
             lock (this.OutboundLock) this.WithSession(() => this.Session.Complete(terminal));
             return this.Emit(terminal);
         }
@@ -443,45 +442,75 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
     {
         int changed = outcome.ManagedGamePathChanges.Count;
         int rolledBack = outcome.Transaction?.RolledBackPaths.Count(change => !change.RelativePath.StartsWith(".smapi-installer/", StringComparison.Ordinal)) ?? 0;
+        int internalChanged = outcome.InternalStateChanges.Count;
+        int internalRolledBack = outcome.Transaction?.RolledBackPaths.Count(change => change.RelativePath.StartsWith(".smapi-installer/", StringComparison.Ordinal)) ?? 0;
         int recoveredTransactions = outcome.RecoveredTransactions.Count;
         int recoveredPaths = outcome.RecoveredTransactions.Sum(transaction => transaction.ChangedPathCount);
-        string code = outcome.ErrorCode?.ToString() ?? outcome.Status.ToString();
         string message = outcome.SafeMessage ?? "The installer core returned a bounded terminal outcome.";
+        ProtocolExecutionSummary summary = new(changed, rolledBack, internalChanged, internalRolledBack, recoveredTransactions, recoveredPaths);
         return ((ProtocolEvent)(outcome.Status switch
         {
-            InstallationExecutionStatus.Succeeded => new SuccessEvent(request.SessionId, request.PlanId, request.PlanDigest, (InstallerOperation)(int)outcome.Action, message, changed, ProtocolRecoveryResult.NotNeeded, "Close the installer or inspect again.", outcome.SanitizedLogPath),
-            InstallationExecutionStatus.SucceededWithCleanupWarning => new SuccessEvent(request.SessionId, request.PlanId, request.PlanDigest, (InstallerOperation)(int)outcome.Action, message, changed, ProtocolRecoveryResult.Pending, "The installation committed; retry recovery cleanup from a fresh inspection.", outcome.SanitizedLogPath),
-            InstallationExecutionStatus.FailedBeforeMutation => new RolledBackFailureEvent(request.SessionId, request.PlanId, request.PlanDigest, code, message, "No managed-file mutation began, so rollback was not needed.", 0, ProtocolRecoveryResult.NotNeeded, "Inspect again before retrying.", outcome.SanitizedLogPath),
-            InstallationExecutionStatus.CancelledBeforeMutation => new CancelledEvent(request.SessionId, request.PlanId, request.PlanDigest, message, "Cancellation was observed before managed-file mutation.", 0, ProtocolRecoveryResult.NotNeeded, "Inspect again when ready.", outcome.SanitizedLogPath),
-            InstallationExecutionStatus.CancelledAndRolledBack => new CancelledEvent(request.SessionId, request.PlanId, request.PlanDigest, message, $"Core restored {rolledBack} of {changed} observed managed-file change(s).", changed, ProtocolRecoveryResult.Succeeded, "Inspect again before retrying.", outcome.SanitizedLogPath),
-            InstallationExecutionStatus.FailedAndRolledBack => new RolledBackFailureEvent(request.SessionId, request.PlanId, request.PlanDigest, code, message, $"Core restored {rolledBack} of {changed} observed managed-file change(s).", changed, ProtocolRecoveryResult.Succeeded, "Inspect again before retrying.", outcome.SanitizedLogPath),
-            InstallationExecutionStatus.InterruptedRecoveryRequired => new RecoverableInterruptionEvent(request.SessionId, request.PlanId, request.PlanDigest, code, message, InstallerRecoveryAction.Resume, $"Core restored {rolledBack} of {changed} observed managed-file change(s); interrupted-operation recovery is still required.", changed, ProtocolRecoveryResult.Pending, "Run interrupted-operation recovery, then inspect again.", outcome.SanitizedLogPath),
-            InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired => new RolledBackFailureEvent(request.SessionId, request.PlanId, request.PlanDigest, code, message, $"Core recovered {recoveredTransactions} prior interrupted transaction(s) covering {recoveredPaths} installer-owned path operation(s) before this operation began.", 0, ProtocolRecoveryResult.Succeeded, "Inspect and confirm again against the recovered state.", outcome.SanitizedLogPath),
+            InstallationExecutionStatus.Succeeded => new SuccessEvent(request.SessionId, request.PlanId, request.PlanDigest, (InstallerOperation)(int)outcome.Action, ProtocolExecutionOutcome.Succeeded, TerminalState(ProtocolDurableState.Committed, RequireNoError(outcome.ErrorCode), ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), summary, message, outcome.SanitizedLogPath),
+            InstallationExecutionStatus.SucceededWithCleanupWarning => new SuccessEvent(request.SessionId, request.PlanId, request.PlanDigest, (InstallerOperation)(int)outcome.Action, ProtocolExecutionOutcome.SucceededWithCleanupWarning, TerminalState(ProtocolDurableState.Committed, RequireError(outcome.ErrorCode), ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.InspectAgain), summary, message, outcome.SanitizedLogPath),
+            InstallationExecutionStatus.FailedBeforeMutation => new RolledBackFailureEvent(request.SessionId, request.PlanId, request.PlanDigest, ProtocolExecutionOutcome.FailedBeforeMutation, TerminalState(ProtocolDurableState.Unchanged, RequireError(outcome.ErrorCode), ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), summary, message, "No managed-file mutation began, so rollback was not needed.", outcome.SanitizedLogPath),
+            InstallationExecutionStatus.CancelledBeforeMutation => new CancelledEvent(request.SessionId, request.PlanId, request.PlanDigest, ProtocolExecutionOutcome.CancelledBeforeMutation, TerminalState(ProtocolDurableState.Unchanged, RequireNoError(outcome.ErrorCode), ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), summary, message, outcome.SanitizedLogPath),
+            InstallationExecutionStatus.CancelledAndRolledBack => new CancelledEvent(request.SessionId, request.PlanId, request.PlanDigest, ProtocolExecutionOutcome.CancelledAndRolledBack, TerminalState(ProtocolDurableState.RolledBack, RequireNoError(outcome.ErrorCode), ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain), summary, $"{message} Core restored {rolledBack} of {changed} observed managed-file change(s).", outcome.SanitizedLogPath),
+            InstallationExecutionStatus.FailedAndRolledBack => new RolledBackFailureEvent(request.SessionId, request.PlanId, request.PlanDigest, ProtocolExecutionOutcome.FailedAndRolledBack, TerminalState(ProtocolDurableState.RolledBack, RequireError(outcome.ErrorCode), ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain), summary, message, $"Core restored {rolledBack} of {changed} observed managed-file change(s).", outcome.SanitizedLogPath),
+            InstallationExecutionStatus.InterruptedRecoveryRequired => new RecoverableInterruptionEvent(request.SessionId, request.PlanId, request.PlanDigest, ProtocolExecutionOutcome.InterruptedRecoveryRequired, TerminalState(ProtocolDurableState.RecoveryRequired, RequireError(outcome.ErrorCode), ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), summary, message, $"Core restored {rolledBack} of {changed} observed managed-file change(s); interrupted-operation recovery is still required.", outcome.SanitizedLogPath),
+            InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired => new RolledBackFailureEvent(request.SessionId, request.PlanId, request.PlanDigest, ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired, TerminalState(ProtocolDurableState.RecoveryCompleted, RequireExactError(outcome.ErrorCode, TransactionErrorCode.PathChanged), ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain), summary, message, $"Core recovered {recoveredTransactions} prior interrupted transaction(s) covering {recoveredPaths} installer-owned path operation(s) before this operation began.", outcome.SanitizedLogPath),
             _ => throw new ProtocolException("The core returned an unknown installation execution status.")
-        })) with { CommandId = request.CommandId };
+        })) with
+        {
+            CommandId = request.CommandId
+        };
     }
 
     private ProtocolEvent CreatePruneTerminal(ExecutePruneRequest request, RecoveryPruneOutcome outcome)
     {
         int logical = outcome.LogicallyRemovedGenerationIds.Count;
         int cleaned = outcome.PhysicallyCleanedGenerationIds.Count;
-        string code = outcome.ErrorCode?.ToString() ?? outcome.Status.ToString();
         string message = outcome.SafeMessage ?? "The recovery core returned a bounded terminal outcome.";
-        ProtocolRecoveryResult recovery = outcome.RequiresCleanup ? ProtocolRecoveryResult.Pending : ProtocolRecoveryResult.NotNeeded;
+        ProtocolPruneSummary summary = new(logical, cleaned, outcome.PendingCleanupGenerationIds.Count, outcome.AuxiliaryCleanupPending);
+        ProtocolRecoveryDisposition recovery = outcome.RequiresCleanup ? ProtocolRecoveryDisposition.CleanupPending : ProtocolRecoveryDisposition.NotRequired;
         string pending = $"{outcome.PendingCleanupGenerationIds.Count} physical generation cleanup operation(s) remain"
             + (outcome.AuxiliaryCleanupPending ? ", and authenticated auxiliary recovery metadata cleanup remains" : "")
             + ".";
         return ((ProtocolEvent)(outcome.Status switch
         {
-            RecoveryPruneOutcomeStatus.Succeeded => new PruneSuccessEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, logical, cleaned, message, "Close the installer or list recoveries again.", null),
-            RecoveryPruneOutcomeStatus.FailedBeforePublication => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, code, recovery == ProtocolRecoveryResult.Pending ? $"{message} {pending}" : message, logical, cleaned, recovery, "List recoveries and inspect pruning again.", null),
-            RecoveryPruneOutcomeStatus.CancelledBeforePublication => new PruneCancelledEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, message, recovery == ProtocolRecoveryResult.Pending ? $"Cancellation was observed before logical retention publication; {pending}" : "Cancellation was observed before logical retention publication.", logical, cleaned, recovery, "List recoveries again when ready.", null),
-            RecoveryPruneOutcomeStatus.Interrupted => new PruneInterruptionEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, code, $"{message} {pending}", InstallerRecoveryAction.Retry, logical, cleaned, recovery, "List recoveries to observe pending cleanup, then retry.", null),
-            RecoveryPruneOutcomeStatus.CancelledWithCleanupPending => new PruneCancelledEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, message, logical > 0 ? $"Logical retention was published; {pending}" : $"No logical generations were removed; {pending}", logical, cleaned, ProtocolRecoveryResult.Pending, "List recoveries, then retry cleanup.", null),
-            RecoveryPruneOutcomeStatus.FailedWithCleanupPending => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, code, $"{message} {pending}", logical, cleaned, ProtocolRecoveryResult.Pending, "List recoveries, then retry cleanup.", null),
+            RecoveryPruneOutcomeStatus.Succeeded => new PruneSuccessEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.Succeeded, TerminalState(ProtocolDurableState.PruneApplied, RequireNoError(outcome.ErrorCode), ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries), summary, message, this.SanitizedLogPath),
+            RecoveryPruneOutcomeStatus.FailedBeforePublication => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.FailedBeforePublication, TerminalState(ProtocolDurableState.Unchanged, RequireError(outcome.ErrorCode), recovery, ProtocolNextAction.ListRecoveries), summary, outcome.RequiresCleanup ? $"{message} {pending}" : message, this.SanitizedLogPath),
+            RecoveryPruneOutcomeStatus.CancelledBeforePublication => new PruneCancelledEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.CancelledBeforePublication, TerminalState(ProtocolDurableState.Unchanged, RequireNoError(outcome.ErrorCode), recovery, ProtocolNextAction.ListRecoveries), summary, outcome.RequiresCleanup ? $"{message} Cancellation was observed before logical retention publication; {pending}" : $"{message} Cancellation was observed before logical retention publication.", this.SanitizedLogPath),
+            RecoveryPruneOutcomeStatus.Interrupted => new PruneInterruptionEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.Interrupted, TerminalState(logical > 0 || cleaned > 0 ? ProtocolDurableState.PruneApplied : ProtocolDurableState.Unchanged, RequireError(outcome.ErrorCode), outcome.RequiresCleanup ? ProtocolRecoveryDisposition.CleanupPending : ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries), summary, outcome.RequiresCleanup ? $"{message} {pending}" : message, this.SanitizedLogPath),
+            RecoveryPruneOutcomeStatus.CancelledWithCleanupPending => new PruneCancelledEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.CancelledWithCleanupPending, TerminalState(logical > 0 || cleaned > 0 ? ProtocolDurableState.PruneApplied : ProtocolDurableState.Unchanged, RequireNoError(outcome.ErrorCode), ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries), summary, logical > 0 ? $"{message} Logical retention was published; {pending}" : $"{message} No logical generations were removed; {pending}", this.SanitizedLogPath),
+            RecoveryPruneOutcomeStatus.FailedWithCleanupPending => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.FailedWithCleanupPending, TerminalState(logical > 0 || cleaned > 0 ? ProtocolDurableState.PruneApplied : ProtocolDurableState.Unchanged, RequireError(outcome.ErrorCode), ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries), summary, $"{message} {pending}", this.SanitizedLogPath),
             _ => throw new ProtocolException("The core returned an unknown recovery-prune status.")
-        })) with { CommandId = request.CommandId };
+        })) with
+        {
+            CommandId = request.CommandId
+        };
     }
+
+    private static ProtocolTerminalState TerminalState(ProtocolDurableState durableState, ProtocolTerminalErrorCode? error, ProtocolRecoveryDisposition recoveryDisposition, ProtocolNextAction nextAction) => new(durableState, error, recoveryDisposition, nextAction);
+    private static ProtocolTerminalErrorCode MapError(TransactionErrorCode error) => error switch
+    {
+        TransactionErrorCode.InvalidPlan => ProtocolTerminalErrorCode.InvalidPlan,
+        TransactionErrorCode.UnsafePath => ProtocolTerminalErrorCode.UnsafePath,
+        TransactionErrorCode.PathChanged => ProtocolTerminalErrorCode.PathChanged,
+        TransactionErrorCode.ExistingFileMismatch => ProtocolTerminalErrorCode.ExistingFileMismatch,
+        TransactionErrorCode.PayloadMismatch => ProtocolTerminalErrorCode.PayloadMismatch,
+        TransactionErrorCode.ConcurrentOperation => ProtocolTerminalErrorCode.ConcurrentOperation,
+        TransactionErrorCode.WorkspaceConflict => ProtocolTerminalErrorCode.WorkspaceConflict,
+        TransactionErrorCode.RecoveryFailed => ProtocolTerminalErrorCode.RecoveryFailed,
+        TransactionErrorCode.DiskFull => ProtocolTerminalErrorCode.DiskFull,
+        TransactionErrorCode.ReadOnlyFileSystem => ProtocolTerminalErrorCode.ReadOnlyFileSystem,
+        TransactionErrorCode.PermissionDenied => ProtocolTerminalErrorCode.PermissionDenied,
+        TransactionErrorCode.CrossDeviceBoundary => ProtocolTerminalErrorCode.CrossDeviceBoundary,
+        TransactionErrorCode.IoFailure => ProtocolTerminalErrorCode.IoFailure,
+        _ => throw new ProtocolException("The core returned an unknown transaction error code.")
+    };
+    private static ProtocolTerminalErrorCode RequireError(TransactionErrorCode? error) => error is { } value ? MapError(value) : throw new ProtocolException("The typed terminal outcome requires an exact core error code.");
+    private static ProtocolTerminalErrorCode RequireExactError(TransactionErrorCode? error, TransactionErrorCode expected) => error == expected ? MapError(expected) : throw new ProtocolException($"The typed terminal outcome requires exact core error '{expected}'.");
+    private static ProtocolTerminalErrorCode? RequireNoError(TransactionErrorCode? error) => error is null ? null : throw new ProtocolException("A successful or cancelled terminal outcome can't carry an error code.");
 
     private PrePlanRejectedEvent CreatePrePlanRejection(ProtocolRequest request, Exception exception)
     {

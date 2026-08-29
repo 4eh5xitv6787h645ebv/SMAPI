@@ -46,8 +46,8 @@ internal sealed class ProtocolJsonSerializerTests
         [
             new HandshakeEvent(session, "server", ["v1"]), new GameDiscoveryEvent(session, [new("/game", LinuxGameFolderStatus.Valid, "Stardew Valley")]),
             new RecoveryProgressEvent(session, 0, TransactionStage.Recovering, 0, null, "Recovering."),
-            new RecoveryCompletedEvent(session, recoveredRoot, true, 7, 8, 1, 2, "Recovered.", "Inspect again.", null),
-            new RecoveryFailureEvent(session, "RecoveryFailed", "Recovery failed.", ProtocolRecoveryResult.Pending, "Retry recovery.", null, new("/game", 1, 2, 3, 7, null, null, null, null, true, true, [new("11111111111111111111111111111111", 2)], 1, 2)),
+            new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, new(ProtocolDurableState.RecoveryCompleted, null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain), new(recoveredRoot, 7, 8, true, [new("11111111111111111111111111111111", 2)]), "Recovered.", null),
+            new RecoveryFailureEvent(session, ProtocolInterruptedRecoveryOutcome.PartialFailure, new(ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.RecoveryFailed, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), "Recovery failed.", null, new(new("/game", 1, 2, 3, 7), 7, null, null, [new("11111111111111111111111111111111", 2)])),
             new PackageOpenedEvent(session, package, CreateRelease()), new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(retainedRecovery, "11111111111111111111111111111111", InstallerOperation.Backup, true, true), new(recovery, "22222222222222222222222222222222", InstallerOperation.Update, false, false)]),
             new PlanEvent(session, plan, digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true),
             new CommandAcknowledgedEvent(session, ProtocolAcknowledgementKind.PlanConfirmed, plan, null),
@@ -55,14 +55,14 @@ internal sealed class ProtocolJsonSerializerTests
             new PrunePlanEvent(session, prune, pruneDigest, ExecutionDigest, catalog, GameRoot, HashA, 1, [retainedRecovery], [recovery], cleanup, "Prune.", [], true),
             new ProgressEvent(session, plan, digest, 0, TransactionStage.PreparingRecovery, 0, null, "Hashing."),
             new PruneProgressEvent(session, prune, pruneDigest, 0, TransactionStage.Revalidating, 0, null, "Revalidating."),
-            new SuccessEvent(session, plan, digest, InstallerOperation.Repair, "Done.", 1, ProtocolRecoveryResult.NotNeeded, "Launch.", "/tmp/smapi.log"),
-            new RolledBackFailureEvent(session, plan, digest, "copy-failed", "Failed.", "Restored.", 1, ProtocolRecoveryResult.Succeeded, "Retry.", null),
-            new RecoverableInterruptionEvent(session, plan, digest, "power-loss", "Interrupted.", InstallerRecoveryAction.InspectAgain, "Journal retained.", 1, ProtocolRecoveryResult.Pending, "Inspect.", null),
-            new CancelledEvent(session, plan, digest, "Cancelled.", "Safe.", 0, ProtocolRecoveryResult.NotNeeded, "Close.", null),
-            new PruneSuccessEvent(session, prune, pruneDigest, 1, 1, "Pruned.", "Close.", null),
-            new PruneFailureEvent(session, prune, pruneDigest, "failed", "Failed.", 0, 0, ProtocolRecoveryResult.Succeeded, "Retry.", null),
-            new PruneInterruptionEvent(session, prune, pruneDigest, "interrupted", "Interrupted.", InstallerRecoveryAction.InspectAgain, 0, 0, ProtocolRecoveryResult.Pending, "Inspect.", null),
-            new PruneCancelledEvent(session, prune, pruneDigest, "Cancelled.", "Safe.", 0, 0, ProtocolRecoveryResult.NotNeeded, "Close.", null),
+            new SuccessEvent(session, plan, digest, InstallerOperation.Repair, ProtocolExecutionOutcome.Succeeded, new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), new(1, 0, 0, 0, 0, 0), "Done.", "/tmp/smapi.log"),
+            new RolledBackFailureEvent(session, plan, digest, ProtocolExecutionOutcome.FailedAndRolledBack, new(ProtocolDurableState.RolledBack, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain), new(1, 1, 0, 0, 0, 0), "Failed.", "Restored.", null),
+            new RecoverableInterruptionEvent(session, plan, digest, ProtocolExecutionOutcome.InterruptedRecoveryRequired, new(ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.RecoveryFailed, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), new(1, 0, 0, 0, 0, 0), "Interrupted.", "Journal retained.", null),
+            new CancelledEvent(session, plan, digest, ProtocolExecutionOutcome.CancelledBeforeMutation, new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), new(0, 0, 0, 0, 0, 0), "Cancelled.", null),
+            new PruneSuccessEvent(session, prune, pruneDigest, ProtocolPruneOutcome.Succeeded, new(ProtocolDurableState.PruneApplied, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries), new(1, 1, 0, false), "Pruned.", null),
+            new PruneFailureEvent(session, prune, pruneDigest, ProtocolPruneOutcome.FailedBeforePublication, new(ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries), new(0, 0, 0, false), "Failed.", null),
+            new PruneInterruptionEvent(session, prune, pruneDigest, ProtocolPruneOutcome.Interrupted, new(ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries), new(0, 0, 1, false), "Interrupted.", null),
+            new PruneCancelledEvent(session, prune, pruneDigest, ProtocolPruneOutcome.CancelledBeforePublication, new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries), new(0, 0, 0, false), "Cancelled.", null),
             new PrePlanRejectedEvent(session, ProtocolPrePlanErrorCode.PackageRejected, "Invalid.", ProtocolNextAction.ReopenVerifiedPackage, false, null)
         ];
 
@@ -125,9 +125,9 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [keep], [remove], cleanup, "Prune.", [], true);
         PrunePlanEvent prune = new(plan.SessionId, ProtocolPrunePlanId.CreateRandom(), digest, ExecutionDigest, catalog, GameRoot, HashA, 1, [keep], [remove], cleanup, "Prune.", [], true);
         string[] returnedCleanup = prune.CleanupGenerationIds; returnedCleanup[0] = "22222222222222222222222222222222"; prune.CleanupGenerationIds.Should().Equal(cleanup);
-        ProtocolInterruptedRecoveryFailureDetails details = new("/game", 1, 2, 3, 7, null, null, null, null, true, true, [new("11111111111111111111111111111111", 2)], 1, 2);
-        ProtocolRecoveredTransactionResult[] returnedRecoveries = details.RecoveredTransactions; returnedRecoveries[0] = returnedRecoveries[0] with { ChangedPathCount = 1 };
-        details.RecoveredTransactions.Should().ContainSingle().Which.ChangedPathCount.Should().Be(2);
+        ProtocolInterruptedRecoveryAttempt attempt = new(new("/game", 1, 2, 3, 7), 7, null, null, [new("11111111111111111111111111111111", 2)]);
+        ProtocolRecoveredTransactionResult[] returnedRecoveries = attempt.RecoveredTransactions; returnedRecoveries[0] = returnedRecoveries[0] with { ChangedPathCount = 1 };
+        attempt.RecoveredTransactions.Should().ContainSingle().Which.ChangedPathCount.Should().Be(2);
     }
 
     [Test]
@@ -202,14 +202,16 @@ internal sealed class ProtocolJsonSerializerTests
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 0))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 65))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoverInterruptedRequest(session, "relative/game"))).Should().Throw<ProtocolException>().WithMessage("*absolute*");
-        ProtocolGameRootIdentity recoveredRoot = new("/game", 1, 2, 3, 8);
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryProgressEvent(session, 0, TransactionStage.Recovering, 2, 1, "Invalid."))).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryCompletedEvent(session, recoveredRoot, true, 7, 8, InstallerTransactionExecutor.MaximumTransactionStoreEntries + 1, 0, "Recovered.", "Inspect.", null))).Should().Throw<ProtocolException>().WithMessage("*bounded count*");
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryCompletedEvent(session, recoveredRoot, true, 7, 8, 1, InstallerTransactionExecutor.MaximumTransactionStoreEntries * TransactionPlan.MaximumOperationCount + 1, "Recovered.", "Inspect.", null))).Should().Throw<ProtocolException>().WithMessage("*bounded count*");
-        ProtocolInterruptedRecoveryFailureDetails inconsistent = new("/game", 1, 2, 3, 7, null, false, null, null, true, true, [new("11111111111111111111111111111111", 2)], 1, 2);
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryFailureEvent(session, "failed", "Failed.", ProtocolRecoveryResult.Pending, "Retry.", null, inconsistent))).Should().Throw<ProtocolException>().WithMessage("*generation result is inconsistent*");
-        ProtocolInterruptedRecoveryFailureDetails impossibleCounts = new("/game", 1, 2, 3, 7, 8, true, true, false, true, true, [], 0, 1);
-        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryFailureEvent(session, "failed", "Failed.", ProtocolRecoveryResult.Pending, "Retry.", null, impossibleCounts))).Should().Throw<ProtocolException>().WithMessage("*bounded recovered counts*");
+        ProtocolTerminalState recoveredState = new(ProtocolDurableState.RecoveryCompleted, null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain);
+        ProtocolRecoveredTransactionResult[] tooMany = Enumerable.Range(1, InstallerTransactionExecutor.MaximumTransactionStoreEntries + 1).Select(index => new ProtocolRecoveredTransactionResult(Guid.Parse(index.ToString("x32")).ToString("N"), 0)).ToArray();
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, recoveredState, new(new("/game", 1, 2, 3, 8), 7, 8, true, tooMany), "Recovered.", null))).Should().Throw<ProtocolException>().WithMessage("*too large*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, recoveredState, new(new("/game", 1, 2, 3, 8), 7, 8, true, [new("11111111111111111111111111111111", TransactionPlan.MaximumOperationCount + 1)]), "Recovered.", null))).Should().Throw<ProtocolException>().WithMessage("*invalid or duplicate*");
+        ProtocolInterruptedRecoveryAttempt inconsistent = new(new("/game", 1, 2, 3, 8), 7, null, null, [new("11111111111111111111111111111111", 2)]);
+        ProtocolTerminalState partialState = new(ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.RecoveryFailed, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryFailureEvent(session, ProtocolInterruptedRecoveryOutcome.PartialFailure, partialState, "Failed.", null, inconsistent))).Should().Throw<ProtocolException>().WithMessage("*root or generation identity*");
+        ProtocolInterruptedRecoveryAttempt duplicate = new(new("/game", 1, 2, 3, 8), 7, 8, true, [new("11111111111111111111111111111111", 0), new("11111111111111111111111111111111", 1)]);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoveryFailureEvent(session, ProtocolInterruptedRecoveryOutcome.PartialFailure, partialState, "Failed.", null, duplicate))).Should().Throw<ProtocolException>().WithMessage("*invalid or duplicate*");
     }
 
     [Test]
@@ -225,8 +227,8 @@ internal sealed class ProtocolJsonSerializerTests
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(plan.Replace("\"evidence\":\"Observed.\"", "\"evidence\":\"Observed.\",\"evidence\":\"Again.\"", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*duplicate 'evidence'*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(plan.Replace(",\"evidence\":\"Observed.\"", "", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*missing the required 'evidence'*");
         ProtocolSessionId session = ProtocolSessionId.CreateRandom();
-        string recovery = ProtocolJsonSerializer.SerializeLine(new RecoveryFailureEvent(session, "failed", "Failed.", ProtocolRecoveryResult.Pending, "Retry.", null, new("/game", 1, 2, 3, 7, null, null, null, null, true, true, [new("11111111111111111111111111111111", 2)], 1, 2)));
-        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(recovery.Replace("\"recoveredPathCount\":2", "\"recoveredPathCount\":2,\"unknown\":true", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*unknown 'unknown'*");
+        string recovery = ProtocolJsonSerializer.SerializeLine(new RecoveryFailureEvent(session, ProtocolInterruptedRecoveryOutcome.PartialFailure, new(ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.RecoveryFailed, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), "Failed.", null, new(new("/game", 1, 2, 3, 7), 7, null, null, [new("11111111111111111111111111111111", 2)])));
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(recovery.Replace("\"changedPathCount\":2", "\"changedPathCount\":2,\"unknown\":true", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*unknown 'unknown'*");
     }
 
     [Test]
@@ -237,6 +239,87 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPlanDigest.Compute(plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, plan.Candidates, plan.Summary, plan.Warnings, true).Should().Be(plan.PlanDigest);
         string line = ProtocolJsonSerializer.SerializeLine(new InspectPlanRequest(plan.SessionId, "/game", InstallerOperation.Repair, plan.PackageId, null));
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(line.Replace("\"repair\"", "\"Repair\"", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*canonical camel case*");
+    }
+
+    [Test]
+    public void TerminalStateRejectsInvalidCartesianCombinationsAndUnknownCountClaims()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolPlanId plan = ProtocolPlanId.CreateRandom(); ProtocolPlanDigest digest = ProtocolPlanDigest.Parse(HashA);
+        SuccessEvent success = new(session, plan, digest, InstallerOperation.Uninstall, ProtocolExecutionOutcome.Succeeded, new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), new(1, 0, 0, 0, 0, 0), "Done.", null);
+        (success with { TerminalState = success.TerminalState with { DurableState = ProtocolDurableState.Unchanged } }).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome table*");
+        (success with { TerminalState = success.TerminalState with { ErrorCode = ProtocolTerminalErrorCode.IoFailure } }).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome table*");
+
+        SuccessEvent cleanup = success with { Outcome = ProtocolExecutionOutcome.SucceededWithCleanupWarning, TerminalState = new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.InspectAgain) };
+        cleanup.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome table*");
+        RecoverableInterruptionEvent unknown = new(session, plan, digest, ProtocolExecutionOutcome.UnexpectedCoreFailure, new(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), new(null, null, null, null, null, null), "Stopped.", "Unknown.", null);
+        (unknown with { ExecutionSummary = new(0, 0, 0, 0, 0, 0) }).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*known and unknown*");
+
+        ProtocolPrunePlanId prune = ProtocolPrunePlanId.CreateRandom();
+        PruneInterruptionEvent pending = new(session, prune, digest, ProtocolPruneOutcome.Interrupted, new(ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries), new(0, 0, 0, false), "Stopped.", null);
+        pending.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome table*");
+    }
+
+    [Test]
+    public void ExecutionSummariesRejectStatusSpecificCountClaims()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolPlanId plan = ProtocolPlanId.CreateRandom(); ProtocolPlanDigest digest = ProtocolPlanDigest.Parse(HashA);
+        ProtocolTerminalState unchanged = new(ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain);
+        new RolledBackFailureEvent(session, plan, digest, ProtocolExecutionOutcome.FailedBeforeMutation, unchanged, new(1, 0, 0, 0, 0, 0), "Failed.", "No mutation.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome counts*");
+
+        ProtocolTerminalState rolledBack = new(ProtocolDurableState.RolledBack, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain);
+        new RolledBackFailureEvent(session, plan, digest, ProtocolExecutionOutcome.FailedAndRolledBack, rolledBack, new(1, 1, 1, 0, 0, 0), "Failed.", "Rolled back.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome counts*");
+
+        ProtocolTerminalState recovered = new(ProtocolDurableState.RecoveryCompleted, ProtocolTerminalErrorCode.PathChanged, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain);
+        new RolledBackFailureEvent(session, plan, digest, ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired, recovered, new(0, 0, 0, 0, 0, 0), "Recovered.", "Inspect again.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome counts*");
+
+        ProtocolTerminalState committed = new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain);
+        new SuccessEvent(session, plan, digest, InstallerOperation.Repair, ProtocolExecutionOutcome.Succeeded, committed, new(TransactionPlan.MaximumOperationCount, 0, TransactionPlan.MaximumOperationCount, 0, 0, 0), "Committed.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*outside their bounds*");
+    }
+
+    [Test]
+    public void InterruptedRecoveryAttemptBindsRootGenerationAndOutcomeExactly()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom();
+        ProtocolTerminalState complete = new(ProtocolDurableState.RecoveryCompleted, null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain);
+        ProtocolInterruptedRecoveryAttempt rootMismatch = new(new("/game", 1, 2, 3, 7), 7, 8, true, []);
+        new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, complete, rootMismatch, "Recovered.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*root or generation identity*");
+
+        ProtocolInterruptedRecoveryAttempt regressed = new(new("/game", 1, 2, 3, 6), 7, 6, true, []);
+        new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, complete, regressed, "Recovered.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*root or generation identity*");
+
+        ProtocolInterruptedRecoveryAttempt unknownSelection = new(new("/game", 1, 2, 3, 8), 7, 8, null, []);
+        new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, complete, unknownSelection, "Recovered.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*selected root*");
+
+        RecoveryFailureEvent cancelled = new(session, ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery, new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), "Cancelled.", null);
+        ProtocolJsonSerializer.SerializeLine(cancelled).Should().NotBeEmpty(); cancelled.RequiresRecovery.Should().BeTrue();
+        (cancelled with { TerminalState = cancelled.TerminalState with { RecoveryDisposition = ProtocolRecoveryDisposition.NotRequired } })
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome table*");
+    }
+
+    [Test]
+    public void TerminalProseIsMutableDisplayTextButTypedAuthorityIsStable()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolPlanId plan = ProtocolPlanId.CreateRandom(); ProtocolPlanDigest digest = ProtocolPlanDigest.Parse(HashA);
+        SuccessEvent original = new(session, plan, digest, InstallerOperation.Uninstall, ProtocolExecutionOutcome.Succeeded, new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), new(1, 0, 0, 0, 0, 0), "One bounded explanation.", null);
+        SuccessEvent reworded = original with { Summary = "Different bounded display prose." };
+        ProtocolJsonSerializer.SerializeLine(original).Should().NotBeEmpty(); ProtocolJsonSerializer.SerializeLine(reworded).Should().NotBeEmpty();
+        reworded.Outcome.Should().Be(original.Outcome); reworded.TerminalState.Should().Be(original.TerminalState); reworded.ExecutionSummary.Should().Be(original.ExecutionSummary);
+    }
+
+    [Test]
+    public void TerminalJsonRejectsNestedUnknownFieldsAndNoncanonicalTypedEnums()
+    {
+        SuccessEvent terminal = new(ProtocolSessionId.CreateRandom(), ProtocolPlanId.CreateRandom(), ProtocolPlanDigest.Parse(HashA), InstallerOperation.Uninstall, ProtocolExecutionOutcome.Succeeded, new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain), new(1, 0, 0, 0, 0, 0), "Done.", null);
+        string line = ProtocolJsonSerializer.SerializeLine(terminal);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(line.Replace("\"durableState\":", "\"unknown\":true,\"durableState\":", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*unknown 'unknown'*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(line.Replace("\"durableState\":\"committed\"", "\"durableState\":0", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*canonical camel case*");
     }
 
     [Test]

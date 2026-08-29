@@ -105,9 +105,9 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
         RecoveryCompletedEvent recovered = (RecoveryCompletedEvent)(await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")))!;
 
-        recovered.GameRoot.Should().Be(new ProtocolGameRootIdentity("/game", 1, 2, 3, 8));
-        recovered.PreviousOperationGeneration.Should().Be(7); recovered.CurrentOperationGeneration.Should().Be(8);
-        recovered.RecoveredTransactionCount.Should().Be(1); recovered.RecoveredPathCount.Should().Be(2);
+        recovered.Attempt.GameRoot.Should().Be(new ProtocolGameRootIdentity("/game", 1, 2, 3, 8));
+        recovered.Attempt.PreviousOperationGeneration.Should().Be(7); recovered.Attempt.CurrentOperationGeneration.Should().Be(8);
+        recovered.Attempt.RecoveredTransactionCount.Should().Be(1); recovered.Attempt.RecoveredPathCount.Should().Be(2);
         emitted.OfType<RecoveryProgressEvent>().Select(value => value.Stage).Should().Equal(TransactionStage.AcquiringLock, TransactionStage.Recovering, TransactionStage.Completed);
         service.State.Should().Be(ProtocolSessionState.Ready);
         Func<Task> staleCatalog = async () => await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1));
@@ -125,7 +125,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
         RecoveryFailureEvent failure = (RecoveryFailureEvent)(await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")))!;
 
-        failure.ErrorCode.Should().Be("RecoveryFailed"); failure.Message.Should().NotContain("private-secret");
+        failure.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.UnexpectedFailure); failure.TerminalState.ErrorCode.Should().Be(ProtocolTerminalErrorCode.UnexpectedCoreFailure); failure.Message.Should().NotContain("private-secret");
         ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(failure)).Should().BeEquivalentTo(failure);
         service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
         Func<Task> inspect = async () => await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null));
@@ -145,7 +145,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
         RecoveryFailureEvent failure = (RecoveryFailureEvent)(await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")))!;
 
-        failure.ErrorCode.Should().Be("RecoveryFailed"); failure.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        failure.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.UnexpectedFailure); failure.TerminalState.Should().Be(new ProtocolTerminalState(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted));
         service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
     }
 
@@ -162,7 +162,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         outer.Cancel(); engine.ReleaseUnrequestedRecoveryCancellation.TrySetResult();
         RecoveryFailureEvent failure = (RecoveryFailureEvent)(await recovery)!;
 
-        failure.ErrorCode.Should().Be("RecoveryFailed"); failure.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        failure.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.UnexpectedFailure); failure.TerminalState.DurableState.Should().Be(ProtocolDurableState.Unknown);
         service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
     }
 
@@ -175,10 +175,10 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
         RecoveryFailureEvent failure = (RecoveryFailureEvent)(await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game")))!;
 
-        failure.ErrorCode.Should().Be(TransactionErrorCode.RecoveryFailed.ToString()); failure.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
-        failure.Details.Should().NotBeNull(); failure.Details!.CurrentOperationGeneration.Should().BeNull(); failure.Details.OperationGenerationAdvanced.Should().BeNull(); failure.Details.NamedRootStillSelected.Should().BeNull(); failure.Details.NamedRootSelectionChanged.Should().BeNull();
-        failure.Details.RequiresRecovery.Should().BeTrue(); failure.Details.RequiresFreshInspection.Should().BeTrue();
-        failure.Details.RecoveredTransactionCount.Should().Be(1); failure.Details.RecoveredPathCount.Should().Be(2);
+        failure.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.PartialFailure); failure.TerminalState.ErrorCode.Should().Be(ProtocolTerminalErrorCode.RecoveryFailed);
+        failure.Attempt.Should().NotBeNull(); failure.Attempt!.CurrentOperationGeneration.Should().BeNull(); failure.Attempt.OperationGenerationAdvanced.Should().BeNull(); failure.Attempt.NamedRootStillSelected.Should().BeNull(); failure.Attempt.NamedRootSelectionChanged.Should().BeNull();
+        failure.RequiresRecovery.Should().BeTrue(); failure.RequiresFreshInspection.Should().BeTrue();
+        failure.Attempt.RecoveredTransactionCount.Should().Be(1); failure.Attempt.RecoveredPathCount.Should().Be(2);
         string line = ProtocolJsonSerializer.SerializeLine(failure); line.Should().NotContain("private-partial-failure");
         ProtocolJsonSerializer.DeserializeEventLine(line).Should().BeEquivalentTo(failure);
         service.State.Should().Be(ProtocolSessionState.RecoveryRequired);
@@ -195,7 +195,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
         Task first = service.DisposeAsync().AsTask(); Task second = service.DisposeAsync().AsTask();
         RecoveryFailureEvent terminal = (RecoveryFailureEvent)(await recovery)!;
-        terminal.ErrorCode.Should().Be("RecoveryCancelled"); terminal.RecoveryResult.Should().Be(ProtocolRecoveryResult.NotNeeded);
+        terminal.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery); terminal.TerminalState.Should().Be(new ProtocolTerminalState(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted)); terminal.RequiresRecovery.Should().BeTrue();
         await Task.WhenAll(first, second);
         Func<Task> useAfterDispose = async () => await service.HandleAsync(new DiscoverGamesRequest(service.SessionId));
         await useAfterDispose.Should().ThrowAsync<ObjectDisposedException>();
@@ -258,7 +258,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
     [Test]
     public async Task ConfirmedExecutionEmitsExactCoreProgressAndTerminalData()
     {
-        List<ProtocolEvent> emitted = []; FakeEngine engine = new() { ExecuteChangedCount = 2 };
+        List<ProtocolEvent> emitted = []; FakeEngine engine = new() { ExecuteChangedCount = 1 };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener(), emitted.Add);
         await Handshake(service);
         PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null)))!;
@@ -267,7 +267,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
 
         emitted.OfType<ProgressEvent>().Select(value => value.Stage).Should().Equal(TransactionStage.Revalidating, TransactionStage.Applying, TransactionStage.Completed);
         emitted.OfType<ProgressEvent>().Select(value => value.Sequence).Should().Equal(0, 1, 2);
-        success.FilesChanged.Should().Be(2); success.Operation.Should().Be(InstallerOperation.Uninstall);
+        success.ExecutionSummary.ManagedFileChangeCount.Should().Be(1); success.Operation.Should().Be(InstallerOperation.Uninstall);
         service.State.Should().Be(ProtocolSessionState.Completed);
     }
 
@@ -304,17 +304,17 @@ internal sealed class LinuxInstallerProtocolServiceTests
         PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, current.CatalogId, 1)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         PruneSuccessEvent success = (PruneSuccessEvent)(await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)))!;
-        success.LogicalRemovedGenerationCount.Should().Be(1); success.PhysicalCleanupGenerationCount.Should().Be(1);
+        success.PruneSummary.LogicallyRemovedGenerationCount.Should().Be(1); success.PruneSummary.PhysicallyCleanedGenerationCount.Should().Be(1);
         emitted.OfType<PruneProgressEvent>().Should().ContainSingle().Which.Stage.Should().Be(TransactionStage.VerifyingRecovery);
     }
 
-    [TestCase(InstallationExecutionStatus.Succeeded, typeof(SuccessEvent), ProtocolRecoveryResult.NotNeeded)]
-    [TestCase(InstallationExecutionStatus.SucceededWithCleanupWarning, typeof(SuccessEvent), ProtocolRecoveryResult.Pending)]
-    [TestCase(InstallationExecutionStatus.FailedBeforeMutation, typeof(RolledBackFailureEvent), ProtocolRecoveryResult.NotNeeded)]
-    [TestCase(InstallationExecutionStatus.FailedAndRolledBack, typeof(RolledBackFailureEvent), ProtocolRecoveryResult.Succeeded)]
-    [TestCase(InstallationExecutionStatus.InterruptedRecoveryRequired, typeof(RecoverableInterruptionEvent), ProtocolRecoveryResult.Pending)]
-    [TestCase(InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired, typeof(RolledBackFailureEvent), ProtocolRecoveryResult.Succeeded)]
-    public async Task EveryNonCancellationExecutionOutcomeMapsToOneExactTerminal(InstallationExecutionStatus status, Type expectedType, ProtocolRecoveryResult expectedRecovery)
+    [TestCase(InstallationExecutionStatus.Succeeded, typeof(SuccessEvent), ProtocolExecutionOutcome.Succeeded, ProtocolDurableState.Committed, ProtocolRecoveryDisposition.NotRequired)]
+    [TestCase(InstallationExecutionStatus.SucceededWithCleanupWarning, typeof(SuccessEvent), ProtocolExecutionOutcome.SucceededWithCleanupWarning, ProtocolDurableState.Committed, ProtocolRecoveryDisposition.CleanupPending)]
+    [TestCase(InstallationExecutionStatus.FailedBeforeMutation, typeof(RolledBackFailureEvent), ProtocolExecutionOutcome.FailedBeforeMutation, ProtocolDurableState.Unchanged, ProtocolRecoveryDisposition.NotRequired)]
+    [TestCase(InstallationExecutionStatus.FailedAndRolledBack, typeof(RolledBackFailureEvent), ProtocolExecutionOutcome.FailedAndRolledBack, ProtocolDurableState.RolledBack, ProtocolRecoveryDisposition.Completed)]
+    [TestCase(InstallationExecutionStatus.InterruptedRecoveryRequired, typeof(RecoverableInterruptionEvent), ProtocolExecutionOutcome.InterruptedRecoveryRequired, ProtocolDurableState.RecoveryRequired, ProtocolRecoveryDisposition.InterruptedRecoveryRequired)]
+    [TestCase(InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired, typeof(RolledBackFailureEvent), ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired, ProtocolDurableState.RecoveryCompleted, ProtocolRecoveryDisposition.Completed)]
+    public async Task EveryNonCancellationExecutionOutcomeMapsToOneExactTerminal(InstallationExecutionStatus status, Type expectedType, ProtocolExecutionOutcome expectedOutcome, ProtocolDurableState durable, ProtocolRecoveryDisposition recovery)
     {
         List<ProtocolEvent> emitted = []; FakeEngine engine = new() { NextExecutionOutcome = CreateOutcome(status) };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener(), emitted.Add);
@@ -323,16 +323,50 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         ProtocolEvent terminal = (await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)))!;
 
-        terminal.Should().BeOfType(expectedType); GetRecoveryResult(terminal).Should().Be(expectedRecovery);
+        terminal.Should().BeOfType(expectedType); GetExecutionOutcome(terminal).Should().Be(expectedOutcome); GetTerminalState(terminal).Should().Match<ProtocolTerminalState>(state => state.DurableState == durable && state.RecoveryDisposition == recovery);
         emitted.Should().OnlyContain(value => value is ProgressEvent, "terminal command responses are returned and never duplicated through the progress sink");
         service.State.Should().Be(ProtocolSessionState.Completed);
+    }
+
+    [TestCaseSource(nameof(TransactionErrors))]
+    public async Task EveryCoreTransactionErrorMapsToTheExactClosedProtocolError(TransactionErrorCode error)
+    {
+        FakeEngine engine = new() { NextExecutionOutcome = CreateOutcome(InstallationExecutionStatus.FailedBeforeMutation, error) };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener()); await Handshake(service);
+        PlanEvent plan = (PlanEvent)await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null));
+        await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        RolledBackFailureEvent terminal = (RolledBackFailureEvent)await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        terminal.TerminalState.ErrorCode.Should().NotBeNull();
+        terminal.TerminalState.ErrorCode!.Value.ToString().Should().Be(error.ToString());
+    }
+
+    [Test]
+    public async Task UnknownCoreStatusEscapesAsProtocolFailureInsteadOfInventingATerminal()
+    {
+        FakeEngine engine = new() { NextExecutionOutcome = CreateOutcome((InstallationExecutionStatus)999, TransactionErrorCode.IoFailure) };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener()); await Handshake(service);
+        PlanEvent plan = (PlanEvent)await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Uninstall, null, null));
+        await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        Func<Task> execute = async () => await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        await execute.Should().ThrowAsync<ProtocolException>().WithMessage("*unknown installation execution status*");
+    }
+
+    [TestCase(true, ProtocolNextAction.InspectAgain)]
+    [TestCase(false, ProtocolNextAction.SelectGameFolder)]
+    public async Task RecoveryCompletionActionTracksWhetherTheNamedRootStillSelectsTheRecoveredAnchor(bool namedRootStillSelected, ProtocolNextAction action)
+    {
+        FakeEngine engine = new() { RecoveryNamedRootStillSelected = namedRootStillSelected };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener()); await Handshake(service);
+        RecoveryCompletedEvent terminal = (RecoveryCompletedEvent)await service.HandleAsync(new RecoverInterruptedRequest(service.SessionId, "/game"));
+        terminal.Attempt.NamedRootStillSelected.Should().Be(namedRootStillSelected);
+        terminal.TerminalState.Should().Be(new ProtocolTerminalState(ProtocolDurableState.RecoveryCompleted, null, ProtocolRecoveryDisposition.Completed, action));
     }
 
     [Test]
     public async Task InterruptedTerminalReportsExactManagedChangesAndPartialRollbackWithoutPathLeakage()
     {
-        TransactionPathChange[] changed = [new("managed-a", TransactionOperationKind.WriteFile), new("managed-b", TransactionOperationKind.RemoveFile), new(".smapi-installer/private", TransactionOperationKind.WriteFile)];
-        TransactionPathChange[] restored = [changed[0], changed[2]];
+        TransactionPathChange[] changed = [new("managed-a", TransactionOperationKind.WriteFile), new(".smapi-installer/private", TransactionOperationKind.WriteFile)];
+        TransactionPathChange[] restored = [changed[1]];
         TransactionExecutionOutcome transaction = new(Guid.NewGuid(), TransactionOutcomeStatus.RollbackFailedRecoveryRequired, null, changed, restored, TransactionCancellationDisposition.None, TransactionErrorCode.RecoveryFailed, "Recovery required.");
         FakeEngine engine = new() { NextExecutionOutcome = new(InstallationAction.Uninstall, InstallationExecutionStatus.InterruptedRecoveryRequired, transaction, [], TransactionErrorCode.RecoveryFailed, "Recovery required.") };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
@@ -341,13 +375,13 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
 
         RecoverableInterruptionEvent terminal = (RecoverableInterruptionEvent)(await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)))!;
-        terminal.FilesChanged.Should().Be(2); terminal.RecoverySummary.Should().Contain("restored 1 of 2");
+        terminal.ExecutionSummary.ManagedFileChangeCount.Should().Be(1); terminal.ExecutionSummary.RolledBackManagedFileCount.Should().Be(0); terminal.ExecutionSummary.InternalStateChangeCount.Should().Be(1); terminal.ExecutionSummary.RolledBackInternalStateCount.Should().Be(1); terminal.Summary.Should().Contain("restored 0 of 1");
         ProtocolJsonSerializer.SerializeLine(terminal).Should().NotContain("private");
     }
 
-    [TestCase(InstallationExecutionStatus.CancelledBeforeMutation, 0, ProtocolRecoveryResult.NotNeeded)]
-    [TestCase(InstallationExecutionStatus.CancelledAndRolledBack, 2, ProtocolRecoveryResult.Succeeded)]
-    public async Task BothCancellationBoundariesMapTruthfully(InstallationExecutionStatus status, int expectedChanged, ProtocolRecoveryResult expectedRecovery)
+    [TestCase(InstallationExecutionStatus.CancelledBeforeMutation, 0, ProtocolDurableState.Unchanged, ProtocolRecoveryDisposition.NotRequired)]
+    [TestCase(InstallationExecutionStatus.CancelledAndRolledBack, 1, ProtocolDurableState.RolledBack, ProtocolRecoveryDisposition.Completed)]
+    public async Task BothCancellationBoundariesMapTruthfully(InstallationExecutionStatus status, int expectedChanged, ProtocolDurableState durable, ProtocolRecoveryDisposition recovery)
     {
         FakeEngine engine = new() { BlockExecutionUntilCancellation = true, CancellationOutcomeStatus = status };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
@@ -358,7 +392,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await engine.ExecutionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         (await service.HandleAsync(new CancelPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeOfType<CommandAcknowledgedEvent>();
         CancelledEvent terminal = (CancelledEvent)(await execution)!;
-        terminal.FilesChanged.Should().Be(expectedChanged); terminal.RecoveryResult.Should().Be(expectedRecovery);
+        terminal.ExecutionSummary.ManagedFileChangeCount.Should().Be(expectedChanged); terminal.TerminalState.Should().Be(new ProtocolTerminalState(durable, null, recovery, ProtocolNextAction.InspectAgain));
     }
 
     [Test]
@@ -443,8 +477,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
         }
 
         RecoverableInterruptionEvent terminal = (RecoverableInterruptionEvent)(await execution)!;
-        terminal.ErrorCode.Should().Be("UnexpectedCoreFailure"); terminal.Message.Should().NotContain("private-secret");
-        terminal.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        terminal.Outcome.Should().Be(ProtocolExecutionOutcome.UnexpectedCoreFailure); terminal.TerminalState.Should().Be(new ProtocolTerminalState(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted)); terminal.Message.Should().NotContain("private-secret");
+        terminal.ExecutionSummary.Should().Be(new ProtocolExecutionSummary(null, null, null, null, null, null));
         emitted.OfType<ProgressEvent>().Should().HaveCount(expectedProgress);
         service.State.Should().Be(ProtocolSessionState.Completed);
     }
@@ -496,11 +530,11 @@ internal sealed class LinuxInstallerProtocolServiceTests
         delivered.OfType<ProgressEvent>().Should().Contain(value => value.Stage == TransactionStage.Applying);
     }
 
-    [TestCase(RecoveryPruneOutcomeStatus.Succeeded, typeof(PruneSuccessEvent), ProtocolRecoveryResult.NotNeeded)]
-    [TestCase(RecoveryPruneOutcomeStatus.FailedBeforePublication, typeof(PruneFailureEvent), ProtocolRecoveryResult.NotNeeded)]
-    [TestCase(RecoveryPruneOutcomeStatus.Interrupted, typeof(PruneInterruptionEvent), ProtocolRecoveryResult.Pending)]
-    [TestCase(RecoveryPruneOutcomeStatus.FailedWithCleanupPending, typeof(PruneFailureEvent), ProtocolRecoveryResult.Pending)]
-    public async Task PruneTerminalMappingsPreserveLogicalPhysicalAndPendingTruth(RecoveryPruneOutcomeStatus status, Type expectedType, ProtocolRecoveryResult recovery)
+    [TestCase(RecoveryPruneOutcomeStatus.Succeeded, typeof(PruneSuccessEvent), ProtocolPruneOutcome.Succeeded, ProtocolRecoveryDisposition.NotRequired)]
+    [TestCase(RecoveryPruneOutcomeStatus.FailedBeforePublication, typeof(PruneFailureEvent), ProtocolPruneOutcome.FailedBeforePublication, ProtocolRecoveryDisposition.NotRequired)]
+    [TestCase(RecoveryPruneOutcomeStatus.Interrupted, typeof(PruneInterruptionEvent), ProtocolPruneOutcome.Interrupted, ProtocolRecoveryDisposition.CleanupPending)]
+    [TestCase(RecoveryPruneOutcomeStatus.FailedWithCleanupPending, typeof(PruneFailureEvent), ProtocolPruneOutcome.FailedWithCleanupPending, ProtocolRecoveryDisposition.CleanupPending)]
+    public async Task PruneTerminalMappingsPreserveLogicalPhysicalAndPendingTruth(RecoveryPruneOutcomeStatus status, Type expectedType, ProtocolPruneOutcome expectedOutcome, ProtocolRecoveryDisposition recovery)
     {
         FakeEngine engine = new() { NextPruneStatus = status };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
@@ -508,7 +542,22 @@ internal sealed class LinuxInstallerProtocolServiceTests
         PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         ProtocolEvent terminal = (await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)))!;
-        terminal.Should().BeOfType(expectedType); GetRecoveryResult(terminal).Should().Be(recovery);
+        terminal.Should().BeOfType(expectedType); GetPruneOutcome(terminal).Should().Be(expectedOutcome); GetTerminalState(terminal).RecoveryDisposition.Should().Be(recovery);
+    }
+
+    [TestCase(false, false, ProtocolDurableState.PruneApplied, ProtocolRecoveryDisposition.CleanupPending)]
+    [TestCase(true, false, ProtocolDurableState.PruneApplied, ProtocolRecoveryDisposition.StateRefreshRequired)]
+    [TestCase(false, true, ProtocolDurableState.Unchanged, ProtocolRecoveryDisposition.CleanupPending)]
+    public async Task InterruptedPruneDerivesDurableStateAndRecoveryOnlyFromExactObservedWork(bool omitPending, bool suppressWork, ProtocolDurableState durable, ProtocolRecoveryDisposition recovery)
+    {
+        FakeEngine engine = new() { NextPruneStatus = RecoveryPruneOutcomeStatus.Interrupted, OmitPendingPruneCleanup = omitPending, SuppressPruneWork = suppressWork };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener()); await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1));
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        PruneInterruptionEvent terminal = (PruneInterruptionEvent)await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        terminal.TerminalState.DurableState.Should().Be(durable); terminal.TerminalState.RecoveryDisposition.Should().Be(recovery);
+        if (recovery == ProtocolRecoveryDisposition.StateRefreshRequired) terminal.Message.Should().NotContain("remain", "no cleanup is known to be pending");
     }
 
     [TestCase(RecoveryPruneOutcomeStatus.CancelledBeforePublication)]
@@ -523,11 +572,11 @@ internal sealed class LinuxInstallerProtocolServiceTests
         Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         await engine.PruneStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); await service.HandleAsync(new CancelPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         PruneCancelledEvent terminal = (PruneCancelledEvent)(await execution)!;
-        terminal.LogicalRemovedGenerationCount.Should().Be(0); terminal.PhysicalCleanupGenerationCount.Should().Be(0);
-        terminal.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending, "cleanup-only plans retain exact pre-existing physical cleanup work even when cancelled before publication");
-        terminal.SafeStateSummary.Should().Contain("physical generation cleanup");
+        terminal.PruneSummary.LogicallyRemovedGenerationCount.Should().Be(0); terminal.PruneSummary.PhysicallyCleanedGenerationCount.Should().Be(0);
+        terminal.TerminalState.RecoveryDisposition.Should().Be(ProtocolRecoveryDisposition.CleanupPending, "cleanup-only plans retain exact pre-existing physical cleanup work even when cancelled before publication");
+        terminal.Summary.Should().Contain("physical generation cleanup");
         if (status == RecoveryPruneOutcomeStatus.CancelledWithCleanupPending)
-            terminal.SafeStateSummary.Should().StartWith("No logical generations were removed");
+            terminal.Summary.Should().Contain("No logical generations were removed");
     }
 
     [TestCase(false)]
@@ -574,8 +623,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         }
 
         PruneInterruptionEvent terminal = (PruneInterruptionEvent)(await pruning)!;
-        terminal.ErrorCode.Should().Be("UnexpectedCoreFailure"); terminal.Message.Should().NotContain("private-prune-secret");
-        terminal.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        terminal.Outcome.Should().Be(ProtocolPruneOutcome.UnexpectedCoreFailure); terminal.TerminalState.Should().Be(new ProtocolTerminalState(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries)); terminal.Message.Should().NotContain("private-prune-secret");
         emitted.OfType<PruneProgressEvent>().Should().HaveCount(expectedProgress);
         service.State.Should().Be(ProtocolSessionState.Completed);
     }
@@ -583,13 +631,13 @@ internal sealed class LinuxInstallerProtocolServiceTests
     [Test]
     public async Task AuxiliaryPruneCleanupPendingIsPresentedWithoutInventingGenerationWork()
     {
-        FakeEngine engine = new() { NextPruneStatus = RecoveryPruneOutcomeStatus.FailedWithCleanupPending, NextPruneAuxiliaryCleanupPending = true };
+        FakeEngine engine = new() { NextPruneStatus = RecoveryPruneOutcomeStatus.FailedWithCleanupPending, NextPruneAuxiliaryCleanupPending = true, OmitPendingPruneCleanup = true };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
         await Handshake(service); RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)(await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game")))!;
         PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         PruneFailureEvent terminal = (PruneFailureEvent)(await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)))!;
-        terminal.Message.Should().Contain("auxiliary recovery metadata cleanup"); terminal.PhysicalCleanupGenerationCount.Should().Be(0); terminal.RecoveryResult.Should().Be(ProtocolRecoveryResult.Pending);
+        terminal.Message.Should().Contain("auxiliary recovery metadata cleanup"); terminal.PruneSummary.PhysicallyCleanedGenerationCount.Should().Be(0); terminal.TerminalState.RecoveryDisposition.Should().Be(ProtocolRecoveryDisposition.CleanupPending);
     }
 
     [Test]
@@ -721,7 +769,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
     private static Task<ProtocolEvent> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
     private static async Task<PackageOpenedEvent> Open(LinuxInstallerProtocolService service) => (PackageOpenedEvent)(await service.HandleAsync(new OpenPackageRequest(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest")))!;
 
-    private static InstallationExecutionOutcome CreateOutcome(InstallationExecutionStatus status)
+    private static InstallationExecutionOutcome CreateOutcome(InstallationExecutionStatus status, TransactionErrorCode? errorOverride = null)
     {
         bool committed = status is InstallationExecutionStatus.Succeeded or InstallationExecutionStatus.SucceededWithCleanupWarning;
         bool rolledBack = status is InstallationExecutionStatus.FailedAndRolledBack or InstallationExecutionStatus.CancelledAndRolledBack;
@@ -734,22 +782,31 @@ internal sealed class LinuxInstallerProtocolServiceTests
             InstallationExecutionStatus.InterruptedRecoveryRequired => TransactionOutcomeStatus.InterruptedRecoveryRequired,
             _ => TransactionOutcomeStatus.FailedBeforeMutation
         };
-        TransactionExecutionOutcome? transaction = status == InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired ? null : new(Guid.NewGuid(), transactionStatus, committed ? TransactionStatus.Committed : rolledBack ? TransactionStatus.RolledBack : null, changed, rolledBack ? changed : [], TransactionCancellationDisposition.None, status is InstallationExecutionStatus.Succeeded or InstallationExecutionStatus.SucceededWithCleanupWarning ? null : TransactionErrorCode.IoFailure, status.ToString());
-        return new(InstallationAction.Uninstall, status, transaction, status == InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired ? [new(Guid.NewGuid(), TransactionStatus.Recovered, 1)] : [], status is InstallationExecutionStatus.Succeeded or InstallationExecutionStatus.SucceededWithCleanupWarning ? null : TransactionErrorCode.IoFailure, status.ToString());
+        TransactionErrorCode? error = errorOverride ?? (status switch
+        {
+            InstallationExecutionStatus.Succeeded or InstallationExecutionStatus.CancelledBeforeMutation or InstallationExecutionStatus.CancelledAndRolledBack => null,
+            InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired => TransactionErrorCode.PathChanged,
+            _ => TransactionErrorCode.IoFailure
+        });
+        TransactionExecutionOutcome? transaction = status == InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired ? null : new(Guid.NewGuid(), transactionStatus, committed ? TransactionStatus.Committed : rolledBack ? TransactionStatus.RolledBack : null, changed, rolledBack ? changed : [], TransactionCancellationDisposition.None, error, status.ToString());
+        return new(InstallationAction.Uninstall, status, transaction, status == InstallationExecutionStatus.AutomaticRecoveryCompletedFreshInspectionRequired ? [new(Guid.NewGuid(), TransactionStatus.Recovered, 1)] : [], error, status.ToString());
     }
 
-    private static ProtocolRecoveryResult GetRecoveryResult(ProtocolEvent terminal) => terminal switch
+    private static ProtocolTerminalState GetTerminalState(ProtocolEvent terminal) => terminal switch
     {
-        SuccessEvent value => value.RecoveryResult,
-        RolledBackFailureEvent value => value.RecoveryResult,
-        RecoverableInterruptionEvent value => value.RecoveryResult,
-        CancelledEvent value => value.RecoveryResult,
-        PruneFailureEvent value => value.RecoveryResult,
-        PruneInterruptionEvent value => value.RecoveryResult,
-        PruneCancelledEvent value => value.RecoveryResult,
-        PruneSuccessEvent => ProtocolRecoveryResult.NotNeeded,
+        SuccessEvent value => value.TerminalState,
+        RolledBackFailureEvent value => value.TerminalState,
+        RecoverableInterruptionEvent value => value.TerminalState,
+        CancelledEvent value => value.TerminalState,
+        PruneFailureEvent value => value.TerminalState,
+        PruneInterruptionEvent value => value.TerminalState,
+        PruneCancelledEvent value => value.TerminalState,
+        PruneSuccessEvent value => value.TerminalState,
         _ => throw new AssertionException("Unexpected terminal event type.")
     };
+    private static ProtocolExecutionOutcome GetExecutionOutcome(ProtocolEvent terminal) => terminal switch { SuccessEvent value => value.Outcome, RolledBackFailureEvent value => value.Outcome, RecoverableInterruptionEvent value => value.Outcome, CancelledEvent value => value.Outcome, _ => throw new AssertionException("Unexpected execution terminal.") };
+    private static ProtocolPruneOutcome GetPruneOutcome(ProtocolEvent terminal) => terminal switch { PruneSuccessEvent value => value.Outcome, PruneFailureEvent value => value.Outcome, PruneInterruptionEvent value => value.Outcome, PruneCancelledEvent value => value.Outcome, _ => throw new AssertionException("Unexpected prune terminal.") };
+    private static IEnumerable<TransactionErrorCode> TransactionErrors => Enum.GetValues<TransactionErrorCode>();
 
     private static InspectedInstallationState Inspection(
         InstallationAction action,
@@ -839,9 +896,12 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public bool ThrowUnrequestedRecoveryCancellation { get; set; }
         public bool BlockUnrequestedRecoveryCancellation { get; set; }
         public bool ThrowPartialRecovery { get; set; }
+        public bool RecoveryNamedRootStillSelected { get; set; } = true;
         public bool BlockRecoveryUntilCancellation { get; set; }
         public bool BlockRecoveryInitiation { get; set; }
         public bool BlockExecutionInitiation { get; set; }
+        public bool OmitPendingPruneCleanup { get; set; }
+        public bool SuppressPruneWork { get; set; }
         public TaskCompletionSource RecoveryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ExecutionInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource PruneInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -878,7 +938,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
             this.Progress.Report(new(TransactionStage.AcquiringLock, 0, null)); this.RecoveryStarted.TrySetResult();
             if (this.BlockRecoveryUntilCancellation) await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             this.Progress.Report(new(TransactionStage.Recovering, 0, null));
-            InterruptedOperationRecoveryResult result = new(Root, 7, 8, [new(Guid.NewGuid(), TransactionStatus.Recovered, 2)]);
+            InterruptedOperationRecoveryResult result = new(Root, 7, 8, [new(Guid.NewGuid(), TransactionStatus.Recovered, 2)], this.RecoveryNamedRootStillSelected);
             this.Progress.Report(new(TransactionStage.Completed, 1, 1));
             return result;
         }
@@ -904,7 +964,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
                     if (this.CommitExecutionAfterCancellation) return CreateOutcome(InstallationExecutionStatus.Succeeded);
                     if (this.CancellationOutcomeStatus == InstallationExecutionStatus.CancelledAndRolledBack)
                     {
-                        TransactionPathChange[] changed = [new("managed-a", TransactionOperationKind.WriteFile), new("managed-b", TransactionOperationKind.RemoveFile)];
+                        TransactionPathChange[] changed = [new("managed-a", TransactionOperationKind.WriteFile)];
                         return new(inspection.Action, this.CancellationOutcomeStatus, new(Guid.NewGuid(), TransactionOutcomeStatus.CancelledAndRolledBack, TransactionStatus.RolledBack, changed, changed, TransactionCancellationDisposition.ObservedAfterMutationAndRolledBack, null, "Cancelled."), [], null, "Cancelled.");
                     }
                     return new(inspection.Action, this.CancellationOutcomeStatus, new(Guid.NewGuid(), TransactionOutcomeStatus.CancelledBeforeMutation, null, [], [], TransactionCancellationDisposition.ObservedBeforeMutation, null, "Cancelled."), [], null, "Cancelled.");
@@ -946,10 +1006,11 @@ internal sealed class LinuxInstallerProtocolServiceTests
             }
             bool pending = this.NextPruneStatus is RecoveryPruneOutcomeStatus.Interrupted or RecoveryPruneOutcomeStatus.CancelledWithCleanupPending or RecoveryPruneOutcomeStatus.FailedWithCleanupPending
                 || (this.CleanupOnlyPrune && (this.NextPruneStatus == RecoveryPruneOutcomeStatus.FailedBeforePublication || this.NextPruneStatus == RecoveryPruneOutcomeStatus.CancelledBeforePublication));
-            IReadOnlyList<Guid> logical = this.NextPruneStatus is RecoveryPruneOutcomeStatus.FailedBeforePublication or RecoveryPruneOutcomeStatus.CancelledBeforePublication ? [] : plan.RemovedGenerationIds;
+            IReadOnlyList<Guid> logical = this.SuppressPruneWork || this.NextPruneStatus is RecoveryPruneOutcomeStatus.FailedBeforePublication or RecoveryPruneOutcomeStatus.CancelledBeforePublication ? [] : plan.RemovedGenerationIds;
             IReadOnlyList<Guid> physical = this.NextPruneStatus == RecoveryPruneOutcomeStatus.Succeeded ? plan.CleanupGenerationIds : [];
-            IReadOnlyList<Guid> pendingIds = pending ? plan.CleanupGenerationIds : [];
-            return new(this.NextPruneStatus, logical, physical, pendingIds, this.NextPruneAuxiliaryCleanupPending, this.NextPruneStatus == RecoveryPruneOutcomeStatus.Succeeded ? null : TransactionErrorCode.IoFailure, this.NextPruneStatus.ToString());
+            IReadOnlyList<Guid> pendingIds = pending && !this.OmitPendingPruneCleanup ? plan.CleanupGenerationIds : [];
+            TransactionErrorCode? error = this.NextPruneStatus is RecoveryPruneOutcomeStatus.Succeeded or RecoveryPruneOutcomeStatus.CancelledBeforePublication or RecoveryPruneOutcomeStatus.CancelledWithCleanupPending ? null : TransactionErrorCode.IoFailure;
+            return new(this.NextPruneStatus, logical, physical, pendingIds, this.NextPruneAuxiliaryCleanupPending, error, this.NextPruneStatus.ToString());
         }
 
         private static ModifiedFileReplacementCandidate[] CreateCandidates(object authority) =>
