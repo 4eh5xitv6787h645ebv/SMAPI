@@ -347,9 +347,63 @@ jobs:
                     fi
 
             -   name: Attest every checksummed release subject
+                id: attestation
                 uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
                 with:
                     subject-checksums: artifacts/release/SHA256SUMS
+
+            -   name: Prepare separately checksummed local provenance pair
+                shell: bash
+                env:
+                    BUNDLE_SOURCE: ${{ steps.attestation.outputs.bundle-path }}
+                    RELEASE_VERSION: ${{ needs.qualify-and-package.outputs.release_version }}
+                run: |
+                    set -euo pipefail
+                    bundle_name="SMAPI-$RELEASE_VERSION-linux-x64-attestation-bundle.jsonl"
+                    checksum_name="$bundle_name.sha256"
+                    bundle_path="artifacts/provenance/$bundle_name"
+                    checksum_path="artifacts/provenance/$checksum_name"
+
+                    if [[ -z "$BUNDLE_SOURCE" || ! -f "$BUNDLE_SOURCE" || -L "$BUNDLE_SOURCE" ]]; then
+                        echo "The attestation action didn't produce one ordinary local-verification bundle." >&2
+                        exit 1
+                    fi
+                    mkdir -p artifacts/provenance
+                    cp -- "$BUNDLE_SOURCE" "$bundle_path"
+                    bundle_size="$(stat -c %s -- "$bundle_path")"
+                    if (( bundle_size <= 0 || bundle_size > 2097152 )); then
+                        echo "The local attestation bundle is empty or exceeds 2 MiB." >&2
+                        exit 1
+                    fi
+                    jq -e -s 'length >= 1 and all(.[]; type == "object" and has("mediaType") and has("verificationMaterial") and has("dsseEnvelope"))' "$bundle_path" >/dev/null
+                    (
+                        cd artifacts/provenance
+                        sha256sum -- "$bundle_name" > "$checksum_name"
+                    )
+                    checksum_size="$(stat -c %s -- "$checksum_path")"
+                    if (( checksum_size <= 0 || checksum_size > 1024 )); then
+                        echo "The local attestation checksum is empty or exceeds 1024 bytes." >&2
+                        exit 1
+                    fi
+                    if [[ "$(find artifacts/provenance -mindepth 1 -maxdepth 1 -printf . | wc -c)" != 2 \
+                        || ! -f "$bundle_path" || -L "$bundle_path" || "$(stat -c %h -- "$bundle_path")" != 1 \
+                        || ! -f "$checksum_path" || -L "$checksum_path" || "$(stat -c %h -- "$checksum_path")" != 1 ]]; then
+                        echo "The local provenance artifact must contain exactly two single-link ordinary files." >&2
+                        exit 1
+                    fi
+                    expected_checksum="$RUNNER_TEMP/expected-attestation-bundle.sha256"
+                    printf '%s  %s\n' "$(sha256sum -- "$bundle_path" | cut -d ' ' -f 1)" "$bundle_name" > "$expected_checksum"
+                    cmp --silent "$expected_checksum" "$checksum_path"
+                    (cd artifacts/provenance && sha256sum --check --strict "$checksum_name")
+
+            -   name: Upload local provenance pair separately
+                uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+                with:
+                    name: linux-alpha-provenance-${{ needs.qualify-and-package.outputs.release_commit }}
+                    path: artifacts/provenance
+                    if-no-files-found: error
+                    retention-days: 30
+                    compression-level: 0
 
     publish-prerelease:
         name: Publish experimental GitHub prerelease
@@ -367,6 +421,12 @@ jobs:
                 with:
                     name: linux-alpha-release-${{ needs.qualify-and-package.outputs.release_commit }}
                     path: artifacts/release
+
+            -   name: Download local provenance pair
+                uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+                with:
+                    name: linux-alpha-provenance-${{ needs.qualify-and-package.outputs.release_commit }}
+                    path: artifacts/provenance
 
             -   name: Checkout exact release source
                 uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -387,6 +447,7 @@ jobs:
                 env:
                     RELEASE_COMMIT: ${{ needs.qualify-and-package.outputs.release_commit }}
                     RELEASE_TAG: ${{ needs.qualify-and-package.outputs.release_tag }}
+                    RELEASE_VERSION: ${{ needs.qualify-and-package.outputs.release_version }}
                     SOURCE_TREE: ${{ needs.qualify-and-package.outputs.source_tree }}
                 run: |
                     set -euo pipefail
@@ -399,6 +460,28 @@ jobs:
                         --tag "$RELEASE_TAG" \
                         --source-commit "$RELEASE_COMMIT" \
                         --source-tree "$SOURCE_TREE"
+
+                    bundle_name="SMAPI-$RELEASE_VERSION-linux-x64-attestation-bundle.jsonl"
+                    checksum_name="$bundle_name.sha256"
+                    bundle_path="artifacts/provenance/$bundle_name"
+                    checksum_path="artifacts/provenance/$checksum_name"
+                    if [[ "$(find artifacts/provenance -mindepth 1 -maxdepth 1 -printf . | wc -c)" != 2 \
+                        || ! -f "$bundle_path" || -L "$bundle_path" || "$(stat -c %h -- "$bundle_path")" != 1 \
+                        || ! -f "$checksum_path" || -L "$checksum_path" || "$(stat -c %h -- "$checksum_path")" != 1 ]]; then
+                        echo "The downloaded local provenance pair has unexpected entries or file types." >&2
+                        exit 1
+                    fi
+                    bundle_size="$(stat -c %s -- "$bundle_path")"
+                    checksum_size="$(stat -c %s -- "$checksum_path")"
+                    if (( bundle_size <= 0 || bundle_size > 2097152 || checksum_size <= 0 || checksum_size > 1024 )); then
+                        echo "The downloaded local provenance pair violates its size bounds." >&2
+                        exit 1
+                    fi
+                    jq -e -s 'length >= 1 and all(.[]; type == "object" and has("mediaType") and has("verificationMaterial") and has("dsseEnvelope"))' "$bundle_path" >/dev/null
+                    expected_checksum="$RUNNER_TEMP/expected-attestation-bundle.sha256"
+                    printf '%s  %s\n' "$(sha256sum -- "$bundle_path" | cut -d ' ' -f 1)" "$bundle_name" > "$expected_checksum"
+                    cmp --silent "$expected_checksum" "$checksum_path"
+                    (cd artifacts/provenance && sha256sum --check --strict "$checksum_name")
 
             -   name: Publish immutable-identity prerelease
                 shell: bash
@@ -416,10 +499,13 @@ jobs:
 
                     package_name="SMAPI-$RELEASE_VERSION-linux-x64-installer.zip"
                     manifest_name="SMAPI-$RELEASE_VERSION-linux-x64-install-manifest.json"
+                    bundle_name="SMAPI-$RELEASE_VERSION-linux-x64-attestation-bundle.jsonl"
+                    bundle_checksum_name="$bundle_name.sha256"
                     package_sha256="$(awk -v name="$package_name" '$2 == name { print $1 }' artifacts/release/SHA256SUMS)"
                     manifest_sha256="$(awk -v name="$manifest_name" '$2 == name { print $1 }' artifacts/release/SHA256SUMS)"
-                    if [[ ! "$package_sha256" =~ ^[0-9a-f]{64}$ || ! "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]]; then
-                        echo "The verified checksums don't contain exactly named package and manifest subjects." >&2
+                    bundle_sha256="$(awk -v name="$bundle_name" '$2 == name { print $1 }' "artifacts/provenance/$bundle_checksum_name")"
+                    if [[ ! "$package_sha256" =~ ^[0-9a-f]{64}$ || ! "$manifest_sha256" =~ ^[0-9a-f]{64}$ || ! "$bundle_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+                        echo "The verified checksums don't contain the exactly named release subjects and local provenance bundle." >&2
                         exit 1
                     fi
                     if [[ ! "$RELEASE_TAG" =~ ^fork-4eh5xitv6787h645ebv-linux-v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([1-9][0-9]*)$ ]]; then
@@ -441,8 +527,9 @@ jobs:
                         echo
                         echo "\`$package_sha256  $package_name\`"
                         echo "\`$manifest_sha256  $manifest_name\`"
+                        echo "\`$bundle_sha256  $bundle_name\`"
                         echo
-                        echo "Download the installer ZIP, its install manifest, \`SHA256SUMS\`, and \`build-metadata.json\` into one empty directory. Run \`sha256sum --check --strict SHA256SUMS\`. Then verify both attested subjects with \`gh attestation verify '$package_name' -R '$GITHUB_REPOSITORY'\` and \`gh attestation verify '$manifest_name' -R '$GITHUB_REPOSITORY'\`."
+                        echo "Download all six assets into one empty directory. Check the package and manifest bytes with \`sha256sum --check --strict SHA256SUMS\`, then inspect \`build-metadata.json\` and confirm its exact release/source/artifact fields agree. Check the separately published local bundle with \`sha256sum --check --strict '$bundle_checksum_name'\`; that sidecar provides transport-integrity detection, while the signed attestation and strict verification policy establish authenticity. With GitHub CLI 2.92.0, verify the package from that bundle without a GitHub login or authenticated attestation download using \`gh attestation verify '$package_name' --bundle '$bundle_name' --hostname github.com --repo '$GITHUB_REPOSITORY' --predicate-type https://slsa.dev/provenance/v1 --cert-oidc-issuer https://token.actions.githubusercontent.com --cert-identity 'https://github.com/$GITHUB_REPOSITORY/.github/workflows/linux-alpha-release.yml@refs/tags/$RELEASE_TAG' --signer-digest '$RELEASE_COMMIT' --source-ref 'refs/tags/$RELEASE_TAG' --source-digest '$RELEASE_COMMIT' --deny-self-hosted-runners --limit 2 --format json\`. GitHub CLI may still retrieve Sigstore/GitHub trusted-root metadata unless it is already cached. The successful statement must contain exactly the installer ZIP and install-manifest subjects."
                         echo
                         echo "## Install, upgrade, and rollback"
                         echo
@@ -450,7 +537,7 @@ jobs:
                         echo
                         echo "## Known limitations"
                         echo
-                        echo "There is no graphical updater yet. The installer changes the game launcher and rollback is not atomic. Performance results describe one controlled machine/workload and are not universal FPS, power, or latency claims. Diagnostics can contain mod and system identifiers; reports stay local unless you choose to share them."
+                        echo "There is no graphical updater yet. The installer changes the game launcher and rollback is not atomic. Local-bundle verification avoids GitHub attestation API authentication, but GitHub CLI may still need network access to update Sigstore/GitHub trusted-root metadata. Performance results describe one controlled machine/workload and are not universal FPS, power, or latency claims. Diagnostics can contain mod and system identifiers; reports stay local unless you choose to share them."
                         echo
                         echo "See the [comparison](https://4eh5xitv6787h645ebv.github.io/SMAPI/upstream-comparison.html), [validation record](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release-validation.html), [documentation](https://4eh5xitv6787h645ebv.github.io/SMAPI/), and [fork issue tracker](https://github.com/$GITHUB_REPOSITORY/issues)."
                     } > "$notes"
@@ -460,6 +547,8 @@ jobs:
                         "artifacts/release/$manifest_name" \
                         artifacts/release/SHA256SUMS \
                         artifacts/release/build-metadata.json \
+                        "artifacts/provenance/$bundle_name" \
+                        "artifacts/provenance/$bundle_checksum_name" \
                         --repo "$GITHUB_REPOSITORY" \
                         --verify-tag \
                         --target "$RELEASE_COMMIT" \
