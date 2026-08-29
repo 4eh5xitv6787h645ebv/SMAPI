@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Text;
 using FluentAssertions;
@@ -235,8 +236,9 @@ internal sealed class GitHubAttestationProcessRunnerTests
             afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
             beforeProcessStartForTesting: bridge =>
             {
-                File.Delete(bridge);
-                File.CreateSymbolicLink(bridge, bundle.ProcPath);
+                string replacement = $"{bridge}.replacement";
+                File.CreateSymbolicLink(replacement, bundle.ProcPath);
+                File.Move(replacement, bridge, overwrite: true);
             }
         );
         string script = this.Script($"/usr/bin/touch '{processMarker}'");
@@ -399,6 +401,46 @@ internal sealed class GitHubAttestationProcessRunnerTests
         await action.Should().ThrowAsync<OperationCanceledException>();
         int pid = int.Parse(await File.ReadAllTextAsync(pidFile));
         Directory.Exists($"/proc/{pid}").Should().BeFalse("the cancelled child must be fully reaped");
+    }
+
+    [Test]
+    public async Task RunAsync_LeaderPidfdAcquisitionFailureTerminatesUnreapedChildAndExactDescendants()
+    {
+        string leaderPidFile = Path.Combine(this.TempDirectory, "startup-failure-leader.pid");
+        string descendantPidFile = Path.Combine(this.TempDirectory, "startup-failure-descendant.pid");
+        string processMarker = Path.Combine(this.TempDirectory, "startup-failure-must-not-continue");
+        string privateSecret = Path.Combine(this.TempDirectory, "private-pidfd-error");
+        string? privateDirectory = null;
+        string script = this.Script("""
+            /usr/bin/sleep 30 </dev/null >/dev/null 2>&1 &
+            /usr/bin/printf '%s' "$!" > "$2"
+            /usr/bin/printf '%s' "$$" > "$1"
+            /usr/bin/sleep 1
+            /usr/bin/touch "$3"
+            exec /usr/bin/sleep 30
+            """);
+        GitHubAttestationProcessRunner runner = new(
+            afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
+            openLeaderPidfdForTesting: _ =>
+            {
+                WaitForFileSynchronously(descendantPidFile);
+                throw new IOException($"synthetic private pidfd failure: {privateSecret}");
+            }
+        );
+
+        Func<Task> action = async () => await runner.RunAsync(
+            this.Request(script, [leaderPidFile, descendantPidFile, processMarker])
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.Message.Should().Be("The GitHub attestation verifier couldn't retain exact process authority.");
+        exception.ToString().Should().NotContain(privateSecret).And.NotContain(descendantPidFile);
+        int leaderPid = int.Parse(await File.ReadAllTextAsync(leaderPidFile));
+        int descendantPid = int.Parse(await File.ReadAllTextAsync(descendantPidFile));
+        Directory.Exists($"/proc/{leaderPid}").Should().BeFalse("the known direct child must be terminated and reaped");
+        Directory.Exists($"/proc/{descendantPid}").Should().BeFalse("session descendants must be terminated through exact pidfds");
+        File.Exists(processMarker).Should().BeFalse("the verifier must not continue after pidfd acquisition fails");
+        Directory.Exists(privateDirectory).Should().BeFalse("the runner-owned private directory must still be cleaned");
     }
 
     [Test]
@@ -660,6 +702,15 @@ internal sealed class GitHubAttestationProcessRunnerTests
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
         while (!File.Exists(path))
             await Task.Delay(10, timeout.Token);
+    }
+
+    private static void WaitForFileSynchronously(string path)
+    {
+        Stopwatch timeout = Stopwatch.StartNew();
+        while (!File.Exists(path) && timeout.Elapsed < TimeSpan.FromSeconds(5))
+            Thread.Sleep(10);
+        if (!File.Exists(path))
+            throw new AssertionException("The startup-failure fixture didn't publish its descendant PID in time.");
     }
 
     private static async Task WaitForProcessExitAsync(int processId)

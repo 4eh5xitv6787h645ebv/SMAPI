@@ -166,18 +166,21 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     private readonly Action<string>? AfterPrivateDirectoryCreatedForTesting;
     private readonly Action<string>? AfterBundleBridgeCreatedForTesting;
     private readonly Action<string>? BeforeProcessStartForTesting;
+    private readonly Func<int, SafeFileHandle>? OpenLeaderPidfdForTesting;
 
     internal GitHubAttestationProcessRunner(
         string setSidPath = DefaultSetSidPath,
         Action<string>? afterPrivateDirectoryCreatedForTesting = null,
         Action<string>? afterBundleBridgeCreatedForTesting = null,
-        Action<string>? beforeProcessStartForTesting = null
+        Action<string>? beforeProcessStartForTesting = null,
+        Func<int, SafeFileHandle>? openLeaderPidfdForTesting = null
     )
     {
         this.SetSidPath = setSidPath ?? throw new ArgumentNullException(nameof(setSidPath));
         this.AfterPrivateDirectoryCreatedForTesting = afterPrivateDirectoryCreatedForTesting;
         this.AfterBundleBridgeCreatedForTesting = afterBundleBridgeCreatedForTesting;
         this.BeforeProcessStartForTesting = beforeProcessStartForTesting;
+        this.OpenLeaderPidfdForTesting = openLeaderPidfdForTesting;
     }
 
     public async Task<GitHubAttestationProcessResult> RunAsync(
@@ -254,7 +257,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             using SafeFileHandle leaderPidfdReservation = OpenRequiredPidfd(Environment.ProcessId);
             // Retain the exact child before WaitForExitAsync enables asynchronous reaping and numeric PID reuse.
             using Process process = new() { StartInfo = startInfo, EnableRaisingEvents = false };
-            int sessionId;
+            int? startedSessionId = null;
             SafeFileHandle? leaderPidfd = null;
             try
             {
@@ -267,8 +270,26 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 if (!process.Start())
                     throw new InvalidOperationException("The verifier process didn't start.");
                 leaderPidfdReservation.Dispose();
-                sessionId = process.Id;
-                leaderPidfd = OpenRequiredPidfd(sessionId);
+                try
+                {
+                    startedSessionId = process.Id;
+                    leaderPidfd = this.OpenLeaderPidfdForTesting is null
+                        ? OpenRequiredPidfd(startedSessionId.Value)
+                        : this.OpenLeaderPidfdForTesting(startedSessionId.Value);
+                    if (leaderPidfd is null || leaderPidfd.IsInvalid || leaderPidfd.IsClosed)
+                        throw new PackageSecurityException("The GitHub attestation verifier couldn't retain exact process authority.");
+                }
+                catch (Exception)
+                {
+                    leaderPidfd?.Dispose();
+                    bool cleaned = await TerminateUnretainedStartupProcessAsync(process, startedSessionId).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new PackageSecurityException(
+                        cleaned
+                            ? "The GitHub attestation verifier couldn't retain exact process authority."
+                            : "The GitHub attestation verifier couldn't retain or terminate exact process authority."
+                    );
+                }
             }
             catch (OperationCanceledException)
             {
@@ -294,6 +315,8 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 cancellationToken.ThrowIfCancellationRequested();
                 throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
             }
+            int sessionId = startedSessionId
+                ?? throw new PackageSecurityException("The GitHub attestation verifier couldn't retain exact process authority.");
             using SafeFileHandle retainedLeaderPidfd = leaderPidfd
                 ?? throw new PackageSecurityException("The GitHub attestation verifier couldn't retain exact process authority.");
 
@@ -539,6 +562,74 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             : new PackageSecurityException("The GitHub attestation verifier output couldn't be read safely.");
     }
 
+    /// <summary>
+    /// Terminate a child whose pidfd acquisition failed before any asynchronous wait could reap it. The direct
+    /// child's numeric PID can't be recycled while it remains our unreaped child; every discovered session descendant
+    /// is signaled only after exact pidfd acquisition and identity revalidation. Reaping happens last.
+    /// </summary>
+    private static async Task<bool> TerminateUnretainedStartupProcessAsync(Process process, int? sessionId)
+    {
+        Stopwatch deadline = Stopwatch.StartNew();
+        try
+        {
+            // Process remains our known unreaped child, so its numeric PID cannot identify an unrelated task here.
+            process.Kill();
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // An already exited but unreaped direct child is also safe to reap below.
+        }
+
+        bool sessionClean = !sessionId.HasValue;
+        while (sessionId.HasValue && deadline.Elapsed < TeardownTimeout)
+        {
+            bool? sessionExists = TrySignalExactSessionMembers(
+                sessionId.Value,
+                deadline,
+                ignoredForExistence: sessionId.Value
+            );
+            if (!sessionExists.HasValue)
+                break;
+            if (!sessionExists.Value)
+            {
+                sessionClean = true;
+                break;
+            }
+
+            TimeSpan remaining = TeardownTimeout - deadline.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+                break;
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, remaining.TotalMilliseconds))).ConfigureAwait(false);
+        }
+
+        TryClose(process.StandardInput);
+        TryClose(process.StandardOutput);
+        TryClose(process.StandardError);
+        TimeSpan reapRemaining = TeardownTimeout - deadline.Elapsed;
+        if (reapRemaining <= TimeSpan.Zero)
+            return false;
+        Task<bool> reaped = ReapStartupAsync(process);
+        if (await Task.WhenAny(reaped, Task.Delay(reapRemaining)).ConfigureAwait(false) != reaped)
+        {
+            ObserveEventually(reaped);
+            return false;
+        }
+        return sessionClean && await reaped.ConfigureAwait(false);
+    }
+
+    private static async Task<bool> ReapStartupAsync(Process process)
+    {
+        try
+        {
+            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
     private static async Task<bool> KillAndObserveAsync(
         Process process,
         int sessionId,
@@ -586,7 +677,11 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     /// numeric /proc lookup. A wholly new same-UID session can theoretically reuse the numeric session ID between
     /// bounded scans; that non-hostile-same-UID residual is not claimed as race-free process containment.
     /// </summary>
-    private static bool? TrySignalExactSessionMembers(int sessionId, Stopwatch deadline)
+    private static bool? TrySignalExactSessionMembers(
+        int sessionId,
+        Stopwatch deadline,
+        int? ignoredForExistence = null
+    )
     {
         if (sessionId <= 0)
             return false;
@@ -609,7 +704,10 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 );
                 if (result == SessionMemberSignalResult.Failed)
                     return null;
-                if (result is SessionMemberSignalResult.Signaled or SessionMemberSignalResult.GoneOrStale)
+                if (
+                    processId != ignoredForExistence
+                    && result is (SessionMemberSignalResult.Signaled or SessionMemberSignalResult.GoneOrStale)
+                )
                     found = true;
             }
             return found;
@@ -761,6 +859,17 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         try
         {
             reader.Close();
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private static void TryClose(StreamWriter writer)
+    {
+        try
+        {
+            writer.Close();
         }
         catch (Exception)
         {
