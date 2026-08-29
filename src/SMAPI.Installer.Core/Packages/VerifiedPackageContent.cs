@@ -12,6 +12,7 @@ internal interface IVerifiedPackageContentAuthority
 {
     PackageManifest Manifest { get; }
     Sha256Digest ManifestSha256 { get; }
+    VerifiedTaggedPackageTrust? ReleaseTrust => null;
     /// <summary>The original caller-owned authority identity retained through core-derived wrappers.</summary>
     object AuthorityIdentity => this;
     LinuxAnchoredFile OpenFile(PackageManifestEntry expected, CancellationToken cancellationToken = default);
@@ -34,9 +35,13 @@ public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable, IVer
     /// <summary>The exact manifest digest represented by these bytes.</summary>
     public Sha256Digest ManifestSha256 => this.Authority.ManifestSha256;
 
+    /// <summary>The exact curated tagged-release evidence retained with a schema-4 package.</summary>
+    public VerifiedTaggedPackageTrust? ReleaseTrust => this.Authority.Trust;
+
     internal VerifiedInstallerPackage Authority { get; }
     internal LinuxAnchoredFileSystem Payload { get; }
     PackageManifest IVerifiedPackageContentAuthority.Manifest => this.Authority.Manifest;
+    VerifiedTaggedPackageTrust? IVerifiedPackageContentAuthority.ReleaseTrust => this.Authority.Trust;
 
     internal VerifiedPackageContent(
         VerifiedInstallerPackage authority,
@@ -122,6 +127,8 @@ public sealed class VerifiedPackageContentFactory
         LinuxPrivilegeGuard.AssertNotRoot();
         ArgumentNullException.ThrowIfNull(authority);
         authority.AssertUsable();
+        if (authority.Manifest.SchemaVersion == PackageManifest.CurrentSchemaVersion && authority.Trust is null)
+            throw new PackageSecurityException("A schema-4 installer package must pass release attestation before extraction.");
         limits ??= ZipPackageLimits.Default;
 
         string stagingRoot = PrivatePackageStaging.CreateDirectory();

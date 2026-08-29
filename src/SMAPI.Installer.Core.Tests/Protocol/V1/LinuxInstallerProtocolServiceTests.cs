@@ -117,7 +117,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         FakePackageOpener opener = new() { ThrowUnexpected = true };
         using LinuxInstallerProtocolService service = Create(new FakeEngine(), opener, sanitizedLogPath: sanitizedLogPath);
         await Handshake(service);
-        OpenPackageRequest request = new(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest");
+        OpenPackageRequest request = new(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest", "/tmp/bundle", "/tmp/bundle-checksum", "/tmp/gh");
 
         PrePlanRejectedEvent rejected = (PrePlanRejectedEvent)await service.HandleAsync(request);
 
@@ -815,12 +815,12 @@ internal sealed class LinuxInstallerProtocolServiceTests
     private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null, Action? terminalCompletionStarting = null, Action? disposalPublished = null, string? sanitizedLogPath = null) =>
         new("test", progress => { engine.Progress = progress; return engine; }, new FakeDiscovery(), opener, sink, sanitizedLogPath, terminalCompletionStarting, disposalPublished);
     private static Task<ProtocolEvent> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
-    private static async Task<PackageOpenedEvent> Open(LinuxInstallerProtocolService service) => (PackageOpenedEvent)(await service.HandleAsync(new OpenPackageRequest(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest")))!;
+    private static async Task<PackageOpenedEvent> Open(LinuxInstallerProtocolService service) => (PackageOpenedEvent)(await service.HandleAsync(new OpenPackageRequest(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest", "/tmp/bundle", "/tmp/bundle-checksum", "/tmp/gh")))!;
     private static string CreateTemporaryDirectory() { string path = Path.Combine(Path.GetTempPath(), $"smapi-protocol-opener-{Guid.NewGuid():N}"); Directory.CreateDirectory(path); return path; }
     private static OpenPackageRequest CreateActualPackageRequest(string root)
     {
         InstallationReleaseIdentity release = CreateRelease(); ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(release.Tag);
-        return new(ProtocolSessionId.CreateRandom(), release.Tag, release.SourceCommit, Path.Combine(root, identity.PackageAssetName), Path.Combine(root, ReleasePackageVerifier.ChecksumAssetName), Path.Combine(root, ReleasePackageVerifier.BuildMetadataAssetName), Path.Combine(root, VerifiedInstallerPackageFactory.GetManifestAssetName(identity)));
+        return new(ProtocolSessionId.CreateRandom(), release.Tag, release.SourceCommit, Path.Combine(root, identity.PackageAssetName), Path.Combine(root, ReleasePackageVerifier.ChecksumAssetName), Path.Combine(root, ReleasePackageVerifier.BuildMetadataAssetName), Path.Combine(root, VerifiedInstallerPackageFactory.GetManifestAssetName(identity)), Path.Combine(root, VerifiedGitHubAttestationBundleFactory.GetBundleAssetName(identity)), Path.Combine(root, VerifiedGitHubAttestationBundleFactory.GetChecksumAssetName(identity)), Path.Combine(root, "gh"));
     }
 
     private static InstallationExecutionOutcome CreateOutcome(InstallationExecutionStatus status, TransactionErrorCode? errorOverride = null)

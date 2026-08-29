@@ -7,6 +7,7 @@ using FluentAssertions;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Ownership;
+using StardewModdingAPI.Installer.Core.Ownership.Persistence;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Security;
@@ -94,6 +95,85 @@ public sealed class VerifiedPackageContentTests
         Func<Task> action = () => new VerifiedPackageContentFactory().ExtractAsync(authority);
 
         await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*Unix mode*");
+        await authority.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ExtractAsync_SchemaFourWithoutAttestationTrustRejectsBeforePayloadExtraction()
+    {
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(
+            new Dictionary<string, (byte[] Bytes, int Mode)>(StringComparer.Ordinal)
+            {
+                ["unix-launcher.sh"] = ("launcher"u8.ToArray(), 493)
+            },
+            schemaFour: true
+        );
+
+        Func<Task> action = () => new VerifiedPackageContentFactory().ExtractAsync(authority);
+
+        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*release attestation*");
+        authority.AssertUsable();
+        await authority.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ExtractAsync_SchemaFourWithExactBoundTrustPreservesPublicEvidence()
+    {
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(
+            new Dictionary<string, (byte[] Bytes, int Mode)>(StringComparer.Ordinal)
+            {
+                ["unix-launcher.sh"] = ("launcher"u8.ToArray(), 493)
+            },
+            schemaFour: true
+        );
+        VerifiedTaggedPackageTrust trust = global::StardewModdingAPI.Installer.Core.Tests.Ownership.OwnershipTestData.Trust(authority.Manifest);
+        authority.BindTrust(trust);
+
+        await using VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(authority);
+
+        content.ReleaseTrust.Should().Be(trust);
+        content.Release.Should().Be(trust.Identity);
+
+        string game = Path.Combine(this.TempRoot, "schema-four-install");
+        LinuxGameTestFolder.MakeValid(game);
+        await File.WriteAllTextAsync(Path.Combine(game, "StardewValley"), "vanilla launcher");
+        File.SetUnixFileMode(Path.Combine(game, "StardewValley"), (UnixFileMode)493);
+        LinuxInstallerEngine engine = new();
+        using (InspectedInstallationState inspection = await engine.InspectAsync(game, InstallationAction.Install, content))
+            (await engine.ExecuteAsync(inspection, inspection.ConfirmationDigest)).Status.Should().Be(TransactionStatus.Committed);
+
+        PackageManifest installedManifest = CanonicalOwnershipDocuments.ParseManifest(
+            await File.ReadAllBytesAsync(Path.Combine(game, TransactionPlan.CoreManifestRelativePath))
+        );
+        InstallationReceipt installedReceipt = CanonicalOwnershipDocuments.ParseReceipt(
+            await File.ReadAllBytesAsync(Path.Combine(game, TransactionPlan.CoreReceiptRelativePath)),
+            installedManifest
+        );
+        installedManifest.SchemaVersion.Should().Be(PackageManifest.CurrentSchemaVersion);
+        installedReceipt.SchemaVersion.Should().Be(InstallationReceipt.CurrentSchemaVersion);
+        installedReceipt.ReleaseTrust.Should().Be(trust);
+    }
+
+    [Test]
+    public async Task SchemaFourTrustBinding_RejectsAnotherReleaseAndDuplicateBinding()
+    {
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(
+            new Dictionary<string, (byte[] Bytes, int Mode)>(StringComparer.Ordinal)
+            {
+                ["unix-launcher.sh"] = ("launcher"u8.ToArray(), 493)
+            },
+            schemaFour: true
+        );
+        VerifiedTaggedPackageTrust exact = global::StardewModdingAPI.Installer.Core.Tests.Ownership.OwnershipTestData.Trust(authority.Manifest);
+        VerifiedTaggedPackageTrust other = global::StardewModdingAPI.Installer.Core.Tests.Ownership.OwnershipTestData.Trust(
+            global::StardewModdingAPI.Installer.Core.Tests.Ownership.OwnershipTestData.AuthorityManifest()
+        );
+
+        Action wrong = () => authority.BindTrust(other);
+        wrong.Should().Throw<PackageSecurityException>().WithMessage("*doesn't match*");
+        authority.BindTrust(exact);
+        Action duplicate = () => authority.BindTrust(exact);
+        duplicate.Should().Throw<InvalidOperationException>().WithMessage("*already bound*");
         await authority.DisposeAsync();
     }
 
@@ -381,7 +461,8 @@ public sealed class VerifiedPackageContentTests
     private async Task<VerifiedInstallerPackage> CreateAuthorityAsync(
         IReadOnlyDictionary<string, (byte[] Bytes, int Mode)> nestedFiles,
         IReadOnlyCollection<string>? manifestSourcePaths = null,
-        IReadOnlyDictionary<string, int>? manifestModeOverrides = null
+        IReadOnlyDictionary<string, int>? manifestModeOverrides = null,
+        bool schemaFour = false
     )
     {
         byte[] nested = CreateZip(nestedFiles);
@@ -405,25 +486,29 @@ public sealed class VerifiedPackageContentTests
             "linux-x64"
         );
         HashSet<string> included = new(manifestSourcePaths ?? nestedFiles.Keys, StringComparer.Ordinal);
+        PackageManifestEntry[] manifestEntries = nestedFiles
+            .Where(pair => included.Contains(pair.Key))
+            .Select(pair =>
+            {
+                string destination = pair.Key == "unix-launcher.sh" ? "StardewValley" : pair.Key;
+                int mode = manifestModeOverrides?.GetValueOrDefault(pair.Key) ?? pair.Value.Mode;
+                OwnedEntryKind kind = destination == "StardewValley"
+                    ? OwnedEntryKind.Launcher
+                    : OwnedEntryKind.InternalFile;
+                return new PackageManifestEntry(
+                    NormalizedRelativePath.Parse(destination),
+                    Sha256Digest.Parse(Hash(pair.Value.Bytes)),
+                    pair.Value.Bytes.Length,
+                    mode,
+                    kind
+                );
+            })
+            .ToArray();
         PackageManifest manifest = new(
             release,
-            nestedFiles
-                .Where(pair => included.Contains(pair.Key))
-                .Select(pair =>
-                {
-                    string destination = pair.Key == "unix-launcher.sh" ? "StardewValley" : pair.Key;
-                    int mode = manifestModeOverrides?.GetValueOrDefault(pair.Key) ?? pair.Value.Mode;
-                    OwnedEntryKind kind = destination == "StardewValley"
-                        ? OwnedEntryKind.Launcher
-                        : OwnedEntryKind.InternalFile;
-                    return new PackageManifestEntry(
-                        NormalizedRelativePath.Parse(destination),
-                        Sha256Digest.Parse(Hash(pair.Value.Bytes)),
-                        pair.Value.Bytes.Length,
-                        mode,
-                        kind
-                    );
-                })
+            manifestEntries,
+            schemaVersion: schemaFour ? PackageManifest.CurrentSchemaVersion : PackageManifest.GeneratedFilesSchemaVersion,
+            releaseAuthorityPolicy: schemaFour ? TaggedReleaseAuthorityPolicy.Create(release) : null
         );
         byte[] manifestBytes = Encoding.UTF8.GetBytes(manifest.ToCanonicalJson());
         string manifestName = VerifiedInstallerPackageFactory.GetManifestAssetName(this.Identity);

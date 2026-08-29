@@ -746,21 +746,21 @@ internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProto
 {
     public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
     {
-        ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(request.ReleaseTag);
-        VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyFilesAsync(request.PackagePath, request.ChecksumsPath, request.BuildMetadataPath, identity, request.ExpectedSourceCommit, cancellationToken: cancellationToken).ConfigureAwait(false);
-        try
-        {
-            VerifiedInstallerPackage? installer = await new VerifiedInstallerPackageFactory().VerifyAsync(release, request.InstallManifestPath, cancellationToken: cancellationToken).ConfigureAwait(false);
-            release = null;
-            try
-            {
-                VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(installer, cancellationToken: cancellationToken).ConfigureAwait(false);
-                installer = null;
-                return new(content.Release, content, content);
-            }
-            finally { installer?.Dispose(); }
-        }
-        finally { release?.Dispose(); }
+        VerifiedPackageContent content = await new LinuxTaggedReleasePackageOpener().OpenAsync(
+            new LinuxTaggedReleaseAssetSet(
+                request.ReleaseTag,
+                request.ExpectedSourceCommit,
+                request.PackagePath,
+                request.ChecksumsPath,
+                request.BuildMetadataPath,
+                request.InstallManifestPath,
+                request.AttestationBundlePath,
+                request.AttestationBundleChecksumPath,
+                request.GitHubCliPath
+            ),
+            cancellationToken
+        ).ConfigureAwait(false);
+        return new(content.Release, content, content);
     }
 
 }

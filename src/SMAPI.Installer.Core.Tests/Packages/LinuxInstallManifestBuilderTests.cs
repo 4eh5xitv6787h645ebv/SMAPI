@@ -34,7 +34,7 @@ public sealed class LinuxInstallManifestBuilderTests
     }
 
     [Test]
-    public async Task BuildAsync_ClassifiesPayloadAndEmitsCanonicalDeterministicSchemaThreeManifest()
+    public async Task BuildAsync_ClassifiesPayloadAndEmitsCanonicalDeterministicSchemaFourManifest()
     {
         string package = this.CreatePackage(extraLinuxSupportFiles: true);
         LinuxInstallManifestBuilder builder = new();
@@ -57,7 +57,9 @@ public sealed class LinuxInstallManifestBuilderTests
         first.GetCanonicalBytes().Should().Equal(second.GetCanonicalBytes());
         first.GetCanonicalBytes().Take(3).Should().NotEqual(new byte[] { 0xef, 0xbb, 0xbf });
         Encoding.UTF8.GetString(first.GetCanonicalBytes()).Should().NotContain("\r").And.NotContain("\n");
-        first.Manifest.SchemaVersion.Should().Be(3);
+        first.Manifest.SchemaVersion.Should().Be(4);
+        first.Manifest.ReleaseAuthorityPolicy.Should().Be(TaggedReleaseAuthorityPolicy.Create(first.Manifest.Release));
+        first.Manifest.ReleaseAuthorityPolicy!.Repository.Should().NotContain("://");
         first.Manifest.Release.BuildWorkflow.Should().Be(this.Workflow);
         (string, OwnedEntryKind)[] entries = first.Manifest.Entries.Select(entry => (entry.Path.Value, entry.Kind)).ToArray();
         entries.Should().Contain(("StardewValley", OwnedEntryKind.Launcher));

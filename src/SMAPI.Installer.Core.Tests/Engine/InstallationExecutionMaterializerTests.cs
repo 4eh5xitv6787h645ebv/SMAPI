@@ -219,6 +219,58 @@ public sealed class InstallationExecutionMaterializerTests
     }
 
     [Test]
+    public void Apply_SchemaFourUpdateRollback_RestoresExactPriorAuthorityTuple()
+    {
+        string game = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        LinuxInstallerEngine engine = new();
+        using FilePackageAuthority first = this.CreatePackage("launcher one", "runtime one", schemaFour: true);
+        using FilePackageAuthority second = this.CreatePackage("launcher two", "runtime two", schemaFour: true);
+
+        Execute(this.Inspect(engine, game, InstallationAction.Install, first), engine);
+        string manifestPath = Path.Combine(game, TransactionPlan.CoreManifestRelativePath);
+        string receiptPath = Path.Combine(game, TransactionPlan.CoreReceiptRelativePath);
+        byte[] firstManifestBytes = File.ReadAllBytes(manifestPath);
+        byte[] firstReceiptBytes = File.ReadAllBytes(receiptPath);
+        firstManifestBytes.Should().Equal(CanonicalOwnershipDocuments.SerializeManifest(first.Manifest));
+        InstallationReceipt firstReceipt = CanonicalOwnershipDocuments.ParseReceipt(firstReceiptBytes, first.Manifest);
+        firstReceiptBytes.Should().Equal(CanonicalOwnershipDocuments.SerializeReceipt(firstReceipt));
+        firstReceipt.SchemaVersion.Should().Be(InstallationReceipt.CurrentSchemaVersion);
+        firstReceipt.ReleaseTrust.Should().Be(first.ReleaseTrust);
+        first.ReleaseTrust.Should().NotBe(second.ReleaseTrust);
+
+        Execute(this.Inspect(engine, game, InstallationAction.Update, second), engine);
+        using (InstallerOperationLease updateLease = InstallerOperationLease.Acquire(game))
+        {
+            AnchoredCoreStateAuthority updated = AnchoredCoreStateAuthority.Inspect(updateLease);
+            updated.Manifest!.SchemaVersion.Should().Be(PackageManifest.CurrentSchemaVersion);
+            updated.Manifest.ReleaseAuthorityPolicy.Should().Be(second.Manifest.ReleaseAuthorityPolicy);
+            updated.Manifest.ReleaseAuthorityPolicy.Should().NotBe(first.Manifest.ReleaseAuthorityPolicy);
+            updated.Receipt!.SchemaVersion.Should().Be(InstallationReceipt.CurrentSchemaVersion);
+            updated.Receipt.ReleaseTrust.Should().Be(second.ReleaseTrust);
+            updated.Pointer!.Action.Should().Be(InstallationAction.Update);
+        }
+
+        using CommittedRecoveryHandle updateRecovery = engine.OpenCurrentRecoveryAsync(game).GetAwaiter().GetResult();
+        updateRecovery.Action.Should().Be(InstallationAction.Update);
+        updateRecovery.RestoreRelease.Should().Be(first.Manifest.Release);
+        Execute(
+            engine.InspectAsync(game, InstallationAction.Rollback, recovery: updateRecovery).GetAwaiter().GetResult(),
+            engine
+        );
+
+        File.ReadAllBytes(manifestPath).Should().Equal(firstManifestBytes);
+        File.ReadAllBytes(receiptPath).Should().Equal(firstReceiptBytes);
+        using InstallerOperationLease rollbackLease = InstallerOperationLease.Acquire(game);
+        AnchoredCoreStateAuthority restored = AnchoredCoreStateAuthority.Inspect(rollbackLease);
+        restored.Manifest!.SchemaVersion.Should().Be(PackageManifest.CurrentSchemaVersion);
+        restored.Manifest.ReleaseAuthorityPolicy.Should().Be(first.Manifest.ReleaseAuthorityPolicy);
+        restored.Receipt!.SchemaVersion.Should().Be(InstallationReceipt.CurrentSchemaVersion);
+        restored.Receipt.ReleaseTrust.Should().Be(first.ReleaseTrust);
+        restored.Pointer!.Action.Should().Be(InstallationAction.Rollback);
+    }
+
+    [Test]
     public void Execute_ModeOnlyDriftAfterInspection_DoesNotCommitFalseReceipt()
     {
         string game = this.CreateDirectory();
@@ -742,21 +794,28 @@ public sealed class InstallationExecutionMaterializerTests
         return (game, engine, package);
     }
 
-    private FilePackageAuthority CreatePackage(string launcher, string runtime)
+    private FilePackageAuthority CreatePackage(string launcher, string runtime, bool schemaFour = false)
     {
         string root = this.CreateDirectory();
         Write(root, "StardewValley", launcher, 0x1ed);
         Write(root, "StardewModdingAPI.dll", runtime, 0x1a4);
         int alpha = launcher.EndsWith("two", StringComparison.Ordinal) ? 2 : 1;
+        InstallationReleaseIdentity release = OwnershipTestData.Release(alpha);
         PackageManifest manifest = new(
-            OwnershipTestData.Release(alpha),
+            release,
             new[]
             {
                 Entry("StardewValley", launcher, 0x1ed, OwnedEntryKind.Launcher),
                 Entry("StardewModdingAPI.dll", runtime, 0x1a4, OwnedEntryKind.RuntimeFile)
-            }
+            },
+            schemaVersion: schemaFour ? PackageManifest.CurrentSchemaVersion : PackageManifest.GeneratedFilesSchemaVersion,
+            releaseAuthorityPolicy: schemaFour ? TaggedReleaseAuthorityPolicy.Create(release) : null
         );
-        return new FilePackageAuthority(manifest, root);
+        return new FilePackageAuthority(
+            manifest,
+            root,
+            schemaFour ? OwnershipTestData.Trust(manifest) : null
+        );
     }
 
     private InspectedInstallationState Inspect(
@@ -797,11 +856,17 @@ public sealed class InstallationExecutionMaterializerTests
         private readonly LinuxAnchoredFileSystem Payload;
         public PackageManifest Manifest { get; }
         public Sha256Digest ManifestSha256 => this.Manifest.GetCanonicalDigest();
+        public VerifiedTaggedPackageTrust? ReleaseTrust { get; }
 
-        public FilePackageAuthority(PackageManifest manifest, string payloadRoot)
+        public FilePackageAuthority(
+            PackageManifest manifest,
+            string payloadRoot,
+            VerifiedTaggedPackageTrust? releaseTrust = null
+        )
         {
             this.Manifest = manifest;
             this.Payload = new LinuxAnchoredFileSystem(payloadRoot);
+            this.ReleaseTrust = releaseTrust;
         }
 
         public LinuxAnchoredFile OpenFile(PackageManifestEntry expected, CancellationToken cancellationToken = default)

@@ -41,8 +41,9 @@ public class CanonicalOwnershipDocumentsTests
     [TestCase("duplicate")]
     public void Manifest_RejectsAnyNonExactRootPropertySet(string mutation)
     {
-        string canonical = CreateManifest().ToCanonicalJson();
-        string schemaProperty = $"\"schema_version\":{PackageManifest.CurrentSchemaVersion},";
+        PackageManifest manifest = CreateManifest();
+        string canonical = manifest.ToCanonicalJson();
+        string schemaProperty = $"\"schema_version\":{manifest.SchemaVersion},";
         string mutated = mutation switch
         {
             "extra" => canonical.Insert(1, "\"unexpected\":true,"),
@@ -77,8 +78,9 @@ public class CanonicalOwnershipDocumentsTests
     [Test]
     public void Manifest_RejectsNoncanonicalWhitespacePropertyOrderAndStringEncoding()
     {
-        string canonical = CreateManifest().ToCanonicalJson();
-        string schemaProperty = $"\"schema_version\":{PackageManifest.CurrentSchemaVersion}";
+        PackageManifest manifest = CreateManifest();
+        string canonical = manifest.ToCanonicalJson();
+        string schemaProperty = $"\"schema_version\":{manifest.SchemaVersion}";
         string whitespace = canonical + "\n";
         string reordered = canonical.Replace(
             $"{schemaProperty},\"release\":",

@@ -17,6 +17,7 @@ internal sealed class GeneratedPackageContentAuthority : IVerifiedPackageContent
 
     public PackageManifest Manifest { get; }
     public Sha256Digest ManifestSha256 { get; }
+    public VerifiedTaggedPackageTrust? ReleaseTrust => this.Package.ReleaseTrust;
     public object AuthorityIdentity => this.Package.AuthorityIdentity;
 
     private GeneratedPackageContentAuthority(
