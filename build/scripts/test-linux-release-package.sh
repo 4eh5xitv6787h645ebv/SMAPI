@@ -33,6 +33,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+assert_exact_line_file() {
+    local expected="$1"
+    local actual_path="$2"
+    local expected_path="$temp_root/expected-line.txt"
+
+    printf '%s\n' "$expected" > "$expected_path"
+    if ! cmp -s -- "$expected_path" "$actual_path"; then
+        echo "Protocol host emitted unexpected diagnostic output." >&2
+        exit 1
+    fi
+}
+
 entries_path="$temp_root/entries.txt"
 zipinfo -1 "$archive_path" > "$entries_path"
 if [[ ! -s "$entries_path" ]]; then
@@ -115,7 +127,9 @@ mixed_exit=$?
 set -e
 test "$mixed_exit" = 2
 test ! -s "$temp_root/protocol-mixed.stdout"
-grep -Fx 'The Linux protocol host requires exactly --linux-protocol-v1-jsonl on Linux.' "$temp_root/protocol-mixed.stderr" >/dev/null
+assert_exact_line_file \
+    'The Linux protocol host requires exactly --linux-protocol-v1-jsonl on Linux.' \
+    "$temp_root/protocol-mixed.stderr"
 
 # A packaged host blocked on controller input must handle SIGTERM through its graceful cancellation
 # path, without extracting install.dat, polluting stdout, or leaving a child process behind.
@@ -164,7 +178,7 @@ if [[ -e "$protocol_watchdog_marker" ]]; then
     exit 1
 fi
 test "$sigterm_exit" = 130
-grep -Fx 'Protocol host was cancelled.' "$temp_root/protocol-sigterm.stderr" >/dev/null
+assert_exact_line_file 'Protocol host was cancelled.' "$temp_root/protocol-sigterm.stderr"
 python3 - "$temp_root/protocol-sigterm.stdout" <<'PY'
 import json
 import pathlib
