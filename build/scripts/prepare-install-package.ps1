@@ -25,6 +25,7 @@ $windowsOnly = $false # Windows-only build
 $linuxOnly = $false # Linux-only build
 $skipBundleDeletion = $false # skip bundle deletion (only applies when using WSL to finalize the build on Windows)
 $gamePathOverride = $null # explicit reference-assembly path for reproducible builds
+$githubCliDirectory = $null # staged pinned GitHub CLI binary and license for the Linux release package
 foreach ($arg in $args) {
     if ($arg -eq "--windows-only" -and $IsWindows) {
         $windowsOnly = $true
@@ -38,9 +39,15 @@ foreach ($arg in $args) {
     elseif ($arg.StartsWith("--game-path=")) {
         $gamePathOverride = $arg.Substring("--game-path=".Length)
     }
+    elseif ($arg.StartsWith("--github-cli-directory=")) {
+        $githubCliDirectory = $arg.Substring("--github-cli-directory=".Length)
+    }
 }
 if ($windowsOnly -and $linuxOnly) {
     throw "The --windows-only and --linux-only options can't be combined."
+}
+if ($linuxOnly -and [string]::IsNullOrWhiteSpace($githubCliDirectory)) {
+    throw "Linux-only release packages require --github-cli-directory with the staged pinned GitHub CLI binary and license."
 }
 
 
@@ -127,6 +134,47 @@ if (!$version) {
 ## Move to SMAPI root
 ##########
 Set-Location "$PSScriptRoot/../.."
+
+function Assert-PinnedGitHubCliFile {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [long] $ExpectedSize,
+        [Parameter(Mandatory = $true)] [string] $ExpectedSha256
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item -isnot [System.IO.FileInfo] -or ![string]::IsNullOrEmpty($item.LinkType)) {
+        throw "The pinned GitHub CLI input '$Path' must be an ordinary non-link file."
+    }
+    if (!$IsWindows) {
+        $hardLinkCount = & stat -c '%h' -- $item.FullName
+        if ($LASTEXITCODE -ne 0 -or $hardLinkCount -ne "1") {
+            throw "The pinned GitHub CLI input '$Path' must have exactly one hard link."
+        }
+    }
+    if ($item.Length -ne $ExpectedSize) {
+        throw "The pinned GitHub CLI input '$Path' has unexpected size $($item.Length)."
+    }
+    $actualSha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualSha256 -ne $ExpectedSha256) {
+        throw "The pinned GitHub CLI input '$Path' has an unexpected SHA-256 digest."
+    }
+}
+
+if ($githubCliDirectory) {
+    $githubCliDirectory = [System.IO.Path]::GetFullPath($githubCliDirectory, (Get-Location).Path)
+    $githubCliDirectoryItem = Get-Item -LiteralPath $githubCliDirectory -Force
+    if ($githubCliDirectoryItem -isnot [System.IO.DirectoryInfo] -or ![string]::IsNullOrEmpty($githubCliDirectoryItem.LinkType)) {
+        throw "The pinned GitHub CLI path must be an ordinary directory."
+    }
+    $githubCliEntries = @(Get-ChildItem -LiteralPath $githubCliDirectory -Force)
+    $githubCliEntryNames = @($githubCliEntries.Name | Sort-Object) -join "`n"
+    if ($githubCliEntries.Count -ne 2 -or $githubCliEntryNames -ne "gh`ngh-LICENSE.txt") {
+        throw "The pinned GitHub CLI directory must contain exactly 'gh' and 'gh-LICENSE.txt'."
+    }
+    Assert-PinnedGitHubCliFile "$githubCliDirectory/gh" 39805090 "b58e487e37c00c114aa07f14987ce12f5e5abf12b9da8a38937b65ef218f6772"
+    Assert-PinnedGitHubCliFile "$githubCliDirectory/gh-LICENSE.txt" 1068 "6da4adc42392c8485e40b4251c7e332fc3352df1947c9ffade71dd60b14a7a4f"
+}
 
 
 ##########
@@ -259,6 +307,12 @@ foreach ($folder in $folders) {
     # installer files
     Copy-Item "src/SMAPI.Installer/bin/$buildConfig/$runtime/publish/*" "$internalPath" -Recurse
     Remove-Item -Recurse -Force "$internalPath/assets"
+    if ($folder -eq "linux" -and $githubCliDirectory) {
+        Copy-Item -LiteralPath "$githubCliDirectory/gh" -Destination "$internalPath/gh"
+        Copy-Item -LiteralPath "$githubCliDirectory/gh-LICENSE.txt" -Destination "$internalPath/gh-LICENSE.txt"
+        Assert-PinnedGitHubCliFile "$internalPath/gh" 39805090 "b58e487e37c00c114aa07f14987ce12f5e5abf12b9da8a38937b65ef218f6772"
+        Assert-PinnedGitHubCliFile "$internalPath/gh-LICENSE.txt" 1068 "6da4adc42392c8485e40b4251c7e332fc3352df1947c9ffade71dd60b14a7a4f"
+    }
 
     # runtime config for SMAPI
     if ($folder -eq "linux") {
@@ -376,6 +430,15 @@ else {
         }
         else {
             Write-Host "Couldn't set permissions for '$packagePath/$path': file does not exist."
+        }
+    }
+
+    if (Test-Path "$packagePath/internal/linux/gh" -PathType Leaf) {
+        foreach ($permission in @(@("555", "gh"), @("444", "gh-LICENSE.txt"))) {
+            chmod $permission[0] "$packagePath/internal/linux/$($permission[1])"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed setting pinned GitHub CLI package permissions for '$($permission[1])' (exit code $LASTEXITCODE)."
+            }
         }
     }
 

@@ -122,6 +122,8 @@ jobs:
                     set -euo pipefail
                     build/scripts/test-linux-release-inputs.sh
                     build/scripts/test-finalize-install-package-inputs.sh
+                    bash -n build/scripts/stage-pinned-github-cli.sh
+                    bash -n build/scripts/test-stage-pinned-github-cli.sh
                     bash -n build/scripts/finalize-install-package.sh
                     bash -n src/SMAPI.Installer/assets/smapi-runtime-dispatcher.sh
                     bash -n src/SMAPI.Installer/assets/unix-launcher.sh
@@ -170,6 +172,18 @@ jobs:
                     --no-build
                     -- RunConfiguration.TreatNoTestsAsError=true
 
+            -   name: Acquire and validate pinned GitHub CLI
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    pinned_archive="$RUNNER_TEMP/gh_2.92.0_linux_amd64.tar.gz"
+                    pinned_root="$RUNNER_TEMP/pinned-github-cli"
+                    curl -fsSL --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
+                        https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_linux_amd64.tar.gz \
+                        -o "$pinned_archive"
+                    build/scripts/test-stage-pinned-github-cli.sh "$pinned_archive"
+                    build/scripts/stage-pinned-github-cli.sh "$pinned_archive" "$pinned_root"
+
             -   name: Build Linux-only installer package
                 shell: pwsh
                 env:
@@ -179,6 +193,7 @@ jobs:
                     "$env:RELEASE_VERSION"
                     --linux-only
                     "--game-path=$env:RUNNER_TEMP/StardewValley"
+                    "--github-cli-directory=$env:RUNNER_TEMP/pinned-github-cli"
 
             -   name: Test package and generate qualified assets
                 shell: bash
@@ -427,22 +442,12 @@ jobs:
                     pinned_archive="$RUNNER_TEMP/gh_2.92.0_linux_amd64.tar.gz"
                     private_home="$RUNNER_TEMP/pinned-gh-private"
                     verification="$RUNNER_TEMP/local-bundle-verification.json"
-                    install -d -m 0700 -- "$pinned_root" "$private_home"
+                    install -d -m 0700 -- "$private_home"
                     curl -fsSL --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
                         https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_linux_amd64.tar.gz \
                         -o "$pinned_archive"
-                    printf '%s  %s\n' \
-                        b57848131bdf0c229cd35e1f2a51aa718199858b2e728410b37e89a428943ec4 \
-                        "$pinned_archive" \
-                        | sha256sum --check --strict
-                    tar -xzf "$pinned_archive" -C "$pinned_root"
-                    pinned_gh="$pinned_root/gh_2.92.0_linux_amd64/bin/gh"
-                    if [[ ! -f "$pinned_gh" || -L "$pinned_gh" || "$(stat -c %h -- "$pinned_gh")" != 1 \
-                        || "$(stat -c %s -- "$pinned_gh")" != 39805090 \
-                        || "$(sha256sum -- "$pinned_gh" | cut -d ' ' -f 1)" != b58e487e37c00c114aa07f14987ce12f5e5abf12b9da8a38937b65ef218f6772 ]]; then
-                        echo "The extracted GitHub CLI doesn't match the reviewed 2.92.0 binary." >&2
-                        exit 1
-                    fi
+                    source/build/scripts/stage-pinned-github-cli.sh "$pinned_archive" "$pinned_root"
+                    pinned_gh="$pinned_root/gh"
 
                     package_path="$(realpath -- "artifacts/release/$package_name")"
                     bundle_path="$(realpath -- "artifacts/provenance/$bundle_name")"
