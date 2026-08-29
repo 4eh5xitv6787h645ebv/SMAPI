@@ -2,7 +2,7 @@ using StardewModdingAPI.Installer.Core.Protocol.V1;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
 
-/// <summary>The deliberately narrow backend surface available to the release-verification UI slice.</summary>
+/// <summary>The deliberately narrow backend surface retained within the authenticated GUI workflow.</summary>
 internal interface IInstallerProtocolClient : IAsyncDisposable
 {
     /// <summary>Completes with a generic fault if the live backend session later violates its transport contract.</summary>
@@ -13,6 +13,24 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
 
     /// <summary>Ask the backend to independently verify and open one complete local package set.</summary>
     Task<InstallerPackageOpenResult> OpenPackageAsync(InstallerPackageOpenInput package, CancellationToken cancellationToken = default);
+
+    /// <summary>Ask the authenticated backend session for its bounded Linux game-folder candidates.</summary>
+    Task<IReadOnlyList<ProtocolGameCandidate>> DiscoverGamesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Ask the authenticated backend session to validate one exact canonical Linux game-folder path.</summary>
+    Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// The only backend authority available after release verification. It retains exactly one verified package session,
+/// exposes only game discovery and validation until later workflow slices add restricted operations, and owns cleanup.
+/// </summary>
+internal interface IVerifiedInstallerSession : IAsyncDisposable
+{
+    ProtocolReleaseIdentity Release { get; }
+    Task<InstallerProtocolClientException> SessionFaulted { get; }
+    Task<IReadOnlyList<ProtocolGameCandidate>> DiscoverGamesAsync(CancellationToken cancellationToken = default);
+    Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default);
 }
 
 /// <summary>The six downloaded paths and reviewed release identity needed for package verification.</summary>

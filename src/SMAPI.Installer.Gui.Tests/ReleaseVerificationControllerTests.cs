@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FluentAssertions;
+using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Backend;
@@ -104,6 +105,91 @@ internal sealed class ReleaseVerificationControllerTests
         package.DisposeCalls.Should().Be(1);
         client.DisposeCalls.Should().Be(0, "the verified backend retains package authority for the next screen");
         await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [Test]
+    public async Task VerifiedSessionTransfersExactlyOnceAndBecomesTheSoleClientOwner()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        ProtocolReleaseIdentity release = CreateRelease();
+        ProtocolGameCandidate discovered = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley 1.6.15");
+        FakeClient client = new()
+        {
+            Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenSuccess(release)),
+            Discover = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([discovered]),
+            Validate = (path, _) => Task.FromResult(discovered with { CanonicalPath = path })
+        };
+        ReleaseVerificationController controller = new(PreparedService(candidate, new FakePreparedPackage()), () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+        await AwaitBounded(controller.StartAsync());
+
+        IVerifiedInstallerSession session = controller.TakeVerifiedSession();
+        Func<IVerifiedInstallerSession> secondTake = controller.TakeVerifiedSession;
+        Func<Task> restart = () => controller.LoadCatalogAsync();
+
+        session.Release.Should().BeSameAs(release);
+        (await session.DiscoverGamesAsync()).Should().Equal(discovered);
+        (await session.ValidateGameAsync("/games/manual")).CanonicalPath.Should().Be("/games/manual");
+        secondTake.Should().Throw<InvalidOperationException>();
+        await restart.Should().ThrowAsync<InvalidOperationException>();
+
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+        client.DisposeCalls.Should().Be(0, "the transferred session, not the controller, owns the backend client");
+        await AwaitBounded(session.DisposeAsync().AsTask());
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task FaultAfterVerifiedSessionTransferBelongsOnlyToTheTransferredOwner()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeClient client = new();
+        ReleaseVerificationController controller = new(PreparedService(candidate, new FakePreparedPackage()), () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+        await AwaitBounded(controller.StartAsync());
+        IVerifiedInstallerSession session = controller.TakeVerifiedSession();
+
+        InstallerProtocolClientException fault = new("late transferred fault");
+        client.Fault.SetResult(fault);
+        (await session.SessionFaulted).Should().BeSameAs(fault);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+
+        client.DisposeCalls.Should().Be(0, "the stopped controller watcher must not reclaim transferred authority");
+        await AwaitBounded(session.DisposeAsync().AsTask());
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task TransferredSessionDisposalCancelsActiveCommandAndDisposesClientOnce()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        TaskCompletionSource discoveryStarted = NewCompletion();
+        FakeClient client = new()
+        {
+            Discover = async cancellationToken =>
+            {
+                discoveryStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return Array.Empty<ProtocolGameCandidate>();
+            }
+        };
+        ReleaseVerificationController controller = new(PreparedService(candidate, new FakePreparedPackage()), () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+        await AwaitBounded(controller.StartAsync());
+        IVerifiedInstallerSession session = controller.TakeVerifiedSession();
+        Task discovery = session.DiscoverGamesAsync();
+        await AwaitBounded(discoveryStarted.Task);
+
+        Task firstDisposal = session.DisposeAsync().AsTask();
+        Task secondDisposal = session.DisposeAsync().AsTask();
+
+        await AwaitBounded(firstDisposal);
+        await AwaitBounded(secondDisposal);
+        await FluentActions.Awaiting(async () => await discovery).Should().ThrowAsync<OperationCanceledException>();
+        client.DisposeCalls.Should().Be(1);
+        await FluentActions.Awaiting(async () => await session.DiscoverGamesAsync()).Should().ThrowAsync<ObjectDisposedException>();
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+        client.DisposeCalls.Should().Be(1);
     }
 
     [Test]
@@ -830,6 +916,8 @@ internal sealed class ReleaseVerificationControllerTests
         public TaskCompletionSource DisposeStarted { get; } = NewCompletion();
         public Func<string, string, CancellationToken, Task<HandshakeEvent>> Handshake { get; init; } = (_, _, _) => Task.FromResult(CreateHandshake());
         public Func<InstallerPackageOpenInput, CancellationToken, Task<InstallerPackageOpenResult>> Open { get; init; } = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenSuccess(CreateRelease()));
+        public Func<CancellationToken, Task<IReadOnlyList<ProtocolGameCandidate>>> Discover { get; init; } = _ => throw new NotSupportedException();
+        public Func<string, CancellationToken, Task<ProtocolGameCandidate>> Validate { get; init; } = (_, _) => throw new NotSupportedException();
         public Task Disposal { get; init; } = Task.CompletedTask;
         public int OpenCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -857,6 +945,12 @@ internal sealed class ReleaseVerificationControllerTests
             this.OpenStarted.TrySetResult();
             return result;
         }
+
+        public Task<IReadOnlyList<ProtocolGameCandidate>> DiscoverGamesAsync(CancellationToken cancellationToken = default)
+            => this.Discover(cancellationToken);
+
+        public Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default)
+            => this.Validate(canonicalPath, cancellationToken);
 
         public ValueTask DisposeAsync()
         {

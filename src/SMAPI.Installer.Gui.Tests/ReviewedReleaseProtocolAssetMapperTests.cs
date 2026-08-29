@@ -37,7 +37,9 @@ internal sealed class ReviewedReleaseProtocolAssetMapperTests
             .Should().Equal(
                 "get_SessionFaulted",
                 nameof(IInstallerProtocolClient.HandshakeAsync),
-                nameof(IInstallerProtocolClient.OpenPackageAsync)
+                nameof(IInstallerProtocolClient.OpenPackageAsync),
+                nameof(IInstallerProtocolClient.DiscoverGamesAsync),
+                nameof(IInstallerProtocolClient.ValidateGameAsync)
             );
     }
 }

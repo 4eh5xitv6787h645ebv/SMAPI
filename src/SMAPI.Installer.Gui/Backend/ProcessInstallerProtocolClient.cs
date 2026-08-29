@@ -10,6 +10,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
 {
     internal const string ProtocolFlag = "--linux-protocol-v1-jsonl";
     internal const string PackageVerificationCapability = "verified-local-package";
+    internal const string GameDiscoveryCapability = "linux-game-discovery";
+    internal const string GameValidationCapability = "linux-game-validation";
     internal const int MaximumObservedStderrBytes = 64 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
@@ -148,7 +150,11 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
 
             HandshakeRequest request = new(clientName, clientVersion);
             HandshakeEvent response = await this.ExchangeAsync<HandshakeEvent>(request, cancellationToken).ConfigureAwait(false);
-            if (!response.Capabilities.Contains(PackageVerificationCapability, StringComparer.Ordinal))
+            if (
+                !response.Capabilities.Contains(PackageVerificationCapability, StringComparer.Ordinal)
+                || !response.Capabilities.Contains(GameDiscoveryCapability, StringComparer.Ordinal)
+                || !response.Capabilities.Contains(GameValidationCapability, StringComparer.Ordinal)
+            )
                 return await this.FailProtocolAsync<HandshakeEvent>().ConfigureAwait(false);
             this.SessionId = response.SessionId;
             return response;
@@ -203,6 +209,56 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 default:
                     return await this.FailProtocolAsync<InstallerPackageOpenResult>().ConfigureAwait(false);
             }
+        }
+        finally
+        {
+            this.CommandGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<ProtocolGameCandidate>> DiscoverGamesAsync(CancellationToken cancellationToken = default)
+    {
+        await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            this.AssertUsable();
+            ProtocolSessionId session = this.SessionId
+                ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+            GameDiscoveryEvent response = await this.ExchangeAsync<GameDiscoveryEvent>(
+                new DiscoverGamesRequest(session),
+                cancellationToken
+            ).ConfigureAwait(false);
+            if (response.SessionId != session)
+                return await this.FailProtocolAsync<IReadOnlyList<ProtocolGameCandidate>>().ConfigureAwait(false);
+            return Array.AsReadOnly(response.Candidates);
+        }
+        finally
+        {
+            this.CommandGate.Release();
+        }
+    }
+
+    public async Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(canonicalPath);
+        await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            this.AssertUsable();
+            ProtocolSessionId session = this.SessionId
+                ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+            GameValidationEvent response = await this.ExchangeAsync<GameValidationEvent>(
+                new ValidateGameRequest(session, canonicalPath),
+                cancellationToken
+            ).ConfigureAwait(false);
+            if (
+                response.SessionId != session
+                || !string.Equals(response.Candidate.CanonicalPath, canonicalPath, StringComparison.Ordinal)
+            )
+            {
+                return await this.FailProtocolAsync<ProtocolGameCandidate>().ConfigureAwait(false);
+            }
+            return response.Candidate;
         }
         finally
         {

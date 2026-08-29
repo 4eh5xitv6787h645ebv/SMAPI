@@ -70,6 +70,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
     private ReleaseVerificationError ErrorValue;
     private ControllerOperation? ActiveOperation;
     private AttemptContext? VerifiedAttempt;
+    private bool VerifiedSessionTaken;
     private long GenerationValue;
     private int AttemptNumberValue;
     private bool DisposeStarted;
@@ -106,7 +107,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         lock (this.Sync)
         {
             this.AssertNotDisposed();
-            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null)
+            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
                 throw new InvalidOperationException("Release verification already owns an active operation or verified backend session.");
 
             operation = this.BeginOperation(cancellationToken);
@@ -129,7 +130,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         lock (this.Sync)
         {
             this.AssertNotDisposed();
-            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null)
+            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
                 throw new InvalidOperationException("A release cannot be selected while verification owns an active authority.");
             ReviewedReleaseCandidate selected = this.ReleasesValue.SingleOrDefault(value => ReferenceEquals(value, release))
                 ?? throw new ArgumentException("The release must be the exact current catalog candidate instance.", nameof(release));
@@ -150,7 +151,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         lock (this.Sync)
         {
             this.AssertNotDisposed();
-            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null)
+            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
                 throw new InvalidOperationException("Release verification already owns an active operation or verified backend session.");
             if (this.StateValue != ReleaseVerificationState.Ready || this.SelectedReleaseValue is null)
                 throw new InvalidOperationException("A current reviewed release must be selected before verification starts.");
@@ -174,7 +175,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         lock (this.Sync)
         {
             this.AssertNotDisposed();
-            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null)
+            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
                 throw new InvalidOperationException("Release verification hasn't finished disposing its prior authorities.");
             if (this.StateValue is not (ReleaseVerificationState.Failed or ReleaseVerificationState.Cancelled))
                 throw new InvalidOperationException("Only a completed failed or cancelled attempt can be retried.");
@@ -219,6 +220,36 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         this.PublishChanged();
         await operation.RequestCancellationAsync().ConfigureAwait(false);
         await operation.Completion.Task.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Transfer the exact verified package and live backend client into the restricted next-stage session once.
+    /// The caller becomes the sole owner and must dispose the returned session.
+    /// </summary>
+    public IVerifiedInstallerSession TakeVerifiedSession()
+    {
+        lock (this.Sync)
+        {
+            this.AssertNotDisposed();
+            if (
+                this.VerifiedSessionTaken
+                || this.StateValue != ReleaseVerificationState.Verified
+                || this.VerifiedAttempt?.Client is not { } client
+                || this.VerifiedReleaseValue is not { } release
+            )
+            {
+                throw new InvalidOperationException("A live verified installer session isn't available for transfer.");
+            }
+            if (client.SessionFaulted.IsCompleted)
+                throw new InvalidOperationException("The verified installer session has already faulted.");
+
+            VerifiedInstallerSession session = new(release, client);
+            AttemptContext attempt = this.VerifiedAttempt;
+            this.VerifiedAttempt = null;
+            this.VerifiedSessionTaken = true;
+            attempt.StopWatching.TrySetResult();
+            return session;
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -820,7 +851,10 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
 
     private ReleaseVerificationSnapshot CreateSnapshot()
     {
-        bool idleAuthority = this.ActiveOperation is null && this.VerifiedAttempt is null && !this.DisposeStarted;
+        bool idleAuthority = this.ActiveOperation is null
+            && this.VerifiedAttempt is null
+            && !this.VerifiedSessionTaken
+            && !this.DisposeStarted;
         bool retryableOutcome = this.StateValue == ReleaseVerificationState.Cancelled
             || (
                 this.StateValue == ReleaseVerificationState.Failed
