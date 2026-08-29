@@ -1,0 +1,170 @@
+<Window
+    x:Class="StardewModdingAPI.Installer.Gui.MainWindow"
+    x:DataType="vm:MainWindowViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
+    Title="SMAPI Linux Installer — Safe Demo"
+    Width="1120"
+    Height="820"
+    MinWidth="680"
+    MinHeight="560"
+    WindowStartupLocation="CenterScreen">
+  <ScrollViewer x:Name="PageScrollViewer" HorizontalScrollBarVisibility="Auto">
+    <Grid Margin="28" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="18">
+      <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="18">
+        <StackPanel>
+          <TextBlock FontSize="30" FontWeight="Bold" Text="SMAPI Linux Installer" />
+          <TextBlock Classes="muted" FontSize="16" Text="Desktop shell preview" />
+        </StackPanel>
+        <Border
+            Grid.Column="1"
+            Padding="12,7"
+            VerticalAlignment="Center"
+            Background="#184A3B"
+            BorderBrush="#49D49D"
+            BorderThickness="1"
+            CornerRadius="20">
+          <TextBlock FontWeight="Bold" Foreground="#A7F3D0" Text="SAFE DEMO" />
+        </Border>
+      </Grid>
+
+      <Border
+          x:Name="SafetyBanner"
+          Grid.Row="1"
+          Padding="16"
+          AutomationProperties.LiveSetting="Polite"
+          AutomationProperties.Name="Safe demo mode notice"
+          Background="#352D14"
+          BorderBrush="#E9C46A"
+          BorderThickness="2"
+          CornerRadius="8">
+        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+          <TextBlock FontSize="22" Text="⚠" />
+          <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="{Binding SafetyBanner}" TextWrapping="Wrap" />
+        </Grid>
+      </Border>
+
+      <Grid Grid.Row="2" ColumnDefinitions="3*,2*" ColumnSpacing="18">
+        <Border Classes="card">
+          <StackPanel Spacing="12">
+            <TextBlock Classes="section-title" Text="1. Choose what to preview" />
+
+            <Label Content="_Game folder (synthetic)" Target="{Binding #FolderSelector}" />
+            <ComboBox
+                x:Name="FolderSelector"
+                Classes="focus-ring"
+                TabIndex="1"
+                AutomationProperties.Name="Synthetic game folder"
+                AutomationProperties.HelpText="Select a display-only example game folder. The path is not inspected."
+                ItemsSource="{Binding Folders}"
+                SelectedItem="{Binding SelectedFolder}"
+                DisplayMemberBinding="{Binding Label}" />
+            <TextBlock Classes="muted" Text="{Binding FolderDetail}" TextWrapping="Wrap" />
+
+            <Label Margin="0,8,0,0" Content="_Release (synthetic)" Target="{Binding #ReleaseSelector}" />
+            <ComboBox
+                x:Name="ReleaseSelector"
+                Classes="focus-ring"
+                TabIndex="2"
+                AutomationProperties.Name="Synthetic release"
+                AutomationProperties.HelpText="Select a display-only example release. Nothing is downloaded."
+                ItemsSource="{Binding Releases}"
+                SelectedItem="{Binding SelectedRelease}"
+                DisplayMemberBinding="{Binding Label}" />
+            <TextBlock Classes="muted" Text="{Binding ReleaseDetail}" TextWrapping="Wrap" />
+
+            <Label Margin="0,8,0,0" Content="_Operation" Target="{Binding #OperationSelector}" />
+            <ComboBox
+                x:Name="OperationSelector"
+                Classes="focus-ring"
+                TabIndex="3"
+                AutomationProperties.Name="Installer operation"
+                AutomationProperties.HelpText="Select the installer operation to preview."
+                ItemsSource="{Binding Operations}"
+                SelectedItem="{Binding SelectedOperation}"
+                DisplayMemberBinding="{Binding Label}" />
+            <TextBlock Classes="muted" Text="{Binding OperationDetail}" TextWrapping="Wrap" />
+
+            <Grid Margin="0,12,0,0" ColumnDefinitions="Auto,Auto,*" ColumnSpacing="12">
+              <Button
+                  x:Name="PreviewButton"
+                  Classes="primary focus-ring"
+                  TabIndex="4"
+                  AutomationProperties.Name="Preview selected operation"
+                  AutomationProperties.HelpText="Creates a synthetic preview only; no installer action is executed."
+                  Command="{Binding PreviewCommand}"
+                  Content="_Preview selection" />
+              <Button
+                  x:Name="ResetButton"
+                  Grid.Column="1"
+                  Classes="focus-ring"
+                  TabIndex="5"
+                  AutomationProperties.Name="Reset demo selections"
+                  Command="{Binding ResetCommand}"
+                  Content="_Reset" />
+            </Grid>
+          </StackPanel>
+        </Border>
+
+        <Border Grid.Column="1" Classes="card">
+          <StackPanel Spacing="12">
+            <TextBlock Classes="section-title" Text="2. Review state" />
+            <TextBlock x:Name="PreviewHeading" FontSize="18" FontWeight="SemiBold" Text="{Binding PreviewHeading}" TextWrapping="Wrap" />
+            <TextBlock Classes="muted" Text="{Binding PreviewSummary}" TextWrapping="Wrap" />
+            <Border Margin="0,8,0,0" Padding="12" Background="#111923" CornerRadius="6">
+              <StackPanel Spacing="4">
+                <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
+                <TextBlock
+                    x:Name="StateLabel"
+                    AutomationProperties.LiveSetting="Polite"
+                    AutomationProperties.Name="Installer durable state"
+                    FontWeight="SemiBold"
+                    Text="{Binding StateLabel}"
+                    TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+            <Button
+                x:Name="ExecuteButton"
+                Classes="focus-ring"
+                Margin="0,12,0,0"
+                TabIndex="6"
+                AutomationProperties.Name="Execute operation unavailable"
+                AutomationProperties.HelpText="Disabled because the production installer backend is not connected."
+                Command="{Binding ExecuteCommand}"
+                Content="Connect verified backend to enable"
+                IsEnabled="{Binding IsBackendConnected}" />
+            <TextBlock
+                Foreground="#E9C46A"
+                FontSize="13"
+                Text="Execution is intentionally disabled in this shell preview."
+                TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
+      </Grid>
+
+      <Border Grid.Row="3" Classes="card" MinHeight="210">
+        <Grid RowDefinitions="Auto,*" RowSpacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Classes="section-title" Text="Detailed local demo log" />
+            <TextBlock Grid.Column="1" Classes="muted" Text="Synthetic • memory only" />
+          </Grid>
+          <ListBox
+              x:Name="LogList"
+              Grid.Row="1"
+              TabIndex="7"
+              AutomationProperties.Name="Detailed local demo log"
+              AutomationProperties.HelpText="Synthetic in-memory messages for this preview."
+              Background="#0C121A"
+              ItemsSource="{Binding LogEntries}">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <TextBlock FontFamily="monospace" FontSize="13" Text="{Binding}" TextWrapping="Wrap" />
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Border>
+    </Grid>
+  </ScrollViewer>
+</Window>
