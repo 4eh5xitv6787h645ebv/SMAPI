@@ -12,12 +12,13 @@
     WindowStartupLocation="CenterScreen">
   <ScrollViewer x:Name="PageScrollViewer" HorizontalScrollBarVisibility="Disabled">
     <Grid Margin="28" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="18">
-      <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="18">
+      <Grid x:Name="HeaderGrid" Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="18">
         <StackPanel>
-          <TextBlock AutomationProperties.HeadingLevel="1" FontSize="30" FontWeight="Bold" Text="SMAPI Linux Installer" />
+          <TextBlock x:Name="HeaderTitle" AutomationProperties.HeadingLevel="1" FontSize="30" FontWeight="Bold" Text="SMAPI Linux Installer" TextWrapping="Wrap" />
           <TextBlock Classes="muted" FontSize="16" Text="Desktop shell preview" />
         </StackPanel>
         <Border
+            x:Name="HeaderBadge"
             Grid.Column="1"
             Padding="12,7"
             VerticalAlignment="Center"
@@ -129,7 +130,6 @@
                 <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
                 <TextBlock
                     x:Name="StateLabel"
-                    AutomationProperties.LiveSetting="Polite"
                     AutomationProperties.Name="Installer durable state"
                     FontWeight="SemiBold"
                     Text="{Binding StateLabel}"

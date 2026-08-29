@@ -133,7 +133,8 @@ jobs:
                         -p:GamePath="$RUNNER_TEMP/StardewValley" \
                         -p:CopyToGameFolder=false \
                         -p:AllowMissingPrunePackageData=true
-                    dotnet format whitespace src/SMAPI.slnx --verify-no-changes --no-restore
+                    dotnet format whitespace src/SMAPI.slnx --verify-no-changes --no-restore \
+                        --include src/SMAPI.Installer.Gui src/SMAPI.Installer.Gui.Tests
                     dotnet format whitespace src/SMAPI.Installer/SMAPI.Installer.csproj --verify-no-changes --no-restore \
                         --include src/SMAPI.Installer/InteractiveInstaller.cs src/SMAPI.Installer/Program.cs
                     git diff --check

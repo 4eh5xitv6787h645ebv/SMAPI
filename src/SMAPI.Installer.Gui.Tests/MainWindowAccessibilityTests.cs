@@ -109,6 +109,7 @@ public sealed class MainWindowAccessibilityTests
         MainWindow window = new();
         MainWindowViewModel viewModel = (MainWindowViewModel)window.DataContext!;
         Border region = window.FindControl<Border>("PreviewStatusRegion")!;
+        TextBlock state = window.FindControl<TextBlock>("StateLabel")!;
 
         window.Show();
         viewModel.PreviewCommand.Execute(null);
@@ -119,6 +120,7 @@ public sealed class MainWindowAccessibilityTests
         peer.GetName().Should().Be(viewModel.PreviewAnnouncement);
         peer.GetName().Should().Contain("No backend action ran");
         peer.GetName().Length.Should().BeLessThanOrEqualTo(DemoText.MaxDisplayLength);
+        AutomationProperties.GetLiveSetting(state).Should().Be(AutomationLiveSetting.Off, "the durable-state text must not duplicate the concise result announcement");
     }
 
     [AvaloniaTest]
@@ -139,11 +141,18 @@ public sealed class MainWindowAccessibilityTests
         MainWindow window = AssertRenderedLayout(420);
         Grid layout = window.FindControl<Grid>("SelectionReviewGrid")!;
         Border review = window.FindControl<Border>("ReviewCard")!;
+        Grid header = window.FindControl<Grid>("HeaderGrid")!;
+        TextBlock title = window.FindControl<TextBlock>("HeaderTitle")!;
+        Border badge = window.FindControl<Border>("HeaderBadge")!;
 
         window.IsNarrowLayout.Should().BeTrue();
         Grid.GetColumn(review).Should().Be(0);
         Grid.GetRow(review).Should().Be(1);
         layout.ColumnDefinitions.Should().ContainSingle();
+        Grid.GetColumn(badge).Should().Be(0);
+        Grid.GetRow(badge).Should().Be(1);
+        title.Bounds.Width.Should().BeLessThanOrEqualTo(header.Bounds.Width);
+        title.TextLayout!.TextLines.Should().OnlyContain(line => !line.HasOverflowed && !line.HasCollapsed, "the full title must remain visible without clipping");
     }
 
     [AvaloniaTest]

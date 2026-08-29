@@ -35,6 +35,14 @@ public sealed partial class MainWindow : Window
 
         if (this.IsNarrowLayout)
         {
+            this.HeaderGrid.ColumnDefinitions = new ColumnDefinitions("*");
+            this.HeaderGrid.RowDefinitions = new RowDefinitions("Auto,Auto");
+            this.HeaderGrid.ColumnSpacing = 0;
+            this.HeaderGrid.RowSpacing = 10;
+            Grid.SetColumn(this.HeaderBadge, 0);
+            Grid.SetRow(this.HeaderBadge, 1);
+            this.HeaderBadge.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left;
+
             this.SelectionReviewGrid.ColumnDefinitions = new ColumnDefinitions("*");
             this.SelectionReviewGrid.RowDefinitions = new RowDefinitions("Auto,Auto");
             this.SelectionReviewGrid.ColumnSpacing = 0;
@@ -44,6 +52,14 @@ public sealed partial class MainWindow : Window
         }
         else
         {
+            this.HeaderGrid.ColumnDefinitions = new ColumnDefinitions("*,Auto");
+            this.HeaderGrid.RowDefinitions = new RowDefinitions("Auto");
+            this.HeaderGrid.ColumnSpacing = 18;
+            this.HeaderGrid.RowSpacing = 0;
+            Grid.SetColumn(this.HeaderBadge, 1);
+            Grid.SetRow(this.HeaderBadge, 0);
+            this.HeaderBadge.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch;
+
             this.SelectionReviewGrid.ColumnDefinitions = new ColumnDefinitions("3*,2*");
             this.SelectionReviewGrid.RowDefinitions = new RowDefinitions("Auto");
             this.SelectionReviewGrid.ColumnSpacing = 18;
