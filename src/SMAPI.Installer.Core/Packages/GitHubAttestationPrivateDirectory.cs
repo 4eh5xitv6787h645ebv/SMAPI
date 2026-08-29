@@ -19,12 +19,14 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
     private const uint StatxBasicStats = 0x7ff;
     private const ushort FileTypeMask = 0xf000;
     private const ushort FileTypeDirectory = 0x4000;
+    private const ushort FileTypeSymbolicLink = 0xa000;
     private const int ErrorNoEntry = 2;
     private const int ErrorExists = 17;
     private const int MaximumCleanupDepth = 32;
     private const int MaximumCleanupEntries = 16_384;
     private const int DirectoryBufferBytes = 64 * 1024;
     private const int DirectoryEntryHeaderBytes = 19;
+    private const int MaximumLinkTargetBytes = 4096;
     private const long SystemCallGetDirectoryEntries64 = 217;
     private const int PrivateDirectoryMode = 0x1c0; // 0700
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
@@ -34,6 +36,7 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
     private SafeFileHandle? DirectoryHandle;
     private readonly string EntryName;
     private readonly DirectoryIdentity Identity;
+    private BundleBridgeIdentity? BundleBridge;
     private int CleanupStarted;
 
     /// <summary>The retained directory path, resolved through this process's open descriptor.</summary>
@@ -125,6 +128,48 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
             directory?.Dispose();
             parent?.Dispose();
         }
+    }
+
+    /// <summary>Create and retain one fixed extension-bearing symlink to an immutable bundle descriptor.</summary>
+    public string CreateBundleBridge(
+        string entryName,
+        string retainedBundlePath,
+        Action<string>? afterCreatedForTesting = null
+    )
+    {
+        SafeFileHandle directory = this.DirectoryHandle
+            ?? throw new ObjectDisposedException(nameof(GitHubAttestationPrivateDirectory));
+        if (this.BundleBridge is not null || entryName.Length == 0 || entryName.Contains('/') || entryName.Any(char.IsControl))
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+
+        AssertPrivateDirectory(GetHandleIdentity(directory));
+        if (symlinkat(retainedBundlePath, directory, entryName) != 0)
+            ThrowNativeFailure();
+        DirectoryIdentity identity = GetNamedIdentity(directory, entryName, allowMissing: false)
+            ?? throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        AssertPrivateBundleBridge(identity);
+        if (!string.Equals(ReadLinkAt(directory, entryName), retainedBundlePath, StringComparison.Ordinal))
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+
+        string bridgePath = Path.Combine(this.ProcPath, entryName);
+        afterCreatedForTesting?.Invoke(bridgePath);
+        AssertBundleBridge(directory, entryName, retainedBundlePath, identity);
+        this.BundleBridge = new BundleBridgeIdentity(entryName, retainedBundlePath, identity);
+        return bridgePath;
+    }
+
+    /// <summary>Revalidate the exact retained bridge entry immediately before process start.</summary>
+    public void AssertBundleBridge(string retainedBundlePath)
+    {
+        SafeFileHandle directory = this.DirectoryHandle
+            ?? throw new ObjectDisposedException(nameof(GitHubAttestationPrivateDirectory));
+        BundleBridgeIdentity bridge = this.BundleBridge
+            ?? throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        if (!string.Equals(bridge.RetainedBundlePath, retainedBundlePath, StringComparison.Ordinal))
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+
+        AssertPrivateDirectory(GetHandleIdentity(directory));
+        AssertBundleBridge(directory, bridge.EntryName, bridge.RetainedBundlePath, bridge.Identity);
     }
 
     /// <inheritdoc />
@@ -328,6 +373,40 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
             throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
     }
 
+    private static void AssertBundleBridge(
+        SafeFileHandle directory,
+        string entryName,
+        string retainedBundlePath,
+        DirectoryIdentity expectedIdentity
+    )
+    {
+        DirectoryIdentity current = GetNamedIdentity(directory, entryName, allowMissing: false)
+            ?? throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        AssertPrivateBundleBridge(current);
+        if (
+            !expectedIdentity.IsSameNode(current)
+            || !string.Equals(ReadLinkAt(directory, entryName), retainedBundlePath, StringComparison.Ordinal)
+        )
+        {
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        }
+    }
+
+    private static void AssertPrivateBundleBridge(DirectoryIdentity identity)
+    {
+        if (!identity.IsSymbolicLink || identity.UserId != geteuid() || identity.LinkCount != 1)
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+    }
+
+    private static string ReadLinkAt(SafeFileHandle directory, string entryName)
+    {
+        byte[] buffer = new byte[MaximumLinkTargetBytes];
+        long length = readlinkat(directory, entryName, buffer, (ulong)buffer.Length);
+        if (length is <= 0 or >= MaximumLinkTargetBytes)
+            ThrowNativeFailure();
+        return StrictUtf8.GetString(buffer, 0, checked((int)length));
+    }
+
     private static void ThrowNativeFailure()
     {
         throw new IOException("A retained private attestation directory operation failed.");
@@ -357,6 +436,12 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
 
     [DllImport("libc", SetLastError = true)]
     private static extern int unlinkat(SafeFileHandle directory, string path, int flags);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int symlinkat(string target, SafeFileHandle directory, string linkPath);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern long readlinkat(SafeFileHandle directory, string path, [Out] byte[] buffer, ulong bufferSize);
 
     [DllImport("libc", SetLastError = true)]
     private static extern uint geteuid();
@@ -397,10 +482,10 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
         public StatxTimestamp BirthTime;
         public StatxTimestamp ChangeTime;
         public StatxTimestamp ModificationTime;
-        public uint DeviceMajor;
-        public uint DeviceMinor;
         public uint RootDeviceMajor;
         public uint RootDeviceMinor;
+        public uint DeviceMajor;
+        public uint DeviceMinor;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -415,24 +500,44 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
         ulong Inode,
         uint DeviceMajor,
         uint DeviceMinor,
+        uint LinkCount,
         uint UserId,
         ushort Mode
     )
     {
         public bool IsDirectory => (this.Mode & FileTypeMask) == FileTypeDirectory;
+        public bool IsSymbolicLink => (this.Mode & FileTypeMask) == FileTypeSymbolicLink;
 
-        public bool IsSameObject(DirectoryIdentity other)
+        public bool IsSameNode(DirectoryIdentity other)
         {
             return this.Inode == other.Inode
                 && this.DeviceMajor == other.DeviceMajor
-                && this.DeviceMinor == other.DeviceMinor
+                && this.DeviceMinor == other.DeviceMinor;
+        }
+
+        public bool IsSameObject(DirectoryIdentity other)
+        {
+            return this.IsSameNode(other)
                 && this.IsDirectory
                 && other.IsDirectory;
         }
 
         public static DirectoryIdentity From(Statx data)
         {
-            return new DirectoryIdentity(data.Inode, data.DeviceMajor, data.DeviceMinor, data.UserId, data.Mode);
+            return new DirectoryIdentity(
+                data.Inode,
+                data.DeviceMajor,
+                data.DeviceMinor,
+                data.LinkCount,
+                data.UserId,
+                data.Mode
+            );
         }
     }
+
+    private readonly record struct BundleBridgeIdentity(
+        string EntryName,
+        string RetainedBundlePath,
+        DirectoryIdentity Identity
+    );
 }

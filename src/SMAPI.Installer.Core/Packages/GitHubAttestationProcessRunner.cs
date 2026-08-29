@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -7,9 +8,25 @@ using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Packages;
 
+/// <summary>The exact immutable local bundle descriptor which the runner may bridge for GitHub CLI.</summary>
+internal sealed class GitHubAttestationProcessBundleAuthority
+{
+    public string ProcPath { get; }
+
+    public GitHubAttestationProcessBundleAuthority(string procPath)
+    {
+        this.ProcPath = GitHubAttestationProcessRequest.AssertCurrentProcessDescriptorPath(
+            procPath,
+            nameof(procPath),
+            "attestation bundle"
+        );
+    }
+}
+
 /// <summary>A bounded request to the pinned GitHub attestation verifier process.</summary>
 internal sealed class GitHubAttestationProcessRequest
 {
+    internal const string BundlePathPlaceholder = "SMAPI_INTERNAL_VERIFIED_ATTESTATION_BUNDLE_JSONL_PATH";
     internal const int MaximumArgumentCount = 64;
     internal const int MaximumArgumentLength = 4096;
     internal const int MaximumOutputBytes = 16 * 1024 * 1024;
@@ -20,13 +37,16 @@ internal sealed class GitHubAttestationProcessRequest
     public TimeSpan Timeout { get; }
     public int MaximumStandardOutputBytes { get; }
     public int MaximumStandardErrorBytes { get; }
+    public GitHubAttestationProcessBundleAuthority? BundleAuthority { get; }
+    public int? BundleArgumentIndex { get; }
 
     public GitHubAttestationProcessRequest(
         string executablePath,
         IEnumerable<string> arguments,
         TimeSpan timeout,
         int maximumStandardOutputBytes,
-        int maximumStandardErrorBytes
+        int maximumStandardErrorBytes,
+        GitHubAttestationProcessBundleAuthority? bundleAuthority = null
     )
     {
         this.ExecutablePath = AssertCanonicalAbsolutePath(executablePath, nameof(executablePath));
@@ -46,10 +66,44 @@ internal sealed class GitHubAttestationProcessRequest
         if (maximumStandardErrorBytes is <= 0 or > MaximumOutputBytes)
             throw new ArgumentOutOfRangeException(nameof(maximumStandardErrorBytes));
 
+        int[] bundleSlots = argumentValues
+            .Select((value, index) => (value, index))
+            .Where(value => string.Equals(value.value, BundlePathPlaceholder, StringComparison.Ordinal))
+            .Select(value => value.index)
+            .ToArray();
+        if ((bundleAuthority is null && bundleSlots.Length != 0) || (bundleAuthority is not null && bundleSlots.Length != 1))
+        {
+            throw new ArgumentException(
+                "The GitHub attestation verifier bundle authority must have one exact reserved argument slot.",
+                nameof(arguments)
+            );
+        }
+
         this.Arguments = Array.AsReadOnly(argumentValues);
         this.Timeout = timeout;
         this.MaximumStandardOutputBytes = maximumStandardOutputBytes;
         this.MaximumStandardErrorBytes = maximumStandardErrorBytes;
+        this.BundleAuthority = bundleAuthority;
+        this.BundleArgumentIndex = bundleSlots.Length == 1 ? bundleSlots[0] : null;
+    }
+
+    internal static string AssertCurrentProcessDescriptorPath(string? value, string parameterName, string authorityName)
+    {
+        string pathValue = value ?? "";
+        string prefix = $"/proc/{Environment.ProcessId}/fd/";
+        string descriptor = pathValue.StartsWith(prefix, StringComparison.Ordinal) ? pathValue[prefix.Length..] : "";
+        if (
+            !int.TryParse(descriptor, NumberStyles.None, CultureInfo.InvariantCulture, out int descriptorNumber)
+            || descriptorNumber < 0
+            || !string.Equals(descriptor, descriptorNumber.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+        )
+        {
+            throw new ArgumentException(
+                $"The {authorityName} must be exposed through this process's retained file descriptor.",
+                parameterName
+            );
+        }
+        return pathValue;
     }
 
     private static string AssertCanonicalAbsolutePath(string value, string parameterName)
@@ -92,20 +146,34 @@ internal interface IGitHubAttestationProcessRunner
 internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcessRunner
 {
     private const string DefaultSetSidPath = "/usr/bin/setsid";
+    private const string BundleBridgeFileName = "verified-attestation-bundle.jsonl";
+    private const int AtEmptyPath = 0x1000;
+    private const int AtSymlinkNoFollow = 0x100;
+    private const uint StatxBasicStats = 0x7ff;
+    private const ushort FileTypeMask = 0xf000;
+    private const ushort FileTypeRegular = 0x8000;
+    private const int GetSeals = 1034;
+    private const int RequiredImmutableSeals = 0x0f;
     private const int SignalKill = 9;
     private const int MaximumProcEntries = 32_768;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly TimeSpan TeardownTimeout = TimeSpan.FromSeconds(5);
     private readonly string SetSidPath;
     private readonly Action<string>? AfterPrivateDirectoryCreatedForTesting;
+    private readonly Action<string>? AfterBundleBridgeCreatedForTesting;
+    private readonly Action<string>? BeforeProcessStartForTesting;
 
     internal GitHubAttestationProcessRunner(
         string setSidPath = DefaultSetSidPath,
-        Action<string>? afterPrivateDirectoryCreatedForTesting = null
+        Action<string>? afterPrivateDirectoryCreatedForTesting = null,
+        Action<string>? afterBundleBridgeCreatedForTesting = null,
+        Action<string>? beforeProcessStartForTesting = null
     )
     {
         this.SetSidPath = setSidPath ?? throw new ArgumentNullException(nameof(setSidPath));
         this.AfterPrivateDirectoryCreatedForTesting = afterPrivateDirectoryCreatedForTesting;
+        this.AfterBundleBridgeCreatedForTesting = afterBundleBridgeCreatedForTesting;
+        this.BeforeProcessStartForTesting = beforeProcessStartForTesting;
     }
 
     public async Task<GitHubAttestationProcessResult> RunAsync(
@@ -133,6 +201,34 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
 
         await using (privateDirectory.ConfigureAwait(false))
         {
+            string[] processArguments;
+            try
+            {
+                processArguments = this.CreateProcessArguments(request, privateDirectory);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (PackageSecurityException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException
+                    or DecoderFallbackException
+                    or IOException
+                    or NotSupportedException
+                    or PathTooLongException
+                    or System.Security.SecurityException
+                    or UnauthorizedAccessException
+            )
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+            }
+
             SystemSetSidAuthority setSid;
             try
             {
@@ -144,16 +240,46 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 throw;
             }
             using SystemSetSidAuthority retainedSetSid = setSid;
-            ProcessStartInfo startInfo = CreateStartInfo(request, privateDirectory.ProcPath, retainedSetSid.ProcPath);
+            ProcessStartInfo startInfo = CreateStartInfo(
+                request,
+                processArguments,
+                privateDirectory.ProcPath,
+                retainedSetSid.ProcPath
+            );
             using Process process = new() { StartInfo = startInfo, EnableRaisingEvents = true };
             int processGroupId;
             try
             {
+                if (request.BundleAuthority is not null)
+                {
+                    this.BeforeProcessStartForTesting?.Invoke(processArguments[request.BundleArgumentIndex!.Value]);
+                    privateDirectory.AssertBundleBridge(request.BundleAuthority.ProcPath);
+                    AssertExactBundleBridgeAuthority(request.BundleAuthority.ProcPath, processArguments[request.BundleArgumentIndex!.Value]);
+                }
                 if (!process.Start())
                     throw new InvalidOperationException("The verifier process didn't start.");
                 processGroupId = process.Id;
             }
-            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (PackageSecurityException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException
+                    or DecoderFallbackException
+                    or IOException
+                    or InvalidOperationException
+                    or NotSupportedException
+                    or PathTooLongException
+                    or System.Security.SecurityException
+                    or UnauthorizedAccessException
+                    or System.ComponentModel.Win32Exception
+            )
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
@@ -266,6 +392,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
 
     private static ProcessStartInfo CreateStartInfo(
         GitHubAttestationProcessRequest request,
+        IReadOnlyList<string> processArguments,
         string privateDirectory,
         string setSidProcPath
     )
@@ -282,7 +409,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         };
         startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(request.ExecutablePath);
-        foreach (string argument in request.Arguments)
+        foreach (string argument in processArguments)
             startInfo.ArgumentList.Add(argument);
 
         startInfo.Environment.Clear();
@@ -304,6 +431,56 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         startInfo.Environment["LANG"] = "C.UTF-8";
         startInfo.Environment["LC_ALL"] = "C.UTF-8";
         return startInfo;
+    }
+
+    /// <summary>
+    /// GitHub CLI 2.92 selects the local bundle decoder from its filename extension. Keep the immutable descriptor as
+    /// the sole byte authority, but expose it through one fixed extension-bearing symlink below the retained private
+    /// directory for the lifetime of the verifier process.
+    /// </summary>
+    private string[] CreateProcessArguments(
+        GitHubAttestationProcessRequest request,
+        GitHubAttestationPrivateDirectory privateDirectory
+    )
+    {
+        string[] arguments = request.Arguments.ToArray();
+        if (request.BundleAuthority is null)
+            return arguments;
+
+        string retainedBundlePath = request.BundleAuthority.ProcPath;
+        string bridgePath = privateDirectory.CreateBundleBridge(
+            BundleBridgeFileName,
+            retainedBundlePath,
+            this.AfterBundleBridgeCreatedForTesting
+        );
+        AssertExactBundleBridgeAuthority(retainedBundlePath, bridgePath);
+        arguments[request.BundleArgumentIndex!.Value] = bridgePath;
+        return arguments;
+    }
+
+    private static void AssertExactBundleBridgeAuthority(string retainedBundlePath, string bridgePath)
+    {
+        using SafeFileHandle retainedBundle = OpenBundleForIdentity(retainedBundlePath);
+        using SafeFileHandle bridgedBundle = OpenBundleForIdentity(bridgePath);
+        BundleFileIdentity retainedIdentity = GetBundleFileIdentity(retainedBundle);
+        BundleFileIdentity bridgedIdentity = GetBundleFileIdentity(bridgedBundle);
+        if (!retainedIdentity.Equals(bridgedIdentity))
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+    }
+
+    private static SafeFileHandle OpenBundleForIdentity(string path)
+    {
+        return File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+    }
+
+    private static BundleFileIdentity GetBundleFileIdentity(SafeFileHandle handle)
+    {
+        if (statx(handle, "", AtEmptyPath | AtSymlinkNoFollow, StatxBasicStats, out BundleStatx data) != 0)
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        int seals = fcntl(handle, GetSeals, 0);
+        if ((data.Mode & FileTypeMask) != FileTypeRegular || seals < 0 || (seals & RequiredImmutableSeals) != RequiredImmutableSeals)
+            throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+        return new BundleFileIdentity(data.Inode, data.DeviceMajor, data.DeviceMinor, data.Size, data.Mode, seals);
     }
 
     private static async Task<byte[]> ReadBoundedAsync(
@@ -498,6 +675,60 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
 
     [DllImport("libc", SetLastError = true)]
     private static extern int kill(int processId, int signal);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int statx(
+        SafeFileHandle directory,
+        string path,
+        int flags,
+        uint mask,
+        out BundleStatx data
+    );
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(SafeFileHandle descriptor, int command, int argument);
+
+    private readonly record struct BundleFileIdentity(
+        ulong Inode,
+        uint DeviceMajor,
+        uint DeviceMinor,
+        ulong Size,
+        ushort Mode,
+        int Seals
+    );
+
+    [StructLayout(LayoutKind.Sequential, Size = 256)]
+    private struct BundleStatx
+    {
+        public uint Mask;
+        public uint BlockSize;
+        public ulong Attributes;
+        public uint LinkCount;
+        public uint UserId;
+        public uint GroupId;
+        public ushort Mode;
+        public ushort Spare0;
+        public ulong Inode;
+        public ulong Size;
+        public ulong Blocks;
+        public ulong AttributesMask;
+        public BundleStatxTimestamp AccessTime;
+        public BundleStatxTimestamp BirthTime;
+        public BundleStatxTimestamp ChangeTime;
+        public BundleStatxTimestamp ModificationTime;
+        public uint RootDeviceMajor;
+        public uint RootDeviceMinor;
+        public uint DeviceMajor;
+        public uint DeviceMinor;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BundleStatxTimestamp
+    {
+        public long Seconds;
+        public uint Nanoseconds;
+        public int Reserved;
+    }
 
     private sealed class SystemSetSidAuthority : IDisposable
     {

@@ -1,8 +1,10 @@
 using System.Runtime.Versioning;
 using System.Text;
 using FluentAssertions;
+using Microsoft.Win32.SafeHandles;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 
@@ -142,6 +144,164 @@ internal sealed class GitHubAttestationProcessRunnerTests
         result.StandardOutput.Should().Be("verified-json");
         privateDirectory.Should().MatchRegex(@".*/smapi-attestation-private-[0-9a-f]{32}$");
         Directory.Exists(privateDirectory).Should().BeFalse("retained recursive cleanup should remove nested verifier state");
+    }
+
+    [Test]
+    public async Task RunAsync_ExposesRetainedBundleThroughExactJsonlBridgeForProcessLifetimeAndCleansIt()
+    {
+        using TestBundleAuthority bundle = new("exact sealed bundle bytes");
+        string retainedBundlePath = bundle.ProcPath;
+        string? privateDirectory = null;
+        string? createdBridge = null;
+        GitHubAttestationProcessRunner runner = new(
+            afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
+            afterBundleBridgeCreatedForTesting: path => createdBridge = path
+        );
+        string script = this.Script("""
+            bundle=
+            while [ "$#" -gt 0 ]; do
+                if [ "$1" = "--bundle" ]; then
+                    shift
+                    bundle="$1"
+                    break
+                fi
+                shift
+            done
+            /usr/bin/printf '%s\n%s\n' "$bundle" "$(/usr/bin/readlink "$bundle")"
+            /usr/bin/cat "$bundle"
+            """);
+        GitHubAttestationProcessRequest request = this.Request(
+            script,
+            ["attestation", "verify", "subject", "--bundle", GitHubAttestationProcessRequest.BundlePathPlaceholder],
+            bundle: bundle.Authority
+        );
+
+        GitHubAttestationProcessResult result = await runner.RunAsync(request);
+
+        string[] lines = result.StandardOutput.Split('\n');
+        lines.Should().HaveCount(3);
+        lines[0].Should().MatchRegex($@"^/proc/{Environment.ProcessId}/fd/[0-9]+/verified-attestation-bundle\.jsonl$");
+        lines[0].Should().Be(createdBridge);
+        lines[1].Should().Be(retainedBundlePath, "the extension bridge must resolve only to the retained descriptor");
+        lines[2].Should().Be("exact sealed bundle bytes");
+        privateDirectory.Should().MatchRegex(@".*/smapi-attestation-private-[0-9a-f]{32}$");
+        Directory.Exists(privateDirectory).Should().BeFalse("the bridge and retained private directory must be cleaned after completion");
+        File.Exists(retainedBundlePath).Should().BeTrue("the caller's retained bundle lease remains authoritative");
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task RunAsync_RejectsBundleBridgeReplacementBeforeStartingProcess(bool symbolicLinkReplacement)
+    {
+        using TestBundleAuthority bundle = new("retained bundle");
+        using TestBundleAuthority replacement = new("untrusted replacement");
+        string processMarker = Path.Combine(this.TempDirectory, "bridge-swap-process-must-not-start");
+        string? privateDirectory = null;
+        GitHubAttestationProcessRunner runner = new(
+            afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
+            afterBundleBridgeCreatedForTesting: bridge =>
+            {
+                File.Delete(bridge);
+                if (symbolicLinkReplacement)
+                    File.CreateSymbolicLink(bridge, replacement.ProcPath);
+                else
+                    File.WriteAllText(bridge, "not a bridge");
+            }
+        );
+        string script = this.Script($"/usr/bin/touch '{processMarker}'");
+        GitHubAttestationProcessRequest request = this.Request(
+            script,
+            ["attestation", "verify", "subject", "--bundle", GitHubAttestationProcessRequest.BundlePathPlaceholder],
+            bundle: bundle.Authority
+        );
+
+        Func<Task> action = async () => await runner.RunAsync(request);
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.Message.Should().Be("The GitHub attestation verifier couldn't be started safely.");
+        exception.ToString().Should().NotContain(replacement.ProcPath).And.NotContain("untrusted replacement");
+        File.Exists(processMarker).Should().BeFalse();
+        Directory.Exists(privateDirectory).Should().BeFalse("retained cleanup must remove a rejected bridge replacement");
+    }
+
+    [Test]
+    public async Task RunAsync_RevalidatesAnchoredBridgeIdentityImmediatelyBeforeProcessStart()
+    {
+        using TestBundleAuthority bundle = new("retained bundle");
+        string processMarker = Path.Combine(this.TempDirectory, "late-bridge-swap-process-must-not-start");
+        string? privateDirectory = null;
+        GitHubAttestationProcessRunner runner = new(
+            afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path,
+            beforeProcessStartForTesting: bridge =>
+            {
+                File.Delete(bridge);
+                File.CreateSymbolicLink(bridge, bundle.ProcPath);
+            }
+        );
+        string script = this.Script($"/usr/bin/touch '{processMarker}'");
+        GitHubAttestationProcessRequest request = this.Request(
+            script,
+            ["--bundle", GitHubAttestationProcessRequest.BundlePathPlaceholder],
+            bundle: bundle.Authority
+        );
+
+        Func<Task> action = async () => await runner.RunAsync(request);
+
+        await action.Should().ThrowAsync<PackageSecurityException>()
+            .WithMessage("The GitHub attestation verifier couldn't be started safely.");
+        File.Exists(processMarker).Should().BeFalse();
+        Directory.Exists(privateDirectory).Should().BeFalse("cleanup must remove the identity-swapped late bridge");
+    }
+
+    [Test]
+    public async Task RunAsync_RejectsCurrentProcessDescriptorWithoutImmutableKernelSeals()
+    {
+        string bundlePath = Path.Combine(this.TempDirectory, "unsealed-bundle.jsonl");
+        await File.WriteAllTextAsync(bundlePath, "mutable bytes");
+        await using FileStream unsealed = new(bundlePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        string procPath = $"/proc/{Environment.ProcessId}/fd/{checked((int)unsealed.SafeFileHandle.DangerousGetHandle())}";
+        GitHubAttestationProcessBundleAuthority authority = new(procPath);
+        string processMarker = Path.Combine(this.TempDirectory, "unsealed-process-must-not-start");
+        string script = this.Script($"/usr/bin/touch '{processMarker}'");
+        GitHubAttestationProcessRequest request = this.Request(
+            script,
+            ["--bundle", GitHubAttestationProcessRequest.BundlePathPlaceholder],
+            bundle: authority
+        );
+
+        Func<Task> action = async () => await this.Runner.RunAsync(request);
+
+        await action.Should().ThrowAsync<PackageSecurityException>()
+            .WithMessage("The GitHub attestation verifier couldn't be started safely.");
+        File.Exists(processMarker).Should().BeFalse();
+    }
+
+    [TestCase("/tmp/unretained-bundle.jsonl")]
+    [TestCase("/proc/1/fd/3")]
+    [TestCase("/proc/999999999/fd/3")]
+    public void BundleAuthority_RejectsPathWhichIsNotThisProcessRetainedDescriptor(string bundlePath)
+    {
+        Action action = () => _ = new GitHubAttestationProcessBundleAuthority(bundlePath);
+
+        action.Should().Throw<ArgumentException>().WithParameterName("procPath");
+    }
+
+    [Test]
+    public void Request_RequiresExactlyOneReservedSlotForTypedBundleAuthority()
+    {
+        using TestBundleAuthority bundle = new("retained bundle");
+        string script = this.Script("exit 0");
+        Action duplicateSlots = () => _ = this.Request(
+            script,
+            [GitHubAttestationProcessRequest.BundlePathPlaceholder, GitHubAttestationProcessRequest.BundlePathPlaceholder],
+            bundle: bundle.Authority
+        );
+        Action missingSlot = () => _ = this.Request(script, ["--bundle", bundle.ProcPath], bundle: bundle.Authority);
+        Action untypedSlot = () => _ = this.Request(script, [GitHubAttestationProcessRequest.BundlePathPlaceholder]);
+
+        duplicateSlots.Should().Throw<ArgumentException>().WithParameterName("arguments");
+        missingSlot.Should().Throw<ArgumentException>().WithParameterName("arguments");
+        untypedSlot.Should().Throw<ArgumentException>().WithParameterName("arguments");
     }
 
     [Test]
@@ -406,7 +566,8 @@ internal sealed class GitHubAttestationProcessRunnerTests
         string[]? arguments = null,
         TimeSpan? timeout = null,
         int stdout = 64 * 1024,
-        int stderr = 64 * 1024
+        int stderr = 64 * 1024,
+        GitHubAttestationProcessBundleAuthority? bundle = null
     )
     {
         return new GitHubAttestationProcessRequest(
@@ -414,7 +575,8 @@ internal sealed class GitHubAttestationProcessRunnerTests
             arguments ?? [],
             timeout ?? TimeSpan.FromSeconds(5),
             stdout,
-            stderr
+            stderr,
+            bundle
         );
     }
 
@@ -438,5 +600,38 @@ internal sealed class GitHubAttestationProcessRunnerTests
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
         while (Directory.Exists($"/proc/{processId}"))
             await Task.Delay(10, timeout.Token);
+    }
+
+    private sealed class TestBundleAuthority : IDisposable
+    {
+        private readonly SafeFileHandle Handle;
+        private readonly LinuxSealedFileLease Lease;
+
+        public GitHubAttestationProcessBundleAuthority Authority { get; }
+        public string ProcPath => this.Lease.ProcPath;
+
+        public TestBundleAuthority(string contents)
+        {
+            this.Handle = LinuxSealedFile.CreateAnonymous("smapi-attestation-runner-test-bundle");
+            try
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(contents);
+                RandomAccess.Write(this.Handle, bytes, 0);
+                LinuxSealedFile.SealImmutable(this.Handle);
+                this.Lease = LinuxSealedFile.LeaseForExternalRead(this.Handle);
+                this.Authority = new GitHubAttestationProcessBundleAuthority(this.Lease.ProcPath);
+            }
+            catch
+            {
+                this.Handle.Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            this.Lease.Dispose();
+            this.Handle.Dispose();
+        }
     }
 }

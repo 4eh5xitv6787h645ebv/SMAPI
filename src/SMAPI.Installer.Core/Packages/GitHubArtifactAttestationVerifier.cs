@@ -156,7 +156,8 @@ internal sealed class GitHubArtifactAttestationVerifier
             CreateArguments(request),
             TimeSpan.FromSeconds(30),
             MaximumOutputBytes,
-            MaximumErrorBytes
+            MaximumErrorBytes,
+            new GitHubAttestationProcessBundleAuthority(request.BundleProcPath)
         );
         GitHubAttestationProcessResult result = await this.Runner.RunAsync(processRequest, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
@@ -174,7 +175,7 @@ internal sealed class GitHubArtifactAttestationVerifier
             "verify",
             request.PackageProcPath,
             "--bundle",
-            request.BundleProcPath,
+            GitHubAttestationProcessRequest.BundlePathPlaceholder,
             "--hostname",
             "github.com",
             "--repo",

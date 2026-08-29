@@ -80,12 +80,14 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         runner.Request.Timeout.Should().Be(TimeSpan.FromSeconds(30));
         runner.Request.MaximumStandardOutputBytes.Should().Be(2 * 1024 * 1024);
         runner.Request.MaximumStandardErrorBytes.Should().Be(64 * 1024);
+        runner.Request.BundleAuthority!.ProcPath.Should().Be(this.BundleFixtureLease.ProcPath);
+        runner.Request.BundleArgumentIndex.Should().Be(4);
         runner.Request.Arguments.Should().Equal(
             "attestation",
             "verify",
             this.PackageFixtureLease.ProcPath,
             "--bundle",
-            this.BundleFixtureLease.ProcPath,
+            GitHubAttestationProcessRequest.BundlePathPlaceholder,
             "--hostname",
             "github.com",
             "--repo",
@@ -149,6 +151,10 @@ internal sealed class GitHubArtifactAttestationVerifierTests
             if [ -z "$bundle" ] || [ ! -r "$bundle" ]; then
                 exit 4
             fi
+            case "$bundle" in
+                "$HOME"/verified-attestation-bundle.jsonl) ;;
+                *) exit 18 ;;
+            esac
             /usr/bin/printf '%s' '{{encodedOutput}}' | /usr/bin/base64 --decode
             """;
         using PinnedGitHubCli cli = await this.CreatePinnedGitHubCliAsync(script);
@@ -437,7 +443,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
             request =>
             {
                 packageProcPath = request.Arguments[2];
-                bundleProcPath = request.Arguments[4];
+                bundleProcPath = request.BundleAuthority!.ProcPath;
                 cliProcPath = request.ExecutablePath;
                 File.Exists(packageProcPath).Should().BeTrue();
                 File.Exists(bundleProcPath).Should().BeTrue();
@@ -459,7 +465,8 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         runner.Request.Should().NotBeNull();
         runner.Request!.ExecutablePath.Should().Be(cliProcPath);
         runner.Request.Arguments[2].Should().Be(packageProcPath);
-        runner.Request.Arguments[4].Should().Be(bundleProcPath);
+        runner.Request.Arguments[4].Should().Be(GitHubAttestationProcessRequest.BundlePathPlaceholder);
+        runner.Request.BundleAuthority!.ProcPath.Should().Be(bundleProcPath);
         runner.Request.Arguments.Should().ContainInOrder("--signer-digest", SourceCommit, "--source-ref", SourceReference);
         trust.Identity.Should().Be(expectedIdentity);
         trust.PackageSubject.Name.Should().Be(expectedIdentity.PackageAssetName);
@@ -516,7 +523,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
             request =>
             {
                 packageProcPath = request.Arguments[2];
-                bundleProcPath = request.Arguments[4];
+                bundleProcPath = request.BundleAuthority!.ProcPath;
                 cliProcPath = request.ExecutablePath;
                 package.Dispose();
                 bundle.Dispose();
@@ -555,7 +562,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
             request =>
             {
                 packageProcPath = request.Arguments[2];
-                bundleProcPath = request.Arguments[4];
+                bundleProcPath = request.BundleAuthority!.ProcPath;
                 cliProcPath = request.ExecutablePath;
                 package.Dispose();
                 bundle.Dispose();
