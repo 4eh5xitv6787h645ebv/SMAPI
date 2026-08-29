@@ -14,6 +14,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan DefaultReapTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultPartialFrameTimeout = TimeSpan.FromSeconds(2);
     private static readonly object ProductionQuarantineLock = new();
     private static (IInstallerProtocolProcess Process, LinuxExternalExecutableLease Executable)? ProductionQuarantine;
     private static bool ProductionLaunchDisabled;
@@ -23,6 +24,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private readonly IInstallerProtocolProcessFactory ProcessFactory;
     private readonly TimeSpan OperationTimeout;
     private readonly TimeSpan ReapTimeout;
+    private readonly TimeSpan PartialFrameTimeout;
     private readonly LinuxExternalExecutableLease? ExecutableLease;
     private readonly bool IsProduction;
     private readonly SemaphoreSlim CommandGate = new(1, 1);
@@ -48,6 +50,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private int CleanupUnconfirmed;
     private Task? CleanupTask;
     private Task? DisposalTask;
+    private bool SessionFaultRaised;
     internal Action? BeforePackageAuthorityCommitForTesting { get; set; }
 
     internal int ObservedStderrBytes => Volatile.Read(ref this.ObservedStderrBytesValue);
@@ -62,12 +65,13 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     }
     public Task<InstallerProtocolClientException> SessionFaulted => this.SessionFault.Task;
 
-    private ProcessInstallerProtocolClient(string installerPath, IInstallerProtocolProcessFactory processFactory, TimeSpan operationTimeout, TimeSpan reapTimeout, LinuxExternalExecutableLease? executableLease, bool isProduction)
+    private ProcessInstallerProtocolClient(string installerPath, IInstallerProtocolProcessFactory processFactory, TimeSpan operationTimeout, TimeSpan reapTimeout, TimeSpan partialFrameTimeout, LinuxExternalExecutableLease? executableLease, bool isProduction)
     {
         this.InstallerPath = installerPath;
         this.ProcessFactory = processFactory;
         this.OperationTimeout = operationTimeout;
         this.ReapTimeout = reapTimeout;
+        this.PartialFrameTimeout = partialFrameTimeout;
         this.ExecutableLease = executableLease;
         this.IsProduction = isProduction;
     }
@@ -79,7 +83,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             SiblingInstallerLocator.OpenForCurrentProcess,
             new SystemInstallerProtocolProcessFactory(),
             DefaultOperationTimeout,
-            DefaultReapTimeout
+            DefaultReapTimeout,
+            DefaultPartialFrameTimeout
         );
     }
 
@@ -92,7 +97,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         executableFactory,
         processFactory,
         operationTimeout ?? DefaultOperationTimeout,
-        reapTimeout ?? DefaultReapTimeout
+        reapTimeout ?? DefaultReapTimeout,
+        DefaultPartialFrameTimeout
     );
 
     internal static void ResetProductionGateForTesting()
@@ -111,12 +117,14 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         IInstallerProtocolProcessFactory processFactory,
         TimeSpan? operationTimeout = null,
         TimeSpan? reapTimeout = null,
-        LinuxExternalExecutableLease? executableLease = null
+        LinuxExternalExecutableLease? executableLease = null,
+        TimeSpan? partialFrameTimeout = null
     ) => new(
         installerPath,
         processFactory ?? throw new ArgumentNullException(nameof(processFactory)),
         operationTimeout ?? DefaultOperationTimeout,
         reapTimeout ?? DefaultReapTimeout,
+        partialFrameTimeout ?? DefaultPartialFrameTimeout,
         executableLease,
         false
     );
@@ -217,7 +225,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         Func<LinuxExternalExecutableLease> executableFactory,
         IInstallerProtocolProcessFactory processFactory,
         TimeSpan operationTimeout,
-        TimeSpan reapTimeout
+        TimeSpan reapTimeout,
+        TimeSpan partialFrameTimeout
     )
     {
         ArgumentNullException.ThrowIfNull(executableFactory);
@@ -235,7 +244,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         try
         {
             executable = executableFactory();
-            return new(executable.ProcPath, processFactory, operationTimeout, reapTimeout, executable, true);
+            return new(executable.ProcPath, processFactory, operationTimeout, reapTimeout, partialFrameTimeout, executable, true);
         }
         catch
         {
@@ -346,7 +355,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.ProcessInput = this.Process.Input;
             this.ProcessOutput = this.Process.Output;
             this.ProcessError = this.Process.Error;
-            this.Reader = new StrictJsonLineReader(this.ProcessOutput);
+            this.Reader = new StrictJsonLineReader(this.ProcessOutput, this.PartialFrameTimeout);
             this.StderrDrain = this.DrainStderrAsync(this.ProcessError, this.Lifetime.Token);
             this.ReaderPump = this.PumpResponsesAsync(this.Lifetime.Token);
         }
@@ -430,16 +439,19 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private void FaultSession(string message)
     {
         InstallerProtocolClientException fault = new(message);
-        this.SessionFault.TrySetResult(fault);
         PendingProtocolResponse? pending;
         lock (this.ResponseLock)
         {
+            if (this.SessionFaultRaised)
+                return;
+            this.SessionFaultRaised = true;
             this.VerifiedPackageId = null;
             this.VerifiedRelease = null;
             pending = this.PendingResponse;
             this.PendingResponse = null;
         }
         pending?.Completion.TrySetException(fault);
+        this.SessionFault.TrySetResult(fault);
         _ = this.CleanupAsync(allowCleanExit: false);
     }
 
@@ -447,7 +459,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     {
         lock (this.ResponseLock)
         {
-            if (this.SessionFault.Task.IsCompleted || Volatile.Read(ref this.CleanupStarted) != 0)
+            if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
                 return false;
             this.VerifiedPackageId = opened.PackageId;
             this.VerifiedRelease = opened.Release;
@@ -695,12 +707,17 @@ internal sealed class SystemInstallerProtocolProcessFactory : IInstallerProtocol
     public IInstallerProtocolProcess Start(ProcessStartInfo startInfo)
     {
         Process process = new() { StartInfo = startInfo };
-        if (!process.Start())
+        try
+        {
+            if (!process.Start())
+                throw new InvalidOperationException("The packaged installer backend did not start.");
+            return new SystemInstallerProtocolProcess(process);
+        }
+        catch
         {
             process.Dispose();
-            throw new InvalidOperationException("The packaged installer backend did not start.");
+            throw;
         }
-        return new SystemInstallerProtocolProcess(process);
     }
 }
 
@@ -724,13 +741,18 @@ internal sealed class StrictJsonLineReader
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly Stream Input;
+    private readonly TimeSpan PartialFrameTimeout;
     private readonly byte[] ReadBuffer = new byte[4096];
     private readonly byte[] LineBuffer = new byte[ProtocolJsonSerializer.MaxLineBytes];
     private int ReadOffset;
     private int ReadLength;
     private int LineLength;
 
-    public StrictJsonLineReader(Stream input) => this.Input = input;
+    public StrictJsonLineReader(Stream input, TimeSpan partialFrameTimeout)
+    {
+        this.Input = input;
+        this.PartialFrameTimeout = partialFrameTimeout;
+    }
 
     public bool HasBufferedFrameData => this.LineLength != 0 || this.ReadOffset < this.ReadLength;
 
@@ -750,13 +772,39 @@ internal sealed class StrictJsonLineReader
             if (this.ReadOffset < this.ReadLength)
                 this.Append(this.ReadBuffer.AsSpan(this.ReadOffset, this.ReadLength - this.ReadOffset));
             this.ReadOffset = 0;
-            this.ReadLength = await this.Input.ReadAsync(this.ReadBuffer, cancellationToken).ConfigureAwait(false);
+            this.ReadLength = await this.ReadMoreAsync(cancellationToken).ConfigureAwait(false);
             if (this.ReadLength != 0)
                 continue;
             if (this.LineLength != 0)
                 throw new InstallerProtocolClientException("The installer backend returned an incomplete response.");
             return null;
         }
+    }
+
+    private async ValueTask<int> ReadMoreAsync(CancellationToken cancellationToken)
+    {
+        Task<int> read = this.Input.ReadAsync(this.ReadBuffer, cancellationToken).AsTask();
+        if (this.LineLength == 0)
+            return await read.ConfigureAwait(false);
+
+        Task deadline = Task.Delay(this.PartialFrameTimeout, cancellationToken);
+        Task completed = await Task.WhenAny(read, deadline).ConfigureAwait(false);
+        if (ReferenceEquals(completed, read))
+            return await read.ConfigureAwait(false);
+
+        ObserveFault(read);
+        cancellationToken.ThrowIfCancellationRequested();
+        throw new InstallerProtocolClientException("The installer backend left a partial response incomplete beyond its bounded deadline.");
+    }
+
+    private static void ObserveFault(Task operation)
+    {
+        _ = operation.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default
+        );
     }
 
     private void Append(ReadOnlySpan<byte> bytes)

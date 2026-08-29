@@ -175,9 +175,30 @@ public sealed class ProcessInstallerProtocolClientTests
         process.Publish(Serialize(CreateOpened(Session, ProtocolCommandId.CreateRandom())));
         InstallerProtocolClientException fault = await client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2));
         fault.Message.Should().NotContain("commandId").And.NotContain("111111");
+        client.HasRetainedPackageAuthority.Should().BeFalse("fault publication follows authority revocation");
         await SpinWaitUntilAsync(() => process.Disposed);
         process.Terminated.Should().BeTrue();
-        client.HasRetainedPackageAuthority.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task DelayedPartialUnsolicitedFrameFaultsWithinBoundedIdleDeadline()
+    {
+        ScriptedProcess process = new(CorrectResponse);
+        await using ProcessInstallerProtocolClient client = Create(
+            process,
+            partialFrame: TimeSpan.FromMilliseconds(50)
+        );
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        (await client.OpenPackageAsync(CreatePackage())).Should().BeOfType<InstallerPackageOpenSuccess>();
+        client.HasRetainedPackageAuthority.Should().BeTrue();
+
+        process.Publish([(byte)'{']);
+        InstallerProtocolClientException fault = await client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(1));
+
+        fault.Message.Should().Contain("bounded deadline").And.NotContain("{");
+        client.HasRetainedPackageAuthority.Should().BeFalse("fault publication follows authority revocation");
+        await SpinWaitUntilAsync(() => process.Disposed);
+        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -638,12 +659,13 @@ public sealed class ProcessInstallerProtocolClientTests
         exception.Message.Should().NotContain(privatePath).And.NotContain("not-json");
     }
 
-    private static ProcessInstallerProtocolClient Create(ScriptedProcess process, TimeSpan? reap = null, TimeSpan? operation = null) =>
+    private static ProcessInstallerProtocolClient Create(ScriptedProcess process, TimeSpan? reap = null, TimeSpan? operation = null, TimeSpan? partialFrame = null) =>
         ProcessInstallerProtocolClient.CreateForTesting(
             "/tmp/SMAPI.Installer",
             new CapturingFactory(process),
             operation ?? TimeSpan.FromSeconds(2),
-            reap ?? TimeSpan.FromMilliseconds(250)
+            reap ?? TimeSpan.FromMilliseconds(250),
+            partialFrameTimeout: partialFrame
         );
 
     private static InstallerPackageOpenInput CreatePackage(string? packageAssetName = null)
