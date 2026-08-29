@@ -785,13 +785,13 @@ internal sealed class StrictJsonLineReader
 
     private async ValueTask<int> ReadMoreAsync(CancellationToken cancellationToken)
     {
-        Task<int> read = this.Input.ReadAsync(this.ReadBuffer, cancellationToken).AsTask();
         if (this.LineLength == 0)
-            return await read.ConfigureAwait(false);
+            return await this.Input.ReadAsync(this.ReadBuffer, cancellationToken).ConfigureAwait(false);
 
         TimeSpan remaining = this.PartialFrameTimeout - Stopwatch.GetElapsedTime(this.PartialFrameStarted);
         if (remaining <= TimeSpan.Zero)
             throw new InstallerProtocolClientException("The installer backend left a partial response incomplete beyond its bounded deadline.");
+        Task<int> read = this.Input.ReadAsync(this.ReadBuffer, cancellationToken).AsTask();
         Task deadline = Task.Delay(remaining, cancellationToken);
         Task completed = await Task.WhenAny(read, deadline).ConfigureAwait(false);
         if (ReferenceEquals(completed, read))
