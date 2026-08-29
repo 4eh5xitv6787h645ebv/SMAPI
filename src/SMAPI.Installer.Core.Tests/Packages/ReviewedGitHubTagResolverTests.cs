@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -9,33 +10,143 @@ namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 [TestFixture]
 public sealed class ReviewedGitHubTagResolverTests
 {
-    private static readonly ForkReleaseIdentity Identity = ForkReleaseIdentity.Parse(
-        "fork-4eh5xitv6787h645ebv-linux-v4.5.4-alpha.2"
-    );
     private const string TagObject = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string Commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     [Test]
-    public void ParseReference_ExactAnnotatedTag_ReturnsTagObject()
+    public void ParseReference_ExactCatalogCandidate_ReturnsOpaqueBoundObservationAndExactNextUri()
     {
-        byte[] document = ReferenceDocument(Identity, TagObject, "tag");
+        ReviewedReleaseCandidate candidate = Candidate();
 
-        ReviewedGitHubTagReference result = ReviewedGitHubTagResolver.ParseReference(document, Identity);
+        ReviewedGitHubTagReference result = ReviewedGitHubTagResolver.ParseReference(
+            ReferenceDocument(candidate.Identity, TagObject, "tag"),
+            candidate
+        );
 
-        result.Should().Be(new ReviewedGitHubTagReference(Identity.Tag, TagObject));
+        result.ReleaseTag.Should().Be(candidate.Identity.Tag);
+        result.AnnotatedTagDocumentUri.Should().Be(ReviewedGitHubReleaseUris.GetTagObjectUri(TagObject));
     }
 
     [Test]
-    public void ParseReference_LightweightTag_Rejects()
+    public void ResolveAfterRefresh_ExactInitialAnnotatedAndFreshDocuments_MintsFinalCommitAuthority()
     {
-        byte[] document = ReferenceDocument(
-            Identity,
-            Commit,
-            "commit",
-            targetUrl: new Uri($"https://api.github.com/repos/{ForkReleaseIdentity.Repository}/git/commits/{Commit}")
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
+
+        ReviewedGitHubResolvedTag result = ReviewedGitHubTagResolver.ResolveAfterRefresh(
+            candidate,
+            initial,
+            AnnotatedTagDocument(candidate.Identity, TagObject, Commit),
+            ReferenceDocument(candidate.Identity, TagObject, "tag")
         );
 
-        Action action = () => ReviewedGitHubTagResolver.ParseReference(document, Identity);
+        result.Release.Should().BeSameAs(candidate);
+        result.ReleaseTag.Should().Be(candidate.Identity.Tag);
+        result.SourceCommit.Should().Be(Commit);
+    }
+
+    [Test]
+    public void PublicApi_AuthoritiesAreOpaqueImmutableAndFinalizationIsOneSequencedOperation()
+    {
+        Type reference = typeof(ReviewedGitHubTagReference);
+        Type resolved = typeof(ReviewedGitHubResolvedTag);
+        typeof(ReviewedReleaseCandidate).GetConstructors(BindingFlags.Instance | BindingFlags.Public)
+            .Should().BeEmpty("raw identities must not be constructible as catalog authorities");
+        reference.IsSealed.Should().BeTrue();
+        resolved.IsSealed.Should().BeTrue();
+        reference.GetConstructors(BindingFlags.Instance | BindingFlags.Public).Should().BeEmpty();
+        resolved.GetConstructors(BindingFlags.Instance | BindingFlags.Public).Should().BeEmpty();
+        reference.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Should().OnlyContain(property => !property.CanWrite && property.SetMethod == null);
+        resolved.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Should().OnlyContain(property => !property.CanWrite && property.SetMethod == null);
+        reference.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Should().NotContain(method => method.Name == "Deconstruct" || method.Name == "<Clone>$");
+        resolved.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Should().NotContain(method => method.Name == "Deconstruct" || method.Name == "<Clone>$");
+
+        MethodInfo[] methods = typeof(ReviewedGitHubTagResolver).GetMethods(
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly
+        );
+        methods.Select(method => method.Name).Should().Equal("ParseReference", "ResolveAfterRefresh");
+        methods.Should().NotContain(method => method.GetParameters().Any(parameter => parameter.ParameterType == typeof(ForkReleaseIdentity)));
+        methods.Single(method => method.Name == "ParseReference").GetParameters()
+            .Should().Contain(parameter => parameter.ParameterType == typeof(ReviewedReleaseCandidate));
+        MethodInfo finalize = methods.Single(method => method.Name == "ResolveAfterRefresh");
+        finalize.ReturnType.Should().Be(typeof(ReviewedGitHubResolvedTag));
+        finalize.GetParameters().Select(parameter => parameter.ParameterType).Should().Equal(
+            typeof(ReviewedReleaseCandidate),
+            typeof(ReviewedGitHubTagReference),
+            typeof(ReadOnlyMemory<byte>),
+            typeof(ReadOnlyMemory<byte>)
+        );
+        resolved.GetProperty(nameof(ReviewedGitHubResolvedTag.SourceCommit)).Should().NotBeNull();
+        reference.GetProperty("SourceCommit").Should().BeNull();
+        reference.GetProperty(nameof(ReviewedGitHubTagReference.AnnotatedTagDocumentUri))!.PropertyType
+            .Should().Be(typeof(Uri));
+    }
+
+    [Test]
+    public void ResolveAfterRefresh_InitialAuthorityFromEqualButDifferentCandidateInstance_Rejects()
+    {
+        ReviewedReleaseCandidate listed = Candidate();
+        ReviewedReleaseCandidate separatelyParsed = Candidate();
+        listed.Should().NotBeSameAs(separatelyParsed);
+        ReviewedGitHubTagReference initial = Initial(listed);
+
+        Action action = () => ReviewedGitHubTagResolver.ResolveAfterRefresh(
+            separatelyParsed,
+            initial,
+            AnnotatedTagDocument(separatelyParsed.Identity, TagObject, Commit),
+            ReferenceDocument(separatelyParsed.Identity, TagObject, "tag")
+        );
+
+        action.Should().Throw<PackageSecurityException>().WithMessage("*different catalog release selection*");
+    }
+
+    [Test]
+    public void ResolveAfterRefresh_MovedFreshReference_RejectsBeforeExposingCommit()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
+
+        Action action = () => ReviewedGitHubTagResolver.ResolveAfterRefresh(
+            candidate,
+            initial,
+            AnnotatedTagDocument(candidate.Identity, TagObject, Commit),
+            ReferenceDocument(candidate.Identity, new string('c', 40), "tag")
+        );
+
+        action.Should().Throw<PackageSecurityException>().WithMessage("*tag moved*");
+    }
+
+    [Test]
+    public void ResolveAfterRefresh_LightweightFreshReference_Rejects()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
+        Uri commitUri = new($"https://api.github.com/repos/{ForkReleaseIdentity.Repository}/git/commits/{Commit}");
+
+        Action action = () => ReviewedGitHubTagResolver.ResolveAfterRefresh(
+            candidate,
+            initial,
+            AnnotatedTagDocument(candidate.Identity, TagObject, Commit),
+            ReferenceDocument(candidate.Identity, Commit, "commit", commitUri)
+        );
+
+        action.Should().Throw<PackageSecurityException>().WithMessage("*lightweight or unsupported Git tag*");
+    }
+
+    [Test]
+    public void ParseReference_LightweightInitialTag_Rejects()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        Uri commitUri = new($"https://api.github.com/repos/{ForkReleaseIdentity.Repository}/git/commits/{Commit}");
+
+        Action action = () => ReviewedGitHubTagResolver.ParseReference(
+            ReferenceDocument(candidate.Identity, Commit, "commit", commitUri),
+            candidate
+        );
 
         action.Should().Throw<PackageSecurityException>().WithMessage("*lightweight or unsupported Git tag*");
     }
@@ -44,122 +155,72 @@ public sealed class ReviewedGitHubTagResolverTests
     [TestCase("refs/heads/develop")]
     public void ParseReference_DifferentReference_Rejects(string reference)
     {
-        Dictionary<string, object?> document = Reference(Identity, TagObject, "tag");
+        ReviewedReleaseCandidate candidate = Candidate();
+        Dictionary<string, object?> document = Reference(candidate.Identity, TagObject, "tag");
         document["ref"] = reference;
 
-        Action action = () => ReviewedGitHubTagResolver.ParseReference(JsonSerializer.SerializeToUtf8Bytes(document), Identity);
+        Action action = () => ReviewedGitHubTagResolver.ParseReference(
+            JsonSerializer.SerializeToUtf8Bytes(document), candidate
+        );
 
         action.Should().Throw<PackageSecurityException>().WithMessage("*different release tag*");
     }
 
     [Test]
-    public void ParseReference_OffRepositoryOrMismatchedUrls_Rejects()
+    public void ParseReference_OffRepositoryMismatchedOrNoncanonicalObject_Rejects()
     {
-        Dictionary<string, object?> offRepository = Reference(Identity, TagObject, "tag");
-        offRepository["url"] = "https://api.github.com/repos/Pathoschild/SMAPI/git/refs/tags/" + Identity.Tag;
-        Dictionary<string, object?> wrongObject = Reference(Identity, TagObject, "tag");
-        ((Dictionary<string, object?>)wrongObject["object"]!)["url"] = ReviewedGitHubReleaseUris.GetTagObjectUri(new string('c', 40)).AbsoluteUri;
+        ReviewedReleaseCandidate candidate = Candidate();
+        Dictionary<string, object?> offRepository = Reference(candidate.Identity, TagObject, "tag");
+        offRepository["url"] =
+            $"https://api.github.com/repos/Pathoschild/SMAPI/git/refs/tags/{candidate.Identity.Tag}";
+        Dictionary<string, object?> wrongObject = Reference(candidate.Identity, TagObject, "tag");
+        ((Dictionary<string, object?>)wrongObject["object"]!)["url"] =
+            ReviewedGitHubReleaseUris.GetTagObjectUri(new string('c', 40)).AbsoluteUri;
+        Dictionary<string, object?> uppercaseObject = Reference(candidate.Identity, TagObject, "tag");
+        ((Dictionary<string, object?>)uppercaseObject["object"]!)["sha"] = TagObject.ToUpperInvariant();
 
-        Action first = () => ReviewedGitHubTagResolver.ParseReference(JsonSerializer.SerializeToUtf8Bytes(offRepository), Identity);
-        Action second = () => ReviewedGitHubTagResolver.ParseReference(JsonSerializer.SerializeToUtf8Bytes(wrongObject), Identity);
+        Action first = () => ReviewedGitHubTagResolver.ParseReference(
+            JsonSerializer.SerializeToUtf8Bytes(offRepository), candidate
+        );
+        Action second = () => ReviewedGitHubTagResolver.ParseReference(
+            JsonSerializer.SerializeToUtf8Bytes(wrongObject), candidate
+        );
+        Action third = () => ReviewedGitHubTagResolver.ParseReference(
+            JsonSerializer.SerializeToUtf8Bytes(uppercaseObject), candidate
+        );
 
         first.Should().Throw<PackageSecurityException>();
         second.Should().Throw<PackageSecurityException>();
+        third.Should().Throw<PackageSecurityException>();
     }
 
     [Test]
-    public void ParseReference_NoncanonicalTagObjectId_Rejects()
+    public void ResolveAfterRefresh_AnnotatedTagObjectOrReleaseTagMismatch_Rejects()
     {
-        Dictionary<string, object?> document = Reference(Identity, TagObject, "tag");
-        ((Dictionary<string, object?>)document["object"]!)["sha"] = TagObject.ToUpperInvariant();
-
-        Action action = () => ReviewedGitHubTagResolver.ParseReference(
-            JsonSerializer.SerializeToUtf8Bytes(document), Identity
-        );
-
-        action.Should().Throw<PackageSecurityException>();
-    }
-
-    [Test]
-    public void ParseAnnotatedTag_ExactSelectedObject_ReturnsIndependentSourceCommit()
-    {
-        ReviewedGitHubTagReference reference = new(Identity.Tag, TagObject);
-
-        ReviewedGitHubResolvedTag result = ReviewedGitHubTagResolver.ParseAnnotatedTag(
-            AnnotatedTagDocument(Identity, TagObject, Commit),
-            Identity,
-            reference
-        );
-
-        result.Should().Be(new ReviewedGitHubResolvedTag(Identity.Tag, TagObject, Commit));
-    }
-
-    [Test]
-    public void AssertReferenceUnchanged_ExactRefreshAllowsMovedOrDifferentRefreshRejects()
-    {
-        ReviewedGitHubTagReference selected = new(Identity.Tag, TagObject);
-        ReviewedGitHubTagReference exact = new(Identity.Tag, TagObject);
-        ReviewedGitHubTagReference moved = new(Identity.Tag, new string('c', 40));
-        ReviewedGitHubTagReference differentTag = new(
-            "fork-4eh5xitv6787h645ebv-linux-v4.5.4-alpha.3",
-            TagObject
-        );
-
-        Action unchanged = () => ReviewedGitHubTagResolver.AssertReferenceUnchanged(selected, exact);
-        Action movedAction = () => ReviewedGitHubTagResolver.AssertReferenceUnchanged(selected, moved);
-        Action differentAction = () => ReviewedGitHubTagResolver.AssertReferenceUnchanged(selected, differentTag);
-
-        unchanged.Should().NotThrow();
-        movedAction.Should().Throw<PackageSecurityException>().WithMessage("*tag moved*");
-        differentAction.Should().Throw<PackageSecurityException>().WithMessage("*tag moved*");
-    }
-
-    [Test]
-    public void ParseAnnotatedTag_MovedTagObject_Rejects()
-    {
-        ReviewedGitHubTagReference reference = new(Identity.Tag, TagObject);
-        byte[] moved = AnnotatedTagDocument(Identity, new string('c', 40), Commit);
-
-        Action action = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(moved, Identity, reference);
-
-        action.Should().Throw<PackageSecurityException>().WithMessage("*doesn't match the selected tag object*");
-    }
-
-    [Test]
-    public void ParseAnnotatedTag_DifferentTagOrRetainedSelection_Rejects()
-    {
-        Dictionary<string, object?> differentTag = AnnotatedTag(Identity, TagObject, Commit);
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
+        Dictionary<string, object?> movedObject = AnnotatedTag(candidate.Identity, new string('c', 40), Commit);
+        Dictionary<string, object?> differentTag = AnnotatedTag(candidate.Identity, TagObject, Commit);
         differentTag["tag"] = "fork-4eh5xitv6787h645ebv-linux-v4.5.4-alpha.3";
-        ReviewedGitHubTagReference wrongReference = new("fork-4eh5xitv6787h645ebv-linux-v4.5.4-alpha.3", TagObject);
 
-        Action documentMismatch = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(
-            JsonSerializer.SerializeToUtf8Bytes(differentTag),
-            Identity,
-            new(Identity.Tag, TagObject)
-        );
-        Action selectionMismatch = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(
-            AnnotatedTagDocument(Identity, TagObject, Commit),
-            Identity,
-            wrongReference
-        );
+        Action first = () => Finalize(candidate, initial, movedObject);
+        Action second = () => Finalize(candidate, initial, differentTag);
 
-        documentMismatch.Should().Throw<PackageSecurityException>().WithMessage("*different release tag*");
-        selectionMismatch.Should().Throw<PackageSecurityException>().WithMessage("*selection doesn't match*");
+        first.Should().Throw<PackageSecurityException>().WithMessage("*doesn't match the selected tag object*");
+        second.Should().Throw<PackageSecurityException>().WithMessage("*different release tag*");
     }
 
     [TestCase("blob")]
     [TestCase("tree")]
     [TestCase("tag")]
-    public void ParseAnnotatedTag_NonCommitTarget_Rejects(string type)
+    public void ResolveAfterRefresh_NonCommitAnnotatedTarget_Rejects(string type)
     {
-        Dictionary<string, object?> document = AnnotatedTag(Identity, TagObject, Commit);
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
+        Dictionary<string, object?> document = AnnotatedTag(candidate.Identity, TagObject, Commit);
         ((Dictionary<string, object?>)document["object"]!)["type"] = type;
 
-        Action action = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(
-            JsonSerializer.SerializeToUtf8Bytes(document),
-            Identity,
-            new(Identity.Tag, TagObject)
-        );
+        Action action = () => Finalize(candidate, initial, document);
 
         action.Should().Throw<PackageSecurityException>().WithMessage("*doesn't target a Git commit*");
     }
@@ -168,36 +229,32 @@ public sealed class ReviewedGitHubTagResolverTests
     [TestCase("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
     [TestCase("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
     [TestCase("gggggggggggggggggggggggggggggggggggggggg")]
-    public void ParseAnnotatedTag_InvalidCommit_Rejects(string commit)
+    public void ResolveAfterRefresh_InvalidAnnotatedCommit_Rejects(string commit)
     {
-        Dictionary<string, object?> document = AnnotatedTag(Identity, TagObject, Commit);
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
+        Dictionary<string, object?> document = AnnotatedTag(candidate.Identity, TagObject, Commit);
         ((Dictionary<string, object?>)document["object"]!)["sha"] = commit;
 
-        Action action = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(
-            JsonSerializer.SerializeToUtf8Bytes(document),
-            Identity,
-            new(Identity.Tag, TagObject)
-        );
+        Action action = () => Finalize(candidate, initial, document);
 
         action.Should().Throw<PackageSecurityException>();
     }
 
     [Test]
-    public void ParseAnnotatedTag_OffRepositoryOrMismatchedCommitUrl_Rejects()
+    public void ResolveAfterRefresh_OffRepositoryOrMismatchedCommitUrl_Rejects()
     {
-        Dictionary<string, object?> offRepository = AnnotatedTag(Identity, TagObject, Commit);
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
+        Dictionary<string, object?> offRepository = AnnotatedTag(candidate.Identity, TagObject, Commit);
         ((Dictionary<string, object?>)offRepository["object"]!)["url"] =
             $"https://api.github.com/repos/Pathoschild/SMAPI/git/commits/{Commit}";
-        Dictionary<string, object?> wrongCommit = AnnotatedTag(Identity, TagObject, Commit);
+        Dictionary<string, object?> wrongCommit = AnnotatedTag(candidate.Identity, TagObject, Commit);
         ((Dictionary<string, object?>)wrongCommit["object"]!)["url"] =
             $"https://api.github.com/repos/{ForkReleaseIdentity.Repository}/git/commits/{new string('c', 40)}";
 
-        Action first = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(
-            JsonSerializer.SerializeToUtf8Bytes(offRepository), Identity, new(Identity.Tag, TagObject)
-        );
-        Action second = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(
-            JsonSerializer.SerializeToUtf8Bytes(wrongCommit), Identity, new(Identity.Tag, TagObject)
-        );
+        Action first = () => Finalize(candidate, initial, offRepository);
+        Action second = () => Finalize(candidate, initial, wrongCommit);
 
         first.Should().Throw<PackageSecurityException>();
         second.Should().Throw<PackageSecurityException>();
@@ -206,14 +263,21 @@ public sealed class ReviewedGitHubTagResolverTests
     [Test]
     public void Parsers_DuplicateMalformedOversizedAndDeepJson_Rejects()
     {
-        string duplicate = $"{{\"ref\":\"refs/tags/{Identity.Tag}\",\"ref\":\"refs/tags/{Identity.Tag}\",\"url\":\"https://api.github.com/repos/{ForkReleaseIdentity.Repository}/git/refs/tags/{Identity.Tag}\",\"object\":{{\"type\":\"tag\",\"sha\":\"{TagObject}\",\"url\":\"{ReviewedGitHubReleaseUris.GetTagObjectUri(TagObject)}\"}}}}";
-        Action duplicateAction = () => ReviewedGitHubTagResolver.ParseReference(Encoding.UTF8.GetBytes(duplicate), Identity);
-        Action malformed = () => ReviewedGitHubTagResolver.ParseReference(Encoding.UTF8.GetBytes("[]"), Identity);
+        ReviewedReleaseCandidate candidate = Candidate();
+        string duplicate = $"{{\"ref\":\"refs/tags/{candidate.Identity.Tag}\",\"ref\":\"refs/tags/{candidate.Identity.Tag}\",\"url\":\"https://api.github.com/repos/{ForkReleaseIdentity.Repository}/git/refs/tags/{candidate.Identity.Tag}\",\"object\":{{\"type\":\"tag\",\"sha\":\"{TagObject}\",\"url\":\"{ReviewedGitHubReleaseUris.GetTagObjectUri(TagObject)}\"}}}}";
+        Action duplicateAction = () => ReviewedGitHubTagResolver.ParseReference(
+            Encoding.UTF8.GetBytes(duplicate), candidate
+        );
+        Action malformed = () => ReviewedGitHubTagResolver.ParseReference(
+            Encoding.UTF8.GetBytes("[]"), candidate
+        );
         Action oversized = () => ReviewedGitHubTagResolver.ParseReference(
-            new byte[ReviewedGitHubReleaseUris.MaximumTagDocumentBytes + 1], Identity
+            new byte[ReviewedGitHubReleaseUris.MaximumTagDocumentBytes + 1], candidate
         );
         string deep = new string('[', 18) + "0" + new string(']', 18);
-        Action excessiveDepth = () => ReviewedGitHubTagResolver.ParseReference(Encoding.UTF8.GetBytes(deep), Identity);
+        Action excessiveDepth = () => ReviewedGitHubTagResolver.ParseReference(
+            Encoding.UTF8.GetBytes(deep), candidate
+        );
 
         duplicateAction.Should().Throw<PackageSecurityException>().WithMessage("*duplicate JSON properties*");
         malformed.Should().Throw<PackageSecurityException>();
@@ -222,21 +286,79 @@ public sealed class ReviewedGitHubTagResolverTests
     }
 
     [Test]
-    public void ParseAnnotatedTag_DoesNotAcceptBuildMetadataShapeAsCommitAuthority()
+    public void ResolveAfterRefresh_BuildMetadataShapeCannotMintCommitAuthority()
     {
+        ReviewedReleaseCandidate candidate = Candidate();
+        ReviewedGitHubTagReference initial = Initial(candidate);
         byte[] buildMetadata = JsonSerializer.SerializeToUtf8Bytes(new
         {
             schema_version = 1,
-            source = new { repository = ForkReleaseIdentity.RepositoryUrl, commit = Commit, tree = new string('c', 40) }
+            source = new
+            {
+                repository = ForkReleaseIdentity.RepositoryUrl,
+                commit = Commit,
+                tree = new string('c', 40)
+            }
         });
 
-        Action action = () => ReviewedGitHubTagResolver.ParseAnnotatedTag(
+        Action action = () => ReviewedGitHubTagResolver.ResolveAfterRefresh(
+            candidate,
+            initial,
             buildMetadata,
-            Identity,
-            new(Identity.Tag, TagObject)
+            ReferenceDocument(candidate.Identity, TagObject, "tag")
         );
 
         action.Should().Throw<PackageSecurityException>();
+    }
+
+    private static ReviewedReleaseCandidate Candidate()
+    {
+        ForkReleaseIdentity identity = Identity();
+        object[] assets = Enum.GetValues<ReviewedReleaseAssetKind>().Select(kind => (object)new
+        {
+            name = ReviewedGitHubReleaseUris.GetAssetName(identity, kind),
+            size = Math.Min(4096, ReviewedGitHubReleaseUris.GetMaximumAssetBytes(kind)),
+            state = "uploaded",
+            browser_download_url = ReviewedGitHubReleaseUris.GetAssetUri(identity, kind).AbsoluteUri
+        }).ToArray();
+        byte[] catalog = JsonSerializer.SerializeToUtf8Bytes(new[]
+        {
+            new
+            {
+                tag_name = identity.Tag,
+                draft = false,
+                prerelease = true,
+                assets
+            }
+        });
+        return ReviewedGitHubReleaseCatalog.Parse(catalog).Single();
+    }
+
+    private static ForkReleaseIdentity Identity()
+    {
+        return ForkReleaseIdentity.Parse("fork-4eh5xitv6787h645ebv-linux-v4.5.4-alpha.2");
+    }
+
+    private static ReviewedGitHubTagReference Initial(ReviewedReleaseCandidate candidate)
+    {
+        return ReviewedGitHubTagResolver.ParseReference(
+            ReferenceDocument(candidate.Identity, TagObject, "tag"),
+            candidate
+        );
+    }
+
+    private static void Finalize(
+        ReviewedReleaseCandidate candidate,
+        ReviewedGitHubTagReference initial,
+        Dictionary<string, object?> annotatedTag
+    )
+    {
+        _ = ReviewedGitHubTagResolver.ResolveAfterRefresh(
+            candidate,
+            initial,
+            JsonSerializer.SerializeToUtf8Bytes(annotatedTag),
+            ReferenceDocument(candidate.Identity, TagObject, "tag")
+        );
     }
 
     private static byte[] ReferenceDocument(

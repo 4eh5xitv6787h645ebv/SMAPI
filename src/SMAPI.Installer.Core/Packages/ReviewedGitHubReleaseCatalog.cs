@@ -186,11 +186,48 @@ public static class ReviewedGitHubReleaseCatalog
     }
 }
 
-/// <summary>The exact annotated tag object selected by one reviewed Git reference.</summary>
-public sealed record ReviewedGitHubTagReference(string ReleaseTag, string TagObjectSha);
+/// <summary>An opaque immutable observation of the annotated tag object selected by one catalog release.</summary>
+public sealed class ReviewedGitHubTagReference
+{
+    internal ReviewedReleaseCandidate Candidate { get; }
+    internal string TagObjectSha { get; }
 
-/// <summary>The independently resolved source commit for one reviewed annotated release tag.</summary>
-public sealed record ReviewedGitHubResolvedTag(string ReleaseTag, string TagObjectSha, string SourceCommit);
+    /// <summary>The exact catalog release tag represented by this observation.</summary>
+    public string ReleaseTag => this.Candidate.Identity.Tag;
+
+    /// <summary>The exact Core-derived endpoint from which to acquire the selected annotated tag document.</summary>
+    public Uri AnnotatedTagDocumentUri { get; }
+
+    internal ReviewedGitHubTagReference(ReviewedReleaseCandidate candidate, string tagObjectSha)
+    {
+        this.Candidate = candidate ?? throw new ArgumentNullException(nameof(candidate));
+        ReviewedGitHubReleaseUris.AssertGitObject(tagObjectSha, "tag object");
+        this.TagObjectSha = tagObjectSha;
+        this.AnnotatedTagDocumentUri = ReviewedGitHubReleaseUris.GetTagObjectUri(tagObjectSha);
+    }
+}
+
+/// <summary>
+/// An opaque immutable source-commit authority minted only after the selected catalog tag was freshly revalidated.
+/// </summary>
+public sealed class ReviewedGitHubResolvedTag
+{
+    /// <summary>The exact catalog-produced release candidate whose tag was resolved.</summary>
+    public ReviewedReleaseCandidate Release { get; }
+
+    /// <summary>The exact release tag.</summary>
+    public string ReleaseTag => this.Release.Identity.Tag;
+
+    /// <summary>The independently resolved full lowercase source commit.</summary>
+    public string SourceCommit { get; }
+
+    internal ReviewedGitHubResolvedTag(ReviewedReleaseCandidate release, string sourceCommit)
+    {
+        this.Release = release ?? throw new ArgumentNullException(nameof(release));
+        ReviewedGitHubReleaseUris.AssertGitObject(sourceCommit, "source commit");
+        this.SourceCommit = sourceCommit;
+    }
+}
 
 /// <summary>Strictly resolves GitHub's annotated-tag API documents without consulting release build metadata.</summary>
 public static class ReviewedGitHubTagResolver
@@ -198,10 +235,47 @@ public static class ReviewedGitHubTagResolver
     /// <summary>Require an exact tag reference whose target is an annotated tag object, never a lightweight tag.</summary>
     public static ReviewedGitHubTagReference ParseReference(
         ReadOnlyMemory<byte> document,
-        ForkReleaseIdentity identity
+        ReviewedReleaseCandidate candidate
     )
     {
-        ArgumentNullException.ThrowIfNull(identity);
+        ArgumentNullException.ThrowIfNull(candidate);
+        return ParseReferenceCore(document, candidate);
+    }
+
+    /// <summary>
+    /// Resolve the selected annotated tag and expose its source commit only after a fresh reference document selects
+    /// the same exact tag object. The initial observation must have been minted for this exact catalog candidate.
+    /// </summary>
+    public static ReviewedGitHubResolvedTag ResolveAfterRefresh(
+        ReviewedReleaseCandidate candidate,
+        ReviewedGitHubTagReference initialReference,
+        ReadOnlyMemory<byte> annotatedTagDocument,
+        ReadOnlyMemory<byte> refreshedReferenceDocument
+    )
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        ArgumentNullException.ThrowIfNull(initialReference);
+        if (!ReferenceEquals(initialReference.Candidate, candidate))
+            throw new PackageSecurityException("The initial Git-reference authority belongs to a different catalog release selection.");
+
+        ReviewedGitHubTagReference refreshed = ParseReferenceCore(refreshedReferenceDocument, candidate);
+        if (!string.Equals(initialReference.TagObjectSha, refreshed.TagObjectSha, StringComparison.Ordinal))
+            throw new PackageSecurityException("The selected release tag moved while its assets were acquired.");
+
+        string sourceCommit = ParseAnnotatedTagCore(
+            annotatedTagDocument,
+            candidate.Identity,
+            initialReference.TagObjectSha
+        );
+        return new ReviewedGitHubResolvedTag(candidate, sourceCommit);
+    }
+
+    private static ReviewedGitHubTagReference ParseReferenceCore(
+        ReadOnlyMemory<byte> document,
+        ReviewedReleaseCandidate candidate
+    )
+    {
+        ForkReleaseIdentity identity = candidate.Identity;
         using JsonDocument parsed = ReviewedGitHubJson.Parse(
             document,
             ReviewedGitHubReleaseUris.MaximumTagDocumentBytes,
@@ -224,21 +298,16 @@ public static class ReviewedGitHubTagResolver
         ReviewedGitHubReleaseUris.AssertGitObject(tagObject, "tag object");
         string targetUrl = ReviewedGitHubJson.RequireString(target, "url", "Git-reference target", 2048);
         AssertExactUri(targetUrl, ReviewedGitHubReleaseUris.GetTagObjectUri(tagObject), "Git-reference target");
-        return new(identity.Tag, tagObject);
+        return new(candidate, tagObject);
     }
 
-    /// <summary>Require the exact annotated tag object to target one full lowercase source commit.</summary>
-    public static ReviewedGitHubResolvedTag ParseAnnotatedTag(
+    private static string ParseAnnotatedTagCore(
         ReadOnlyMemory<byte> document,
         ForkReleaseIdentity identity,
-        ReviewedGitHubTagReference reference
+        string expectedTagObject
     )
     {
-        ArgumentNullException.ThrowIfNull(identity);
-        ArgumentNullException.ThrowIfNull(reference);
-        if (!string.Equals(reference.ReleaseTag, identity.Tag, StringComparison.Ordinal))
-            throw new PackageSecurityException("The retained Git-reference selection doesn't match the release tag.");
-        ReviewedGitHubReleaseUris.AssertGitObject(reference.TagObjectSha, "tag object");
+        ReviewedGitHubReleaseUris.AssertGitObject(expectedTagObject, "tag object");
 
         using JsonDocument parsed = ReviewedGitHubJson.Parse(
             document,
@@ -250,11 +319,11 @@ public static class ReviewedGitHubTagResolver
         string tagObject = ReviewedGitHubJson.RequireString(root, "sha", "annotated-tag response", 40);
         string tag = ReviewedGitHubJson.RequireString(root, "tag", "annotated-tag response", 160);
         string rootUrl = ReviewedGitHubJson.RequireString(root, "url", "annotated-tag response", 2048);
-        if (!string.Equals(tagObject, reference.TagObjectSha, StringComparison.Ordinal))
+        if (!string.Equals(tagObject, expectedTagObject, StringComparison.Ordinal))
             throw new PackageSecurityException("The annotated-tag response doesn't match the selected tag object.");
         if (!string.Equals(tag, identity.Tag, StringComparison.Ordinal))
             throw new PackageSecurityException("The annotated-tag response names a different release tag.");
-        AssertExactUri(rootUrl, ReviewedGitHubReleaseUris.GetTagObjectUri(reference.TagObjectSha), "annotated-tag response");
+        AssertExactUri(rootUrl, ReviewedGitHubReleaseUris.GetTagObjectUri(expectedTagObject), "annotated-tag response");
 
         JsonElement target = ReviewedGitHubJson.RequireProperty(root, "object", "annotated-tag response");
         ReviewedGitHubJson.RequireObject(target, "annotated-tag target");
@@ -265,26 +334,7 @@ public static class ReviewedGitHubTagResolver
         ReviewedGitHubReleaseUris.AssertGitObject(commit, "source commit");
         string targetUrl = ReviewedGitHubJson.RequireString(target, "url", "annotated-tag target", 2048);
         AssertExactUri(targetUrl, ReviewedGitHubReleaseUris.GetCommitObjectUri(commit), "annotated-tag target");
-        return new(identity.Tag, reference.TagObjectSha, commit);
-    }
-
-    /// <summary>Require a fresh post-download reference observation to select the same exact annotated tag object.</summary>
-    public static void AssertReferenceUnchanged(
-        ReviewedGitHubTagReference selected,
-        ReviewedGitHubTagReference refreshed
-    )
-    {
-        ArgumentNullException.ThrowIfNull(selected);
-        ArgumentNullException.ThrowIfNull(refreshed);
-        ReviewedGitHubReleaseUris.AssertGitObject(selected.TagObjectSha, "selected tag object");
-        ReviewedGitHubReleaseUris.AssertGitObject(refreshed.TagObjectSha, "refreshed tag object");
-        if (
-            !string.Equals(selected.ReleaseTag, refreshed.ReleaseTag, StringComparison.Ordinal)
-            || !string.Equals(selected.TagObjectSha, refreshed.TagObjectSha, StringComparison.Ordinal)
-        )
-        {
-            throw new PackageSecurityException("The selected release tag moved while its assets were acquired.");
-        }
+        return commit;
     }
 
     private static void AssertExactUri(string raw, Uri expected, string description)
