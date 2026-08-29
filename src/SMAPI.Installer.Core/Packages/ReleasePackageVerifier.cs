@@ -211,17 +211,6 @@ internal sealed record ReleasePackageVerifierFaults(
 public sealed class ReleasePackageVerifier
 {
     private const string StagingFilename = "verified-package.zip";
-    private const uint MemfdCloseOnExec = 0x0001;
-    private const uint MemfdAllowSealing = 0x0002;
-    private const int DuplicateCloseOnExec = 1030;
-    private const int AddSeals = 1033;
-    private const int GetSeals = 1034;
-    private const int SealSeal = 0x0001;
-    private const int SealShrink = 0x0002;
-    private const int SealGrow = 0x0004;
-    private const int SealWrite = 0x0008;
-    private const int RequiredMemfdSeals = SealSeal | SealShrink | SealGrow | SealWrite;
-    private const int ErrorFunctionNotImplemented = 38;
     private readonly ReleasePackageVerifierFaults? Faults;
 
     /// <summary>The exact checksum asset filename accepted from an untrusted caller-selected path.</summary>
@@ -329,7 +318,10 @@ public sealed class ReleasePackageVerifier
         {
             if (OperatingSystem.IsLinux())
             {
-                SafeFileHandle memfd = this.CreateMemfd();
+                SafeFileHandle memfd = LinuxSealedFile.CreateAnonymous(
+                    "smapi-installer-verified-package",
+                    this.Faults?.CreateMemfdOverride
+                );
                 try
                 {
                     stagingStream = new FileStream(memfd, FileAccess.ReadWrite, bufferSize: 128 * 1024, isAsync: false);
@@ -378,9 +370,9 @@ public sealed class ReleasePackageVerifier
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (this.Faults?.AfterPreUseHash is not null)
-                    sealedWriteAlias = DuplicateDescriptor(stagingStream.SafeFileHandle);
+                    sealedWriteAlias = LinuxSealedFile.Duplicate(stagingStream.SafeFileHandle);
                 this.Faults?.BeforeMemfdSeal?.Invoke(stagingStream.SafeFileHandle);
-                ApplyAndVerifyMemfdSeals(stagingStream.SafeFileHandle);
+                LinuxSealedFile.SealImmutable(stagingStream.SafeFileHandle);
                 this.Faults?.AfterMemfdSeal?.Invoke(stagingStream.SafeFileHandle);
                 cancellationToken.ThrowIfCancellationRequested();
             }
@@ -450,70 +442,6 @@ public sealed class ReleasePackageVerifier
             if (stagingDirectory != null)
                 PrivatePackageStaging.TryDeleteDirectory(stagingDirectory);
         }
-    }
-
-    private SafeFileHandle CreateMemfd()
-    {
-        if (this.Faults?.CreateMemfdOverride is not null)
-        {
-            SafeFileHandle overridden;
-            try
-            {
-                overridden = this.Faults.CreateMemfdOverride()
-                    ?? throw new PackageSecurityException("The Linux anonymous-staging test seam returned no descriptor.");
-            }
-            catch (EntryPointNotFoundException ex)
-            {
-                throw new PackageSecurityException("This Linux runtime doesn't provide the required anonymous sealed-package staging support.", ex);
-            }
-            if (overridden.IsInvalid || overridden.IsClosed)
-            {
-                overridden.Dispose();
-                throw new PackageSecurityException("The Linux anonymous-staging test seam returned an invalid descriptor.");
-            }
-            return overridden;
-        }
-
-        int descriptor;
-        try
-        {
-            descriptor = memfd_create(
-                "smapi-installer-verified-package",
-                ReleasePackageVerifier.MemfdCloseOnExec | ReleasePackageVerifier.MemfdAllowSealing
-            );
-        }
-        catch (EntryPointNotFoundException ex)
-        {
-            throw new PackageSecurityException("This Linux runtime doesn't provide the required anonymous sealed-package staging support.", ex);
-        }
-        if (descriptor < 0)
-        {
-            int error = Marshal.GetLastWin32Error();
-            string message = error == ReleasePackageVerifier.ErrorFunctionNotImplemented
-                ? "This Linux kernel doesn't provide the required anonymous sealed-package staging support."
-                : "Linux couldn't create anonymous sealed package staging.";
-            throw new PackageSecurityException(message, new LinuxNativeIOException("memfd_create failed", error));
-        }
-        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
-    }
-
-    private static SafeFileHandle DuplicateDescriptor(SafeFileHandle source)
-    {
-        int descriptor = fcntl(source, ReleasePackageVerifier.DuplicateCloseOnExec, 0);
-        if (descriptor < 0)
-            throw new PackageSecurityException("Linux couldn't retain the package sealing test authority.", new LinuxNativeIOException("fcntl(F_DUPFD_CLOEXEC) failed", Marshal.GetLastWin32Error()));
-        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
-    }
-
-    private static void ApplyAndVerifyMemfdSeals(SafeFileHandle handle)
-    {
-        if (fcntl(handle, ReleasePackageVerifier.AddSeals, ReleasePackageVerifier.RequiredMemfdSeals) < 0)
-            throw new PackageSecurityException("Linux couldn't seal anonymous package staging.", new LinuxNativeIOException("fcntl(F_ADD_SEALS) failed", Marshal.GetLastWin32Error()));
-        int actual = fcntl(handle, ReleasePackageVerifier.GetSeals, 0);
-        if (actual < 0)
-            throw new PackageSecurityException("Linux couldn't verify anonymous package staging seals.", new LinuxNativeIOException("fcntl(F_GET_SEALS) failed", Marshal.GetLastWin32Error()));
-        if ((actual & ReleasePackageVerifier.RequiredMemfdSeals) != ReleasePackageVerifier.RequiredMemfdSeals)
-            throw new PackageSecurityException("Linux anonymous package staging doesn't have every required immutable seal.");
     }
 
     private static void AssertExactFilename(string path, string expectedName, string description)
@@ -792,11 +720,6 @@ public sealed class ReleasePackageVerifier
     private sealed record BuildSection(string Workflow, string Configuration, string RuntimeIdentifier);
     private sealed record ArtifactSection(string Name, long SizeBytes, string Sha256);
 
-    [DllImport("libc", SetLastError = true)]
-    private static extern int memfd_create(string name, uint flags);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int fcntl(SafeFileHandle descriptor, int command, int argument);
 }
 
 /// <summary>A read-only view which exclusively owns the exact retained staging stream.</summary>
