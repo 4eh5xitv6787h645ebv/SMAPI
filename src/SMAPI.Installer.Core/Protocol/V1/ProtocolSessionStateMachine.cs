@@ -30,10 +30,16 @@ public sealed class ProtocolSessionStateMachine : IDisposable
     private readonly Dictionary<ProtocolRecoveryCatalogId, RecoveryCatalogAuthority> Catalogs = [];
     private readonly Dictionary<ProtocolRecoverySelectionId, RecoverySelectionAuthority> Recoveries = [];
     private readonly Dictionary<ProtocolCandidateId, ModifiedFileReplacementCandidate> Candidates = [];
+    private readonly HashSet<ProtocolCommandId> AcceptedCommands = [];
     private PlanEvent? CurrentPlan;
     private InspectedInstallationState? CurrentInspection;
     private PrunePlanEvent? CurrentPrunePlan;
     private RecoveryPrunePlan? CurrentCorePrunePlan;
+    private ProtocolPlanOperation[] CurrentOperations = [];
+    private ProtocolPlanConflict[] CurrentConflicts = [];
+    private ProtocolPlanCandidate[] CurrentCandidates = [];
+    private string[] CurrentWarnings = [];
+    private ProtocolCommandId? ActiveCommandId;
     private bool ExecutionStartedForCurrentPlan;
     private bool PruneStarted;
     private bool Disposed;
@@ -45,6 +51,7 @@ public sealed class ProtocolSessionStateMachine : IDisposable
     public ProtocolPlanDigest? CurrentPlanDigest => this.CurrentPlan?.PlanDigest;
     public ProtocolPrunePlanId? CurrentPrunePlanId => this.CurrentPrunePlan?.PrunePlanId;
     public ProtocolPlanDigest? CurrentPruneDigest => this.CurrentPrunePlan?.PruneDigest;
+    internal ProtocolCommandId? ActiveCommand => this.ActiveCommandId;
     public bool CurrentPlanCanExecute { get; private set; }
     public long LastProgressSequence { get; private set; } = -1;
 
@@ -53,16 +60,24 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         this.AssertUsable(); ArgumentNullException.ThrowIfNull(request); this.RequireState(ProtocolSessionState.AwaitingHandshake);
         string[] snapshot = capabilities?.ToArray() ?? [];
         ProtocolJsonSerializer.SerializeLine(request);
-        HandshakeEvent response = new(this.SessionId, serverVersion, snapshot);
+        HandshakeEvent response = new(this.SessionId, serverVersion, snapshot) { CommandId = request.CommandId };
         ProtocolJsonSerializer.SerializeLine(response); this.State = ProtocolSessionState.Ready; return response;
+    }
+
+    /// <summary>Reserve one never-reusable command ID before any request work begins.</summary>
+    internal void AcceptCommand(ProtocolRequest request)
+    {
+        this.AssertUsable(); ArgumentNullException.ThrowIfNull(request); ProtocolJsonSerializer.SerializeLine(request);
+        if (this.AcceptedCommands.Count >= 65_536) throw new ProtocolException("The bounded session command registry is full.");
+        if (!this.AcceptedCommands.Add(request.CommandId)) throw new ProtocolException("A command ID can't be reused within one protocol session.");
     }
 
     public GameDiscoveryEvent RecordDiscovery(DiscoverGamesRequest request, ProtocolGameCandidate[] candidates)
     {
         this.AssertUsable(); this.RequireReadyLookup(request.SessionId); ProtocolJsonSerializer.SerializeLine(request);
         ProtocolGameCandidate[] snapshot = candidates?.ToArray() ?? throw new ProtocolException("Candidates can't be null.");
-        GameDiscoveryEvent result = new(this.SessionId, snapshot); ProtocolJsonSerializer.SerializeLine(result);
-        return new GameDiscoveryEvent(result.SessionId, result.Candidates.ToArray());
+        GameDiscoveryEvent result = new(this.SessionId, snapshot) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result);
+        return new GameDiscoveryEvent(result.SessionId, result.Candidates.ToArray()) { CommandId = request.CommandId };
     }
 
     /// <summary>Validate a ready-state lookup before an orchestration service performs external bounded work.</summary>
@@ -84,7 +99,7 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         if (release.Tag != request.ReleaseTag || release.SourceCommit != request.ExpectedSourceCommit)
             throw new ProtocolException("The verified package authority doesn't match the requested tag and source commit.");
         ProtocolPackageId id; do id = ProtocolPackageId.CreateRandom(); while (this.Packages.ContainsKey(id));
-        PackageOpenedEvent result = new(this.SessionId, id, ToProtocol(release)!); ProtocolJsonSerializer.SerializeLine(result);
+        PackageOpenedEvent result = new(this.SessionId, id, ToProtocol(release)!) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result);
         this.Packages.Add(id, new(authority.AuthorityIdentity, authority, release, owner)); return result;
     }
 
@@ -116,9 +131,9 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         ProtocolRecoveryGeneration[] generations = history.Generations.Select(info =>
         {
             ProtocolRecoverySelectionId selection; do selection = ProtocolRecoverySelectionId.CreateRandom(); while (this.Recoveries.ContainsKey(selection) || !minted.Add(selection));
-            return new ProtocolRecoveryGeneration(selection, info.GenerationId.ToString("N"), ToProtocol(info.Action), info.IsCurrent, info.IsUserCheckpoint);
+            return new ProtocolRecoveryGeneration(selection, info.GenerationId.ToString("N"), ToProtocol(info.Action), info.IsCurrent, info.IsUserCheckpoint, ToProtocol(info.RestoreRelease), info.RestoreRelease is null);
         }).ToArray();
-        RecoveryCatalogEvent result = new(this.SessionId, catalogId, ToProtocol(root, 0), history.HeadConfirmationDigest.Value, generations); ProtocolJsonSerializer.SerializeLine(result);
+        RecoveryCatalogEvent result = new(this.SessionId, catalogId, ToProtocol(root, 0), history.HeadConfirmationDigest.Value, generations) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result);
         RecoveryCatalogAuthority catalog = new(result, root, history, authoritySnapshot); this.Catalogs.Add(catalogId, catalog);
         for (int index = 0; index < generations.Length; index++) this.Recoveries.Add(generations[index].SelectionId, new(catalog, generations[index], byId[history.Generations[index].GenerationId]));
         return result;
@@ -132,7 +147,7 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         if (request.Operation != operation || request.GamePath != inspection.GameRoot.CanonicalPath) throw new ProtocolException("The core inspection doesn't match the requested action and game path.");
         ProtocolPackageId? packageId = this.ResolvePackageAuthority(request.PackageId, inspection.TargetPackageContent, inspection.TargetPackageAuthorityIdentity, operation);
         ProtocolRecoveryAuthority? recovery = this.ResolveRecoveryAuthority(request.RecoverySelectionId, inspection.RollbackContent, inspection.GameRoot, inspection.OperationGeneration, operation);
-        return this.SetCurrentPlan(inspection, packageId, recovery);
+        return this.SetCurrentPlan(request.CommandId, inspection, packageId, recovery);
     }
 
     /// <summary>Resolve selected opaque IDs back to the exact core candidates needed by the core approval API.</summary>
@@ -184,23 +199,23 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         this.RequireSession(request.SessionId); ProtocolJsonSerializer.SerializeLine(request);
         this.InvalidateCurrentPlan(); this.CurrentPrunePlan = null; this.CurrentCorePrunePlan = null;
         foreach (ProtocolRecoveryCatalogId catalog in this.Catalogs.Keys.ToArray()) this.RemoveCatalog(catalog);
-        this.LastProgressSequence = -1; this.State = ProtocolSessionState.Recovering;
+        this.LastProgressSequence = -1; this.ActiveCommandId = request.CommandId; this.State = ProtocolSessionState.Recovering;
     }
 
     internal void RecordRecoveryProgress(RecoveryProgressEvent progress)
     {
-        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(progress.SessionId); this.RequireNextSequence(progress.Sequence); ProtocolJsonSerializer.SerializeLine(progress); this.LastProgressSequence = progress.Sequence;
+        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(progress.SessionId); this.RequireActiveCommand(progress.CommandId); this.RequireNextSequence(progress.Sequence); ProtocolJsonSerializer.SerializeLine(progress); this.LastProgressSequence = progress.Sequence;
     }
 
     internal void CompleteInterruptedRecovery(RecoverInterruptedRequest request, RecoveryCompletedEvent result)
     {
-        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(request.SessionId); this.RequireSession(result.SessionId);
-        ProtocolJsonSerializer.SerializeLine(result); this.LastProgressSequence = -1; this.State = ProtocolSessionState.Ready;
+        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(request.SessionId); this.RequireSession(result.SessionId); this.RequireActiveCommand(result.CommandId);
+        ProtocolJsonSerializer.SerializeLine(result); this.LastProgressSequence = -1; this.ActiveCommandId = null; this.State = ProtocolSessionState.Ready;
     }
 
     internal void FailInterruptedRecovery(RecoveryFailureEvent result)
     {
-        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(result.SessionId); ProtocolJsonSerializer.SerializeLine(result); this.LastProgressSequence = -1; this.State = result.RecoveryResult == ProtocolRecoveryResult.Pending ? ProtocolSessionState.RecoveryRequired : ProtocolSessionState.Ready;
+        this.AssertUsable(); this.RequireState(ProtocolSessionState.Recovering); this.RequireSession(result.SessionId); this.RequireActiveCommand(result.CommandId); ProtocolJsonSerializer.SerializeLine(result); this.LastProgressSequence = -1; this.ActiveCommandId = null; this.State = result.TerminalState.RecoveryDisposition == ProtocolRecoveryDisposition.NotRequired ? ProtocolSessionState.Ready : ProtocolSessionState.RecoveryRequired;
     }
 
     /// <summary>Borrow the current inspection for the exact current plan while an orchestration command is serialized.</summary>
@@ -224,7 +239,7 @@ public sealed class ProtocolSessionStateMachine : IDisposable
             .ToHashSet();
         HashSet<(string Path, string Sha256, int Mode)> actual = replacement.ModifiedFileReplacementApprovals.Select(approval => (approval.Path.Value, approval.ObservedSha256.Value, approval.ObservedUnixMode)).ToHashSet();
         if (!actual.SetEquals(expected)) throw new ProtocolException("The replacement inspection doesn't contain the exact selected candidate authorities.");
-        return this.SetCurrentPlan(replacement, this.CurrentPlan!.PackageId, this.CurrentPlan.RecoveryAuthority);
+        return this.SetCurrentPlan(request.CommandId, replacement, this.CurrentPlan!.PackageId, this.CurrentPlan.RecoveryAuthority);
     }
 
     /// <summary>Issue a prune presentation only from an exact core prune plan and stored authenticated catalog.</summary>
@@ -245,32 +260,83 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         ProtocolPlanDigest execution = ProtocolPlanDigest.Parse(corePlan.ConfirmationDigest.Value); ProtocolPrunePlanId id = ProtocolPrunePlanId.CreateRandom();
         ProtocolGameRootIdentity pruneRoot = ToProtocol(corePlan.GameRoot, corePlan.OperationGeneration);
         ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(execution, request.CatalogId, pruneRoot, catalog.Event.HeadSha256, request.RetainNewest, retained, removed, cleanup, summary, warnings, true);
-        PrunePlanEvent result = new(this.SessionId, id, digest, execution, request.CatalogId, pruneRoot, catalog.Event.HeadSha256, request.RetainNewest, retained, removed, cleanup, summary, warnings, true); ProtocolJsonSerializer.SerializeLine(result);
+        PrunePlanEvent result = new(this.SessionId, id, digest, execution, request.CatalogId, pruneRoot, catalog.Event.HeadSha256, request.RetainNewest, retained, removed, cleanup, summary, warnings, [ProtocolPlanRisk.RecoveryPrune], ProtocolRecommendedDefault.Cancel, true) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result);
         this.InvalidateCurrentPlan(); this.CurrentPrunePlan = result; this.CurrentCorePrunePlan = corePlan; this.LastProgressSequence = -1; this.PruneStarted = false; this.State = ProtocolSessionState.PrunePlanIssued; return result;
     }
 
-    public void ConfirmPlan(ConfirmPlanRequest request) { this.AssertUsable(); this.RequireState(ProtocolSessionState.PlanIssued); if (!this.CurrentPlanCanExecute) throw new ProtocolException("A plan with unresolved conflicts can't be confirmed."); this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest); ProtocolJsonSerializer.SerializeLine(request); this.State = ProtocolSessionState.PlanConfirmed; }
-    public InspectedInstallationState BeginExecution(ExecutePlanRequest request) { this.AssertUsable(); if (this.State == ProtocolSessionState.PlanIssued) throw new ProtocolException("The current plan must be confirmed before execution."); this.RequireState(ProtocolSessionState.PlanConfirmed); this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest); ProtocolJsonSerializer.SerializeLine(request); this.CurrentInspection!.AssertUsable(); this.State = ProtocolSessionState.Executing; this.ExecutionStartedForCurrentPlan = true; return this.CurrentInspection; }
-    public void ConfirmPrune(ConfirmPruneRequest request) { this.AssertUsable(); this.RequireState(ProtocolSessionState.PrunePlanIssued); this.RequireCurrentPruneBinding(request.SessionId, request.PrunePlanId, request.PruneDigest); ProtocolJsonSerializer.SerializeLine(request); this.State = ProtocolSessionState.PrunePlanConfirmed; }
-    public RecoveryPrunePlan BeginPrune(ExecutePruneRequest request) { this.AssertUsable(); if (this.State == ProtocolSessionState.PrunePlanIssued) throw new ProtocolException("The prune plan must be confirmed before execution."); this.RequireState(ProtocolSessionState.PrunePlanConfirmed); this.RequireCurrentPruneBinding(request.SessionId, request.PrunePlanId, request.PruneDigest); ProtocolJsonSerializer.SerializeLine(request); this.State = ProtocolSessionState.Pruning; this.PruneStarted = true; return this.CurrentCorePrunePlan!; }
+    /// <summary>Return one deterministic bounded page from the exact current digest-bound plan.</summary>
+    public PlanPageEvent GetPlanPage(GetPlanPageRequest request)
+    {
+        this.AssertUsable();
+        if (this.State is not (ProtocolSessionState.PlanIssued or ProtocolSessionState.PlanConfirmed)) throw new ProtocolException($"Plan pages can't be read while the session is in state '{this.State}'.");
+        this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest); ProtocolJsonSerializer.SerializeLine(request);
+        int total = request.PageKind switch
+        {
+            ProtocolPlanPageKind.Operations => this.CurrentOperations.Length,
+            ProtocolPlanPageKind.Conflicts => this.CurrentConflicts.Length,
+            ProtocolPlanPageKind.Candidates => this.CurrentCandidates.Length,
+            ProtocolPlanPageKind.Warnings => this.CurrentWarnings.Length,
+            _ => throw new ProtocolException("The requested plan page kind isn't defined.")
+        };
+        if (request.Offset < 0 || request.Offset >= total) throw new ProtocolException("The requested plan page offset is outside the exact collection.");
 
-    public void RequestCancellation(CancelPlanRequest request) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.PlanIssued or ProtocolSessionState.PlanConfirmed or ProtocolSessionState.Executing)) throw new ProtocolException($"Cancellation can't be requested while the session is in state '{this.State}'."); this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest); ProtocolJsonSerializer.SerializeLine(request); this.State = ProtocolSessionState.CancellationRequested; }
-    public void RequestPruneCancellation(CancelPruneRequest request) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.PrunePlanIssued or ProtocolSessionState.PrunePlanConfirmed or ProtocolSessionState.Pruning)) throw new ProtocolException($"Prune cancellation can't be requested while the session is in state '{this.State}'."); this.RequireCurrentPruneBinding(request.SessionId, request.PrunePlanId, request.PruneDigest); ProtocolJsonSerializer.SerializeLine(request); this.State = ProtocolSessionState.PruneCancellationRequested; }
+        PlanPageEvent? accepted = null;
+        int maximum = Math.Min(128, total - request.Offset);
+        for (int count = 1; count <= maximum; count++)
+        {
+            int? next = request.Offset + count < total ? request.Offset + count : null;
+            PlanPageEvent candidate = new(
+                this.SessionId,
+                request.PlanId,
+                request.PlanDigest,
+                request.PageKind,
+                request.Offset,
+                total,
+                next,
+                request.PageKind == ProtocolPlanPageKind.Operations ? this.CurrentOperations.Skip(request.Offset).Take(count).ToArray() : [],
+                request.PageKind == ProtocolPlanPageKind.Conflicts ? this.CurrentConflicts.Skip(request.Offset).Take(count).ToArray() : [],
+                request.PageKind == ProtocolPlanPageKind.Candidates ? this.CurrentCandidates.Skip(request.Offset).Take(count).ToArray() : [],
+                request.PageKind == ProtocolPlanPageKind.Warnings ? this.CurrentWarnings.Skip(request.Offset).Take(count).ToArray() : []
+            )
+            {
+                CommandId = request.CommandId
+            };
+            try
+            {
+                string line = ProtocolJsonSerializer.SerializeLine(candidate);
+                if (System.Text.Encoding.UTF8.GetByteCount(line) > ProtocolJsonSerializer.MaxLineBytes - 1024) break;
+                accepted = candidate;
+            }
+            catch (ProtocolException) when (accepted is not null)
+            {
+                break;
+            }
+        }
+        return accepted ?? throw new ProtocolException("One plan page item exceeds the bounded protocol line size.");
+    }
+
+    public CommandAcknowledgedEvent ConfirmPlan(ConfirmPlanRequest request) { this.AssertUsable(); this.RequireState(ProtocolSessionState.PlanIssued); if (!this.CurrentPlanCanExecute) throw new ProtocolException("A plan with unresolved conflicts can't be confirmed."); this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest); ProtocolJsonSerializer.SerializeLine(request); this.State = ProtocolSessionState.PlanConfirmed; CommandAcknowledgedEvent result = new(this.SessionId, ProtocolAcknowledgementKind.PlanConfirmed, request.PlanId, null) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result); return result; }
+    public InspectedInstallationState BeginExecution(ExecutePlanRequest request) { this.AssertUsable(); if (this.State == ProtocolSessionState.PlanIssued) throw new ProtocolException("The current plan must be confirmed before execution."); this.RequireState(ProtocolSessionState.PlanConfirmed); this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest); ProtocolJsonSerializer.SerializeLine(request); this.CurrentInspection!.AssertUsable(); this.ActiveCommandId = request.CommandId; this.State = ProtocolSessionState.Executing; this.ExecutionStartedForCurrentPlan = true; return this.CurrentInspection; }
+    public CommandAcknowledgedEvent ConfirmPrune(ConfirmPruneRequest request) { this.AssertUsable(); this.RequireState(ProtocolSessionState.PrunePlanIssued); this.RequireCurrentPruneBinding(request.SessionId, request.PrunePlanId, request.PruneDigest); ProtocolJsonSerializer.SerializeLine(request); this.State = ProtocolSessionState.PrunePlanConfirmed; CommandAcknowledgedEvent result = new(this.SessionId, ProtocolAcknowledgementKind.PrunePlanConfirmed, null, request.PrunePlanId) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result); return result; }
+    public RecoveryPrunePlan BeginPrune(ExecutePruneRequest request) { this.AssertUsable(); if (this.State == ProtocolSessionState.PrunePlanIssued) throw new ProtocolException("The prune plan must be confirmed before execution."); this.RequireState(ProtocolSessionState.PrunePlanConfirmed); this.RequireCurrentPruneBinding(request.SessionId, request.PrunePlanId, request.PruneDigest); ProtocolJsonSerializer.SerializeLine(request); this.ActiveCommandId = request.CommandId; this.State = ProtocolSessionState.Pruning; this.PruneStarted = true; return this.CurrentCorePrunePlan!; }
+
+    public CommandAcknowledgedEvent RequestCancellation(CancelPlanRequest request) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.PlanIssued or ProtocolSessionState.PlanConfirmed or ProtocolSessionState.Executing)) throw new ProtocolException($"Cancellation can't be requested while the session is in state '{this.State}'."); this.RequireCurrentBinding(request.SessionId, request.PlanId, request.PlanDigest); ProtocolJsonSerializer.SerializeLine(request); bool active = this.State == ProtocolSessionState.Executing; this.State = active ? ProtocolSessionState.CancellationRequested : ProtocolSessionState.Completed; CommandAcknowledgedEvent result = new(this.SessionId, active ? ProtocolAcknowledgementKind.PlanCancellationRequested : ProtocolAcknowledgementKind.PlanCancelledBeforeExecution, request.PlanId, null) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result); return result; }
+    public CommandAcknowledgedEvent RequestPruneCancellation(CancelPruneRequest request) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.PrunePlanIssued or ProtocolSessionState.PrunePlanConfirmed or ProtocolSessionState.Pruning)) throw new ProtocolException($"Prune cancellation can't be requested while the session is in state '{this.State}'."); this.RequireCurrentPruneBinding(request.SessionId, request.PrunePlanId, request.PruneDigest); ProtocolJsonSerializer.SerializeLine(request); bool active = this.State == ProtocolSessionState.Pruning; this.State = active ? ProtocolSessionState.PruneCancellationRequested : ProtocolSessionState.Completed; CommandAcknowledgedEvent result = new(this.SessionId, active ? ProtocolAcknowledgementKind.PruneCancellationRequested : ProtocolAcknowledgementKind.PruneCancelledBeforeExecution, null, request.PrunePlanId) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result); return result; }
     internal void RequestInternalCancellation(ProtocolSessionId sessionId, ProtocolPlanId planId, ProtocolPlanDigest planDigest) { this.AssertUsable(); this.RequireState(ProtocolSessionState.Executing); this.RequireCurrentBinding(sessionId, planId, planDigest); this.State = ProtocolSessionState.CancellationRequested; }
     internal void RequestInternalPruneCancellation(ProtocolSessionId sessionId, ProtocolPrunePlanId planId, ProtocolPlanDigest planDigest) { this.AssertUsable(); this.RequireState(ProtocolSessionState.Pruning); this.RequireCurrentPruneBinding(sessionId, planId, planDigest); this.State = ProtocolSessionState.PruneCancellationRequested; }
-    public void RecordProgress(ProgressEvent progress) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested)) throw new ProtocolException($"Progress can't be recorded while the session is in state '{this.State}'."); if (!this.ExecutionStartedForCurrentPlan) throw new ProtocolException("Progress can't be recorded for a plan cancelled before execution began."); this.RequireCurrentBinding(progress.SessionId, progress.PlanId, progress.PlanDigest); this.RequireNextSequence(progress.Sequence); ProtocolJsonSerializer.SerializeLine(progress); this.LastProgressSequence = progress.Sequence; }
-    public void RecordPruneProgress(PruneProgressEvent progress) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.Pruning or ProtocolSessionState.PruneCancellationRequested)) throw new ProtocolException($"Prune progress can't be recorded while the session is in state '{this.State}'."); if (!this.PruneStarted) throw new ProtocolException("Prune progress can't be recorded for a plan cancelled before execution began."); this.RequireCurrentPruneBinding(progress.SessionId, progress.PrunePlanId, progress.PruneDigest); this.RequireNextSequence(progress.Sequence); ProtocolJsonSerializer.SerializeLine(progress); this.LastProgressSequence = progress.Sequence; }
+    public void RecordProgress(ProgressEvent progress) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested)) throw new ProtocolException($"Progress can't be recorded while the session is in state '{this.State}'."); if (!this.ExecutionStartedForCurrentPlan) throw new ProtocolException("Progress can't be recorded for a plan cancelled before execution began."); this.RequireCurrentBinding(progress.SessionId, progress.PlanId, progress.PlanDigest); this.RequireActiveCommand(progress.CommandId); this.RequireNextSequence(progress.Sequence); ProtocolJsonSerializer.SerializeLine(progress); this.LastProgressSequence = progress.Sequence; }
+    public void RecordPruneProgress(PruneProgressEvent progress) { this.AssertUsable(); if (this.State is not (ProtocolSessionState.Pruning or ProtocolSessionState.PruneCancellationRequested)) throw new ProtocolException($"Prune progress can't be recorded while the session is in state '{this.State}'."); if (!this.PruneStarted) throw new ProtocolException("Prune progress can't be recorded for a plan cancelled before execution began."); this.RequireCurrentPruneBinding(progress.SessionId, progress.PrunePlanId, progress.PruneDigest); this.RequireActiveCommand(progress.CommandId); this.RequireNextSequence(progress.Sequence); ProtocolJsonSerializer.SerializeLine(progress); this.LastProgressSequence = progress.Sequence; }
 
     public void Complete(SuccessEvent result) { if (result.Operation != this.CurrentOperation) throw new ProtocolException("The success event operation doesn't match the current plan."); this.CompleteTerminal(result, result.SessionId, result.PlanId, result.PlanDigest, true); }
     public void Complete(RolledBackFailureEvent result) => this.CompleteTerminal(result, result.SessionId, result.PlanId, result.PlanDigest, true);
     public void Complete(RecoverableInterruptionEvent result) => this.CompleteTerminal(result, result.SessionId, result.PlanId, result.PlanDigest, true);
-    public void Complete(CancelledEvent result) { this.AssertUsable(); this.RequireState(ProtocolSessionState.CancellationRequested); this.RequireCurrentBinding(result.SessionId, result.PlanId, result.PlanDigest); if (!this.ExecutionStartedForCurrentPlan && (result.FilesChanged != 0 || result.RecoveryResult != ProtocolRecoveryResult.NotNeeded)) throw new ProtocolException("A pre-execution cancellation can't report changed files or recovery work."); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
-    public void Complete(PruneSuccessEvent result) { this.RequirePruneTerminalState(true); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); if (result.LogicalRemovedGenerationCount != this.CurrentPrunePlan!.RemovedSelectionIds.Length || result.PhysicalCleanupGenerationCount != this.CurrentPrunePlan.CleanupGenerationIds.Length) throw new ProtocolException("The prune result logical-removal or physical-cleanup count doesn't match the confirmed plan."); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
-    public void Complete(PruneFailureEvent result) { this.RequirePruneTerminalState(true); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequirePruneCounts(result.LogicalRemovedGenerationCount, result.PhysicalCleanupGenerationCount); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
-    public void Complete(PruneInterruptionEvent result) { this.RequirePruneTerminalState(true); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequirePruneCounts(result.LogicalRemovedGenerationCount, result.PhysicalCleanupGenerationCount); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
-    public void Complete(PruneCancelledEvent result) { this.AssertUsable(); this.RequireState(ProtocolSessionState.PruneCancellationRequested); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequirePruneCounts(result.LogicalRemovedGenerationCount, result.PhysicalCleanupGenerationCount); if (!this.PruneStarted && (result.LogicalRemovedGenerationCount != 0 || result.PhysicalCleanupGenerationCount != 0 || result.RecoveryResult != ProtocolRecoveryResult.NotNeeded)) throw new ProtocolException("A pre-execution prune cancellation can't report removals, cleanup, or recovery work."); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
+    public void Complete(CancelledEvent result) { this.AssertUsable(); this.RequireState(ProtocolSessionState.CancellationRequested); this.RequireCurrentBinding(result.SessionId, result.PlanId, result.PlanDigest); this.RequireActiveCommand(result.CommandId); if (!this.ExecutionStartedForCurrentPlan && result.Outcome != ProtocolExecutionOutcome.CancelledBeforeMutation) throw new ProtocolException("A pre-execution cancellation can't report rollback or mutation."); this.RequireExecutionSummary(result.ExecutionSummary); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
+    public void Complete(PruneSuccessEvent result) { this.RequirePruneTerminalState(true); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequireActiveCommand(result.CommandId); if (result.PruneSummary.LogicallyRemovedGenerationCount != this.CurrentPrunePlan!.RemovedSelectionIds.Length || result.PruneSummary.PhysicallyCleanedGenerationCount != this.CurrentPrunePlan.CleanupGenerationIds.Length) throw new ProtocolException("The prune result logical-removal or physical-cleanup count doesn't match the confirmed plan."); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
+    public void Complete(PruneFailureEvent result) { this.RequirePruneTerminalState(true); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequireActiveCommand(result.CommandId); this.RequirePruneCounts(result.PruneSummary.LogicallyRemovedGenerationCount, result.PruneSummary.PhysicallyCleanedGenerationCount); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
+    public void Complete(PruneInterruptionEvent result) { this.RequirePruneTerminalState(true); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequireActiveCommand(result.CommandId); this.RequirePruneCounts(result.PruneSummary.LogicallyRemovedGenerationCount, result.PruneSummary.PhysicallyCleanedGenerationCount); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
+    public void Complete(PruneCancelledEvent result) { this.AssertUsable(); this.RequireState(ProtocolSessionState.PruneCancellationRequested); this.RequireCurrentPruneBinding(result.SessionId, result.PrunePlanId, result.PruneDigest); this.RequireActiveCommand(result.CommandId); this.RequirePruneCounts(result.PruneSummary.LogicallyRemovedGenerationCount, result.PruneSummary.PhysicallyCleanedGenerationCount); if (!this.PruneStarted && (result.Outcome != ProtocolPruneOutcome.CancelledBeforePublication || result.PruneSummary.LogicallyRemovedGenerationCount != 0 || result.PruneSummary.PhysicallyCleanedGenerationCount != 0 || result.PruneSummary.PendingCleanupGenerationCount != 0 || result.PruneSummary.AuxiliaryCleanupPending != false || result.TerminalState.RecoveryDisposition != ProtocolRecoveryDisposition.NotRequired)) throw new ProtocolException("A pre-execution prune cancellation can't report publication, cleanup, or recovery work."); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
 
-    public void RecordPrePlanError(PrePlanErrorEvent error) { this.AssertUsable(); if (this.State is ProtocolSessionState.AwaitingHandshake or ProtocolSessionState.Recovering or ProtocolSessionState.RecoveryRequired or ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested or ProtocolSessionState.Pruning or ProtocolSessionState.PruneCancellationRequested or ProtocolSessionState.Completed) throw new ProtocolException($"A pre-plan error can't be recorded while the session is in state '{this.State}'."); this.RequireSession(error.SessionId); ProtocolJsonSerializer.SerializeLine(error); if (error.IsTerminal) this.State = ProtocolSessionState.Completed; }
+    public void RecordPrePlanRejection(PrePlanRejectedEvent error) { this.AssertUsable(); if (this.State is ProtocolSessionState.AwaitingHandshake or ProtocolSessionState.Recovering or ProtocolSessionState.RecoveryRequired or ProtocolSessionState.Executing or ProtocolSessionState.CancellationRequested or ProtocolSessionState.Pruning or ProtocolSessionState.PruneCancellationRequested or ProtocolSessionState.Completed) throw new ProtocolException($"A pre-plan rejection can't be recorded while the session is in state '{this.State}'."); this.RequireSession(error.SessionId); ProtocolJsonSerializer.SerializeLine(error); if (error.IsTerminal) this.State = ProtocolSessionState.Completed; }
 
     public void Dispose()
     {
@@ -279,9 +345,10 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         foreach (IDisposable owner in this.Packages.Values.Select(value => value.Owner).OfType<IDisposable>().Distinct()) owner.Dispose();
         foreach (IDisposable recovery in this.Recoveries.Values.Select(value => value.Handle).OfType<IDisposable>().Distinct()) recovery.Dispose();
         this.Packages.Clear(); this.Catalogs.Clear(); this.Recoveries.Clear(); this.Candidates.Clear();
+        this.AcceptedCommands.Clear();
     }
 
-    private PlanEvent SetCurrentPlan(InspectedInstallationState inspection, ProtocolPackageId? packageId, ProtocolRecoveryAuthority? recovery)
+    private PlanEvent SetCurrentPlan(ProtocolCommandId commandId, InspectedInstallationState inspection, ProtocolPackageId? packageId, ProtocolRecoveryAuthority? recovery)
     {
         InstallerOperation operation = ToProtocol(inspection.Action); ProtocolGameRootIdentity root = ToProtocol(inspection.GameRoot, inspection.OperationGeneration);
         ProtocolPlanOperation[] operations = inspection.Plan.Operations.Select(item => new ProtocolPlanOperation(item.Kind, item.Path.Value, item.ExpectedCurrentSha256?.Value, item.ResultSha256?.Value)).ToArray();
@@ -296,8 +363,9 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         string[] warnings = conflicts.Select(conflict => conflict.Path is null ? $"{conflict.Code}." : $"{conflict.Code}: {conflict.Path}.").ToArray();
         ProtocolPlanDigest execution = ProtocolPlanDigest.Parse(inspection.ConfirmationDigest.Value); ProtocolPlanId id = ProtocolPlanId.CreateRandom();
         ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(execution, operation, packageId, recovery, root, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), ToProtocol(inspection.ObservedState), operations, conflicts, candidates, summary, warnings, true);
-        PlanEvent result = new(this.SessionId, id, digest, execution, operation, packageId, recovery, root, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), ToProtocol(inspection.ObservedState), operations, conflicts, candidates, summary, warnings, true); ProtocolJsonSerializer.SerializeLine(result);
-        this.CurrentInspection?.Dispose(); this.CurrentInspection = inspection; this.CurrentPlan = result; this.Candidates.Clear(); foreach ((ProtocolCandidateId candidateId, ModifiedFileReplacementCandidate candidate) in candidateAuthorities) this.Candidates.Add(candidateId, candidate); this.CurrentPlanCanExecute = inspection.Plan.CanExecute; this.CurrentPrunePlan = null; this.CurrentCorePrunePlan = null; this.ExecutionStartedForCurrentPlan = false; this.LastProgressSequence = -1; this.State = ProtocolSessionState.PlanIssued; return result;
+        ProtocolPlanRisk[] risks = GetPlanRisks(operation, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), candidates);
+        PlanEvent result = new PlanEvent(this.SessionId, id, digest, execution, operation, packageId, recovery, root, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), ToProtocol(inspection.ObservedState), operations.Length, conflicts.Length, candidates.Length, warnings.Length, inspection.Plan.CanExecute, risks, ProtocolRecommendedDefault.Cancel, summary, true) { CommandId = commandId }.AttachPageData(operations, conflicts, candidates, warnings); ProtocolJsonSerializer.SerializeLine(result);
+        this.CurrentInspection?.Dispose(); this.CurrentInspection = inspection; this.CurrentPlan = result; this.CurrentOperations = operations; this.CurrentConflicts = conflicts; this.CurrentCandidates = candidates; this.CurrentWarnings = warnings; this.Candidates.Clear(); foreach ((ProtocolCandidateId candidateId, ModifiedFileReplacementCandidate candidate) in candidateAuthorities) this.Candidates.Add(candidateId, candidate); this.CurrentPlanCanExecute = inspection.Plan.CanExecute; this.CurrentPrunePlan = null; this.CurrentCorePrunePlan = null; this.ExecutionStartedForCurrentPlan = false; this.LastProgressSequence = -1; this.State = ProtocolSessionState.PlanIssued; return result;
     }
 
     private ProtocolPackageId? ResolvePackageAuthority(ProtocolPackageId? requested, IVerifiedPackageContentAuthority? inspected, object? authorityIdentity, InstallerOperation operation)
@@ -321,23 +389,50 @@ public sealed class ProtocolSessionStateMachine : IDisposable
     }
 
     private void RemoveCatalog(ProtocolRecoveryCatalogId id) { RecoveryCatalogAuthority catalog = this.Catalogs[id]; foreach (ProtocolRecoverySelectionId selection in catalog.Event.Generations.Select(item => item.SelectionId)) { if (this.Recoveries.Remove(selection, out RecoverySelectionAuthority? authority) && authority.Handle is IDisposable disposable) disposable.Dispose(); } this.Catalogs.Remove(id); }
-    private void CompleteTerminal(ProtocolEvent result, ProtocolSessionId session, ProtocolPlanId plan, ProtocolPlanDigest digest, bool allowCancellation) { this.AssertUsable(); if (this.State != ProtocolSessionState.Executing && !(allowCancellation && this.State == ProtocolSessionState.CancellationRequested && this.ExecutionStartedForCurrentPlan)) throw new ProtocolException($"A terminal event can't be recorded while the session is in state '{this.State}'."); this.RequireCurrentBinding(session, plan, digest); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
+    private void CompleteTerminal(ProtocolEvent result, ProtocolSessionId session, ProtocolPlanId plan, ProtocolPlanDigest digest, bool allowCancellation) { this.AssertUsable(); if (this.State != ProtocolSessionState.Executing && !(allowCancellation && this.State == ProtocolSessionState.CancellationRequested && this.ExecutionStartedForCurrentPlan)) throw new ProtocolException($"A terminal event can't be recorded while the session is in state '{this.State}'."); this.RequireCurrentBinding(session, plan, digest); this.RequireActiveCommand(result.CommandId); this.RequireExecutionSummary(result switch { SuccessEvent value => value.ExecutionSummary, RolledBackFailureEvent value => value.ExecutionSummary, RecoverableInterruptionEvent value => value.ExecutionSummary, _ => throw new ProtocolException("The execution terminal family is invalid.") }); ProtocolJsonSerializer.SerializeLine(result); this.State = ProtocolSessionState.Completed; }
+    private void RequireExecutionSummary(ProtocolExecutionSummary summary) { if (summary.ManagedFileChangeCount is { } managed && managed > this.CurrentPlan!.OperationCount) throw new ProtocolException("The execution terminal managed-file count exceeds the confirmed plan operation count."); }
     private void RequirePruneTerminalState(bool allowCancellation) { this.AssertUsable(); if (this.State != ProtocolSessionState.Pruning && !(allowCancellation && this.State == ProtocolSessionState.PruneCancellationRequested)) throw new ProtocolException($"A prune terminal event can't be recorded while the session is in state '{this.State}'."); }
     private void RequireNextSequence(long sequence) { if (sequence <= this.LastProgressSequence) throw new ProtocolException("Progress sequence values must increase monotonically."); }
-    private void RequirePruneCounts(int logicalRemoved, int physicalCleanup) { int expectedLogical = this.CurrentPrunePlan!.RemovedSelectionIds.Length; if (logicalRemoved is not 0 && logicalRemoved != expectedLogical) throw new ProtocolException("A prune terminal event must report either zero or the exact confirmed logical removals."); if (physicalCleanup > this.CurrentPrunePlan.CleanupGenerationIds.Length) throw new ProtocolException("A prune terminal event can't report more physical cleanup than the confirmed plan."); }
+    private void RequireActiveCommand(ProtocolCommandId commandId) { if (this.ActiveCommandId != commandId) throw new ProtocolException("The progress or terminal doesn't match the active long-operation command ID."); }
+    private void RequirePruneCounts(int? logicalRemoved, int? physicalCleanup) { if (logicalRemoved is null && physicalCleanup is null) return; if (logicalRemoved is null || physicalCleanup is null) throw new ProtocolException("A prune terminal event can't mix known and unknown counts."); int expectedLogical = this.CurrentPrunePlan!.RemovedSelectionIds.Length; if (logicalRemoved is not 0 && logicalRemoved != expectedLogical) throw new ProtocolException("A prune terminal event must report either zero or the exact confirmed logical removals."); if (physicalCleanup > this.CurrentPrunePlan.CleanupGenerationIds.Length) throw new ProtocolException("A prune terminal event can't report more physical cleanup than the confirmed plan."); }
     private void RequireCanIssuePlan() { if (this.State is not (ProtocolSessionState.Ready or ProtocolSessionState.PlanIssued or ProtocolSessionState.PlanConfirmed or ProtocolSessionState.PrunePlanIssued or ProtocolSessionState.PrunePlanConfirmed)) throw new ProtocolException($"A plan can't be issued while the session is in state '{this.State}'."); }
     private void RequireReadyLookup(ProtocolSessionId session) { this.RequireState(ProtocolSessionState.Ready); this.RequireSession(session); }
     private void RequireCurrentBinding(ProtocolSessionId session, ProtocolPlanId plan, ProtocolPlanDigest digest) { this.RequireSession(session); if (this.CurrentPlan?.PlanId != plan) throw new ProtocolException("The request or event doesn't match the current plan ID; it may be stale."); if (this.CurrentPlan.PlanDigest != digest) throw new ProtocolException("The request or event doesn't match the current execution-plan digest; it may be stale or altered."); }
     private void RequireCurrentPruneBinding(ProtocolSessionId session, ProtocolPrunePlanId plan, ProtocolPlanDigest digest) { this.RequireSession(session); if (this.CurrentPrunePlan?.PrunePlanId != plan) throw new ProtocolException("The request or event doesn't match the current prune plan ID; it may be stale."); if (this.CurrentPrunePlan.PruneDigest != digest) throw new ProtocolException("The request or event doesn't match the current prune digest; it may be stale or altered."); }
     private void RequireSession(ProtocolSessionId session) { if (session != this.SessionId) throw new ProtocolException("The request or event doesn't match this process session ID."); }
     private void RequireState(ProtocolSessionState expected) { if (this.State != expected) throw new ProtocolException($"Expected protocol state '{expected}', but the session is in state '{this.State}'."); }
-    private void InvalidateCurrentPlan() { this.CurrentInspection?.Dispose(); this.CurrentInspection = null; this.CurrentPlan = null; this.Candidates.Clear(); this.CurrentPlanCanExecute = false; this.LastProgressSequence = -1; }
+    private void InvalidateCurrentPlan() { this.CurrentInspection?.Dispose(); this.CurrentInspection = null; this.CurrentPlan = null; this.CurrentOperations = []; this.CurrentConflicts = []; this.CurrentCandidates = []; this.CurrentWarnings = []; this.Candidates.Clear(); this.CurrentPlanCanExecute = false; this.ActiveCommandId = null; this.LastProgressSequence = -1; }
     private void AssertUsable() { if (this.Disposed) throw new ObjectDisposedException(nameof(ProtocolSessionStateMachine)); }
 
     private static InstallerOperation ToProtocol(InstallationAction action) => (InstallerOperation)(int)action;
     private static ProtocolGameRootIdentity ToProtocol(GameRootIdentity root, ulong operationGeneration) => new(root.CanonicalPath, root.DeviceMajor, root.DeviceMinor, root.Inode, operationGeneration);
     private static ObservedInstallState ToProtocol(ObservedInstallationState state) => (ObservedInstallState)(int)state;
     private static ProtocolReleaseIdentity? ToProtocol(InstallationReleaseIdentity? release) => release is null ? null : new(release.Repository, release.Tag, release.EmbeddedVersion, release.PackageAssetName, release.SourceCommit, release.SourceTree, release.PackageSha256.Value, release.PackageSizeBytes, release.BuildWorkflow, release.BuildConfiguration, release.RuntimeIdentifier);
+
+    private static ProtocolPlanRisk[] GetPlanRisks(InstallerOperation operation, ProtocolReleaseIdentity? current, ProtocolReleaseIdentity? target, ProtocolPlanCandidate[] candidates)
+    {
+        List<ProtocolPlanRisk> risks = [];
+        if (operation == InstallerOperation.Uninstall) risks.Add(ProtocolPlanRisk.Uninstall);
+        if (operation == InstallerOperation.Rollback) risks.Add(ProtocolPlanRisk.Rollback);
+        if (current is not null && target is not null && IsEarlierRelease(target.Tag, current.Tag)) risks.Add(ProtocolPlanRisk.Downgrade);
+        if (candidates.Length > 0) risks.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
+        return risks.ToArray();
+    }
+
+    private static bool IsEarlierRelease(string targetTag, string currentTag)
+    {
+        static (Version Version, int Alpha) Parse(string tag)
+        {
+            const string prefix = "fork-4eh5xitv6787h645ebv-linux-v";
+            int separator = tag.LastIndexOf("-alpha.", StringComparison.Ordinal);
+            if (!tag.StartsWith(prefix, StringComparison.Ordinal) || separator <= prefix.Length || !Version.TryParse(tag[prefix.Length..separator], out Version? version) || !int.TryParse(tag[(separator + "-alpha.".Length)..], out int alpha))
+                throw new ProtocolException("A release tag couldn't be compared for downgrade risk.");
+            return (version, alpha);
+        }
+        (Version targetVersion, int targetAlpha) = Parse(targetTag); (Version currentVersion, int currentAlpha) = Parse(currentTag);
+        int version = targetVersion.CompareTo(currentVersion);
+        return version < 0 || version == 0 && targetAlpha < currentAlpha;
+    }
 
     private sealed record PackageAuthority(object Identity, IVerifiedPackageContentAuthority Authority, InstallationReleaseIdentity Release, IDisposable? Owner);
     private sealed record RecoveryCatalogAuthority(RecoveryCatalogEvent Event, GameRootIdentity GameRoot, RecoveryHistory History, ICommittedRecoveryContentAuthority[] Handles);

@@ -1,8 +1,9 @@
 using System.IO.Compression;
-using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using FluentAssertions;
+using Microsoft.Win32.SafeHandles;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Packages;
@@ -14,6 +15,13 @@ public sealed class ReleasePackageVerifierTests
 {
     private const string Commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string Tree = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private const int AddSeals = 1033;
+    private const int GetSeals = 1034;
+    private const int SealSeal = 0x0001;
+    private const int SealShrink = 0x0002;
+    private const int SealGrow = 0x0004;
+    private const int SealWrite = 0x0008;
+    private const int RequiredSeals = SealSeal | SealShrink | SealGrow | SealWrite;
 
     private string TempRoot = null!;
     private ForkReleaseIdentity Identity = null!;
@@ -215,26 +223,26 @@ public sealed class ReleasePackageVerifierTests
     }
 
     [Test]
-    public async Task VerifyThenReplaceSource_ExtractionUsesRetainedVerifiedHandleAndPrivateModes()
+    public async Task VerifyThenReplaceSource_ExtractionUsesExactRetainedSealedHandle()
     {
         const string expectedRoot = "SMAPI synthetic Linux installer";
         (string path, byte[] bytes, string hash) = this.CreateZipPackage(expectedRoot, "verified");
-        VerifiedReleasePackage verified = await new ReleasePackageVerifier().VerifyAsync(
+        SafeFileHandle? retainedHandle = null;
+        ReleasePackageVerifier verifier = new(new ReleasePackageVerifierFaults(AfterMemfdSeal: handle =>
+        {
+            retainedHandle = handle;
+            (fcntl(handle, ReleasePackageVerifierTests.GetSeals, 0) & ReleasePackageVerifierTests.RequiredSeals)
+                .Should().Be(ReleasePackageVerifierTests.RequiredSeals);
+        }));
+        VerifiedReleasePackage verified = await verifier.VerifyAsync(
             path,
             $"{hash}  {this.Identity.PackageAssetName}\n",
             this.CreateMetadata(hash, bytes.Length),
             this.Identity,
             ReleasePackageVerifierTests.Commit
         );
-        string stagingDirectory = GetPrivatePath(verified, "StagingDirectory");
-        string stagingPath = GetPrivatePath(verified, "StagingPath");
         if (OperatingSystem.IsLinux())
-        {
-            Convert.ToInt32(File.GetUnixFileMode(stagingDirectory) & (UnixFileMode)0x1ff)
-                .Should().Be(Convert.ToInt32("700", 8));
-            Convert.ToInt32(File.GetUnixFileMode(stagingPath) & (UnixFileMode)0x1ff)
-                .Should().Be(Convert.ToInt32("600", 8));
-        }
+            retainedHandle.Should().NotBeNull();
 
         File.WriteAllBytes(path, CreateZipBytes(expectedRoot, "replacement"));
         string extraction = Path.Combine(this.TempRoot, "extracted");
@@ -257,7 +265,120 @@ public sealed class ReleasePackageVerifierTests
         }
 
         await verified.DisposeAsync();
-        Directory.Exists(stagingDirectory).Should().BeFalse();
+        if (OperatingSystem.IsLinux())
+            retainedHandle!.IsClosed.Should().BeTrue();
+    }
+
+    [TestCase("cancel")]
+    [TestCase("seal-failure")]
+    [Platform("Linux")]
+    public async Task VerifyAsync_MemfdSealCancellationOrFailure_ClosesExactDescriptor(string kind)
+    {
+        (string path, byte[] bytes, string hash) = this.CreatePackage();
+        SafeFileHandle? captured = null;
+        ReleasePackageVerifier verifier = new(new ReleasePackageVerifierFaults(BeforeMemfdSeal: handle =>
+        {
+            captured = handle;
+            if (kind == "cancel")
+                throw new OperationCanceledException("synthetic cancellation before sealing");
+            fcntl(handle, ReleasePackageVerifierTests.AddSeals, ReleasePackageVerifierTests.SealSeal)
+                .Should().Be(0, $"synthetic pre-seal failed with errno {Marshal.GetLastWin32Error()}");
+        }));
+
+        Func<Task> action = () => verifier.VerifyAsync(
+            path,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+
+        if (kind == "cancel")
+            await action.Should().ThrowAsync<OperationCanceledException>();
+        else
+            await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*seal*");
+        captured.Should().NotBeNull();
+        captured!.IsClosed.Should().BeTrue();
+    }
+
+    [Test]
+    [Platform("Linux")]
+    public async Task VerifyAsync_MemfdEntryPointUnavailable_FailsClosedWithBoundedError()
+    {
+        (string path, byte[] bytes, string hash) = this.CreatePackage();
+        ReleasePackageVerifier verifier = new(new ReleasePackageVerifierFaults(
+            CreateMemfdOverride: () => throw new EntryPointNotFoundException("private native detail")
+        ));
+
+        Func<Task> action = () => verifier.VerifyAsync(
+            path,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+
+        await action.Should().ThrowAsync<PackageSecurityException>()
+            .WithMessage("*doesn't provide the required anonymous sealed-package staging support*");
+    }
+
+    [Test]
+    [Platform("Linux")]
+    public async Task UseVerifiedStream_PreSealWriteAliasIsKernelImmutableBeforeZipConsumption()
+    {
+        const string expectedRoot = "SMAPI synthetic Linux installer";
+        (string path, byte[] bytes, string hash) = this.CreateZipPackage(expectedRoot, "verified");
+        bool faultReached = false;
+        SafeFileHandle? retainedHandle = null;
+        SafeFileHandle? writeAlias = null;
+        ReleasePackageVerifier verifier = new(new ReleasePackageVerifierFaults(
+            AfterMemfdSeal: handle => retainedHandle = handle,
+            AfterPreUseHash: (stream, alias) =>
+            {
+                faultReached = true;
+                writeAlias = alias;
+                alias.Should().NotBeNull();
+                (fcntl(alias!, ReleasePackageVerifierTests.GetSeals, 0) & ReleasePackageVerifierTests.RequiredSeals)
+                    .Should().Be(ReleasePackageVerifierTests.RequiredSeals);
+                stream.CanWrite.Should().BeFalse();
+                Action managedWrite = () => stream.WriteByte(0x41);
+                managedWrite.Should().Throw<NotSupportedException>();
+                Action nativeWrite = () => RandomAccess.Write(alias!, new byte[] { 0x41 }, 0);
+                Exception nativeWriteError = nativeWrite.Should().Throw<Exception>().Which;
+                (nativeWriteError is IOException || nativeWriteError is UnauthorizedAccessException).Should().BeTrue();
+                ftruncate(alias!, bytes.Length - 1).Should().Be(-1, "F_SEAL_SHRINK must reject truncation");
+                ftruncate(alias!, bytes.Length + 1).Should().Be(-1, "F_SEAL_GROW must reject extension");
+            }
+        ));
+        VerifiedReleasePackage verified = await verifier.VerifyAsync(
+            path,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+        string extraction = Path.Combine(this.TempRoot, "immutable-extraction");
+
+        try
+        {
+            await new BoundedZipPackage().InspectAndExtractAsync(
+                verified,
+                expectedRoot,
+                extraction,
+                new ZipPackageLimits(1024 * 1024, 10, 10, 1024, 4096, 1000)
+            );
+
+            faultReached.Should().BeTrue();
+            File.ReadAllText(Path.Combine(extraction, expectedRoot, "payload.txt")).Should().Be("verified");
+        }
+        finally
+        {
+            await verified.DisposeAsync();
+        }
+        retainedHandle.Should().NotBeNull();
+        writeAlias.Should().NotBeNull();
+        retainedHandle!.IsClosed.Should().BeTrue();
+        writeAlias!.IsClosed.Should().BeTrue();
     }
 
     [Test]
@@ -463,10 +584,9 @@ public sealed class ReleasePackageVerifierTests
         return stream.ToArray();
     }
 
-    private static string GetPrivatePath(VerifiedReleasePackage package, string fieldName)
-    {
-        return (string)typeof(VerifiedReleasePackage)
-            .GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(package)!;
-    }
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(SafeFileHandle descriptor, int command, int argument);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int ftruncate(SafeFileHandle descriptor, long length);
 }

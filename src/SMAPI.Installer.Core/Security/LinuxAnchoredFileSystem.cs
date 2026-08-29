@@ -241,7 +241,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
                 throw new IOException("The anchored lock-file identity changed while it was opened.");
             SetHandleMode(handle, unixMode);
             if (flock(handle, LockExclusive | LockNonBlocking) != 0)
-                throw new IOException($"Couldn't acquire the anchored exclusive lock (errno {Marshal.GetLastWin32Error()}).");
+                throw new LinuxNativeIOException("Couldn't acquire the anchored exclusive lock", Marshal.GetLastWin32Error());
             Fsync(handle);
             Fsync(parent.Parent);
             return new LinuxAnchoredFile(handle, GetHandleIdentity(handle, requireSingleLinkRegularFile: true));
@@ -522,7 +522,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         if (!before.IsSameObject(file.Identity) || namedBefore != before || length > before.Size)
             throw new IOException("The anchored truncate target identity or requested length is invalid.");
         if (ftruncate(file.Handle, length) != 0)
-            throw new IOException($"Couldn't truncate an anchored file (errno {Marshal.GetLastWin32Error()}).");
+            throw new LinuxNativeIOException("Couldn't truncate an anchored file", Marshal.GetLastWin32Error());
         Fsync(file.Handle);
         LinuxFileIdentity after = GetHandleIdentity(file.Handle, requireSingleLinkRegularFile: true);
         LinuxFileIdentity? namedAfter = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
@@ -626,7 +626,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         {
             int error = Marshal.GetLastWin32Error();
             duplicate.Dispose();
-            throw new IOException($"Couldn't enumerate an anchored directory (errno {error}).");
+            throw new LinuxNativeIOException("Couldn't enumerate an anchored directory", error);
         }
 
         duplicate.SetHandleAsInvalid(); // fdopendir owns the descriptor from here.
@@ -641,7 +641,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
                 {
                     int error = Marshal.GetLastWin32Error();
                     if (error != 0)
-                        throw new IOException($"Couldn't enumerate an anchored directory (errno {error}).");
+                        throw new LinuxNativeIOException("Couldn't enumerate an anchored directory", error);
                     break;
                 }
 
@@ -668,7 +668,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         finally
         {
             if (closedir(stream) != 0)
-                throw new IOException($"Couldn't close an anchored directory enumeration (errno {Marshal.GetLastWin32Error()}).");
+                throw new LinuxNativeIOException("Couldn't close an anchored directory enumeration", Marshal.GetLastWin32Error());
         }
 
         names.Sort(StringComparer.Ordinal);
@@ -999,7 +999,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     {
         int descriptor = fcntl(handle, DuplicateCloseOnExec, 0);
         if (descriptor < 0)
-            throw new IOException($"Couldn't duplicate an anchored directory descriptor (errno {Marshal.GetLastWin32Error()}).");
+            throw new LinuxNativeIOException("Couldn't duplicate an anchored directory descriptor", Marshal.GetLastWin32Error());
         return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
     }
 
@@ -1031,7 +1031,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             int error = Marshal.GetLastWin32Error();
             if (error == ErrorNotSupported)
                 throw new PlatformNotSupportedException("Linux statx is required for fail-closed anchored filesystem identity checks.");
-            throw new IOException($"Couldn't inspect an anchored handle (errno {error}).");
+            throw new LinuxNativeIOException("Couldn't inspect an anchored handle", error);
         }
         return ConvertIdentity(data, requireSingleLinkRegularFile);
     }
@@ -1134,7 +1134,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     {
         ValidateUnixMode(mode);
         if (fchmod(handle, (uint)mode) != 0)
-            throw new IOException($"Couldn't set anchored file permissions (errno {Marshal.GetLastWin32Error()}).");
+            throw new LinuxNativeIOException("Couldn't set anchored file permissions", Marshal.GetLastWin32Error());
     }
 
     private static void ValidateUnixMode(int mode)
@@ -1146,7 +1146,7 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     private static void Fsync(SafeFileHandle handle)
     {
         if (fsync(handle) != 0)
-            throw new IOException($"Couldn't durably flush an anchored handle (errno {Marshal.GetLastWin32Error()}).");
+            throw new LinuxNativeIOException("Couldn't durably flush an anchored handle", Marshal.GetLastWin32Error());
     }
 
     private void AssertUsable()
@@ -1163,10 +1163,10 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         return error switch
         {
             ErrorNoEntry => new FileNotFoundException($"{message} (errno {error})."),
-            ErrorExists => new IOException($"{message}: the destination already exists (errno {error})."),
-            ErrorNotDirectory or ErrorSymbolicLinkLoop => new IOException($"{message}: a path segment is a symbolic link or non-directory (errno {error})."),
+            ErrorExists => new LinuxNativeIOException($"{message}: the destination already exists", error),
+            ErrorNotDirectory or ErrorSymbolicLinkLoop => new LinuxNativeIOException($"{message}: a path segment is a symbolic link or non-directory", error),
             ErrorNotSupported => new PlatformNotSupportedException($"{message}: the required Linux syscall isn't supported."),
-            _ => new IOException($"{message} (errno {error}).")
+            _ => new LinuxNativeIOException(message, error)
         };
     }
 

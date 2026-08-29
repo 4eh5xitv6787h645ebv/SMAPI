@@ -8,6 +8,14 @@ using StardewModdingAPI.Installer.Core.Planning;
 
 namespace StardewModdingAPI.Installer.Core.Protocol.V1;
 
+[JsonConverter(typeof(ProtocolCommandIdJsonConverter))]
+public readonly record struct ProtocolCommandId(string Value)
+{
+    public static ProtocolCommandId CreateRandom() => new(ProtocolIdentifier.Create());
+    public static ProtocolCommandId Parse(string? value) => new(ProtocolIdentifier.Parse(value, "command"));
+    public override string ToString() => this.Value;
+}
+
 [JsonConverter(typeof(ProtocolSessionIdJsonConverter))]
 public readonly record struct ProtocolSessionId(string Value)
 {
@@ -240,6 +248,8 @@ public sealed record ProtocolPlanDigest
         writer.WriteString("origin_operation", JsonNamingPolicy.CamelCase.ConvertName(authority.Generation.OriginOperation.ToString()));
         writer.WriteBoolean("is_current", authority.Generation.IsCurrent);
         writer.WriteBoolean("is_user_checkpoint", authority.Generation.IsUserCheckpoint);
+        WriteRelease(writer, "restore_release", authority.Generation.RestoreRelease);
+        writer.WriteBoolean("restores_uninstalled_state", authority.Generation.RestoresUninstalledState);
         writer.WriteEndObject();
         writer.WriteEndObject();
     }
@@ -300,6 +310,7 @@ internal abstract class ProtocolIdJsonConverter<T> : JsonConverter<T>
 }
 
 internal sealed class ProtocolSessionIdJsonConverter : ProtocolIdJsonConverter<ProtocolSessionId> { protected override string Kind => "session"; protected override ProtocolSessionId Parse(string? v) => ProtocolSessionId.Parse(v); protected override string GetValue(ProtocolSessionId v) => v.Value; }
+internal sealed class ProtocolCommandIdJsonConverter : ProtocolIdJsonConverter<ProtocolCommandId> { protected override string Kind => "command"; protected override ProtocolCommandId Parse(string? v) => ProtocolCommandId.Parse(v); protected override string GetValue(ProtocolCommandId v) => v.Value; }
 internal sealed class ProtocolPlanIdJsonConverter : ProtocolIdJsonConverter<ProtocolPlanId> { protected override string Kind => "plan"; protected override ProtocolPlanId Parse(string? v) => ProtocolPlanId.Parse(v); protected override string GetValue(ProtocolPlanId v) => v.Value; }
 internal sealed class ProtocolPackageIdJsonConverter : ProtocolIdJsonConverter<ProtocolPackageId> { protected override string Kind => "package"; protected override ProtocolPackageId Parse(string? v) => ProtocolPackageId.Parse(v); protected override string GetValue(ProtocolPackageId v) => v.Value; }
 internal sealed class ProtocolRecoveryCatalogIdJsonConverter : ProtocolIdJsonConverter<ProtocolRecoveryCatalogId> { protected override string Kind => "recovery catalog"; protected override ProtocolRecoveryCatalogId Parse(string? v) => ProtocolRecoveryCatalogId.Parse(v); protected override string GetValue(ProtocolRecoveryCatalogId v) => v.Value; }

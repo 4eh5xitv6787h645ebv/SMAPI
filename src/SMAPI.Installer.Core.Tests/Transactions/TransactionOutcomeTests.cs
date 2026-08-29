@@ -16,6 +16,75 @@ public sealed class TransactionOutcomeTests
 {
     private readonly List<string> TemporaryDirectories = new();
 
+    [TestCase(28, TransactionErrorCode.DiskFull)]
+    [TestCase(122, TransactionErrorCode.DiskFull)]
+    [TestCase(30, TransactionErrorCode.ReadOnlyFileSystem)]
+    [TestCase(13, TransactionErrorCode.PermissionDenied)]
+    [TestCase(1, TransactionErrorCode.PermissionDenied)]
+    [TestCase(18, TransactionErrorCode.CrossDeviceBoundary)]
+    [TestCase(5, TransactionErrorCode.IoFailure)]
+    public void ErrorClassification_PreservesActionableLinuxIoFailures(int errorNumber, TransactionErrorCode expected)
+    {
+        IOException failure = new("synthetic", unchecked((int)0x80070000) | errorNumber);
+
+        InstallerTransactionExecutor.GetErrorCode(failure).Should().Be(expected);
+        InstallerTransactionExecutor.SafeMessage(expected).Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Test]
+    public void ErrorClassification_MapsManagedPermissionFailureWithoutLeakingExceptionText()
+    {
+        InstallerTransactionExecutor.GetErrorCode(new UnauthorizedAccessException("private path"))
+            .Should().Be(TransactionErrorCode.PermissionDenied);
+        InstallerTransactionExecutor.SafeMessage(TransactionErrorCode.PermissionDenied).Should().NotContain("private path");
+    }
+
+    [TestCase(28, TransactionErrorCode.DiskFull)]
+    [TestCase(122, TransactionErrorCode.DiskFull)]
+    [TestCase(30, TransactionErrorCode.ReadOnlyFileSystem)]
+    [TestCase(13, TransactionErrorCode.PermissionDenied)]
+    [TestCase(18, TransactionErrorCode.CrossDeviceBoundary)]
+    public void ErrorClassification_ActionableInnerIoFailureOverridesSemanticWrapper(int errorNumber, TransactionErrorCode expected)
+    {
+        IOException failure = new("synthetic", unchecked((int)0x80070000) | errorNumber);
+        InstallerTransactionException wrapper = new(TransactionErrorCode.WorkspaceConflict, "semantic wrapper", failure);
+
+        InstallerTransactionExecutor.GetErrorCode(wrapper).Should().Be(expected);
+    }
+
+    [TestCase(28, TransactionErrorCode.DiskFull)]
+    [TestCase(122, TransactionErrorCode.DiskFull)]
+    [TestCase(30, TransactionErrorCode.ReadOnlyFileSystem)]
+    [TestCase(13, TransactionErrorCode.PermissionDenied)]
+    [TestCase(18, TransactionErrorCode.CrossDeviceBoundary)]
+    public void ErrorClassification_PreservesTypedNativeErrnoThroughSemanticWrapper(int errorNumber, TransactionErrorCode expected)
+    {
+        LinuxNativeIOException failure = new("synthetic syscall failure", errorNumber);
+        InstallerTransactionException wrapper = new(TransactionErrorCode.WorkspaceConflict, "semantic wrapper", failure);
+
+        InstallerTransactionExecutor.GetErrorCode(wrapper).Should().Be(expected);
+    }
+
+    [Test]
+    public void ErrorClassification_UnknownLockFailurePreservesConcurrentOperation()
+    {
+        IOException failure = new("synthetic", unchecked((int)0x80070000) | 11); // EAGAIN/EWOULDBLOCK
+        InstallerTransactionException wrapper = new(TransactionErrorCode.ConcurrentOperation, "lock contention", failure);
+
+        InstallerTransactionExecutor.GetErrorCode(wrapper).Should().Be(TransactionErrorCode.ConcurrentOperation);
+    }
+
+    [Test]
+    public void ErrorClassification_AggregatePreservesLatestActionableFailurePrecedence()
+    {
+        AggregateException failures = new(
+            new LinuxNativeIOException("earlier recovery failure", 28),
+            new LinuxNativeIOException("later generation failure", 30)
+        );
+
+        InstallerTransactionExecutor.GetErrorCode(failures).Should().Be(TransactionErrorCode.ReadOnlyFileSystem);
+    }
+
     [TearDown]
     public void TearDown()
     {
