@@ -132,6 +132,26 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         return artifact;
     }
 
+    /// <summary>Lease the exact immutable package descriptor for an external verifier.</summary>
+    internal LinuxSealedFileLease LeasePackageForExternalRead()
+    {
+        this.UseLock.Wait();
+        try
+        {
+            if (this.Disposed)
+                throw new ObjectDisposedException(nameof(VerifiedReleasePackage));
+            if (!OperatingSystem.IsLinux())
+                throw new PlatformNotSupportedException("External package descriptor leases are only supported on Linux.");
+            if (this.Stream is not ReadOnlyRetainedStream retainedStream)
+                throw new PackageSecurityException("The verified package doesn't retain the required read-only descriptor authority.");
+            return retainedStream.LeaseForExternalRead();
+        }
+        finally
+        {
+            this.UseLock.Release();
+        }
+    }
+
     internal async Task<T> UseVerifiedStreamAsync<T>(
         Func<Stream, CancellationToken, Task<T>> action,
         CancellationToken cancellationToken
@@ -738,6 +758,16 @@ internal sealed class ReadOnlyRetainedStream : Stream
         this.Inner = inner ?? throw new ArgumentNullException(nameof(inner));
         if (!inner.CanRead || !inner.CanSeek)
             throw new ArgumentException("The retained staging stream must be readable and seekable.", nameof(inner));
+    }
+
+    /// <summary>Lease the sealed Linux descriptor without exposing its owning handle.</summary>
+    internal LinuxSealedFileLease LeaseForExternalRead()
+    {
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("External retained-stream descriptor leases are only supported on Linux.");
+        if (this.Inner is not FileStream fileStream || !fileStream.CanRead || !fileStream.CanSeek)
+            throw new PackageSecurityException("The verified package doesn't retain the required Linux file descriptor.");
+        return LinuxSealedFile.LeaseForExternalRead(fileStream.SafeFileHandle);
     }
 
     public override void Flush()
