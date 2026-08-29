@@ -34,8 +34,10 @@ public sealed class LinuxInstallerProtocolJsonlHost
     /// <remarks>
     /// Standard output is reserved exclusively for complete protocol event lines. Diagnostics are bounded, generic,
     /// and written only to <paramref name="diagnostics"/> so rejected input, paths, and tokens aren't reflected.
-    /// A cancellation or fail-stop error may dispose <paramref name="input"/> to interrupt operating-system streams
-    /// whose asynchronous reads don't observe cancellation until their descriptor is closed.
+    /// A cancellation or fail-stop error may dispose <paramref name="input"/> and <paramref name="output"/> to
+    /// interrupt operating-system streams whose asynchronous I/O doesn't observe cancellation promptly. If an
+    /// operating-system operation ignores both cancellation and disposal, the host observes and abandons at most one
+    /// bounded read and one bounded write task for that failed session instead of delaying backend settlement.
     /// </remarks>
     public async Task<int> RunAsync(Stream input, Stream output, TextWriter diagnostics, CancellationToken cancellationToken = default)
     {
@@ -49,6 +51,11 @@ public sealed class LinuxInstallerProtocolJsonlHost
         using CancellationTokenRegistration inputInterruption = lifetime.Token.Register(() =>
         {
             try { input.Dispose(); }
+            catch { }
+        });
+        using CancellationTokenRegistration outputInterruption = lifetime.Token.Register(() =>
+        {
+            try { output.Dispose(); }
             catch { }
         });
         // Request cancellation is separate from transport cancellation. Controller EOF must stop admitted
@@ -71,7 +78,8 @@ public sealed class LinuxInstallerProtocolJsonlHost
         void Fail(int exitCode)
         {
             Interlocked.CompareExchange(ref failureCode, exitCode, 0);
-            lifetime.Cancel();
+            try { lifetime.Cancel(); }
+            catch (ObjectDisposedException) { }
         }
 
         void PublishProgress(ProtocolEvent value)
@@ -187,15 +195,22 @@ public sealed class LinuxInstallerProtocolJsonlHost
             catch { if (Volatile.Read(ref failureCode) == 0) Fail(FailureExitCode); }
 
             if (read is not null)
-                ObserveAbandonedRead(read);
+                ObserveAbandonedIo(read);
 
             outbound.Writer.TryComplete();
-            try { await writer.ConfigureAwait(false); }
-            catch { Fail(FailureExitCode); }
+            Task writerSettlement = await Task.WhenAny(writer, cancellationSignal).ConfigureAwait(false);
+            if (ReferenceEquals(writerSettlement, writer))
+            {
+                try { await writer.ConfigureAwait(false); }
+                catch { Fail(FailureExitCode); }
+            }
+            else
+                ObserveAbandonedIo(writer);
 
             // Release the infinite cancellation race task without changing the established exit result.
-            // On clean EOF the read has completed, so don't dispose the caller's input just for this cleanup.
+            // On clean EOF I/O has completed, so don't dispose caller streams just for this cleanup.
             inputInterruption.Dispose();
+            outputInterruption.Dispose();
             lifetime.Cancel();
         }
 
@@ -259,9 +274,9 @@ public sealed class LinuxInstallerProtocolJsonlHost
         catch { }
     }
 
-    private static void ObserveAbandonedRead(Task<string?> read)
+    private static void ObserveAbandonedIo(Task operation)
     {
-        _ = read.ContinueWith(
+        _ = operation.ContinueWith(
             static completed => _ = completed.Exception,
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,

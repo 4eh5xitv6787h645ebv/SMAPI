@@ -238,6 +238,46 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
     }
 
     [Test]
+    public async Task RunAsync_ExternalCancellation_BoundsWriterWhichIgnoresCancellationAndDisposal()
+    {
+        HandshakeRequest request = new("gui", "1");
+        byte[] line = Encoding.UTF8.GetBytes(ProtocolJsonSerializer.SerializeLine(request) + "\n");
+        Action<ProtocolEvent>? sink = null;
+        TaskCompletionSource settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool requestCancelled = false;
+        FakeSession session = new(async (value, token) =>
+        {
+            sink!(new RecoveryProgressEvent(Session, 1, TransactionStage.Recovering, 0, 1, "Recovering."));
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                requestCancelled = true;
+                settled.TrySetResult();
+            }
+            return Response(value);
+        }, dispose: () => new ValueTask(settled.Task));
+        LinuxInstallerProtocolJsonlHost host = new(value => { sink = value; return session; });
+        IgnoringWriteStream output = new();
+        using CancellationTokenSource cancellation = new();
+        using StringWriter diagnostics = new();
+        Task<int> running = host.RunAsync(new PrefixThenBlockingReadStream(line), output, diagnostics, cancellation.Token);
+        await output.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        cancellation.Cancel();
+
+        (await running.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(LinuxInstallerProtocolJsonlHost.CancelledExitCode);
+        requestCancelled.Should().BeTrue();
+        session.Disposed.Should().BeTrue();
+        output.Disposed.Should().BeTrue();
+        diagnostics.ToString().Should().Be("Protocol host was cancelled." + Environment.NewLine);
+
+        // Complete the abandoned write with a fault after RunAsync returned. The host-owned fault observer
+        // must consume the single writer failure without changing the already published exit result.
+        output.FailPendingWrite();
+        await Task.Delay(50);
+    }
+
+    [Test]
     public async Task RunAsync_ProgressOverflow_FailsStopAndCancelsInsteadOfGrowingUnbounded()
     {
         Action<ProtocolEvent>? sink = null;
@@ -336,6 +376,31 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
             base.ReadAsync(buffer[..Math.Min(buffer.Length, maximumChunk)], cancellationToken);
     }
 
+    private sealed class PrefixThenBlockingReadStream(byte[] prefix) : Stream
+    {
+        private bool ReturnedPrefix;
+        private readonly TaskCompletionSource<int> Blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (this.ReturnedPrefix)
+                return new(this.Blocked.Task);
+            this.ReturnedPrefix = true;
+            prefix.CopyTo(buffer);
+            return ValueTask.FromResult(prefix.Length);
+        }
+        protected override void Dispose(bool disposing) { }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     private sealed class BlockingReadStream : Stream
     {
         private readonly TaskCompletionSource<int> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -386,6 +451,33 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) => new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+    }
+
+    private sealed class IgnoringWriteStream : Stream
+    {
+        private readonly TaskCompletionSource WriteCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource WriteStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool Disposed { get; private set; }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public void FailPendingWrite() => this.WriteCompletion.TrySetException(new IOException("Late ignored write failure."));
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            this.WriteStarted.TrySetResult();
+            return new(this.WriteCompletion.Task);
+        }
+        protected override void Dispose(bool disposing)
+        {
+            this.Disposed = true;
+        }
     }
 
     private sealed class SlowWriteStream : MemoryStream

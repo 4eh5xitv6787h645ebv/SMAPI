@@ -17,11 +17,16 @@ fi
 
 temp_root="$(mktemp -d)"
 protocol_pid=""
+protocol_watchdog_pid=""
 cleanup() {
     set +e
     if [[ -n "$protocol_pid" ]]; then
         kill -KILL "$protocol_pid" 2>/dev/null
         wait "$protocol_pid" 2>/dev/null
+    fi
+    if [[ -n "$protocol_watchdog_pid" ]]; then
+        kill -KILL "$protocol_watchdog_pid" 2>/dev/null
+        wait "$protocol_watchdog_pid" 2>/dev/null
     fi
     exec 9>&- 2>/dev/null
     rm -rf -- "$temp_root"
@@ -136,12 +141,28 @@ done
 test -s "$temp_root/protocol-sigterm.stdout"
 mapfile -t protocol_children < <(pgrep -P "$protocol_pid" || true)
 kill -TERM "$protocol_pid"
+protocol_watchdog_marker="$temp_root/protocol-sigterm.watchdog"
+(
+    sleep 10
+    if kill -0 "$protocol_pid" 2>/dev/null; then
+        : > "$protocol_watchdog_marker"
+        kill -KILL "$protocol_pid" 2>/dev/null || true
+    fi
+) &
+protocol_watchdog_pid=$!
 set +e
 wait "$protocol_pid"
 sigterm_exit=$?
+kill -KILL "$protocol_watchdog_pid" 2>/dev/null
+wait "$protocol_watchdog_pid" 2>/dev/null
 set -e
 protocol_pid=""
+protocol_watchdog_pid=""
 exec 9>&-
+if [[ -e "$protocol_watchdog_marker" ]]; then
+    echo "Protocol host didn't exit within 10 seconds of SIGTERM and was killed." >&2
+    exit 1
+fi
 test "$sigterm_exit" = 130
 grep -Fx 'Protocol host was cancelled.' "$temp_root/protocol-sigterm.stderr" >/dev/null
 python3 - "$temp_root/protocol-sigterm.stdout" <<'PY'
