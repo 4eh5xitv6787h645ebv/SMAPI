@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Win32.SafeHandles;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Security;
 
@@ -53,10 +54,10 @@ public sealed record PackageVerificationLimits
 public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
 {
     private readonly Stream Stream;
-    private readonly string StagingDirectory;
-    private readonly string StagingPath;
-    private readonly bool CleanupStagingPath;
-    private readonly Action<Stream, string>? AfterPreUseHash;
+    private readonly string? StagingDirectory;
+    private readonly string? StagingPath;
+    private readonly SafeFileHandle? SealedWriteAlias;
+    private readonly Action<Stream, SafeFileHandle?>? AfterPreUseHash;
     private readonly SemaphoreSlim UseLock = new(1, 1);
     private readonly IReadOnlyDictionary<string, VerifiedReleaseArtifactIdentity> Artifacts;
     private bool Disposed;
@@ -89,11 +90,11 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         string buildConfiguration,
         string runtimeIdentifier,
         IEnumerable<VerifiedReleaseArtifactIdentity> artifacts,
-        string stagingDirectory,
-        string stagingPath,
+        string? stagingDirectory,
+        string? stagingPath,
         Stream stream,
-        bool cleanupStagingPath = true,
-        Action<Stream, string>? afterPreUseHash = null
+        SafeFileHandle? sealedWriteAlias = null,
+        Action<Stream, SafeFileHandle?>? afterPreUseHash = null
     )
     {
         this.Identity = identity;
@@ -117,8 +118,8 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
         );
         this.StagingDirectory = stagingDirectory;
         this.StagingPath = stagingPath;
-        this.CleanupStagingPath = cleanupStagingPath;
         this.Stream = stream;
+        this.SealedWriteAlias = sealedWriteAlias;
         this.AfterPreUseHash = afterPreUseHash;
     }
 
@@ -153,7 +154,7 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
                 throw new PackageSecurityException("The private staged package no longer matches its verified identity.");
 
             this.Stream.Position = 0;
-            this.AfterPreUseHash?.Invoke(this.Stream, this.StagingPath);
+            this.AfterPreUseHash?.Invoke(this.Stream, this.SealedWriteAlias);
             if (!this.Stream.CanRead || this.Stream.CanWrite || !this.Stream.CanSeek || this.Stream.Length != this.SizeBytes)
                 throw new PackageSecurityException("The private verified package authority changed before consumption.");
             this.Stream.Position = 0;
@@ -177,7 +178,8 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
                 return;
             this.Disposed = true;
             this.Stream.Dispose();
-            if (this.CleanupStagingPath)
+            this.SealedWriteAlias?.Dispose();
+            if (this.StagingPath is not null && this.StagingDirectory is not null)
             {
                 PrivatePackageStaging.TryDeleteFile(this.StagingPath);
                 PrivatePackageStaging.TryDeleteDirectory(this.StagingDirectory);
@@ -199,14 +201,27 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
 
 /// <summary>Deterministic test seams around private staging authority publication and consumption.</summary>
 internal sealed record ReleasePackageVerifierFaults(
-    Action<string, string>? BeforeStagingUnlink = null,
-    Action<Stream, string>? AfterPreUseHash = null
+    Func<SafeFileHandle>? CreateMemfdOverride = null,
+    Action<SafeFileHandle>? BeforeMemfdSeal = null,
+    Action<SafeFileHandle>? AfterMemfdSeal = null,
+    Action<Stream, SafeFileHandle?>? AfterPreUseHash = null
 );
 
 /// <summary>Verifies that package bytes, SHA256SUMS, metadata, and release identity all agree.</summary>
 public sealed class ReleasePackageVerifier
 {
     private const string StagingFilename = "verified-package.zip";
+    private const uint MemfdCloseOnExec = 0x0001;
+    private const uint MemfdAllowSealing = 0x0002;
+    private const int DuplicateCloseOnExec = 1030;
+    private const int AddSeals = 1033;
+    private const int GetSeals = 1034;
+    private const int SealSeal = 0x0001;
+    private const int SealShrink = 0x0002;
+    private const int SealGrow = 0x0004;
+    private const int SealWrite = 0x0008;
+    private const int RequiredMemfdSeals = SealSeal | SealShrink | SealGrow | SealWrite;
+    private const int ErrorFunctionNotImplemented = 38;
     private readonly ReleasePackageVerifierFaults? Faults;
 
     /// <summary>The exact checksum asset filename accepted from an untrusted caller-selected path.</summary>
@@ -308,27 +323,27 @@ public sealed class ReleasePackageVerifier
 
         string? stagingDirectory = null;
         string? stagingPath = null;
-        LinuxAnchoredFileSystem? stagingFileSystem = null;
-        LinuxAnchoredFile? stagingFile = null;
         FileStream? stagingStream = null;
+        SafeFileHandle? sealedWriteAlias = null;
         try
         {
-            stagingDirectory = PrivatePackageStaging.CreateDirectory();
-            stagingPath = Path.Combine(stagingDirectory, ReleasePackageVerifier.StagingFilename);
-
             if (OperatingSystem.IsLinux())
             {
-                stagingFileSystem = new LinuxAnchoredFileSystem(stagingDirectory);
-                stagingFile = stagingFileSystem.CreateNewFile(ReleasePackageVerifier.StagingFilename, Convert.ToInt32("600", 8));
-                stagingStream = new FileStream(
-                    stagingFile.Handle,
-                    FileAccess.ReadWrite,
-                    bufferSize: 128 * 1024,
-                    isAsync: false
-                );
+                SafeFileHandle memfd = this.CreateMemfd();
+                try
+                {
+                    stagingStream = new FileStream(memfd, FileAccess.ReadWrite, bufferSize: 128 * 1024, isAsync: false);
+                }
+                catch
+                {
+                    memfd.Dispose();
+                    throw;
+                }
             }
             else
             {
+                stagingDirectory = PrivatePackageStaging.CreateDirectory();
+                stagingPath = Path.Combine(stagingDirectory, ReleasePackageVerifier.StagingFilename);
                 stagingStream = new FileStream(
                     stagingPath,
                     FileMode.CreateNew,
@@ -361,25 +376,16 @@ public sealed class ReleasePackageVerifier
 
             if (OperatingSystem.IsLinux())
             {
-                try
-                {
-                    this.Faults?.BeforeStagingUnlink?.Invoke(stagingDirectory, stagingPath);
-                    LinuxFileIdentity named = stagingFileSystem!.Stat(ReleasePackageVerifier.StagingFilename)
-                        ?? throw new PackageSecurityException("The private staged package disappeared before its authority was retained.");
-                    if (!named.IsSameObject(stagingFile!.Identity) || named.Size != size)
-                        throw new PackageSecurityException("The private staged package identity changed before its authority was retained.");
-                    stagingFileSystem.UnlinkFile(ReleasePackageVerifier.StagingFilename, named);
-                }
-                catch (PackageSecurityException)
-                {
-                    throw;
-                }
-                catch (IOException ex)
-                {
-                    throw new PackageSecurityException("The private staged package name became unsafe before authority publication.", ex);
-                }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (this.Faults?.AfterPreUseHash is not null)
+                    sealedWriteAlias = DuplicateDescriptor(stagingStream.SafeFileHandle);
+                this.Faults?.BeforeMemfdSeal?.Invoke(stagingStream.SafeFileHandle);
+                ApplyAndVerifyMemfdSeals(stagingStream.SafeFileHandle);
+                this.Faults?.AfterMemfdSeal?.Invoke(stagingStream.SafeFileHandle);
+                cancellationToken.ThrowIfCancellationRequested();
             }
 
+            // Hash the exact retained descriptor only after Linux has made it kernel-immutable.
             stagingStream.Position = 0;
             using (SHA256 retainedHasher = SHA256.Create())
             {
@@ -393,14 +399,6 @@ public sealed class ReleasePackageVerifier
                 }
             }
             stagingStream.Position = 0;
-
-            if (OperatingSystem.IsLinux())
-            {
-                stagingFileSystem!.Dispose();
-                stagingFileSystem = null;
-                stagingFile = null; // the retained stream owns the same SafeFileHandle instance
-                Directory.Delete(stagingDirectory);
-            }
 
             Stream verifiedStream = new ReadOnlyRetainedStream(stagingStream);
             stagingStream = null;
@@ -421,9 +419,10 @@ public sealed class ReleasePackageVerifier
                     stagingDirectory,
                     stagingPath,
                     verifiedStream,
-                    cleanupStagingPath: !OperatingSystem.IsLinux(),
+                    sealedWriteAlias,
                     afterPreUseHash: this.Faults?.AfterPreUseHash
                 );
+                sealedWriteAlias = null;
                 stagingDirectory = null;
                 stagingPath = null;
                 return result;
@@ -445,13 +444,76 @@ public sealed class ReleasePackageVerifier
         finally
         {
             stagingStream?.Dispose();
-            stagingFile?.Dispose();
-            stagingFileSystem?.Dispose();
+            sealedWriteAlias?.Dispose();
             if (stagingPath != null)
                 PrivatePackageStaging.TryDeleteFile(stagingPath);
             if (stagingDirectory != null)
                 PrivatePackageStaging.TryDeleteDirectory(stagingDirectory);
         }
+    }
+
+    private SafeFileHandle CreateMemfd()
+    {
+        if (this.Faults?.CreateMemfdOverride is not null)
+        {
+            SafeFileHandle overridden;
+            try
+            {
+                overridden = this.Faults.CreateMemfdOverride()
+                    ?? throw new PackageSecurityException("The Linux anonymous-staging test seam returned no descriptor.");
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                throw new PackageSecurityException("This Linux runtime doesn't provide the required anonymous sealed-package staging support.", ex);
+            }
+            if (overridden.IsInvalid || overridden.IsClosed)
+            {
+                overridden.Dispose();
+                throw new PackageSecurityException("The Linux anonymous-staging test seam returned an invalid descriptor.");
+            }
+            return overridden;
+        }
+
+        int descriptor;
+        try
+        {
+            descriptor = memfd_create(
+                "smapi-installer-verified-package",
+                ReleasePackageVerifier.MemfdCloseOnExec | ReleasePackageVerifier.MemfdAllowSealing
+            );
+        }
+        catch (EntryPointNotFoundException ex)
+        {
+            throw new PackageSecurityException("This Linux runtime doesn't provide the required anonymous sealed-package staging support.", ex);
+        }
+        if (descriptor < 0)
+        {
+            int error = Marshal.GetLastWin32Error();
+            string message = error == ReleasePackageVerifier.ErrorFunctionNotImplemented
+                ? "This Linux kernel doesn't provide the required anonymous sealed-package staging support."
+                : "Linux couldn't create anonymous sealed package staging.";
+            throw new PackageSecurityException(message, new LinuxNativeIOException("memfd_create failed", error));
+        }
+        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+    }
+
+    private static SafeFileHandle DuplicateDescriptor(SafeFileHandle source)
+    {
+        int descriptor = fcntl(source, ReleasePackageVerifier.DuplicateCloseOnExec, 0);
+        if (descriptor < 0)
+            throw new PackageSecurityException("Linux couldn't retain the package sealing test authority.", new LinuxNativeIOException("fcntl(F_DUPFD_CLOEXEC) failed", Marshal.GetLastWin32Error()));
+        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+    }
+
+    private static void ApplyAndVerifyMemfdSeals(SafeFileHandle handle)
+    {
+        if (fcntl(handle, ReleasePackageVerifier.AddSeals, ReleasePackageVerifier.RequiredMemfdSeals) < 0)
+            throw new PackageSecurityException("Linux couldn't seal anonymous package staging.", new LinuxNativeIOException("fcntl(F_ADD_SEALS) failed", Marshal.GetLastWin32Error()));
+        int actual = fcntl(handle, ReleasePackageVerifier.GetSeals, 0);
+        if (actual < 0)
+            throw new PackageSecurityException("Linux couldn't verify anonymous package staging seals.", new LinuxNativeIOException("fcntl(F_GET_SEALS) failed", Marshal.GetLastWin32Error()));
+        if ((actual & ReleasePackageVerifier.RequiredMemfdSeals) != ReleasePackageVerifier.RequiredMemfdSeals)
+            throw new PackageSecurityException("Linux anonymous package staging doesn't have every required immutable seal.");
     }
 
     private static void AssertExactFilename(string path, string expectedName, string description)
@@ -729,6 +791,12 @@ public sealed class ReleasePackageVerifier
     private sealed record SourceSection(string Repository, string Commit, string Tree);
     private sealed record BuildSection(string Workflow, string Configuration, string RuntimeIdentifier);
     private sealed record ArtifactSection(string Name, long SizeBytes, string Sha256);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int memfd_create(string name, uint flags);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(SafeFileHandle descriptor, int command, int argument);
 }
 
 /// <summary>A read-only view which exclusively owns the exact retained staging stream.</summary>
