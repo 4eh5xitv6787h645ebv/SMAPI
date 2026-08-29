@@ -92,8 +92,8 @@ internal interface IGitHubAttestationProcessRunner
 internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcessRunner
 {
     private const string DefaultSetSidPath = "/usr/bin/setsid";
-    private const int ErrorNoSuchProcess = 3;
     private const int SignalKill = 9;
+    private const int MaximumProcEntries = 32_768;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly TimeSpan TeardownTimeout = TimeSpan.FromSeconds(5);
     private readonly string SetSidPath;
@@ -159,100 +159,107 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
             }
 
+            Task stdout = Task.CompletedTask;
+            Task stderr = Task.CompletedTask;
+            Task<byte[]>? stdoutBytes = null;
+            Task<byte[]>? stderrBytes = null;
             try
             {
-                process.StandardInput.Close();
-            }
-            catch (Exception)
-            {
-                await KillAndObserveAsync(process, processGroupId, Task.CompletedTask, Task.CompletedTask).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
-                throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
-            }
-
-            TaskCompletionSource<Exception> outputFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            Task<byte[]> stdout = ReadBoundedAsync(
-                process.StandardOutput.BaseStream,
-                request.MaximumStandardOutputBytes,
-                outputFailure
-            );
-            Task<byte[]> stderr = ReadBoundedAsync(
-                process.StandardError.BaseStream,
-                request.MaximumStandardErrorBytes,
-                outputFailure
-            );
-            Task exited = process.WaitForExitAsync(CancellationToken.None);
-            Task completed = Task.WhenAll(exited, Task.WhenAll(stdout, stderr));
-            using CancellationTokenSource timeoutCancellation = new();
-            Task timedOut = Task.Delay(request.Timeout, timeoutCancellation.Token);
-            Task cancelled = cancellationToken.CanBeCanceled
-                ? Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
-                : Task.Delay(Timeout.InfiniteTimeSpan);
-
-            try
-            {
-                await Task.WhenAny(completed, outputFailure.Task, timedOut, cancelled).ConfigureAwait(false);
-                if (cancellationToken.IsCancellationRequested)
+                try
                 {
+                    process.StandardInput.Close();
+                }
+                catch (Exception)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
+                }
+
+                TaskCompletionSource<Exception> outputFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                stdoutBytes = ReadBoundedAsync(
+                    process.StandardOutput.BaseStream,
+                    request.MaximumStandardOutputBytes,
+                    outputFailure
+                );
+                stderrBytes = ReadBoundedAsync(
+                    process.StandardError.BaseStream,
+                    request.MaximumStandardErrorBytes,
+                    outputFailure
+                );
+                stdout = stdoutBytes;
+                stderr = stderrBytes;
+                Task exited = process.WaitForExitAsync(CancellationToken.None);
+                Task completed = Task.WhenAll(exited, Task.WhenAll(stdout, stderr));
+                using CancellationTokenSource timeoutCancellation = new();
+                Task timedOut = Task.Delay(request.Timeout, timeoutCancellation.Token);
+                Task cancelled = cancellationToken.CanBeCanceled
+                    ? Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                    : Task.Delay(Timeout.InfiniteTimeSpan);
+
+                try
+                {
+                    await Task.WhenAny(completed, outputFailure.Task, timedOut, cancelled).ConfigureAwait(false);
+                    if (cancellationToken.IsCancellationRequested)
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                    if (!completed.IsCompleted)
+                    {
+                        if (outputFailure.Task.IsCompleted)
+                        {
+                            Exception failure = await outputFailure.Task.ConfigureAwait(false);
+                            cancellationToken.ThrowIfCancellationRequested();
+                            throw MapOutputFailure(failure);
+                        }
+
+                        cancellationToken.ThrowIfCancellationRequested();
+                        throw new PackageSecurityException("The GitHub attestation verifier timed out.");
+                    }
+
+                    byte[] standardOutput;
+                    byte[] standardError;
                     try
                     {
-                        await KillAndObserveAsync(process, processGroupId, stdout, stderr).ConfigureAwait(false);
+                        standardOutput = await stdoutBytes.ConfigureAwait(false);
+                        standardError = await stderrBytes.ConfigureAwait(false);
                     }
-                    finally
+                    catch (Exception exception)
+                    {
+                        await ObserveAsync(stdout, stderr).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        throw MapOutputFailure(exception);
+                    }
+
+                    string output;
+                    try
+                    {
+                        output = StrictUtf8.GetString(standardOutput);
+                        _ = StrictUtf8.GetString(standardError);
+                    }
+                    catch (DecoderFallbackException)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                    }
-                }
-
-                if (!completed.IsCompleted)
-                {
-                    if (outputFailure.Task.IsCompleted)
-                    {
-                        Exception failure = await outputFailure.Task.ConfigureAwait(false);
-                        await KillAndObserveAsync(process, processGroupId, stdout, stderr).ConfigureAwait(false);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        throw MapOutputFailure(failure);
+                        throw new PackageSecurityException("The GitHub attestation verifier returned invalid UTF-8 output.");
                     }
 
-                    await KillAndObserveAsync(process, processGroupId, stdout, stderr).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
-                    throw new PackageSecurityException("The GitHub attestation verifier timed out.");
+                    if (process.ExitCode != 0)
+                        throw new PackageSecurityException("The GitHub attestation verifier rejected the selected release evidence.");
+                    return new GitHubAttestationProcessResult(output);
                 }
-
-                byte[] standardOutput;
-                byte[] standardError;
-                try
+                finally
                 {
-                    standardOutput = await stdout.ConfigureAwait(false);
-                    standardError = await stderr.ConfigureAwait(false);
+                    timeoutCancellation.Cancel();
                 }
-                catch (Exception exception)
-                {
-                    await ObserveAsync(stdout, stderr).ConfigureAwait(false);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    throw MapOutputFailure(exception);
-                }
-
-                string output;
-                try
-                {
-                    output = StrictUtf8.GetString(standardOutput);
-                    _ = StrictUtf8.GetString(standardError);
-                }
-                catch (DecoderFallbackException)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    throw new PackageSecurityException("The GitHub attestation verifier returned invalid UTF-8 output.");
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                if (process.ExitCode != 0)
-                    throw new PackageSecurityException("The GitHub attestation verifier rejected the selected release evidence.");
-                return new GitHubAttestationProcessResult(output);
             }
             finally
             {
-                timeoutCancellation.Cancel();
+                bool cleaned = await KillAndObserveAsync(process, processGroupId, stdout, stderr).ConfigureAwait(false);
+                if (!cleaned)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new PackageSecurityException("The GitHub attestation verifier process couldn't be terminated safely.");
+                }
+                cancellationToken.ThrowIfCancellationRequested();
             }
         }
     }
@@ -334,35 +341,101 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             : new PackageSecurityException("The GitHub attestation verifier output couldn't be read safely.");
     }
 
-    private static async Task KillAndObserveAsync(Process process, int processGroupId, Task stdout, Task stderr)
+    private static async Task<bool> KillAndObserveAsync(Process process, int processGroupId, Task stdout, Task stderr)
     {
-        KillProcessGroup(processGroupId);
-        TryKillDirectProcess(process);
-
         Task reaped = ReapAsync(process);
         Task observed = ObserveAsync(stdout, stderr);
         Task cleanup = Task.WhenAll(reaped, observed);
-        Task deadline = Task.Delay(TeardownTimeout);
-        if (await Task.WhenAny(cleanup, deadline).ConfigureAwait(false) == cleanup)
+        Stopwatch deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TeardownTimeout)
         {
-            await cleanup.ConfigureAwait(false);
-            return;
+            bool? groupExists = TryFindProcessGroupMember(processGroupId, deadline);
+            if (!groupExists.HasValue)
+                break;
+            if (groupExists.Value)
+                KillObservedProcessGroup(processGroupId);
+            TryKillDirectProcess(process);
+
+            if (cleanup.IsCompleted && groupExists.Value == false)
+            {
+                await cleanup.ConfigureAwait(false);
+                return true;
+            }
+
+            TimeSpan remaining = TeardownTimeout - deadline.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+                break;
+            Task shortDelay = Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, remaining.TotalMilliseconds)));
+            if (cleanup.IsCompleted)
+                await shortDelay.ConfigureAwait(false);
+            else
+                await Task.WhenAny(cleanup, shortDelay).ConfigureAwait(false);
         }
 
         TryClose(process.StandardOutput);
         TryClose(process.StandardError);
-        KillProcessGroup(processGroupId);
+        if (TryFindProcessGroupMember(processGroupId, deadline) == true)
+            KillObservedProcessGroup(processGroupId);
         TryKillDirectProcess(process);
         ObserveEventually(cleanup);
+        return false;
     }
 
-    private static void KillProcessGroup(int processGroupId)
+    private static void KillObservedProcessGroup(int processGroupId)
     {
         if (processGroupId <= 0)
             return;
-        int result = kill(-processGroupId, SignalKill);
-        if (result != 0 && Marshal.GetLastWin32Error() != ErrorNoSuchProcess)
-            return;
+        _ = kill(-processGroupId, SignalKill);
+    }
+
+    private static bool? TryFindProcessGroupMember(int processGroupId, Stopwatch deadline)
+    {
+        if (processGroupId <= 0)
+            return false;
+        try
+        {
+            int count = 0;
+            foreach (string path in Directory.EnumerateDirectories("/proc"))
+            {
+                if (++count > MaximumProcEntries || deadline.Elapsed >= TeardownTimeout)
+                    return null;
+                if (!int.TryParse(Path.GetFileName(path), out _))
+                    continue;
+                string stat;
+                try
+                {
+                    stat = File.ReadAllText(Path.Combine(path, "stat"));
+                }
+                catch (Exception exception) when (
+                    exception is FileNotFoundException or DirectoryNotFoundException
+                )
+                {
+                    continue;
+                }
+
+                int commandEnd = stat.LastIndexOf(')');
+                if (commandEnd < 0 || commandEnd + 2 >= stat.Length)
+                    continue;
+                string[] fields = stat[(commandEnd + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (
+                    fields.Length >= 4
+                    && int.TryParse(fields[2], out int group)
+                    && int.TryParse(fields[3], out int session)
+                    && group == processGroupId
+                    && session == processGroupId
+                )
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        catch (Exception exception) when (
+            exception is DirectoryNotFoundException or IOException or UnauthorizedAccessException
+        )
+        {
+            return null;
+        }
     }
 
     private static void TryKillDirectProcess(Process process)

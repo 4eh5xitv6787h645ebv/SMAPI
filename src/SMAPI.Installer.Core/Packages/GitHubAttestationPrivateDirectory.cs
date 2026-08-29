@@ -70,7 +70,7 @@ internal sealed class GitHubAttestationPrivateDirectory : IAsyncDisposable
             parent = OpenAbsoluteDirectoryNoFollow(temporaryRoot);
             for (int attempt = 0; attempt < 32; attempt++)
             {
-                entryName = $"smapi-installer-verified-{Guid.NewGuid():N}";
+                entryName = $"smapi-attestation-private-{Guid.NewGuid():N}";
                 if (mkdirat(parent, entryName, PrivateDirectoryMode) == 0)
                     break;
                 if (Marshal.GetLastWin32Error() != ErrorExists)

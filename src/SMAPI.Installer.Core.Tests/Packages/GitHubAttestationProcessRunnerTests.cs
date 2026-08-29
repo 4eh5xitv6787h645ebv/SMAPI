@@ -112,7 +112,7 @@ internal sealed class GitHubAttestationProcessRunnerTests
         GitHubAttestationProcessResult result = await runner.RunAsync(this.Request(script));
 
         result.StandardOutput.Should().Be("verified-json");
-        privateDirectory.Should().MatchRegex(@".*/smapi-installer-verified-[0-9a-f]{32}$");
+        privateDirectory.Should().MatchRegex(@".*/smapi-attestation-private-[0-9a-f]{32}$");
         Directory.Exists(privateDirectory).Should().BeFalse("retained recursive cleanup should remove nested verifier state");
     }
 
@@ -143,7 +143,7 @@ internal sealed class GitHubAttestationProcessRunnerTests
 
             PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
             exception.Message.Should().Be("The GitHub attestation verifier couldn't be started safely.");
-            privateDirectory.Should().MatchRegex(@".*/smapi-installer-verified-[0-9a-f]{32}$");
+            privateDirectory.Should().MatchRegex(@".*/smapi-attestation-private-[0-9a-f]{32}$");
             File.Exists(sentinel).Should().BeTrue("cleanup must not recurse into an identity-mismatched replacement");
             File.ReadAllText(sentinel!).Should().Be("must survive");
             Directory.Exists(movedOriginal).Should().BeTrue("the retained original may be safely leaked after its name is replaced");
@@ -249,6 +249,34 @@ internal sealed class GitHubAttestationProcessRunnerTests
         Func<Task> action = async () => await running;
 
         await action.Should().ThrowAsync<OperationCanceledException>();
+        int descendantPid = int.Parse(await File.ReadAllTextAsync(pidFile));
+        await WaitForProcessExitAsync(descendantPid);
+    }
+
+    [TestCase(0)]
+    [TestCase(23)]
+    public async Task RunAsync_TerminalExitKillsBackgroundProcessWhichClosedInheritedStreams(int exitCode)
+    {
+        string pidFile = Path.Combine(this.TempDirectory, $"closed-streams-{exitCode}.pid");
+        string script = this.Script($$"""
+            /usr/bin/sleep 30 </dev/null >/dev/null 2>&1 &
+            /usr/bin/printf '%s' "$!" > "$1"
+            /usr/bin/printf 'verified-json'
+            exit {{exitCode}}
+            """);
+
+        if (exitCode == 0)
+        {
+            GitHubAttestationProcessResult result = await this.Runner.RunAsync(this.Request(script, [pidFile]));
+            result.StandardOutput.Should().Be("verified-json");
+        }
+        else
+        {
+            Func<Task> action = async () => await this.Runner.RunAsync(this.Request(script, [pidFile]));
+            PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+            exception.Message.Should().Be("The GitHub attestation verifier rejected the selected release evidence.");
+        }
+
         int descendantPid = int.Parse(await File.ReadAllTextAsync(pidFile));
         await WaitForProcessExitAsync(descendantPid);
     }
