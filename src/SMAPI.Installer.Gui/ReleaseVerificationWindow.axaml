@@ -1,0 +1,224 @@
+<Window
+    x:Class="StardewModdingAPI.Installer.Gui.ReleaseVerificationWindow"
+    x:DataType="vm:ReleaseVerificationViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:packages="using:StardewModdingAPI.Installer.Core.Packages"
+    xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
+    Title="SMAPI Linux Installer — Release verification"
+    Width="980"
+    Height="760"
+    MinWidth="420"
+    MinHeight="560"
+    WindowStartupLocation="CenterScreen">
+  <Window.Styles>
+    <Style Selector="Border.keyboard-focus:focus-visible">
+      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderThickness" Value="3" />
+    </Style>
+  </Window.Styles>
+
+  <ScrollViewer
+      x:Name="PageScrollViewer"
+      HorizontalScrollBarVisibility="Disabled"
+      VerticalScrollBarVisibility="Auto">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="18">
+      <StackPanel Grid.Row="0" Spacing="4">
+        <TextBlock
+            AutomationProperties.HeadingLevel="1"
+            FontSize="30"
+            FontWeight="Bold"
+            Text="SMAPI Linux Installer"
+            TextWrapping="Wrap" />
+        <TextBlock Classes="muted" FontSize="16" Text="Experimental Linux release verification" TextWrapping="Wrap" />
+      </StackPanel>
+
+      <Border
+          Grid.Row="1"
+          Padding="14"
+          Background="#192C43"
+          BorderBrush="#5AA7E8"
+          BorderThickness="1"
+          CornerRadius="8">
+        <TextBlock
+            FontWeight="SemiBold"
+            Text="Experimental prereleases only. A verified download is not an installation; you will review a separate change plan before any game files can change."
+            TextWrapping="Wrap" />
+      </Border>
+
+      <Border Grid.Row="2" Classes="card">
+        <StackPanel Spacing="14">
+          <Border
+              x:Name="StatusRegion"
+              Classes="keyboard-focus"
+              TabIndex="0"
+              Focusable="True"
+              AutomationProperties.LiveSetting="{Binding StatusLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}">
+            <StackPanel Spacing="8">
+              <TextBlock
+                  x:Name="StatusHeading"
+                  AutomationProperties.HeadingLevel="2"
+                  FontSize="22"
+                  FontWeight="SemiBold"
+                  Text="{Binding Heading}"
+                  TextWrapping="Wrap" />
+              <TextBlock Classes="muted" Text="{Binding Message}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border
+              x:Name="ErrorRegion"
+              Classes="keyboard-focus"
+              Padding="12"
+              TabIndex="0"
+              Focusable="True"
+              IsVisible="{Binding IsErrorVisible}"
+              AutomationProperties.LiveSetting="Assertive"
+              AutomationProperties.Name="{Binding LiveAnnouncement}"
+              Background="#3B1F26"
+              BorderBrush="#FF8A9A"
+              BorderThickness="2"
+              CornerRadius="6">
+            <TextBlock Text="Verification is blocked. Use the safe next step below; no game files were changed." TextWrapping="Wrap" />
+          </Border>
+
+          <StackPanel Spacing="8">
+            <Label Content="_Experimental release" Target="{Binding #ReleaseSelector}" />
+            <ComboBox
+                x:Name="ReleaseSelector"
+                Classes="focus-ring"
+                TabIndex="1"
+                AutomationProperties.AccessKey="Alt+E"
+                AutomationProperties.Name="Experimental Linux release"
+                AutomationProperties.HelpText="Choose one complete six-file prerelease reviewed by the installer."
+                IsEnabled="{Binding IsReleaseSelectorEnabled}"
+                ItemsSource="{Binding Releases}"
+                SelectedItem="{Binding SelectedRelease}">
+              <ComboBox.ItemTemplate>
+                <DataTemplate x:DataType="packages:ReviewedReleaseCandidate">
+                  <TextBlock Text="{Binding DisplayLabel}" TextWrapping="Wrap" />
+                </DataTemplate>
+              </ComboBox.ItemTemplate>
+            </ComboBox>
+            <TextBlock
+                x:Name="ReleaseDetail"
+                Classes="muted"
+                AutomationProperties.Name="Selected release details"
+                Text="{Binding ReleaseDetail}"
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsProgressVisible}" Spacing="8">
+            <ProgressBar
+                x:Name="ReleaseProgress"
+                Height="12"
+                Minimum="0"
+                Maximum="100"
+                IsIndeterminate="{Binding IsProgressIndeterminate}"
+                Value="{Binding ProgressValue}"
+                AutomationProperties.Name="Release download and verification progress"
+                AutomationProperties.HelpText="{Binding ProgressText}" />
+            <TextBlock
+                x:Name="ProgressText"
+                Classes="muted"
+                Text="{Binding ProgressText}"
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border
+              x:Name="VerifiedEvidence"
+              Padding="14"
+              IsVisible="{Binding IsVerifiedVisible}"
+              AutomationProperties.Name="Verified package evidence"
+              Background="#17372D"
+              BorderBrush="#55C89A"
+              BorderThickness="2"
+              CornerRadius="8">
+            <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="7">
+              <TextBlock Grid.Row="0" FontWeight="Bold" Foreground="#A7F3D0" Text="✓" />
+              <TextBlock Grid.Row="0" Grid.Column="1" FontWeight="SemiBold" Text="Package integrity: verified" TextWrapping="Wrap" />
+              <TextBlock Grid.Row="1" FontWeight="Bold" Foreground="#A7F3D0" Text="✓" />
+              <TextBlock Grid.Row="1" Grid.Column="1" FontWeight="SemiBold" Text="GitHub provenance: verified" TextWrapping="Wrap" />
+              <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Classes="muted" Text="These checks are separate. Nothing has been installed yet." TextWrapping="Wrap" />
+              <TextBlock
+                  Grid.Row="3"
+                  Grid.ColumnSpan="2"
+                  Classes="muted"
+                  AutomationProperties.Name="Authoritative verified release identity"
+                  Text="{Binding VerifiedIdentityDetail}"
+                  TextWrapping="Wrap" />
+            </Grid>
+          </Border>
+
+          <Border Padding="12" Background="#111923" CornerRadius="6">
+            <StackPanel Spacing="3">
+              <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
+              <TextBlock
+                  x:Name="DurableState"
+                  AutomationProperties.Name="Installer durable state"
+                  FontWeight="SemiBold"
+                  Text="{Binding DurableState}"
+                  TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <WrapPanel Orientation="Horizontal">
+            <Button
+                x:Name="DownloadButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="2"
+                AutomationProperties.AccessKey="Alt+D"
+                AutomationProperties.Name="Download and verify selected release"
+                AutomationProperties.HelpText="Downloads and verifies the selected release without installing it."
+                Command="{Binding DownloadAndVerifyCommand}"
+                IsVisible="{Binding IsDownloadActionVisible}"
+                Content="_Download and verify" />
+            <Button
+                x:Name="RetryButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="2"
+                AutomationProperties.AccessKey="Alt+T"
+                AutomationProperties.Name="Try release action again"
+                Command="{Binding RetryCommand}"
+                IsVisible="{Binding IsRetryVisible}"
+                Content="_Try again" />
+            <Button
+                x:Name="ContinueButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="2"
+                AutomationProperties.AccessKey="Alt+N"
+                AutomationProperties.Name="Continue to game folder selection"
+                AutomationProperties.HelpText="Continues to game selection; it does not install immediately."
+                Command="{Binding ContinueCommand}"
+                IsVisible="{Binding IsContinueVisible}"
+                Content="Co_ntinue to game folder" />
+            <Button
+                x:Name="CancelButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="3"
+                AutomationProperties.AccessKey="Alt+C"
+                AutomationProperties.Name="Cancel active release action"
+                AutomationProperties.HelpText="Stops the current bounded step and removes retained release files."
+                Command="{Binding CancelCommand}"
+                IsVisible="{Binding IsCancelVisible}"
+                Content="_Cancel" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="3" Classes="card">
+        <StackPanel Spacing="8">
+          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Manual installation remains available" />
+          <TextBlock
+              Text="If no compatible graphical-installer release is listed, use the documented manual console installer from a verified public package. The graphical installer does not run as root and does not inspect your game during this release-verification step."
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+    </Grid>
+  </ScrollViewer>
+</Window>

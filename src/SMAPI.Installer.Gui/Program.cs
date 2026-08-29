@@ -12,7 +12,11 @@ internal static class Program
             args,
             OperatingSystem.IsLinux(),
             OperatingSystem.IsLinux() ? GetEffectiveUserId() : null,
-            mode => StartSelectedMode(mode, () => BuildAvaloniaApp().StartWithClassicDesktopLifetime(args), Console.Error),
+            mode => StartSelectedMode(
+                mode,
+                selectedMode => BuildAvaloniaApp(selectedMode).StartWithClassicDesktopLifetime(args),
+                Console.Error
+            ),
             Console.Error
         );
     }
@@ -40,24 +44,22 @@ internal static class Program
         return startDesktop(mode);
     }
 
-    internal static int StartSelectedMode(GuiLaunchMode mode, Func<int> startDemo, TextWriter diagnostics)
+    internal static int StartSelectedMode(GuiLaunchMode mode, Func<GuiLaunchMode, int> startDesktop, TextWriter diagnostics)
     {
-        ArgumentNullException.ThrowIfNull(startDemo);
+        ArgumentNullException.ThrowIfNull(startDesktop);
         ArgumentNullException.ThrowIfNull(diagnostics);
-        if (mode != GuiLaunchMode.Demo)
+        if (!Enum.IsDefined(mode))
         {
-            // The production composition remains fail-closed until the reviewed release-verification
-            // screen owns this bridge. Never present the sealed synthetic demo as production UI.
-            diagnostics.WriteLine("The production graphical installer is not enabled in this build. Use exactly --demo to view the safe demo.");
+            diagnostics.WriteLine("The graphical installer launch mode is invalid.");
             return 2;
         }
 
-        return startDemo();
+        return startDesktop(mode);
     }
 
-    public static AppBuilder BuildAvaloniaApp()
+    public static AppBuilder BuildAvaloniaApp(GuiLaunchMode mode)
     {
-        return AppBuilder.Configure<App>()
+        return AppBuilder.Configure(() => new App(mode))
             .UsePlatformDetect()
             .LogToTrace();
     }

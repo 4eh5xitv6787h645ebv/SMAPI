@@ -19,15 +19,23 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
     /// <summary>Construct an instance using a redirect-disabled, cookie-free HTTP handler.</summary>
     /// <param name="uriPolicy">The policy applied before every request.</param>
     public BoundedHttpDownloader(IDownloadUriPolicy uriPolicy)
-        : this(
-            uriPolicy,
-            new SocketsHttpHandler
-            {
-                AllowAutoRedirect = false,
-                UseCookies = false
-            }
-        )
+        : this(uriPolicy, CreateProductionHandler())
     {
+    }
+
+    /// <summary>Create the direct-only production handler used for public release assets.</summary>
+    internal static SocketsHttpHandler CreateProductionHandler()
+    {
+        return new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            AutomaticDecompression = DecompressionMethods.None,
+            Credentials = null,
+            DefaultProxyCredentials = null,
+            PreAuthenticate = false,
+            UseCookies = false,
+            UseProxy = false
+        };
     }
 
     /// <summary>Construct with an internal deterministic handler while preserving the exact caller policy.</summary>
