@@ -290,7 +290,10 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
         startInfo.Environment["GH_CONFIG_DIR"] = privateDirectory;
         startInfo.Environment["XDG_CONFIG_HOME"] = privateDirectory;
         startInfo.Environment["XDG_CACHE_HOME"] = privateDirectory;
+        startInfo.Environment["XDG_RUNTIME_DIR"] = privateDirectory;
         startInfo.Environment["TMPDIR"] = privateDirectory;
+        startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"] = $"unix:path={privateDirectory}/session-bus-unavailable";
+        startInfo.Environment["DBUS_SYSTEM_BUS_ADDRESS"] = $"unix:path={privateDirectory}/system-bus-unavailable";
         startInfo.Environment["GH_PROMPT_DISABLED"] = "1";
         startInfo.Environment["GH_NO_UPDATE_NOTIFIER"] = "1";
         startInfo.Environment["GH_NO_EXTENSION_UPDATE_NOTIFIER"] = "1";

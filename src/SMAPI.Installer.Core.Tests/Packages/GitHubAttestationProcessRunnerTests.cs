@@ -64,6 +64,12 @@ internal sealed class GitHubAttestationProcessRunnerTests
             result.StandardOutput.Should().NotContain($"HOME={this.TempDirectory}");
             result.StandardOutput.Should().Contain("GH_PROMPT_DISABLED=1");
             result.StandardOutput.Should().Contain("GH_NO_UPDATE_NOTIFIER=1");
+            string runtimeDirectory = result.StandardOutput
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Single(line => line.StartsWith("XDG_RUNTIME_DIR=", StringComparison.Ordinal))["XDG_RUNTIME_DIR=".Length..];
+            runtimeDirectory.Should().MatchRegex($@"^/proc/{Environment.ProcessId}/fd/[0-9]+$");
+            result.StandardOutput.Should().Contain($"DBUS_SESSION_BUS_ADDRESS=unix:path={runtimeDirectory}/session-bus-unavailable");
+            result.StandardOutput.Should().Contain($"DBUS_SYSTEM_BUS_ADDRESS=unix:path={runtimeDirectory}/system-bus-unavailable");
             result.StandardOutput.Should().NotContain("private-token").And.NotContain("private-proxy");
         }
         finally
@@ -71,6 +77,28 @@ internal sealed class GitHubAttestationProcessRunnerTests
             Environment.SetEnvironmentVariable("GH_TOKEN", previousToken);
             Environment.SetEnvironmentVariable("HTTPS_PROXY", previousProxy);
         }
+    }
+
+    [Test]
+    public async Task RunAsync_DBusEndpointsAreNonexistentInsideRetainedPrivateRuntimeDirectory()
+    {
+        string script = this.Script("""
+            session=${DBUS_SESSION_BUS_ADDRESS#unix:path=}
+            system=${DBUS_SYSTEM_BUS_ADDRESS#unix:path=}
+            if [ "$session" = "$DBUS_SESSION_BUS_ADDRESS" ] || [ "$system" = "$DBUS_SYSTEM_BUS_ADDRESS" ]; then
+                exit 11
+            fi
+            if [ -e "$session" ] || [ -e "$system" ]; then
+                exit 12
+            fi
+            case "$session" in "$XDG_RUNTIME_DIR"/*) ;; *) exit 13 ;; esac
+            case "$system" in "$XDG_RUNTIME_DIR"/*) ;; *) exit 14 ;; esac
+            /usr/bin/printf 'isolated-runtime'
+            """);
+
+        GitHubAttestationProcessResult result = await this.Run(script);
+
+        result.StandardOutput.Should().Be("isolated-runtime");
     }
 
     [Test]

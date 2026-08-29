@@ -19,18 +19,21 @@ internal sealed class GitHubArtifactAttestationVerificationRequest
     public string PackageProcPath { get; }
     public VerifiedAttestedSubject ManifestSubject { get; }
     public string GitHubCliPath { get; }
+    public string BundleProcPath { get; }
 
     internal GitHubArtifactAttestationVerificationRequest(
         InstallationReleaseIdentity identity,
         string packageProcPath,
         VerifiedAttestedSubject manifestSubject,
-        string gitHubCliPath
+        string gitHubCliPath,
+        string bundleProcPath
     )
     {
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(manifestSubject);
         string procPathValue = AssertCurrentProcessDescriptorPath(packageProcPath, nameof(packageProcPath), "package");
         string gitHubCliPathValue = AssertCurrentProcessDescriptorPath(gitHubCliPath, nameof(gitHubCliPath), "GitHub CLI");
+        string bundleProcPathValue = AssertCurrentProcessDescriptorPath(bundleProcPath, nameof(bundleProcPath), "attestation bundle");
         string expectedManifestName = $"SMAPI-{identity.EmbeddedVersion}-linux-x64-install-manifest.json";
         if (!string.Equals(manifestSubject.Name, expectedManifestName, StringComparison.Ordinal))
             throw new ArgumentException("The retained manifest subject doesn't match the tagged release identity.", nameof(manifestSubject));
@@ -39,6 +42,7 @@ internal sealed class GitHubArtifactAttestationVerificationRequest
         this.PackageProcPath = procPathValue;
         this.ManifestSubject = manifestSubject;
         this.GitHubCliPath = gitHubCliPathValue;
+        this.BundleProcPath = bundleProcPathValue;
     }
 
     private static string AssertCurrentProcessDescriptorPath(string? value, string parameterName, string authorityName)
@@ -97,35 +101,44 @@ internal sealed class GitHubArtifactAttestationVerifier
 
     internal async Task<VerifiedTaggedPackageTrust> VerifyAsync(
         VerifiedInstallerPackage package,
+        VerifiedGitHubAttestationBundle bundle,
         PinnedGitHubCli cli,
         CancellationToken cancellationToken = default
     )
     {
         ArgumentNullException.ThrowIfNull(package);
+        ArgumentNullException.ThrowIfNull(bundle);
         ArgumentNullException.ThrowIfNull(cli);
         cancellationToken.ThrowIfCancellationRequested();
 
         LinuxSealedFileLease? packageLease = null;
         LinuxSealedFileLease? manifestLease = null;
+        LinuxSealedFileLease? bundleLease = null;
         LinuxSealedFileLease? executableLease = null;
         try
         {
             packageLease = package.Package.LeasePackageForExternalRead();
             manifestLease = package.LeaseManifestForExternalRead();
+            bundleLease = bundle.LeaseForExternalRead();
             executableLease = cli.LeaseForExecution();
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (!bundle.Release.Equals(package.Release))
+                throw new PackageSecurityException("The local attestation bundle is bound to a different tagged release.");
 
             GitHubArtifactAttestationVerificationRequest request = new(
                 package.Release,
                 packageLease.ProcPath,
                 new VerifiedAttestedSubject(package.ManifestAssetName, package.ManifestSha256, package.ManifestSizeBytes),
-                executableLease.ProcPath
+                executableLease.ProcPath,
+                bundleLease.ProcPath
             );
             return await this.VerifyAsync(request, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             executableLease?.Dispose();
+            bundleLease?.Dispose();
             manifestLease?.Dispose();
             packageLease?.Dispose();
         }
@@ -160,6 +173,8 @@ internal sealed class GitHubArtifactAttestationVerifier
             "attestation",
             "verify",
             request.PackageProcPath,
+            "--bundle",
+            request.BundleProcPath,
             "--hostname",
             "github.com",
             "--repo",
