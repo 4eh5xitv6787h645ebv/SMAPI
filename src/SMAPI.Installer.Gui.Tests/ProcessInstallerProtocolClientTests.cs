@@ -131,12 +131,13 @@ public sealed class ProcessInstallerProtocolClientTests
     {
         const string selectedPath = "/games/Stardew Valley";
         ProtocolGameCandidate discovered = new(selectedPath, LinuxGameFolderStatus.Valid, "Stardew Valley 1.6.15");
+        ProtocolGameCandidate validatedCandidate = new("/real-games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley 1.6.15");
         ProtocolGameCandidate missing = new("/games/missing", LinuxGameFolderStatus.MissingDirectory, "Stardew Valley folder (missing)");
         ScriptedProcess process = new(request => request switch
         {
             HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
             DiscoverGamesRequest => Serialize(new GameDiscoveryEvent(Session, [discovered, missing]) { CommandId = request.CommandId }),
-            ValidateGameRequest validate when validate.GamePath == selectedPath => Serialize(new GameValidationEvent(Session, discovered) { CommandId = request.CommandId }),
+            ValidateGameRequest validate when validate.GamePath == selectedPath => Serialize(new GameValidationEvent(Session, validatedCandidate) { CommandId = request.CommandId }),
             _ => throw new AssertionException("Unexpected protocol request.")
         });
         await using ProcessInstallerProtocolClient client = Create(process);
@@ -147,7 +148,7 @@ public sealed class ProcessInstallerProtocolClientTests
 
         candidates.Should().Equal(discovered, missing);
         candidates.Should().BeAssignableTo<System.Collections.ObjectModel.ReadOnlyCollection<ProtocolGameCandidate>>();
-        validated.Should().Be(discovered);
+        validated.Should().Be(validatedCandidate, "safe backend anchoring may resolve a selected symlink to another canonical path");
         process.Requests.Select(request => request.Kind).Should().Equal(
             ProtocolMessageKind.HandshakeRequest,
             ProtocolMessageKind.DiscoverGamesRequest,
@@ -168,7 +169,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 [new(selectedPath, LinuxGameFolderStatus.Valid, "Stardew Valley")]
             ) { CommandId = request.CommandId }),
             ValidateGameRequest => Serialize(new GameValidationEvent(
-                Session,
+                ProtocolSessionId.CreateRandom(),
                 new("/games/a-different-root", LinuxGameFolderStatus.Valid, "Stardew Valley")
             ) { CommandId = request.CommandId }),
             _ => throw new AssertionException("Unexpected protocol request.")

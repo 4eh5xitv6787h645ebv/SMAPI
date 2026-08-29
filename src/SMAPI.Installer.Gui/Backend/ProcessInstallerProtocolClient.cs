@@ -251,13 +251,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 new ValidateGameRequest(session, canonicalPath),
                 cancellationToken
             ).ConfigureAwait(false);
-            if (
-                response.SessionId != session
-                || !string.Equals(response.Candidate.CanonicalPath, canonicalPath, StringComparison.Ordinal)
-            )
-            {
+            if (response.SessionId != session)
                 return await this.FailProtocolAsync<ProtocolGameCandidate>().ConfigureAwait(false);
-            }
             return response.Candidate;
         }
         finally
