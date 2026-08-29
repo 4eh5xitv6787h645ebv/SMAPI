@@ -30,6 +30,20 @@ public sealed class BoundedHttpDownloaderTests
     }
 
     [Test]
+    public void ProductionHandlerIsDirectOnlyCredentialFreeAndDoesNotTransformContent()
+    {
+        using SocketsHttpHandler handler = BoundedHttpDownloader.CreateProductionHandler();
+
+        handler.AllowAutoRedirect.Should().BeFalse();
+        handler.AutomaticDecompression.Should().Be(DecompressionMethods.None);
+        handler.Credentials.Should().BeNull();
+        handler.DefaultProxyCredentials.Should().BeNull();
+        handler.PreAuthenticate.Should().BeFalse();
+        handler.UseCookies.Should().BeFalse();
+        handler.UseProxy.Should().BeFalse();
+    }
+
+    [Test]
     public async Task DownloadAsync_ReviewedRedirectAndBoundedBody_AtomicallyCompletes()
     {
         byte[] content = Encoding.UTF8.GetBytes("synthetic package bytes");

@@ -45,16 +45,16 @@ public sealed class ProgramTests
     }
 
     [Test]
-    public void ProductionCompositionFailsClosedWithoutStartingDemo()
+    public void ProductionCompositionStartsOnlyProductionMode()
     {
-        bool demoStarted = false;
+        GuiLaunchMode? started = null;
         using StringWriter diagnostics = new();
 
-        int exit = Program.StartSelectedMode(GuiLaunchMode.Production, () => { demoStarted = true; return 0; }, diagnostics);
+        int exit = Program.StartSelectedMode(GuiLaunchMode.Production, mode => { started = mode; return 19; }, diagnostics);
 
-        exit.Should().Be(2);
-        demoStarted.Should().BeFalse();
-        diagnostics.ToString().Should().Contain("not enabled");
+        exit.Should().Be(19);
+        started.Should().Be(GuiLaunchMode.Production);
+        diagnostics.ToString().Should().BeEmpty();
     }
 
     [Test]
@@ -62,9 +62,24 @@ public sealed class ProgramTests
     {
         using StringWriter diagnostics = new();
 
-        int exit = Program.StartSelectedMode(GuiLaunchMode.Demo, () => 23, diagnostics);
+        GuiLaunchMode? started = null;
+        int exit = Program.StartSelectedMode(GuiLaunchMode.Demo, mode => { started = mode; return 23; }, diagnostics);
 
         exit.Should().Be(23);
+        started.Should().Be(GuiLaunchMode.Demo);
         diagnostics.ToString().Should().BeEmpty();
+    }
+
+    [Test]
+    public void InvalidCompositionModeFailsBeforeDesktopInitialization()
+    {
+        bool started = false;
+        using StringWriter diagnostics = new();
+
+        int exit = Program.StartSelectedMode((GuiLaunchMode)999, _ => { started = true; return 0; }, diagnostics);
+
+        exit.Should().Be(2);
+        started.Should().BeFalse();
+        diagnostics.ToString().Should().Contain("launch mode is invalid");
     }
 }
