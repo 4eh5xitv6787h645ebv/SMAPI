@@ -29,6 +29,12 @@ public sealed record LinuxFileIdentity(
     uint ChangeNanoseconds
 )
 {
+    /// <summary>The observed owning user, available to internal fail-closed Linux authorities.</summary>
+    internal uint OwnerUserId { get; init; }
+
+    /// <summary>The observed set-user-ID, set-group-ID, and sticky bits.</summary>
+    internal int SpecialModeBits { get; init; }
+
     /// <summary>Whether two observations refer to the same filesystem object.</summary>
     public bool IsSameObject(LinuxFileIdentity other)
     {
@@ -106,6 +112,16 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     /// <summary>The captured identity of this anchored root directory.</summary>
     public LinuxFileIdentity Identity => this.RootIdentity;
 
+    /// <summary>The retained root path through this process's descriptor table.</summary>
+    internal string ProcPath
+    {
+        get
+        {
+            this.AssertUsable();
+            return $"/proc/{Environment.ProcessId}/fd/{checked((int)this.RootHandle.DangerousGetHandle())}";
+        }
+    }
+
     /// <summary>Observe the current metadata for the captured root handle after verifying its stable object identity.</summary>
     public LinuxFileIdentity GetCurrentRootIdentity()
     {
@@ -164,6 +180,67 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
     {
         this.AssertUsable();
         return new LinuxAnchoredFileSystem(this.OpenDirectoryPath(relativePath));
+    }
+
+    /// <summary>Create and retain a new real subdirectory without replacing any existing entry.</summary>
+    internal LinuxAnchoredFileSystem CreateNewSubdirectory(
+        string relativePath,
+        int unixMode,
+        out LinuxFileIdentity identity,
+        Action? afterCreatedForTesting = null
+    )
+    {
+        this.AssertUsable();
+        ValidateUnixMode(unixMode);
+        using ParentAndLeaf parent = this.OpenParent(relativePath);
+        if (mkdirat(parent.Parent, parent.Leaf, (uint)unixMode) != 0)
+            throw CreatePathException("Couldn't create an anchored directory without replacement", Marshal.GetLastWin32Error());
+
+        SafeFileHandle? handle = null;
+        LinuxFileIdentity? createdIdentity = null;
+        LinuxFileIdentity? cleanupIdentity = null;
+        try
+        {
+            createdIdentity = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: false)
+                ?? throw new IOException("The newly created anchored directory disappeared.");
+            cleanupIdentity = createdIdentity;
+            if (createdIdentity.Kind != LinuxAnchoredEntryKind.Directory)
+                throw new IOException("The newly created anchored entry isn't a directory.");
+            afterCreatedForTesting?.Invoke();
+            handle = OpenDirectoryAt(parent.Parent, parent.Leaf);
+            LinuxFileIdentity opened = GetHandleIdentity(handle, requireSingleLinkRegularFile: false);
+            if (!opened.IsSameObject(createdIdentity))
+                throw new IOException("The newly created anchored directory changed while it was opened.");
+            SetHandleMode(handle, unixMode);
+            identity = GetHandleIdentity(handle, requireSingleLinkRegularFile: false);
+            cleanupIdentity = identity;
+            LinuxFileIdentity? named = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: false);
+            if (!identity.IsSameObject(createdIdentity) || named != identity)
+                throw new IOException("The newly created anchored directory changed while it was opened.");
+            Fsync(parent.Parent);
+            LinuxAnchoredFileSystem result = new(Duplicate(handle));
+            handle.Dispose();
+            handle = null;
+            return result;
+        }
+        catch
+        {
+            handle?.Dispose();
+            try
+            {
+                LinuxFileIdentity? current = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: true, requireSingleLinkRegularFile: false);
+                if (cleanupIdentity is not null && current == cleanupIdentity)
+                {
+                    _ = unlinkat(parent.Parent, parent.Leaf, AtRemoveDirectory);
+                    Fsync(parent.Parent);
+                }
+            }
+            catch
+            {
+                // Never broaden cleanup beyond the exact entry created by this call.
+            }
+            throw;
+        }
     }
 
     /// <summary>Get a safe regular-file handle without following any path segment.</summary>
@@ -619,7 +696,9 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         this.AssertUsable();
         if (maximumEntries < 0)
             throw new ArgumentOutOfRangeException(nameof(maximumEntries));
-        using SafeFileHandle directory = relativePath is null ? Duplicate(this.RootHandle) : this.OpenDirectoryPath(relativePath);
+        using SafeFileHandle directory = relativePath is null
+            ? OpenDirectoryAt(this.RootHandle, ".")
+            : this.OpenDirectoryPath(relativePath);
         SafeFileHandle duplicate = Duplicate(directory);
         IntPtr stream = fdopendir(duplicate.DangerousGetHandle().ToInt32());
         if (stream == IntPtr.Zero)
@@ -1060,7 +1139,11 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             data.ModificationTime.Nanoseconds,
             data.ChangeTime.Seconds,
             data.ChangeTime.Nanoseconds
-        );
+        )
+        {
+            OwnerUserId = data.UserId,
+            SpecialModeBits = data.Mode & 0xe00
+        };
     }
 
     private static string[] GetSegments(string relativePath)

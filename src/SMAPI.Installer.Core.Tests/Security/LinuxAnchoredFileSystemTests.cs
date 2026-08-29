@@ -200,13 +200,14 @@ public sealed class LinuxAnchoredFileSystemTests
     }
 
     [Test]
-    public void EnumerateEntryNames_ReturnsImmediateNamesDeterministically()
+    public void EnumerateEntryNames_RepeatedCallsReturnImmediateNamesDeterministically()
     {
         File.WriteAllText(Path.Combine(this.RootPath, "zeta"), string.Empty);
         File.WriteAllText(Path.Combine(this.RootPath, "alpha"), string.Empty);
         Directory.CreateDirectory(Path.Combine(this.RootPath, "middle"));
         using LinuxAnchoredFileSystem fileSystem = new(this.RootPath);
 
+        fileSystem.EnumerateEntryNames().Should().Equal("alpha", "middle", "zeta");
         fileSystem.EnumerateEntryNames().Should().Equal("alpha", "middle", "zeta");
     }
 
