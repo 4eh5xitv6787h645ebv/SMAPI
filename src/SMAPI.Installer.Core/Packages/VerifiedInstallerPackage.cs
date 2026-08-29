@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Ownership.Persistence;
 using StardewModdingAPI.Installer.Core.Security;
@@ -11,7 +12,8 @@ namespace StardewModdingAPI.Installer.Core.Packages;
 /// </summary>
 public sealed class VerifiedInstallerPackage : IDisposable, IAsyncDisposable
 {
-    private bool Disposed;
+    private readonly SafeFileHandle? RetainedManifest;
+    private int Disposed;
 
     /// <summary>The exact cross-verified release identity.</summary>
     public InstallationReleaseIdentity Release => this.Manifest.Release;
@@ -19,42 +21,73 @@ public sealed class VerifiedInstallerPackage : IDisposable, IAsyncDisposable
     /// <summary>The canonical install-manifest digest.</summary>
     public Sha256Digest ManifestSha256 { get; }
 
+    /// <summary>The exact checksummed install-manifest asset name.</summary>
+    internal string ManifestAssetName { get; }
+
+    /// <summary>The exact checksummed install-manifest byte length.</summary>
+    internal long ManifestSizeBytes { get; }
+
     internal VerifiedReleasePackage Package { get; }
     internal PackageManifest Manifest { get; }
 
     internal VerifiedInstallerPackage(
         VerifiedReleasePackage package,
         PackageManifest manifest,
-        Sha256Digest manifestSha256
+        Sha256Digest manifestSha256,
+        string manifestAssetName,
+        long manifestSizeBytes,
+        SafeFileHandle? retainedManifest
     )
     {
-        this.Package = package;
-        this.Manifest = manifest;
-        this.ManifestSha256 = manifestSha256;
+        this.Package = package ?? throw new ArgumentNullException(nameof(package));
+        this.Manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
+        this.ManifestSha256 = manifestSha256 ?? throw new ArgumentNullException(nameof(manifestSha256));
+        if (string.IsNullOrWhiteSpace(manifestAssetName))
+            throw new ArgumentException("The exact install-manifest asset name is required.", nameof(manifestAssetName));
+        if (manifestSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(manifestSizeBytes));
+        if (OperatingSystem.IsLinux() != (retainedManifest is not null))
+            throw new ArgumentException("Linux installer authority requires one retained immutable manifest descriptor.", nameof(retainedManifest));
+        if (retainedManifest is not null)
+        {
+            using LinuxSealedFileLease _ = LinuxSealedFile.LeaseForExternalRead(retainedManifest);
+        }
+        this.ManifestAssetName = manifestAssetName;
+        this.ManifestSizeBytes = manifestSizeBytes;
+        this.RetainedManifest = retainedManifest;
     }
 
     internal void AssertUsable()
     {
-        if (this.Disposed)
+        if (Volatile.Read(ref this.Disposed) != 0)
             throw new ObjectDisposedException(nameof(VerifiedInstallerPackage));
         _ = this.Package.GetArtifact(this.Release.PackageAssetName);
+    }
+
+    /// <summary>Lease the exact immutable manifest descriptor for an external verifier.</summary>
+    internal LinuxSealedFileLease LeaseManifestForExternalRead()
+    {
+        this.AssertUsable();
+        SafeFileHandle handle = this.RetainedManifest
+            ?? throw new PlatformNotSupportedException("External manifest descriptor leases are only supported on Linux.");
+        return LinuxSealedFile.LeaseForExternalRead(handle);
     }
 
     /// <inheritdoc />
     public void Dispose()
     {
-        if (this.Disposed)
+        if (Interlocked.Exchange(ref this.Disposed, 1) != 0)
             return;
-        this.Disposed = true;
+        this.RetainedManifest?.Dispose();
         this.Package.Dispose();
     }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (this.Disposed)
+        if (Interlocked.Exchange(ref this.Disposed, 1) != 0)
             return;
-        this.Disposed = true;
+        this.RetainedManifest?.Dispose();
         await this.Package.DisposeAsync().ConfigureAwait(false);
     }
 }
@@ -107,19 +140,76 @@ public sealed class VerifiedInstallerPackageFactory
         if (!string.Equals(actualSha256, expected.Sha256, StringComparison.Ordinal))
             throw new PackageSecurityException("The selected install manifest doesn't match SHA256SUMS and build-metadata.json.");
 
-        PackageManifest manifest;
+        SafeFileHandle? retainedManifest = null;
         try
         {
-            manifest = CanonicalOwnershipDocuments.ParseManifest(bytes, limits);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (OperatingSystem.IsLinux())
+            {
+                retainedManifest = LinuxSealedFile.CreateAnonymous("smapi-installer-verified-manifest");
+                RandomAccess.Write(retainedManifest, bytes, 0);
+                cancellationToken.ThrowIfCancellationRequested();
+                LinuxSealedFile.SealImmutable(retainedManifest);
+                AssertRetainedManifest(retainedManifest, bytes.LongLength, actualSha256, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            PackageManifest manifest = CanonicalOwnershipDocuments.ParseManifest(bytes, limits);
+            if (!manifest.Release.Equals(package.InstallationIdentity))
+                throw new PackageSecurityException("The verified install manifest names a different release package.");
+
+            VerifiedInstallerPackage result = new(
+                package,
+                manifest,
+                Sha256Digest.Parse(actualSha256),
+                expectedName,
+                bytes.LongLength,
+                retainedManifest
+            );
+            retainedManifest = null;
+            return result;
         }
         catch (OwnershipDocumentException ex)
         {
             throw new PackageSecurityException("The verified install manifest isn't canonical or valid.", ex);
         }
+        finally
+        {
+            retainedManifest?.Dispose();
+        }
+    }
 
-        if (!manifest.Release.Equals(package.InstallationIdentity))
-            throw new PackageSecurityException("The verified install manifest names a different release package.");
+    private static void AssertRetainedManifest(
+        SafeFileHandle retainedManifest,
+        long expectedSize,
+        string expectedSha256,
+        CancellationToken cancellationToken
+    )
+    {
+        if (RandomAccess.GetLength(retainedManifest) != expectedSize)
+            throw new PackageSecurityException("The retained install manifest has an unexpected byte length.");
 
-        return new VerifiedInstallerPackage(package, manifest, Sha256Digest.Parse(actualSha256));
+        using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = new byte[Math.Min(128 * 1024, checked((int)expectedSize))];
+        long offset = 0;
+        while (offset < expectedSize)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int count = RandomAccess.Read(
+                retainedManifest,
+                buffer.AsSpan(0, (int)Math.Min(buffer.Length, expectedSize - offset)),
+                offset
+            );
+            if (count <= 0)
+                throw new PackageSecurityException("The retained install manifest ended before its verified byte length.");
+            hasher.AppendData(buffer, 0, count);
+            offset = checked(offset + count);
+        }
+
+        if (RandomAccess.GetLength(retainedManifest) != expectedSize || RandomAccess.Read(retainedManifest, buffer.AsSpan(0, 1), expectedSize) != 0)
+            throw new PackageSecurityException("The retained install manifest changed while it was verified.");
+        string actualSha256 = Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+        if (!string.Equals(actualSha256, expectedSha256, StringComparison.Ordinal))
+            throw new PackageSecurityException("The retained install manifest doesn't match its verified digest.");
     }
 }
