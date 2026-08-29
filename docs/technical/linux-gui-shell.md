@@ -8,6 +8,8 @@ Avalonia and the operating-system desktop stack still make their normal infrastr
 
 ![The Linux installer shell showing synthetic selections, a safe-demo warning, disconnected state, disabled execution, and an in-memory demo log.](../screenshots/linux-installer-safe-demo.png)
 
+[Review the exact source, capture environment, checksum, and privacy record for this screenshot.](../screenshots/linux-installer-safe-demo.provenance.html)
+
 ## Build and run on Linux
 
 Install the .NET 10 SDK and the normal desktop libraries required by Avalonia for your distribution. From the repository root:
