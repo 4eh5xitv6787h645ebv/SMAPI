@@ -272,12 +272,17 @@ public sealed class VerifiedTaggedPackageTrust : IEquatable<VerifiedTaggedPackag
         InstallationReleaseIdentity identity,
         VerifiedAttestedSubject packageSubject,
         VerifiedAttestedSubject manifestSubject,
+        Sha256Digest retainedManifestSha256,
+        long retainedManifestSizeBytes,
         VerifiedGitHubWorkflowEvidence evidence
     )
     {
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(packageSubject);
         ArgumentNullException.ThrowIfNull(manifestSubject);
+        ArgumentNullException.ThrowIfNull(retainedManifestSha256);
+        if (retainedManifestSizeBytes is <= 0 or > InstallationPackageIdentity.MaximumPackageSizeBytes)
+            throw new ArgumentOutOfRangeException(nameof(retainedManifestSizeBytes));
         ArgumentNullException.ThrowIfNull(evidence);
 
         VerifiedTaggedPackageTrust.RequireSubject(
@@ -288,8 +293,13 @@ public sealed class VerifiedTaggedPackageTrust : IEquatable<VerifiedTaggedPackag
             nameof(packageSubject)
         );
         string expectedManifestName = $"SMAPI-{identity.EmbeddedVersion}-linux-x64-install-manifest.json";
-        if (!string.Equals(manifestSubject.Name, expectedManifestName, StringComparison.Ordinal))
-            throw new ArgumentException("The attested manifest subject doesn't match the exact release manifest name.", nameof(manifestSubject));
+        VerifiedTaggedPackageTrust.RequireSubject(
+            manifestSubject,
+            expectedManifestName,
+            retainedManifestSha256,
+            retainedManifestSizeBytes,
+            nameof(manifestSubject)
+        );
 
         VerifiedTaggedPackageTrust.RequireEvidence(identity, evidence);
 
@@ -335,7 +345,7 @@ public sealed class VerifiedTaggedPackageTrust : IEquatable<VerifiedTaggedPackag
             || subject.ObservedSizeBytes != expectedSizeBytes
         )
         {
-            throw new ArgumentException("The attested package subject doesn't match the exact retained release package.", parameterName);
+            throw new ArgumentException("The attested subject doesn't match the exact retained release artifact.", parameterName);
         }
     }
 

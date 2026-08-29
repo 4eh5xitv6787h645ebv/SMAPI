@@ -115,9 +115,9 @@ internal sealed class VerifiedTaggedPackageTrustTests
         VerifiedAttestedSubject wrongDigest = new(PackageName, Sha256Digest.Parse(new string('c', 64)), identity.PackageSizeBytes);
         VerifiedAttestedSubject wrongSize = new(PackageName, PackageSha256, identity.PackageSizeBytes + 1);
 
-        Action name = () => new VerifiedTaggedPackageTrust(identity, wrongName, manifest, evidence);
-        Action digest = () => new VerifiedTaggedPackageTrust(identity, wrongDigest, manifest, evidence);
-        Action size = () => new VerifiedTaggedPackageTrust(identity, wrongSize, manifest, evidence);
+        Action name = () => CreateTrust(identity, wrongName, manifest, evidence);
+        Action digest = () => CreateTrust(identity, wrongDigest, manifest, evidence);
+        Action size = () => CreateTrust(identity, wrongSize, manifest, evidence);
 
         name.Should().Throw<ArgumentException>().WithParameterName("packageSubject");
         digest.Should().Throw<ArgumentException>().WithParameterName("packageSubject");
@@ -133,10 +133,40 @@ internal sealed class VerifiedTaggedPackageTrustTests
             identity,
             CreatePackageSubject(identity),
             wrongManifest,
+            ManifestSha256,
+            6543,
             CreateEvidence(identity)
         );
 
         construct.Should().Throw<ArgumentException>().WithParameterName("manifestSubject");
+    }
+
+    [Test]
+    public void TrustRejectsSameNameManifestSubjectWithWrongDigestOrSize()
+    {
+        InstallationReleaseIdentity identity = CreateIdentity();
+        VerifiedGitHubWorkflowEvidence evidence = CreateEvidence(identity);
+        VerifiedAttestedSubject wrongDigest = new(ManifestName, Sha256Digest.Parse(new string('c', 64)), 6543);
+        VerifiedAttestedSubject wrongSize = new(ManifestName, ManifestSha256, 6544);
+        Action digest = () => new VerifiedTaggedPackageTrust(
+            identity,
+            CreatePackageSubject(identity),
+            wrongDigest,
+            ManifestSha256,
+            6543,
+            evidence
+        );
+        Action size = () => new VerifiedTaggedPackageTrust(
+            identity,
+            CreatePackageSubject(identity),
+            wrongSize,
+            ManifestSha256,
+            6543,
+            evidence
+        );
+
+        digest.Should().Throw<ArgumentException>().WithParameterName("manifestSubject");
+        size.Should().Throw<ArgumentException>().WithParameterName("manifestSubject");
     }
 
     [Test]
@@ -158,7 +188,14 @@ internal sealed class VerifiedTaggedPackageTrustTests
             6543
         );
 
-        Action construct = () => new VerifiedTaggedPackageTrust(other, package, manifest, CreateEvidence(identity));
+        Action construct = () => new VerifiedTaggedPackageTrust(
+            other,
+            package,
+            manifest,
+            manifest.Sha256,
+            manifest.ObservedSizeBytes,
+            CreateEvidence(identity)
+        );
 
         construct.Should().Throw<ArgumentException>().WithParameterName("evidence");
     }
@@ -240,7 +277,26 @@ internal sealed class VerifiedTaggedPackageTrustTests
             identity,
             CreatePackageSubject(identity),
             CreateManifestSubject(manifestSha256),
+            manifestSha256 ?? ManifestSha256,
+            6543,
             CreateEvidence(identity, runInvocationUri: invocation, tlogUtc: tlogUtc)
+        );
+    }
+
+    private static VerifiedTaggedPackageTrust CreateTrust(
+        InstallationReleaseIdentity identity,
+        VerifiedAttestedSubject package,
+        VerifiedAttestedSubject manifest,
+        VerifiedGitHubWorkflowEvidence evidence
+    )
+    {
+        return new VerifiedTaggedPackageTrust(
+            identity,
+            package,
+            manifest,
+            ManifestSha256,
+            6543,
+            evidence
         );
     }
 
