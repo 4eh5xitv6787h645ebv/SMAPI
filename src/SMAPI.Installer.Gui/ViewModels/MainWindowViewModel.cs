@@ -28,10 +28,10 @@ internal sealed class MainWindowViewModel : ObservableObject
         this.ExecuteCommand = new RelayCommand(() => { }, () => false);
 
         this.LogEntries.Add("DEMO  Ready. Synthetic selections are loaded; the installer backend is disconnected.");
-        this.LogEntries.Add("SAFE  No game folder, Mods folder, save, package, or network resource has been accessed.");
+        this.LogEntries.Add("SAFE  No installer backend or app download ran; no game, Mods, save, or package was inspected or changed.");
     }
 
-    public string SafetyBanner => "SAFE DEMO MODE — synthetic data only. Backend disconnected. No game, Mods, saves, packages, or network are accessed.";
+    public string SafetyBanner => "SAFE DEMO MODE — fixed synthetic data. Installer backend disconnected. No game, Mods, saves, or packages are inspected or changed; no app download runs.";
 
     public IReadOnlyList<FolderChoice> Folders => this.session.Folders;
 

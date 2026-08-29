@@ -35,8 +35,8 @@ public sealed class DemoInstallerFrontendSessionTests
 
         preview.DurableState.Should().Be(ProtocolDurableState.Unchanged);
         preview.StateLabel.Should().Contain("Unchanged");
-        preview.LogEntries.Should().Contain(p => p.Contains("No backend action ran", StringComparison.Ordinal));
-        preview.LogEntries.Should().Contain(p => p.Contains("no files", StringComparison.Ordinal));
+        preview.LogEntries.Should().Contain(p => p.Contains("No installer backend", StringComparison.Ordinal));
+        preview.LogEntries.Should().Contain(p => p.Contains("no game", StringComparison.Ordinal));
     }
 
     [Test]

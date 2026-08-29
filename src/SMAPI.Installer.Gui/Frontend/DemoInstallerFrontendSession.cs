@@ -59,7 +59,7 @@ internal sealed class DemoInstallerFrontendSession
                 $"DEMO  Selected folder: {folder.Label} ({folder.Path})",
                 $"DEMO  Selected release: {release.Label} [{release.VersionLabel}]",
                 $"DEMO  Prepared a synthetic {operation.Label.ToLowerInvariant()} preview.",
-                "SAFE  No backend action ran; no files, saves, Mods, or network resources were accessed."
+                "SAFE  No installer backend or app download ran; no game, Mods, save, or package was inspected or changed."
             ])
         );
 
