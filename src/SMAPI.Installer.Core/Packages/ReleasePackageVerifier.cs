@@ -298,6 +298,37 @@ public sealed class ReleasePackageVerifier
         ).ConfigureAwait(false);
     }
 
+    internal async Task<VerifiedReleasePackage> VerifyFilesAsync(
+        IRetainedReleaseAssetSource source,
+        ForkReleaseIdentity identity,
+        string expectedSourceCommit,
+        PackageVerificationLimits? limits = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(identity);
+        limits ??= PackageVerificationLimits.Default;
+
+        string checksums;
+        using (RetainedReleaseAssetFile file = source.Open(ReleasePackageVerifier.ChecksumAssetName, "checksum document"))
+            checksums = await file.ReadUtf8TextAsync(limits.MaxChecksumBytes, cancellationToken).ConfigureAwait(false);
+        string metadata;
+        using (RetainedReleaseAssetFile file = source.Open(ReleasePackageVerifier.BuildMetadataAssetName, "build metadata"))
+            metadata = await file.ReadUtf8TextAsync(limits.MaxMetadataBytes, cancellationToken).ConfigureAwait(false);
+        using RetainedReleaseAssetFile package = source.Open(identity.PackageAssetName, "installer package");
+        return await this.VerifyRetainedAsync(
+            package,
+            checksums,
+            metadata,
+            identity,
+            expectedSourceCommit,
+            limits,
+            cancellationToken
+        ).ConfigureAwait(false);
+    }
+
     /// <summary>Verify a release into private staging and retain the exact verified read handle.</summary>
     public async Task<VerifiedReleasePackage> VerifyAsync(
         string packagePath,
@@ -319,16 +350,46 @@ public sealed class ReleasePackageVerifier
             throw new ArgumentException("The expected source commit must be a full lowercase Git commit.", nameof(expectedSourceCommit));
         limits ??= PackageVerificationLimits.Default;
 
+        string fullPackagePath = Path.GetFullPath(packagePath);
+        if (!string.Equals(Path.GetFileName(fullPackagePath), identity.PackageAssetName, StringComparison.Ordinal))
+            throw new PackageSecurityException("The selected installer filename doesn't match its release identity.");
+        using RetainedReleaseAssetFile source = RetainedReleaseAssetFile.Open(fullPackagePath, "installer package");
+        return await this.VerifyRetainedAsync(
+            source,
+            checksumDocument,
+            metadataDocument,
+            identity,
+            expectedSourceCommit,
+            limits,
+            cancellationToken
+        ).ConfigureAwait(false);
+    }
+
+    internal async Task<VerifiedReleasePackage> VerifyRetainedAsync(
+        RetainedReleaseAssetFile source,
+        string checksumDocument,
+        string metadataDocument,
+        ForkReleaseIdentity identity,
+        string expectedSourceCommit,
+        PackageVerificationLimits limits,
+        CancellationToken cancellationToken
+    )
+    {
+        LinuxPrivilegeGuard.AssertNotRoot();
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(checksumDocument);
+        ArgumentNullException.ThrowIfNull(metadataDocument);
+        ArgumentNullException.ThrowIfNull(identity);
+        if (expectedSourceCommit == null || !ReleasePackageVerifier.CommitPattern.IsMatch(expectedSourceCommit))
+            throw new ArgumentException("The expected source commit must be a full lowercase Git commit.", nameof(expectedSourceCommit));
+        ArgumentNullException.ThrowIfNull(limits);
+
         this.AssertTextBound(checksumDocument, limits.MaxChecksumBytes, "checksum document");
         this.AssertTextBound(metadataDocument, limits.MaxMetadataBytes, "build metadata");
         IReadOnlyDictionary<string, string> checksumHashes = this.ParseChecksumDocument(checksumDocument);
         ReleaseBuildMetadata metadata = this.ParseMetadata(metadataDocument, identity.PackageAssetName);
         this.AssertArtifactSetsAgree(checksumHashes, metadata.Artifacts);
         string checksumHash = checksumHashes[identity.PackageAssetName];
-
-        string fullPackagePath = Path.GetFullPath(packagePath);
-        if (!string.Equals(Path.GetFileName(fullPackagePath), identity.PackageAssetName, StringComparison.Ordinal))
-            throw new PackageSecurityException("The selected installer filename doesn't match its release identity.");
 
         string? stagingDirectory = null;
         string? stagingPath = null;
@@ -369,16 +430,13 @@ public sealed class ReleasePackageVerifier
 
             long size;
             string packageHash;
-            using (RetainedReleaseAssetFile source = RetainedReleaseAssetFile.Open(fullPackagePath, "installer package"))
-            {
-                size = source.Size;
-                if (size <= 0 || size > limits.MaxPackageBytes)
-                    throw new PackageSecurityException("The selected installer package has an invalid or excessive size.");
+            size = source.Size;
+            if (size <= 0 || size > limits.MaxPackageBytes)
+                throw new PackageSecurityException("The selected installer package has an invalid or excessive size.");
 
-                packageHash = await source.CopyAndHashAsync(stagingStream, limits.MaxPackageBytes, cancellationToken).ConfigureAwait(false);
-                await stagingStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                stagingStream.Flush(flushToDisk: true);
-            }
+            packageHash = await source.CopyAndHashAsync(stagingStream, limits.MaxPackageBytes, cancellationToken).ConfigureAwait(false);
+            await stagingStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            stagingStream.Flush(flushToDisk: true);
 
             this.AssertMetadata(metadata, identity, size, expectedSourceCommit);
             if (!string.Equals(packageHash, checksumHash, StringComparison.OrdinalIgnoreCase))

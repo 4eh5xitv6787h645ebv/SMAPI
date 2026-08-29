@@ -14,10 +14,12 @@ public sealed record ReviewedReleaseAcquisitionProgress(
 );
 
 /// <summary>
-/// The exact six retained process-descriptor paths bound to one same-candidate resolved-tag authority. This remains internal
-/// until the dependent protocol opener can validate cross-process retained-directory descriptor paths explicitly.
+/// The exact six retained process-descriptor paths bound to one same-candidate resolved-tag authority. Instances can only
+/// be issued by a live <see cref="ReviewedReleaseAssetLease"/> after same-candidate resolved-tag validation.
+/// These ephemeral capability paths are valid only while that lease remains live; callers must never persist, log, or
+/// display them. The direct-child backend independently revalidates their parent, workspace identity, and six files.
 /// </summary>
-internal sealed class ReviewedReleaseProtocolAssetPaths
+public sealed class ReviewedReleaseProtocolAssetPaths
 {
     public string ReleaseTag { get; }
     public string SourceCommit { get; }
@@ -27,6 +29,11 @@ internal sealed class ReviewedReleaseProtocolAssetPaths
     public string BuildMetadataPath { get; }
     public string AttestationBundlePath { get; }
     public string AttestationBundleChecksumPath { get; }
+    public uint WorkspaceDeviceMajor { get; }
+    public uint WorkspaceDeviceMinor { get; }
+    public ulong WorkspaceInode { get; }
+    public long WorkspaceChangeSeconds { get; }
+    public uint WorkspaceChangeNanoseconds { get; }
 
     internal ReviewedReleaseProtocolAssetPaths(
         string releaseTag,
@@ -36,7 +43,12 @@ internal sealed class ReviewedReleaseProtocolAssetPaths
         string checksumsPath,
         string buildMetadataPath,
         string attestationBundlePath,
-        string attestationBundleChecksumPath
+        string attestationBundleChecksumPath,
+        uint workspaceDeviceMajor,
+        uint workspaceDeviceMinor,
+        ulong workspaceInode,
+        long workspaceChangeSeconds,
+        uint workspaceChangeNanoseconds
     )
     {
         this.ReleaseTag = releaseTag;
@@ -47,14 +59,18 @@ internal sealed class ReviewedReleaseProtocolAssetPaths
         this.BuildMetadataPath = buildMetadataPath;
         this.AttestationBundlePath = attestationBundlePath;
         this.AttestationBundleChecksumPath = attestationBundleChecksumPath;
+        this.WorkspaceDeviceMajor = workspaceDeviceMajor;
+        this.WorkspaceDeviceMinor = workspaceDeviceMinor;
+        this.WorkspaceInode = workspaceInode;
+        this.WorkspaceChangeSeconds = workspaceChangeSeconds;
+        this.WorkspaceChangeNanoseconds = workspaceChangeNanoseconds;
     }
 }
 
 /// <summary>A retained private acquisition whose descriptor paths stay valid only while this lease is held.</summary>
 /// <remarks>
-/// This slice owns acquisition authority only. Its internal process-descriptor projection isn't accepted by the
-/// current production protocol opener; that requires the immediately dependent strict cross-process proc-directory
-/// anchoring change. A process crash can leave one bounded random private workspace; normal disposal never performs
+/// The process-descriptor projection is accepted only by the strict direct-parent proc-directory protocol opener and
+/// is bound to the workspace's captured kernel identity. A process crash can leave one bounded random private workspace; normal disposal never performs
 /// recursive or pathname-fallback deletion.
 /// </remarks>
 public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
@@ -75,16 +91,16 @@ public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
     /// Bind the retained assets to a same-candidate resolved-tag authority. This method doesn't prove when the remote
     /// documents were fetched. The dependent serialized controller must fetch the refreshed reference after all six
     /// downloads, then call <see cref="ReviewedGitHubTagResolver.ResolveAfterRefresh"/> and this method before exposing
-    /// paths. The projection remains internal until a dependent backend change can consume proc-directory capabilities
-    /// without a named-path fallback.
+    /// paths. The backend independently captures all six through one strict parent proc-directory authority.
     /// </summary>
-    internal ReviewedReleaseProtocolAssetPaths Bind(ReviewedGitHubResolvedTag resolvedTag)
+    public ReviewedReleaseProtocolAssetPaths Bind(ReviewedGitHubResolvedTag resolvedTag)
     {
         ArgumentNullException.ThrowIfNull(resolvedTag);
         if (!ReferenceEquals(resolvedTag.Release, this.Candidate))
             throw new PackageSecurityException("The resolved tag belongs to a different reviewed release selection.");
         this.Workspace.AssertComplete(this.Candidate);
 
+        LinuxFileIdentity workspaceIdentity = this.Workspace.Identity;
         return new ReviewedReleaseProtocolAssetPaths(
             resolvedTag.ReleaseTag,
             resolvedTag.SourceCommit,
@@ -93,7 +109,12 @@ public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
             this.GetPath(ReviewedReleaseAssetKind.Checksums),
             this.GetPath(ReviewedReleaseAssetKind.BuildMetadata),
             this.GetPath(ReviewedReleaseAssetKind.AttestationBundle),
-            this.GetPath(ReviewedReleaseAssetKind.AttestationBundleChecksum)
+            this.GetPath(ReviewedReleaseAssetKind.AttestationBundleChecksum),
+            workspaceIdentity.DeviceMajor,
+            workspaceIdentity.DeviceMinor,
+            workspaceIdentity.Inode,
+            workspaceIdentity.ChangeSeconds,
+            workspaceIdentity.ChangeNanoseconds
         );
     }
 
@@ -111,7 +132,7 @@ public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
 
 /// <summary>
 /// Acquires exactly the six public assets of one Core-reviewed GitHub release into private retained storage. This is
-/// acquisition authority only and isn't wired to the current production protocol opener yet.
+/// acquisition authority; the production opener independently recaptures and verifies its six retained files.
 /// </summary>
 public static class ReviewedReleaseAssetAcquirer
 {

@@ -181,7 +181,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 package.BuildMetadataPath,
                 package.InstallManifestPath,
                 package.AttestationBundlePath,
-                package.AttestationBundleChecksumPath
+                package.AttestationBundleChecksumPath,
+                package.ProcWorkspaceIdentity
             );
             ProtocolEvent response = await this.ExchangeAsync<ProtocolEvent>(request, cancellationToken).ConfigureAwait(false);
             switch (response)

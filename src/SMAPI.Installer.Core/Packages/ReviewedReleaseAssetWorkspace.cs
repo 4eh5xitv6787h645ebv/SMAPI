@@ -26,6 +26,8 @@ internal sealed class ReviewedReleaseAssetWorkspace : IAsyncDisposable
     public LinuxAnchoredFileSystem FileSystem => this.DirectoryAuthority
         ?? throw new ObjectDisposedException(nameof(ReviewedReleaseAssetWorkspace));
 
+    public LinuxFileIdentity Identity => this.FileSystem.GetCurrentRootIdentity();
+
     private ReviewedReleaseAssetWorkspace(
         LinuxAnchoredFileSystem parent,
         LinuxAnchoredFileSystem directory,

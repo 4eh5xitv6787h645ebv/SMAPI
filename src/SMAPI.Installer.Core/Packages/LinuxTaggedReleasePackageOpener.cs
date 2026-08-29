@@ -76,4 +76,58 @@ public sealed class LinuxTaggedReleasePackageOpener
             release?.Dispose();
         }
     }
+
+    internal async Task<VerifiedPackageContent> OpenAsync(
+        LinuxTaggedReleaseAssetSet assets,
+        IRetainedReleaseAssetSource source,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(assets);
+        ArgumentNullException.ThrowIfNull(source);
+        ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(assets.ReleaseTag);
+        VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyFilesAsync(
+            source,
+            identity,
+            assets.ExpectedSourceCommit,
+            cancellationToken: cancellationToken
+        ).ConfigureAwait(false);
+        try
+        {
+            VerifiedInstallerPackage? installer = await new VerifiedInstallerPackageFactory().VerifyAsync(
+                release,
+                source,
+                cancellationToken: cancellationToken
+            ).ConfigureAwait(false);
+            release = null;
+            try
+            {
+                using VerifiedGitHubAttestationBundle bundle = await new VerifiedGitHubAttestationBundleFactory().VerifyAsync(
+                    installer,
+                    source,
+                    cancellationToken
+                ).ConfigureAwait(false);
+                using PinnedGitHubCli cli = await PinnedGitHubCli.OpenAsync(assets.GitHubCliPath, cancellationToken).ConfigureAwait(false);
+                VerifiedTaggedPackageTrust trust = await new GitHubArtifactAttestationVerifier(
+                    new GitHubAttestationProcessRunner()
+                ).VerifyAsync(installer, bundle, cli, cancellationToken).ConfigureAwait(false);
+                installer.BindTrust(trust);
+
+                VerifiedPackageContent result = await new VerifiedPackageContentFactory().ExtractAsync(
+                    installer,
+                    cancellationToken: cancellationToken
+                ).ConfigureAwait(false);
+                installer = null;
+                return result;
+            }
+            finally
+            {
+                installer?.Dispose();
+            }
+        }
+        finally
+        {
+            release?.Dispose();
+        }
+    }
 }

@@ -24,7 +24,8 @@ internal sealed record InstallerPackageOpenInput(
     string BuildMetadataPath,
     string InstallManifestPath,
     string AttestationBundlePath,
-    string AttestationBundleChecksumPath
+    string AttestationBundleChecksumPath,
+    ProtocolProcWorkspaceIdentity? ProcWorkspaceIdentity = null
 );
 
 /// <summary>A sanitized, typed outcome from local package verification.</summary>

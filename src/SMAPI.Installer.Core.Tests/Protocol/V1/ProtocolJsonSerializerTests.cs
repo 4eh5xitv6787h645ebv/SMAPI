@@ -155,6 +155,37 @@ internal sealed class ProtocolJsonSerializerTests
     }
 
     [Test]
+    public void OpenPackageRequest_ValidatesExactOptionalProcWorkspaceIdentity()
+    {
+        OpenPackageRequest request = new(
+            ProtocolSessionId.CreateRandom(),
+            CreateRelease().Tag,
+            CreateRelease().SourceCommit,
+            "/proc/123/fd/4/package.zip",
+            "/proc/123/fd/4/SHA256SUMS",
+            "/proc/123/fd/4/build.json",
+            "/proc/123/fd/4/install.json",
+            "/proc/123/fd/4/bundle.jsonl",
+            "/proc/123/fd/4/bundle.sha256",
+            new ProtocolProcWorkspaceIdentity(1, 2, 3, 4, 5)
+        );
+        string line = ProtocolJsonSerializer.SerializeLine(request);
+        ProtocolJsonSerializer.DeserializeRequestLine(line).Should().BeEquivalentTo(request);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(
+            line.Replace("\"inode\":3", "\"inode\":3,\"extra\":4", StringComparison.Ordinal)
+        )).Should().Throw<ProtocolException>().WithMessage("*unknown 'extra'*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(
+            line.Replace(",\"inode\":3", "", StringComparison.Ordinal)
+        )).Should().Throw<ProtocolException>().WithMessage("*missing the required 'inode'*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(
+            line.Replace("\"inode\":3", "\"inode\":0", StringComparison.Ordinal)
+        )).Should().Throw<ProtocolException>().WithMessage("*outside its canonical bounds*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(
+            line.Replace("\"procWorkspaceIdentity\":{", "\"procWorkspaceIdentity\":[]", StringComparison.Ordinal)
+        )).Should().Throw<ProtocolException>();
+    }
+
+    [Test]
     public void PlanSummaryAndPages_ValidateStructuredDataIndependentlyOfPagedDigestAuthority()
     {
         PlanEvent plan = CreatePlan();

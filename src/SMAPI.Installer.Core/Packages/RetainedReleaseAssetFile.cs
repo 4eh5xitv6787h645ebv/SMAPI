@@ -10,6 +10,7 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
 {
     private readonly LinuxAnchoredFileSystem? LinuxFileSystem;
     private readonly LinuxAnchoredFile? LinuxFile;
+    private readonly bool OwnsLinuxFileSystem;
     private readonly FileStream? PortableFile;
     private readonly long CapturedSize;
 
@@ -20,13 +21,23 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
         LinuxAnchoredFileSystem? linuxFileSystem,
         LinuxAnchoredFile? linuxFile,
         FileStream? portableFile,
-        long capturedSize
+        long capturedSize,
+        bool ownsLinuxFileSystem = true
     )
     {
         this.LinuxFileSystem = linuxFileSystem;
         this.LinuxFile = linuxFile;
         this.PortableFile = portableFile;
         this.CapturedSize = capturedSize;
+        this.OwnsLinuxFileSystem = ownsLinuxFileSystem;
+    }
+
+    /// <summary>Adopt one already-retained Linux asset captured by a stricter aggregate authority.</summary>
+    internal static RetainedReleaseAssetFile Adopt(LinuxAnchoredFileSystem fileSystem, LinuxAnchoredFile file)
+    {
+        ArgumentNullException.ThrowIfNull(fileSystem);
+        ArgumentNullException.ThrowIfNull(file);
+        return new RetainedReleaseAssetFile(fileSystem, file, null, file.Identity.Size, ownsLinuxFileSystem: false);
     }
 
     /// <summary>
@@ -193,6 +204,14 @@ internal sealed class RetainedReleaseAssetFile : IDisposable
     {
         this.PortableFile?.Dispose();
         this.LinuxFile?.Dispose();
-        this.LinuxFileSystem?.Dispose();
+        if (this.OwnsLinuxFileSystem)
+            this.LinuxFileSystem?.Dispose();
     }
+}
+
+
+/// <summary>Opens exact logical release-asset names from one retained aggregate authority.</summary>
+internal interface IRetainedReleaseAssetSource : IDisposable
+{
+    RetainedReleaseAssetFile Open(string logicalName, string description);
 }
