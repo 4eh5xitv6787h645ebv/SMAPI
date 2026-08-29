@@ -56,20 +56,30 @@ public sealed class MainWindowViewModelTests
         viewModel.StateLabel.Should().Contain("Unchanged");
     }
 
-    [TestCase()]
-    [TestCase("--demo")]
-    public void LaunchPolicyAllowsOnlyExplicitDemoCompatibleArguments(params string[] args)
+    [Test]
+    public void LaunchPolicyUsesProductionOnlyForNoArguments()
     {
-        DemoLaunchPolicy.TryValidate(args, out string? error).Should().BeTrue();
+        GuiLaunchPolicy.TryParse([], out GuiLaunchMode mode, out string? error).Should().BeTrue();
+        mode.Should().Be(GuiLaunchMode.Production);
+        error.Should().BeNull();
+    }
+
+    [Test]
+    public void LaunchPolicyUsesDemoOnlyForExactDemoFlag()
+    {
+        GuiLaunchPolicy.TryParse(["--demo"], out GuiLaunchMode mode, out string? error).Should().BeTrue();
+        mode.Should().Be(GuiLaunchMode.Demo);
         error.Should().BeNull();
     }
 
     [TestCase("--install")]
     [TestCase("--demo", "/real/game")]
-    public void LaunchPolicyRejectsArgumentsThatCouldSuggestProductionUse(params string[] args)
+    [TestCase("--demo", "--demo")]
+    [TestCase("--Demo")]
+    public void LaunchPolicyRejectsAllOtherAndMixedArguments(params string[] args)
     {
-        DemoLaunchPolicy.TryValidate(args, out string? error).Should().BeFalse();
-        error.Should().Contain("safe demo mode");
+        GuiLaunchPolicy.TryParse(args, out _, out string? error).Should().BeFalse();
+        error.Should().Be("The graphical installer accepts either no arguments or exactly --demo.");
     }
 
 }
