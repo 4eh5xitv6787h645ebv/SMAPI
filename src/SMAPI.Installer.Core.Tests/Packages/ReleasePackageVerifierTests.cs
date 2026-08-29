@@ -7,6 +7,7 @@ using Microsoft.Win32.SafeHandles;
 using NUnit.Framework;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Security;
 
 namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 
@@ -89,6 +90,60 @@ public sealed class ReleasePackageVerifierTests
         );
 
         result.Sha256.Should().Be(hash);
+    }
+
+    [Test]
+    [Platform("Linux")]
+    public async Task LeasePackageForExternalRead_SourceReplacementAndDeletionCannotChangeExactAuthority()
+    {
+        (string path, byte[] bytes, string hash) = this.CreatePackage();
+        await using VerifiedReleasePackage verified = await new ReleasePackageVerifier().VerifyAsync(
+            path,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+        string original = path + ".original";
+        File.Move(path, original);
+        File.WriteAllBytes(path, "replacement package bytes"u8.ToArray());
+        File.Delete(path);
+
+        using LinuxSealedFileLease lease = verified.LeasePackageForExternalRead();
+
+        File.ReadAllBytes(lease.ProcPath).Should().Equal(bytes);
+        Action overwrite = () => File.WriteAllBytes(lease.ProcPath, "changed"u8.ToArray());
+        Exception error = overwrite.Should().Throw<Exception>().Which;
+        (error is IOException or UnauthorizedAccessException).Should().BeTrue();
+        File.ReadAllBytes(lease.ProcPath).Should().Equal(bytes);
+    }
+
+    [Test]
+    [Platform("Linux")]
+    public async Task LeasePackageForExternalRead_LeaseSurvivesOwnerDisposalAndPreventsDescriptorReuse()
+    {
+        (string path, byte[] bytes, string hash) = this.CreatePackage();
+        await using VerifiedReleasePackage verified = await new ReleasePackageVerifier().VerifyAsync(
+            path,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+        using LinuxSealedFileLease lease = verified.LeasePackageForExternalRead();
+        string procPath = lease.ProcPath;
+        int retainedDescriptor = int.Parse(Path.GetFileName(procPath), System.Globalization.CultureInfo.InvariantCulture);
+
+        await verified.DisposeAsync();
+        using SafeFileHandle next = LinuxSealedFile.CreateAnonymous("smapi-installer-package-fd-nonreuse-test");
+
+        checked((int)next.DangerousGetHandle()).Should().NotBe(retainedDescriptor);
+        File.ReadAllBytes(procPath).Should().Equal(bytes);
+        Action reuse = () => verified.LeasePackageForExternalRead().Dispose();
+        reuse.Should().Throw<ObjectDisposedException>();
+        lease.Dispose();
+        File.Exists(procPath).Should().BeFalse();
+        verified.Dispose();
     }
 
     [Test]
