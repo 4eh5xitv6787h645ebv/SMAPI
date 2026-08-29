@@ -55,6 +55,14 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
 
     internal int ObservedStderrBytes => Volatile.Read(ref this.ObservedStderrBytesValue);
     internal bool CleanupConfirmed => Volatile.Read(ref this.CleanupUnconfirmed) == 0;
+    internal static bool IsProductionQuarantineClearedForTesting
+    {
+        get
+        {
+            lock (ProductionQuarantineLock)
+                return ProductionQuarantine is null;
+        }
+    }
     internal bool HasRetainedPackageAuthority
     {
         get

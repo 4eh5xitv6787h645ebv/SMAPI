@@ -614,7 +614,10 @@ public sealed class ProcessInstallerProtocolClientTests
             if (client is not null)
                 await client.DisposeAsync();
             if (process.WaitObserved)
-                await SpinWaitUntilAsync(() => process.Disposed);
+            {
+                await SpinWaitUntilAsync(() => ProcessInstallerProtocolClient.IsProductionQuarantineClearedForTesting);
+                process.Disposed.Should().BeTrue("the quarantine clears only after the deferred process disposal");
+            }
             ProcessInstallerProtocolClient.ResetProductionGateForTesting();
             File.Delete(executablePath);
         }
