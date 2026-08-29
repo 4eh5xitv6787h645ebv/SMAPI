@@ -125,8 +125,9 @@ internal sealed class ReleaseAssetSet
     }
 
     /// <summary>
-    /// Verify the package and manifest authority through the complete Core chain. Informational runner metadata is
-    /// checked only for a strict bounded profile because a clean machine has no independent value to compare it to.
+    /// Qualify the package and manifest before attestation through deterministic package inspection, exact regenerated
+    /// manifest comparison, and the retained Core release authorities. Informational runner metadata is checked only
+    /// for a strict bounded profile because a clean machine has no independent value to compare it to.
     /// </summary>
     public async Task VerifyReleaseAsync(
         string assetDirectory,
@@ -198,13 +199,9 @@ internal sealed class ReleaseAssetSet
             throw;
         }
         await using (installer.ConfigureAwait(false))
-        await using (VerifiedPackageContent content = await new VerifiedPackageContentFactory().ExtractAsync(
-            installer,
-            cancellationToken: cancellationToken
-        ).ConfigureAwait(false))
         {
-            if (!content.Release.Equals(manifest.Manifest.Release))
-                throw new PackageSecurityException("The extracted payload authority doesn't match the generated manifest.");
+            if (!installer.Release.Equals(manifest.Manifest.Release))
+                throw new PackageSecurityException("The verified installer authority doesn't match the generated manifest.");
         }
     }
 
