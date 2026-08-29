@@ -70,6 +70,20 @@ jobs:
                     build/scripts/test-stage-pinned-github-cli.sh "$pinned_archive"
                     build/scripts/stage-pinned-github-cli.sh "$pinned_archive" "$pinned_root"
 
+            -   name: Build and test fixture-free Linux GUI shell
+                shell: bash
+                run: |
+                    set -euo pipefail
+                    dotnet restore src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj
+                    dotnet build src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
+                        --configuration Release \
+                        --no-restore
+                    dotnet test src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
+                        --configuration Release \
+                        --no-build \
+                        -- RunConfiguration.TreatNoTestsAsError=true
+                    build/scripts/test-linux-gui-demo-smoke.sh
+
             -   name: Build Linux installer
                 shell: pwsh
                 env:
