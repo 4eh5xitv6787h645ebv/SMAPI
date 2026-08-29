@@ -60,11 +60,13 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         add
         {
             this.ContinueRequestedValue += value;
+            this.OnPropertyChanged(nameof(this.IsContinueVisible));
             this.ContinueCommand.NotifyCanExecuteChanged();
         }
         remove
         {
             this.ContinueRequestedValue -= value;
+            this.OnPropertyChanged(nameof(this.IsContinueVisible));
             this.ContinueCommand.NotifyCanExecuteChanged();
         }
     }
@@ -136,7 +138,8 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     public bool IsRetryVisible => this.CanRetry();
 
-    public bool IsContinueVisible => this.snapshot.State == ReleaseVerificationState.Verified;
+    public bool IsContinueVisible => this.snapshot.State == ReleaseVerificationState.Verified
+        && this.ContinueRequestedValue is not null;
 
     public bool IsCancelVisible => this.snapshot.CanCancel;
 
@@ -347,8 +350,8 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                 "Checking package integrity, release metadata, GitHub provenance, and the local installer package."
             ),
             ReleaseVerificationState.CleaningUp => (
-                "Cancelling safely…",
-                "Waiting for the current bounded step to stop and removing retained release files."
+                "Cleaning up safely…",
+                "Waiting for the current bounded step to settle and releasing retained session resources."
             ),
             ReleaseVerificationState.Verified => (
                 "Release verified — ready to review",
@@ -366,7 +369,9 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                 ),
                 ReleaseVerificationError.PreparationFailed => (
                     "The release could not be prepared safely",
-                    "No complete package was retained and your game is unchanged. Select the release again or try once more."
+                    value.CanRetry
+                        ? "No complete package was retained and your game is unchanged. Try the download once more."
+                        : "No complete package was retained and your game is unchanged. Close and reopen the installer before trying again."
                 ),
                 ReleaseVerificationError.PackageRejected => (
                     "The release could not be verified",
@@ -408,7 +413,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
             : Math.Min(progress.CompletedAssets + 1, progress.TotalAssets);
         int percent = (int)Math.Clamp((progress.TransferredBytes * 100L) / progress.TotalBytes, 0, 100);
         string asset = progress.AssetKind.HasValue ? GetAssetLabel(progress.AssetKind.Value) : "release file";
-        return $"File {visibleAsset} of {progress.TotalAssets}: {asset} — {FormatBytes(progress.TransferredBytes)} of {FormatBytes(progress.TotalBytes)} ({percent}%)";
+        return $"File {visibleAsset} of {progress.TotalAssets}: {asset} — Overall: {FormatBytes(progress.TransferredBytes)} of {FormatBytes(progress.TotalBytes)} ({percent}%)";
     }
 
     private static double GetProgressValue(ReviewedReleasePreparationProgress? progress)
@@ -429,14 +434,16 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                 : Math.Min(progress.CompletedAssets + 1, progress.TotalAssets);
             if (newState || asset != this.AnnouncedAsset || percentBucket != this.AnnouncedPercentBucket)
             {
-                this.LiveAnnouncement = $"Downloading file {asset} of {progress.TotalAssets}, {percentBucket} percent.";
+                this.LiveAnnouncement = $"Downloading file {asset} of {progress.TotalAssets}, overall {percentBucket} percent.";
                 this.AnnouncedAsset = asset;
                 this.AnnouncedPercentBucket = percentBucket;
             }
         }
         else if (newState || value.Progress?.Stage != ReviewedReleasePreparationStage.Downloading)
         {
-            this.LiveAnnouncement = this.Heading;
+            this.LiveAnnouncement = value.State == ReleaseVerificationState.Failed
+                ? $"{this.Heading}. {this.Message}"
+                : this.Heading;
             this.AnnouncedAsset = -1;
             this.AnnouncedPercentBucket = -1;
         }
@@ -472,17 +479,21 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     private static string GetRejectionNextStep(ReleaseVerificationSnapshot value)
     {
+        if (value.AttemptNumber >= value.MaximumAttempts)
+            return "The retry limit has been reached. Close and reopen the installer to start a new verification session.";
         if (value.RejectionIsTerminal)
-            return "Close and reopen the installer before trying another package.";
+            return "Close and reopen the installer to start a new verification session.";
+        if (!value.CanRetry)
+            return "Close and reopen the installer to start a new verification session.";
         return value.RejectionNextAction switch
         {
             ProtocolNextAction.RetryRequest or ProtocolNextAction.ReopenVerifiedPackage =>
-                "Try the download once more, or choose another compatible release.",
+                "Try the download once more.",
             ProtocolNextAction.StartNewSession =>
                 "Close and reopen the installer before trying again.",
             ProtocolNextAction.ViewPrivateLog =>
                 "Review the private local log, then close and reopen the installer.",
-            _ => "Choose another compatible release or close the installer."
+            _ => "Close and reopen the installer before trying again."
         };
     }
 

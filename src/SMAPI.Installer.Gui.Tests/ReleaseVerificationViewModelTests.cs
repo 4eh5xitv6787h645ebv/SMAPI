@@ -55,12 +55,18 @@ internal sealed class ReleaseVerificationViewModelTests
         viewModel.VerifiedIdentityDetail.Should().Contain(candidate.Identity.Tag);
         viewModel.VerifiedIdentityDetail.Should().Contain(new string('a', 40));
         viewModel.ContinueCommand.CanExecute(null).Should().BeFalse("an unwired next screen must not expose a dead enabled action");
+        viewModel.IsContinueVisible.Should().BeFalse("an unwired next screen must not expose a dead visible action");
 
         bool continued = false;
-        viewModel.ContinueRequested += (_, _) => continued = true;
+        EventHandler handler = (_, _) => continued = true;
+        viewModel.ContinueRequested += handler;
         viewModel.ContinueCommand.CanExecute(null).Should().BeTrue();
+        viewModel.IsContinueVisible.Should().BeTrue();
         viewModel.ContinueCommand.Execute(null);
         continued.Should().BeTrue();
+        viewModel.ContinueRequested -= handler;
+        viewModel.ContinueCommand.CanExecute(null).Should().BeFalse();
+        viewModel.IsContinueVisible.Should().BeFalse();
         client.OpenCount.Should().Be(1);
     }
 
@@ -85,6 +91,34 @@ internal sealed class ReleaseVerificationViewModelTests
         viewModel.IsRetryVisible.Should().BeFalse();
         viewModel.RetryCommand.CanExecute(null).Should().BeFalse();
         viewModel.StatusLiveSetting.Should().Be(AutomationLiveSetting.Off, "the assertive error region is the sole error announcement");
+        viewModel.LiveAnnouncement.Should().Be($"{viewModel.Heading}. {viewModel.Message}");
+    }
+
+    [AvaloniaTest]
+    public async Task ThirdRejectedAttemptShowsRetryLimitWithoutOfferingAnImpossibleAction()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate]) { CompletePreparation = true };
+        FakeProtocolClient client = new(success: false, candidate);
+        await using ReleaseVerificationViewModel viewModel = CreateViewModel(service, client);
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        await viewModel.DownloadAndVerifyCommand.ExecuteAsync();
+        viewModel.RetryCommand.CanExecute(null).Should().BeTrue();
+        await viewModel.RetryCommand.ExecuteAsync();
+        viewModel.RetryCommand.CanExecute(null).Should().BeTrue();
+        await viewModel.RetryCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        client.OpenCount.Should().Be(3);
+        viewModel.Message.Should().Contain("retry limit has been reached");
+        viewModel.Message.Should().Contain("start a new verification session");
+        viewModel.Message.Should().NotContain("Try the download");
+        viewModel.Message.Should().NotContain("choose another");
+        viewModel.IsReleaseSelectorEnabled.Should().BeFalse();
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.RetryCommand.CanExecute(null).Should().BeFalse();
     }
 
     [AvaloniaTest]
@@ -113,15 +147,23 @@ internal sealed class ReleaseVerificationViewModelTests
         service.Report(new(ReviewedReleasePreparationStage.Downloading, ReviewedReleaseAssetKind.InstallManifest, 1, 6, 101, 600));
 
         announcements.Count(value => value.Contains("file 1", StringComparison.OrdinalIgnoreCase)).Should().Be(2);
-        announcements.Should().Contain(value => value == "Downloading file 1 of 6, 0 percent.");
-        announcements.Should().Contain(value => value == "Downloading file 1 of 6, 10 percent.");
-        announcements.Should().Contain(value => value == "Downloading file 2 of 6, 10 percent.");
+        announcements.Should().Contain(value => value == "Downloading file 1 of 6, overall 0 percent.");
+        announcements.Should().Contain(value => value == "Downloading file 1 of 6, overall 10 percent.");
+        announcements.Should().Contain(value => value == "Downloading file 2 of 6, overall 10 percent.");
         viewModel.ProgressValue.Should().BeApproximately(16.83, 0.02);
-        viewModel.ProgressText.Should().Contain("File 2 of 6: installation manifest");
+        viewModel.ProgressText.Should().Be("File 2 of 6: installation manifest — Overall: 101 B of 600 B (16%)");
 
+        List<string> headings = [];
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(viewModel.Heading))
+                headings.Add(viewModel.Heading);
+        };
         await viewModel.CancelCommand.ExecuteAsync();
         await attempt;
         Dispatcher.UIThread.RunJobs();
+        headings.Should().Contain("Cleaning up safely…");
+        headings.Should().NotContain("Cancelling safely…");
         viewModel.Heading.Should().Be("Download cancelled");
         viewModel.RetryCommand.CanExecute(null).Should().BeTrue();
     }

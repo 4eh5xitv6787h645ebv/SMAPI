@@ -80,7 +80,10 @@
               BorderBrush="#FF8A9A"
               BorderThickness="2"
               CornerRadius="6">
-            <TextBlock Text="Verification is blocked. Use the safe next step below; no game files were changed." TextWrapping="Wrap" />
+            <TextBlock
+                x:Name="ErrorMessageText"
+                Text="Verification is blocked. No game files were changed. Follow the safe next step in the error message."
+                TextWrapping="Wrap" />
           </Border>
 
           <StackPanel Spacing="8">
@@ -117,7 +120,7 @@
                 Maximum="100"
                 IsIndeterminate="{Binding IsProgressIndeterminate}"
                 Value="{Binding ProgressValue}"
-                AutomationProperties.Name="Release download and verification progress"
+                AutomationProperties.Name="Overall release download and verification progress"
                 AutomationProperties.HelpText="{Binding ProgressText}" />
             <TextBlock
                 x:Name="ProgressText"

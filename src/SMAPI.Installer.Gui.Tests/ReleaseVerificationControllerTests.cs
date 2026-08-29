@@ -419,6 +419,172 @@ internal sealed class ReleaseVerificationControllerTests
         await AwaitBounded(controller.DisposeAsync().AsTask());
     }
 
+    [Test]
+    public async Task RejectionLeaseDisposalFailureSupersedesRetryableResultAndClearsAuthority()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakePreparedPackage package = new()
+        {
+            Disposal = Task.FromException(new IOException("private rejection lease cleanup failure"))
+        };
+        FakeReleaseService service = PreparedService(candidate, package);
+        FakeClient client = new()
+        {
+            Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
+                ProtocolPrePlanErrorCode.PackageRejected,
+                ProtocolNextAction.RetryRequest,
+                "retryable before cleanup",
+                false
+            ))
+        };
+        ReleaseVerificationController controller = new(service, () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+
+        await AwaitBounded(controller.StartAsync());
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Failed);
+        snapshot.Error.Should().Be(ReleaseVerificationError.CleanupFailed);
+        snapshot.CanRetry.Should().BeFalse();
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.RejectionCode.Should().BeNull();
+        snapshot.RejectionNextAction.Should().BeNull();
+        snapshot.RejectionIsTerminal.Should().BeFalse();
+        package.DisposeCalls.Should().Be(1);
+        client.DisposeCalls.Should().Be(1);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [Test]
+    public async Task CancellationLeaseDisposalFailureSupersedesCancelledAndReapsClientOnce()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        TaskCompletionSource<InstallerPackageOpenResult> opened = NewCompletion<InstallerPackageOpenResult>();
+        FakePreparedPackage package = new()
+        {
+            Disposal = Task.FromException(new IOException("private cancelled lease cleanup failure"))
+        };
+        FakeReleaseService service = PreparedService(candidate, package);
+        FakeClient client = new() { Open = (_, _) => opened.Task };
+        ReleaseVerificationController controller = new(service, () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+        Task running = controller.StartAsync();
+        await AwaitBounded(client.OpenStarted.Task);
+
+        Task cancellation = controller.CancelAsync();
+        opened.SetResult(new InstallerPackageOpenRejection(
+            ProtocolPrePlanErrorCode.RequestCancelled,
+            ProtocolNextAction.RetryRequest,
+            "late cancellation rejection",
+            false
+        ));
+        await AwaitBounded(cancellation);
+        await AwaitBounded(running);
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Failed);
+        snapshot.Error.Should().Be(ReleaseVerificationError.CleanupFailed);
+        snapshot.CanRetry.Should().BeFalse();
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.RejectionCode.Should().BeNull();
+        snapshot.RejectionNextAction.Should().BeNull();
+        package.DisposeCalls.Should().Be(1);
+        client.DisposeCalls.Should().Be(1);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [Test]
+    public async Task ClientDisposalFailureSupersedesRejectionAndClearsAuthority()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakePreparedPackage package = new();
+        FakeReleaseService service = PreparedService(candidate, package);
+        FakeClient client = new()
+        {
+            Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
+                ProtocolPrePlanErrorCode.PackageRejected,
+                ProtocolNextAction.RetryRequest,
+                "retryable before client cleanup",
+                false
+            )),
+            Disposal = Task.FromException(new IOException("private client cleanup failure"))
+        };
+        ReleaseVerificationController controller = new(service, () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+
+        await AwaitBounded(controller.StartAsync());
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Failed);
+        snapshot.Error.Should().Be(ReleaseVerificationError.CleanupFailed);
+        snapshot.CanRetry.Should().BeFalse();
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.RejectionCode.Should().BeNull();
+        snapshot.RejectionNextAction.Should().BeNull();
+        package.DisposeCalls.Should().Be(1);
+        client.DisposeCalls.Should().Be(1);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [Test]
+    public async Task ConcurrentCancelAndDisposeJoinThrowingCancellationCallbackAndMandatoryCleanup()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        TaskCompletionSource<InstallerPackageOpenResult> opened = NewCompletion<InstallerPackageOpenResult>();
+        TaskCompletionSource callbackEntered = NewCompletion();
+        TaskCompletionSource releaseCallback = NewCompletion();
+        FakePreparedPackage package = new();
+        FakeReleaseService service = PreparedService(candidate, package);
+        FakeClient client = new()
+        {
+            Open = (_, cancellationToken) =>
+            {
+                cancellationToken.Register(() =>
+                {
+                    callbackEntered.TrySetResult();
+                    if (!releaseCallback.Task.Wait(TimeSpan.FromSeconds(5)))
+                        throw new TimeoutException("The deterministic cancellation-callback gate wasn't released.");
+                    throw new InvalidOperationException("private throwing cancellation callback");
+                });
+                return opened.Task;
+            }
+        };
+        ReleaseVerificationController controller = new(service, () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+        Task running = controller.StartAsync();
+        await AwaitBounded(client.OpenStarted.Task);
+
+        Task cancellation = Task.Run(controller.CancelAsync);
+        await AwaitBounded(callbackEntered.Task);
+        Task disposal = Task.Run(() => controller.DisposeAsync().AsTask());
+        cancellation.IsCompleted.Should().BeFalse();
+        disposal.IsCompleted.Should().BeFalse();
+        client.DisposeCalls.Should().Be(0);
+        service.DisposeCalls.Should().Be(0);
+
+        releaseCallback.SetResult();
+        opened.SetResult(new InstallerPackageOpenRejection(
+            ProtocolPrePlanErrorCode.RequestCancelled,
+            ProtocolNextAction.RetryRequest,
+            "late after throwing callback",
+            false
+        ));
+        await AwaitBounded(cancellation);
+        await AwaitBounded(running);
+        await AwaitBounded(disposal);
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Disposed);
+        snapshot.Error.Should().Be(ReleaseVerificationError.CleanupFailed);
+        snapshot.CanRetry.Should().BeFalse();
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.RejectionCode.Should().BeNull();
+        package.DisposeCalls.Should().Be(1);
+        client.DisposeCalls.Should().Be(1);
+        service.DisposeCalls.Should().Be(1);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
     private static FakeReleaseService PreparedService(
         ReviewedReleaseCandidate candidate,
         FakePreparedPackage package

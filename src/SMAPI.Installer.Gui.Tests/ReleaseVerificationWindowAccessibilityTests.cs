@@ -121,6 +121,88 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         await WaitUntilAsync(() => !window.IsVisible);
     }
 
+    [AvaloniaTest]
+    public async Task TerminalErrorHasOneAssertiveExactSafeAnnouncementAndNoFalseLocationCue()
+    {
+        ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
+        ReleaseVerificationViewModelTests.FakeReleaseService service = new([candidate]) { CompletePreparation = true };
+        ReleaseVerificationViewModel viewModel = new(new ReleaseVerificationController(
+            service,
+            () => new ReleaseVerificationViewModelTests.FakeProtocolClient(
+                false,
+                candidate,
+                terminalRejection: true
+            )
+        ));
+        ReleaseVerificationWindow window = new(viewModel);
+        window.Show();
+        await WaitUntilAsync(() => viewModel.IsDownloadActionVisible);
+
+        await viewModel.DownloadAndVerifyCommand.ExecuteAsync();
+        await WaitUntilAsync(() => viewModel.IsErrorVisible);
+        Border status = window.FindControl<Border>("StatusRegion")!;
+        Border error = window.FindControl<Border>("ErrorRegion")!;
+        AutomationPeer errorPeer = ControlAutomationPeer.CreatePeerForElement(error);
+
+        ControlAutomationPeer.CreatePeerForElement(status).GetLiveSetting().Should().Be(AutomationLiveSetting.Off);
+        errorPeer.GetLiveSetting().Should().Be(AutomationLiveSetting.Assertive);
+        errorPeer.GetName().Should().Be($"{viewModel.Heading}. {viewModel.Message}");
+        errorPeer.GetName().Should().Contain("Close and reopen the installer to start a new verification session");
+        errorPeer.GetName().Should().Contain("game is unchanged");
+        window.FindControl<TextBlock>("ErrorMessageText")!.Text.Should().NotContain("below");
+        error.IsFocused.Should().BeTrue();
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task AccessKeysAreUniqueAndTabTraversalTracksReadyAndBusyControls()
+    {
+        ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
+        ReleaseVerificationViewModelTests.FakeReleaseService service = new([candidate]);
+        ReleaseVerificationViewModel viewModel = new(new ReleaseVerificationController(
+            service,
+            () => new ReleaseVerificationViewModelTests.FakeProtocolClient(true, candidate)
+        ));
+        ReleaseVerificationWindow window = new(viewModel);
+        window.Show();
+        await WaitUntilAsync(() => viewModel.IsDownloadActionVisible);
+        ComboBox selector = window.FindControl<ComboBox>("ReleaseSelector")!;
+        Button download = window.FindControl<Button>("DownloadButton")!;
+        Button cancel = window.FindControl<Button>("CancelButton")!;
+        Border status = window.FindControl<Border>("StatusRegion")!;
+        Control[] actionControls =
+        [
+            selector,
+            download,
+            window.FindControl<Button>("RetryButton")!,
+            window.FindControl<Button>("ContinueButton")!,
+            cancel
+        ];
+
+        actionControls.Select(AutomationProperties.GetAccessKey)
+            .Should().NotContainNulls()
+            .And.OnlyHaveUniqueItems();
+        selector.IsFocused.Should().BeTrue();
+        Press(window, Key.Tab);
+        download.IsFocused.Should().BeTrue("forward traversal follows the visible ready-state order");
+        Press(window, Key.Tab, RawInputModifiers.Shift);
+        selector.IsFocused.Should().BeTrue("reverse traversal returns to the release selector");
+
+        viewModel.DownloadAndVerifyCommand.Execute(null);
+        await service.PreparationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => viewModel.CancelCommand.CanExecute(null) && status.IsFocused);
+        Press(window, Key.Tab);
+        cancel.IsFocused.Should().BeTrue("disabled and hidden ready-state controls are skipped while busy");
+        Press(window, Key.Tab, RawInputModifiers.Shift);
+        status.IsFocused.Should().BeTrue("reverse traversal returns to the busy status region");
+
+        await viewModel.CancelCommand.ExecuteAsync();
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         DateTime deadline = DateTime.UtcNow.AddSeconds(3);
@@ -131,6 +213,17 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
                 throw new TimeoutException("The expected production GUI state was not reached.");
             await Task.Delay(10);
         }
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    private static void Press(
+        ReleaseVerificationWindow window,
+        Key key,
+        RawInputModifiers modifiers = RawInputModifiers.None
+    )
+    {
+        window.KeyPress(key, modifiers, PhysicalKey.None, null);
+        window.KeyRelease(key, modifiers, PhysicalKey.None, null);
         Dispatcher.UIThread.RunJobs();
     }
 

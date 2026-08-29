@@ -215,7 +215,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             this.ProgressValue = null;
         }
         this.PublishChanged();
-        operation.Cancellation.Cancel();
+        await operation.RequestCancellationAsync().ConfigureAwait(false);
         await operation.Completion.Task.ConfigureAwait(false);
     }
 
@@ -242,10 +242,17 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         await Task.Yield();
         bool cleanupFailed = false;
         this.PublishChanged();
-        operation?.Cancellation.Cancel();
+        if (operation is not null)
+        {
+            await operation.RequestCancellationAsync().ConfigureAwait(false);
+            cleanupFailed = operation.CleanupFailed;
+        }
 
         if (operation is not null)
+        {
             await operation.Completion.Task.ConfigureAwait(false);
+            cleanupFailed |= operation.CleanupFailed;
+        }
         if (verified is not null)
         {
             verified.StopWatching.TrySetResult();
@@ -325,7 +332,6 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 this.SelectedReleaseValue = refreshed;
                 if (refreshed is null)
                 {
-                    this.ActiveOperation = null;
                     this.StateValue = releases.Length == 0
                         ? ReleaseVerificationState.NoCompatibleRelease
                         : ReleaseVerificationState.Failed;
@@ -343,8 +349,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             this.PublishChanged();
             if (refreshed is null)
             {
-                operation.Cancellation.Dispose();
-                operation.Completion.TrySetResult();
+                await this.CompleteOperationAsync(operation).ConfigureAwait(false);
                 return;
             }
 
@@ -354,12 +359,12 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
         {
             this.SetOperationOutcome(operation, ReleaseVerificationState.Cancelled, ReleaseVerificationError.None);
-            this.CompleteOperation(operation);
+            await this.CompleteOperationAsync(operation).ConfigureAwait(false);
         }
         catch
         {
             this.SetOperationOutcome(operation, ReleaseVerificationState.Failed, ReleaseVerificationError.CatalogUnavailable);
-            this.CompleteOperation(operation);
+            await this.CompleteOperationAsync(operation).ConfigureAwait(false);
         }
     }
 
@@ -397,7 +402,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         }
         finally
         {
-            this.CompleteOperation(operation);
+            await this.CompleteOperationAsync(operation).ConfigureAwait(false);
         }
     }
 
@@ -539,11 +544,19 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 catch
                 {
                     outcomeState = ReleaseVerificationState.Failed;
-                    outcomeError = ReleaseVerificationError.PreparationFailed;
+                    outcomeError = ReleaseVerificationError.CleanupFailed;
                     lock (this.Sync)
                         this.ClearResultAuthority();
                     transferVerifiedClient = false;
                 }
+            }
+            if (await attempt.Operation.DisposeCancellationAsync().ConfigureAwait(false))
+            {
+                outcomeState = ReleaseVerificationState.Failed;
+                outcomeError = ReleaseVerificationError.CleanupFailed;
+                transferVerifiedClient = false;
+                lock (this.Sync)
+                    this.ClearResultAuthority();
             }
             bool watchVerifiedFault = false;
             lock (this.Sync)
@@ -570,6 +583,11 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                             outcomeState = ReleaseVerificationState.Failed;
                             outcomeError = ReleaseVerificationError.SessionFaulted;
                         }
+                        else if (transferVerifiedClient && this.DisposeStarted)
+                        {
+                            outcomeState = ReleaseVerificationState.Cancelled;
+                            outcomeError = ReleaseVerificationError.None;
+                        }
                         transferVerifiedClient = false;
                         this.VerifiedReleaseValue = null;
                         this.StateValue = ReleaseVerificationState.CleaningUp;
@@ -586,6 +604,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 {
                     outcomeState = ReleaseVerificationState.Failed;
                     outcomeError = ReleaseVerificationError.CleanupFailed;
+                    lock (this.Sync)
+                        this.ClearResultAuthority();
                 }
                 lock (this.Sync)
                 {
@@ -598,7 +618,6 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                     }
                 }
             }
-            attempt.Operation.Cancellation.Dispose();
             attempt.Operation.Completion.TrySetResult();
             this.PublishChanged();
             if (watchVerifiedFault)
@@ -659,7 +678,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         Task completed = await Task.WhenAny(operation, attempt.Client!.SessionFaulted).ConfigureAwait(false);
         if (ReferenceEquals(completed, attempt.Client.SessionFaulted))
         {
-            attempt.Operation.Cancellation.Cancel();
+            await attempt.Operation.RequestCancellationAsync().ConfigureAwait(false);
             await ObserveAsync(operation).ConfigureAwait(false);
             throw new BackendSessionFaultException();
         }
@@ -673,7 +692,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         Task completed = await Task.WhenAny(operation, attempt.Client!.SessionFaulted).ConfigureAwait(false);
         if (ReferenceEquals(completed, attempt.Client.SessionFaulted))
         {
-            attempt.Operation.Cancellation.Cancel();
+            await attempt.Operation.RequestCancellationAsync().ConfigureAwait(false);
             await ObserveAsync(operation).ConfigureAwait(false);
             throw new BackendSessionFaultException();
         }
@@ -748,14 +767,22 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         this.PublishChanged();
     }
 
-    private void CompleteOperation(ControllerOperation operation)
+    private async Task CompleteOperationAsync(ControllerOperation operation)
     {
+        bool cleanupFailed = await operation.DisposeCancellationAsync().ConfigureAwait(false);
         lock (this.Sync)
         {
             if (this.IsCurrent(operation))
+            {
                 this.ActiveOperation = null;
+                if (cleanupFailed)
+                {
+                    this.StateValue = ReleaseVerificationState.Failed;
+                    this.ErrorValue = ReleaseVerificationError.CleanupFailed;
+                    this.ClearResultAuthority();
+                }
+            }
         }
-        operation.Cancellation.Dispose();
         operation.Completion.TrySetResult();
         this.PublishChanged();
     }
@@ -848,9 +875,86 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         CancellationTokenSource cancellation
     )
     {
+        private readonly object CancellationSync = new();
+        private TaskCompletionSource? CancellationSettled;
+        private bool CancellationDisposed;
+        private bool CancellationFailed;
+
         public long Generation { get; } = generation;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool CleanupFailed
+        {
+            get
+            {
+                lock (this.CancellationSync)
+                    return this.CancellationFailed;
+            }
+        }
+
+        public Task RequestCancellationAsync()
+        {
+            TaskCompletionSource settled;
+            lock (this.CancellationSync)
+            {
+                if (this.CancellationDisposed)
+                    return Task.CompletedTask;
+                if (this.CancellationSettled is not null)
+                    return this.CancellationSettled.Task;
+                settled = this.CancellationSettled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            _ = this.CompleteCancellationAsync(settled);
+            return settled.Task;
+        }
+
+        private async Task CompleteCancellationAsync(TaskCompletionSource settled)
+        {
+            try
+            {
+                await this.Cancellation.CancelAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                lock (this.CancellationSync)
+                    this.CancellationFailed = true;
+            }
+            finally
+            {
+                settled.TrySetResult();
+            }
+        }
+
+        public async Task<bool> DisposeCancellationAsync()
+        {
+            while (true)
+            {
+                Task? cancellation;
+                lock (this.CancellationSync)
+                {
+                    if (this.CancellationDisposed)
+                        return this.CancellationFailed;
+                    cancellation = this.CancellationSettled?.Task;
+                    if (cancellation is null || cancellation.IsCompleted)
+                    {
+                        this.CancellationDisposed = true;
+                        break;
+                    }
+                }
+                await cancellation.ConfigureAwait(false);
+            }
+            try
+            {
+                this.Cancellation.Dispose();
+            }
+            catch
+            {
+                lock (this.CancellationSync)
+                    this.CancellationFailed = true;
+            }
+            lock (this.CancellationSync)
+                return this.CancellationFailed;
+        }
     }
 
     private sealed class AttemptContext(
