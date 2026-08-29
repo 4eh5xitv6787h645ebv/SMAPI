@@ -17,7 +17,6 @@ internal sealed class GitHubAttestationProcessRequest
 
     public string ExecutablePath { get; }
     public IReadOnlyList<string> Arguments { get; }
-    public string IsolatedDirectory { get; }
     public TimeSpan Timeout { get; }
     public int MaximumStandardOutputBytes { get; }
     public int MaximumStandardErrorBytes { get; }
@@ -25,14 +24,12 @@ internal sealed class GitHubAttestationProcessRequest
     public GitHubAttestationProcessRequest(
         string executablePath,
         IEnumerable<string> arguments,
-        string isolatedDirectory,
         TimeSpan timeout,
         int maximumStandardOutputBytes,
         int maximumStandardErrorBytes
     )
     {
         this.ExecutablePath = AssertCanonicalAbsolutePath(executablePath, nameof(executablePath));
-        this.IsolatedDirectory = AssertCanonicalAbsolutePath(isolatedDirectory, nameof(isolatedDirectory));
         ArgumentNullException.ThrowIfNull(arguments);
         string[] argumentValues = arguments.ToArray();
         if (
@@ -100,10 +97,15 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly TimeSpan TeardownTimeout = TimeSpan.FromSeconds(5);
     private readonly string SetSidPath;
+    private readonly Action<string>? AfterPrivateDirectoryCreatedForTesting;
 
-    internal GitHubAttestationProcessRunner(string setSidPath = DefaultSetSidPath)
+    internal GitHubAttestationProcessRunner(
+        string setSidPath = DefaultSetSidPath,
+        Action<string>? afterPrivateDirectoryCreatedForTesting = null
+    )
     {
         this.SetSidPath = setSidPath ?? throw new ArgumentNullException(nameof(setSidPath));
+        this.AfterPrivateDirectoryCreatedForTesting = afterPrivateDirectoryCreatedForTesting;
     }
 
     public async Task<GitHubAttestationProcessResult> RunAsync(
@@ -118,10 +120,10 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             cancellationToken.ThrowIfCancellationRequested();
             throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
         }
-        string privateDirectory;
+        GitHubAttestationPrivateDirectory privateDirectory;
         try
         {
-            privateDirectory = PrivatePackageStaging.CreateDirectory();
+            privateDirectory = GitHubAttestationPrivateDirectory.Create(this.AfterPrivateDirectoryCreatedForTesting);
         }
         catch (Exception)
         {
@@ -129,7 +131,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             throw new PackageSecurityException("The GitHub attestation verifier couldn't be started safely.");
         }
 
-        try
+        await using (privateDirectory.ConfigureAwait(false))
         {
             SystemSetSidAuthority setSid;
             try
@@ -142,7 +144,7 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
                 throw;
             }
             using SystemSetSidAuthority retainedSetSid = setSid;
-            ProcessStartInfo startInfo = CreateStartInfo(request, privateDirectory, retainedSetSid.ProcPath);
+            ProcessStartInfo startInfo = CreateStartInfo(request, privateDirectory.ProcPath, retainedSetSid.ProcPath);
             using Process process = new() { StartInfo = startInfo, EnableRaisingEvents = true };
             int processGroupId;
             try
@@ -252,10 +254,6 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             {
                 timeoutCancellation.Cancel();
             }
-        }
-        finally
-        {
-            await DeletePrivateDirectoryAsync(privateDirectory).ConfigureAwait(false);
         }
     }
 
@@ -409,15 +407,6 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default
         );
-    }
-
-    private static async Task DeletePrivateDirectoryAsync(string path)
-    {
-        Task deletion = Task.Run(() => PrivatePackageStaging.TryDeleteDirectory(path));
-        if (await Task.WhenAny(deletion, Task.Delay(TeardownTimeout)).ConfigureAwait(false) == deletion)
-            await deletion.ConfigureAwait(false);
-        else
-            ObserveEventually(deletion);
     }
 
     private static void TryClose(StreamReader reader)

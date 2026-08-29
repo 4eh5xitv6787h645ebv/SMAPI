@@ -60,7 +60,7 @@ internal sealed class GitHubAttestationProcessRunnerTests
             string script = this.Script("/usr/bin/env");
             GitHubAttestationProcessResult result = await this.Run(script);
 
-            result.StandardOutput.Should().MatchRegex(@"(?m)^HOME=.*/smapi-installer-verified-[0-9a-f]{32}$");
+            result.StandardOutput.Should().MatchRegex($@"(?m)^HOME=/proc/{Environment.ProcessId}/fd/[0-9]+$");
             result.StandardOutput.Should().NotContain($"HOME={this.TempDirectory}");
             result.StandardOutput.Should().Contain("GH_PROMPT_DISABLED=1");
             result.StandardOutput.Should().Contain("GH_NO_UPDATE_NOTIFIER=1");
@@ -80,7 +80,7 @@ internal sealed class GitHubAttestationProcessRunnerTests
         await File.WriteAllTextAsync(config, "private-ambient-token");
         string script = this.Script("""
             /usr/bin/printf 'home=%s\nmode=' "$HOME"
-            /usr/bin/stat -c '%a' "$HOME"
+            /usr/bin/stat -Lc '%a' "$HOME"
             if [ -e "$GH_CONFIG_DIR/hosts.yml" ]; then
                 /usr/bin/printf 'ambient-config-visible'
                 exit 17
@@ -96,6 +96,66 @@ internal sealed class GitHubAttestationProcessRunnerTests
             .Single(line => line.StartsWith("home=", StringComparison.Ordinal))["home=".Length..];
         Directory.Exists(home).Should().BeFalse("the runner-owned configuration directory must be removed after completion");
         File.Exists(config).Should().BeTrue("the request directory is input only and must not be mutated");
+    }
+
+    [Test]
+    public async Task RunAsync_RemovesNestedContentThroughRetainedPrivateDirectoryAuthority()
+    {
+        string? privateDirectory = null;
+        GitHubAttestationProcessRunner runner = new(afterPrivateDirectoryCreatedForTesting: path => privateDirectory = path);
+        string script = this.Script("""
+            /usr/bin/mkdir -p "$HOME/cache/nested"
+            /usr/bin/printf 'temporary' > "$HOME/cache/nested/value"
+            /usr/bin/printf 'verified-json'
+            """);
+
+        GitHubAttestationProcessResult result = await runner.RunAsync(this.Request(script));
+
+        result.StandardOutput.Should().Be("verified-json");
+        privateDirectory.Should().MatchRegex(@".*/smapi-installer-verified-[0-9a-f]{32}$");
+        Directory.Exists(privateDirectory).Should().BeFalse("retained recursive cleanup should remove nested verifier state");
+    }
+
+    [Test]
+    public async Task RunAsync_RejectsPrivateDirectoryPathSwapWithoutTouchingReplacement()
+    {
+        string? privateDirectory = null;
+        string? movedOriginal = null;
+        string? sentinel = null;
+        string processMarker = Path.Combine(this.TempDirectory, "process-must-not-start");
+        GitHubAttestationProcessRunner runner = new(
+            afterPrivateDirectoryCreatedForTesting: path =>
+            {
+                privateDirectory = path;
+                movedOriginal = $"{path}-moved";
+                Directory.Move(path, movedOriginal);
+                Directory.CreateDirectory(path);
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                sentinel = Path.Combine(path, "replacement-sentinel");
+                File.WriteAllText(sentinel, "must survive");
+            }
+        );
+        string script = this.Script($"/usr/bin/touch '{processMarker}'");
+
+        try
+        {
+            Func<Task> action = async () => await runner.RunAsync(this.Request(script));
+
+            PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+            exception.Message.Should().Be("The GitHub attestation verifier couldn't be started safely.");
+            privateDirectory.Should().MatchRegex(@".*/smapi-installer-verified-[0-9a-f]{32}$");
+            File.Exists(sentinel).Should().BeTrue("cleanup must not recurse into an identity-mismatched replacement");
+            File.ReadAllText(sentinel!).Should().Be("must survive");
+            Directory.Exists(movedOriginal).Should().BeTrue("the retained original may be safely leaked after its name is replaced");
+            File.Exists(processMarker).Should().BeFalse("the process must not start after the directory authority is replaced");
+        }
+        finally
+        {
+            if (privateDirectory is not null && Directory.Exists(privateDirectory))
+                Directory.Delete(privateDirectory, recursive: true);
+            if (movedOriginal is not null && Directory.Exists(movedOriginal))
+                Directory.Delete(movedOriginal, recursive: true);
+        }
     }
 
     [TestCase(false)]
@@ -296,7 +356,6 @@ internal sealed class GitHubAttestationProcessRunnerTests
         return new GitHubAttestationProcessRequest(
             executable,
             arguments ?? [],
-            this.TempDirectory,
             timeout ?? TimeSpan.FromSeconds(5),
             stdout,
             stderr
