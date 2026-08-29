@@ -63,18 +63,19 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
 
     /// <summary>Create a production service using the bounded Linux discovery, package verification, and installer engine.</summary>
     /// <param name="serverVersion">The bounded backend version displayed during the handshake.</param>
+    /// <param name="githubCliPath">The absolute path to the host-owned, packaged GitHub CLI executable used for attestation verification.</param>
     /// <param name="sanitizedLogPath">An optional absolute path to a sanitized local log which terminal responses may present.</param>
     /// <param name="eventSink">
     /// An optional synchronous, serialized sink for unsolicited progress events only. It runs on a core worker thread,
     /// its exceptions are swallowed, and it must not synchronously reenter this service. Command and terminal responses
     /// are returned only by <see cref="HandleAsync"/>.
     /// </param>
-    public LinuxInstallerProtocolService(string serverVersion, string? sanitizedLogPath = null, Action<ProtocolEvent>? eventSink = null)
+    public LinuxInstallerProtocolService(string serverVersion, string githubCliPath, string? sanitizedLogPath = null, Action<ProtocolEvent>? eventSink = null)
         : this(
             serverVersion,
             progress => new LinuxInstallerProtocolEngine(new LinuxInstallerEngine(progress)),
             new LinuxInstallerProtocolDiscovery(new LinuxGameDiscovery()),
-            new LinuxInstallerProtocolPackageOpener(),
+            new LinuxInstallerProtocolPackageOpener(githubCliPath),
             eventSink,
             sanitizedLogPath
         )
@@ -744,6 +745,15 @@ internal sealed class ProtocolPackageRegistration : IDisposable
 
 internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProtocolPackageOpener
 {
+    private readonly string GitHubCliPath;
+
+    public LinuxInstallerProtocolPackageOpener(string githubCliPath)
+    {
+        if (string.IsNullOrWhiteSpace(githubCliPath) || !Path.IsPathFullyQualified(githubCliPath))
+            throw new ArgumentException("An absolute host-owned GitHub CLI path is required.", nameof(githubCliPath));
+        this.GitHubCliPath = githubCliPath;
+    }
+
     public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
     {
         VerifiedPackageContent content = await new LinuxTaggedReleasePackageOpener().OpenAsync(
@@ -756,7 +766,7 @@ internal sealed class LinuxInstallerProtocolPackageOpener : ILinuxInstallerProto
                 request.InstallManifestPath,
                 request.AttestationBundlePath,
                 request.AttestationBundleChecksumPath,
-                request.GitHubCliPath
+                this.GitHubCliPath
             ),
             cancellationToken
         ).ConfigureAwait(false);

@@ -4,12 +4,16 @@ using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace StardewModdingApi.Installer;
 
 /// <summary>The entry point for SMAPI's install and uninstall console app.</summary>
 internal class Program
 {
+    /// <summary>The exact command-line switch which selects the machine-readable Linux installer backend.</summary>
+    private const string LinuxProtocolV1JsonlFlag = "--linux-protocol-v1-jsonl";
+
     /*********
     ** Fields
     *********/
@@ -36,6 +40,20 @@ internal class Program
         {
             Console.Error.WriteLine("The SMAPI installer must not be run as root or with sudo. Run it as your normal desktop user instead.");
             return 2;
+        }
+
+        // The protocol host is a separate, machine-readable execution mode. Route it before
+        // inspecting or extracting install.dat so stdout remains JSON-only and the shared core
+        // owns all mutations performed for a desktop frontend.
+        bool protocolRequested = Array.IndexOf(args, Program.LinuxProtocolV1JsonlFlag) >= 0;
+        if (protocolRequested)
+        {
+            if (!OperatingSystem.IsLinux() || args.Length != 1 || args[0] != Program.LinuxProtocolV1JsonlFlag)
+            {
+                Console.Error.WriteLine("The Linux protocol host requires exactly --linux-protocol-v1-jsonl on Linux.");
+                return 2;
+            }
+            return Program.RunLinuxProtocolHost();
         }
 
         // find install bundle
@@ -87,6 +105,39 @@ internal class Program
     /*********
     ** Private methods
     *********/
+    /// <summary>Run the bounded JSONL backend without extracting the legacy interactive installer bundle.</summary>
+    private static int RunLinuxProtocolHost()
+    {
+        using CancellationTokenSource cancellation = new();
+        ConsoleCancelEventHandler cancelKeyPress = (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            cancellation.Cancel();
+        };
+        Console.CancelKeyPress += cancelKeyPress;
+        using PosixSignalRegistration terminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+        {
+            context.Cancel = true;
+            cancellation.Cancel();
+        });
+        try
+        {
+            string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown";
+            string githubCliPath = Path.Combine(Program.InstallerPath, "gh");
+            var host = new StardewModdingAPI.Installer.Core.Protocol.V1.LinuxInstallerProtocolJsonlHost(version, githubCliPath);
+            return host.RunAsync(Console.OpenStandardInput(), Console.OpenStandardOutput(), Console.Error, cancellation.Token).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            Console.Error.WriteLine("The Linux protocol host failed before starting safely.");
+            return 1;
+        }
+        finally
+        {
+            Console.CancelKeyPress -= cancelKeyPress;
+        }
+    }
+
     /// <summary>Get the effective Unix user ID.</summary>
     [DllImport("libc", EntryPoint = "geteuid")]
     private static extern uint GetEffectiveUserId();

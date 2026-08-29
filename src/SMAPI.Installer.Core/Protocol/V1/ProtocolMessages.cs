@@ -263,8 +263,7 @@ public sealed record OpenPackageRequest(
     string BuildMetadataPath,
     string InstallManifestPath,
     string AttestationBundlePath,
-    string AttestationBundleChecksumPath,
-    string GitHubCliPath
+    string AttestationBundleChecksumPath
 ) : ProtocolRequest
 {
     [JsonIgnore]

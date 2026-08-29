@@ -43,6 +43,7 @@ test -x "$package_root/install on Linux.sh"
 grep -F 'must not be run as root or with sudo' "$package_root/install on Linux.sh" >/dev/null
 test -f "$package_root/README.txt"
 test -f "$package_root/internal/linux/SMAPI.Installer"
+test -f "$package_root/internal/linux/SMAPI.Installer.Core.dll"
 test -f "$package_root/internal/linux/install.dat"
 test -f "$package_root/internal/linux/gh"
 test ! -L "$package_root/internal/linux/gh"
@@ -59,6 +60,47 @@ test "$(stat -c %s -- "$package_root/internal/linux/gh-LICENSE.txt")" = 1068
 test "$(sha256sum -- "$package_root/internal/linux/gh-LICENSE.txt" | cut -d ' ' -f 1)" = 6da4adc42392c8485e40b4251c7e332fc3352df1947c9ffade71dd60b14a7a4f
 test ! -e "$package_root/internal/macOS"
 test ! -e "$package_root/internal/windows"
+
+# The JSONL backend must run directly from the trimmed published installer without inspecting or
+# extracting the legacy install.dat payload. Exercise both a missing and poisoned ambient bundle.
+protocol_root="$temp_root/protocol-host"
+cp -a "$package_root/internal/linux" "$protocol_root"
+rm "$protocol_root/install.dat"
+protocol_request='{"protocolVersion":1,"messageType":"handshake.request","payload":{"commandId":"11111111111111111111111111111111","clientName":"package-test","clientVersion":"1"}}'
+for ambient_bundle in missing poisoned; do
+    if [[ "$ambient_bundle" == poisoned ]]; then
+        printf 'not an installer archive\n' > "$protocol_root/install.dat"
+    fi
+    printf '%s\n' "$protocol_request" \
+        | "$protocol_root/SMAPI.Installer" --linux-protocol-v1-jsonl \
+            > "$temp_root/protocol-$ambient_bundle.stdout" \
+            2> "$temp_root/protocol-$ambient_bundle.stderr"
+    test ! -s "$temp_root/protocol-$ambient_bundle.stderr"
+    python3 - "$temp_root/protocol-$ambient_bundle.stdout" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_bytes().splitlines()
+assert len(lines) == 1
+message = json.loads(lines[0].decode("utf-8", errors="strict"))
+assert set(message) == {"protocolVersion", "messageType", "payload"}
+assert message["protocolVersion"] == 1
+assert message["messageType"] == "handshake.event"
+assert message["payload"]["commandId"] == "11111111111111111111111111111111"
+assert message["payload"]["serverVersion"]
+assert "verified-local-package" in message["payload"]["capabilities"]
+PY
+done
+
+set +e
+"$protocol_root/SMAPI.Installer" --linux-protocol-v1-jsonl unexpected \
+    > "$temp_root/protocol-mixed.stdout" 2> "$temp_root/protocol-mixed.stderr"
+mixed_exit=$?
+set -e
+test "$mixed_exit" = 2
+test ! -s "$temp_root/protocol-mixed.stdout"
+grep -Fx 'The Linux protocol host requires exactly --linux-protocol-v1-jsonl on Linux.' "$temp_root/protocol-mixed.stderr" >/dev/null
 
 mkdir "$temp_root/bundle"
 unzip -q "$package_root/internal/linux/install.dat" -d "$temp_root/bundle"
