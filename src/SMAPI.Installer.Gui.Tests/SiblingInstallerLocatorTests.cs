@@ -1,6 +1,6 @@
+using System.Runtime.Versioning;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Gui.Backend;
-using System.Runtime.Versioning;
 
 namespace StardewModdingAPI.Installer.Gui.Tests;
 

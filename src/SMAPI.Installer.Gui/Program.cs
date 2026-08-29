@@ -1,5 +1,5 @@
-using Avalonia;
 using System.Runtime.InteropServices;
+using Avalonia;
 
 namespace StardewModdingAPI.Installer.Gui;
 
@@ -44,7 +44,7 @@ internal static class Program
     {
         ArgumentNullException.ThrowIfNull(startDemo);
         ArgumentNullException.ThrowIfNull(diagnostics);
-        if (mode == GuiLaunchMode.Production)
+        if (mode != GuiLaunchMode.Demo)
         {
             // The production composition remains fail-closed until the reviewed release-verification
             // screen owns this bridge. Never present the sealed synthetic demo as production UI.
