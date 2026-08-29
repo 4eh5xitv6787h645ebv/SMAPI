@@ -9,6 +9,8 @@ internal static class LinuxSealedFile
 {
     private const uint MemfdCloseOnExec = 0x0001;
     private const uint MemfdAllowSealing = 0x0002;
+    private const uint MemfdNoExecSeal = 0x0008;
+    private const uint MemfdExecutable = 0x0010;
     private const int DuplicateCloseOnExec = 1030;
     private const int AddSeals = 1033;
     private const int GetSeals = 1034;
@@ -16,16 +18,25 @@ internal static class LinuxSealedFile
     private const int SealShrink = 0x0002;
     private const int SealGrow = 0x0004;
     private const int SealWrite = 0x0008;
+    private const int SealExecute = 0x0020;
     private const int RequiredSeals = SealSeal | SealShrink | SealGrow | SealWrite;
+    private const int RequiredExecutableSeals = RequiredSeals | SealExecute;
+    private const int ErrorInvalidArgument = 22;
     private const int ErrorFunctionNotImplemented = 38;
 
     /// <summary>Create an anonymous file which can be made kernel-immutable after its bytes are written.</summary>
-    public static SafeFileHandle CreateAnonymous(string privateName, Func<SafeFileHandle>? createOverride = null)
+    public static SafeFileHandle CreateAnonymous(
+        string privateName,
+        Func<SafeFileHandle>? createOverride = null,
+        Func<uint, SafeFileHandle>? createWithFlagsOverride = null
+    )
     {
         if (!OperatingSystem.IsLinux())
             throw new PlatformNotSupportedException("Anonymous sealed files are only supported on Linux.");
         if (string.IsNullOrWhiteSpace(privateName) || privateName.Length > 128 || privateName.Any(char.IsControl))
             throw new ArgumentException("A short private anonymous-file name is required.", nameof(privateName));
+        if (createOverride is not null && createWithFlagsOverride is not null)
+            throw new ArgumentException("Only one anonymous-file test seam may be provided.");
 
         if (createOverride is not null)
         {
@@ -47,26 +58,104 @@ internal static class LinuxSealedFile
             return overridden;
         }
 
-        int descriptor;
+        const uint legacyFlags = LinuxSealedFile.MemfdCloseOnExec | LinuxSealedFile.MemfdAllowSealing;
         try
         {
-            descriptor = memfd_create(privateName, LinuxSealedFile.MemfdCloseOnExec | LinuxSealedFile.MemfdAllowSealing);
+            return CreateDataWithFlags(
+                privateName,
+                legacyFlags | LinuxSealedFile.MemfdNoExecSeal,
+                createWithFlagsOverride
+            );
+        }
+        catch (LinuxNativeIOException ex) when (ex.ErrorNumber == LinuxSealedFile.ErrorInvalidArgument)
+        {
+            try
+            {
+                return CreateDataWithFlags(privateName, legacyFlags, createWithFlagsOverride);
+            }
+            catch (EntryPointNotFoundException fallbackException)
+            {
+                throw Unsupported(fallbackException);
+            }
+            catch (LinuxNativeIOException fallbackException) when (fallbackException.ErrorNumber == LinuxSealedFile.ErrorFunctionNotImplemented)
+            {
+                throw Unsupported(fallbackException);
+            }
+            catch (LinuxNativeIOException fallbackException)
+            {
+                throw new PackageSecurityException(
+                    "Linux couldn't create anonymous sealed-file staging.",
+                    fallbackException
+                );
+            }
         }
         catch (EntryPointNotFoundException ex)
         {
             throw Unsupported(ex);
         }
-        if (descriptor < 0)
+        catch (LinuxNativeIOException ex) when (ex.ErrorNumber == LinuxSealedFile.ErrorFunctionNotImplemented)
         {
-            int error = Marshal.GetLastWin32Error();
-            if (error == LinuxSealedFile.ErrorFunctionNotImplemented)
-                throw Unsupported(new LinuxNativeIOException("memfd_create failed", error));
+            throw Unsupported(ex);
+        }
+        catch (LinuxNativeIOException ex)
+        {
             throw new PackageSecurityException(
                 "Linux couldn't create anonymous sealed-file staging.",
-                new LinuxNativeIOException("memfd_create failed", error)
+                ex
             );
         }
-        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+    }
+
+    /// <summary>
+    /// Create an anonymous file intended for execution. Linux 6.3 and later receive the explicit executable flag;
+    /// kernels which reject that unknown flag with EINVAL alone are retried with the legacy flags.
+    /// </summary>
+    public static SafeFileHandle CreateExecutableAnonymous(
+        string privateName,
+        Func<uint, SafeFileHandle>? createOverride = null
+    )
+    {
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Anonymous executable files are only supported on Linux.");
+        if (string.IsNullOrWhiteSpace(privateName) || privateName.Length > 128 || privateName.Any(char.IsControl))
+            throw new ArgumentException("A short private anonymous-file name is required.", nameof(privateName));
+
+        const uint legacyFlags = LinuxSealedFile.MemfdCloseOnExec | LinuxSealedFile.MemfdAllowSealing;
+        try
+        {
+            return CreateExecutableWithFlags(privateName, legacyFlags | LinuxSealedFile.MemfdExecutable, createOverride);
+        }
+        catch (LinuxNativeIOException ex) when (ex.ErrorNumber == LinuxSealedFile.ErrorInvalidArgument)
+        {
+            try
+            {
+                return CreateExecutableWithFlags(privateName, legacyFlags, createOverride);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                throw ExecutableUnsupported();
+            }
+            catch (LinuxNativeIOException fallbackException) when (fallbackException.ErrorNumber == LinuxSealedFile.ErrorFunctionNotImplemented)
+            {
+                throw ExecutableUnsupported();
+            }
+            catch (LinuxNativeIOException)
+            {
+                throw ExecutableCreationFailed();
+            }
+        }
+        catch (EntryPointNotFoundException)
+        {
+            throw ExecutableUnsupported();
+        }
+        catch (LinuxNativeIOException ex) when (ex.ErrorNumber == LinuxSealedFile.ErrorFunctionNotImplemented)
+        {
+            throw ExecutableUnsupported();
+        }
+        catch (LinuxNativeIOException)
+        {
+            throw ExecutableCreationFailed();
+        }
     }
 
     /// <summary>Duplicate a descriptor with close-on-exec retained.</summary>
@@ -99,6 +188,32 @@ internal static class LinuxSealedFile
     }
 
     /// <summary>
+    /// Make an executable anonymous file immutable, including its execute mode on kernels which support F_SEAL_EXEC.
+    /// Returns whether the execute-mode seal was applied; EINVAL alone retries the pre-F_SEAL_EXEC seal set.
+    /// </summary>
+    public static bool SealExecutableImmutable(
+        SafeFileHandle handle,
+        Func<int, int>? addSealsOverride = null
+    )
+    {
+        AssertOpen(handle);
+        int error = ApplySeals(handle, LinuxSealedFile.RequiredExecutableSeals, addSealsOverride);
+        if (error == 0)
+        {
+            AssertImmutable(handle, LinuxSealedFile.RequiredExecutableSeals);
+            return true;
+        }
+        if (error != LinuxSealedFile.ErrorInvalidArgument)
+            throw ExecutableSealFailed(error);
+
+        error = ApplySeals(handle, LinuxSealedFile.RequiredSeals, addSealsOverride);
+        if (error != 0)
+            throw ExecutableSealFailed(error);
+        AssertImmutable(handle, LinuxSealedFile.RequiredSeals);
+        return false;
+    }
+
+    /// <summary>
     /// Retain an immutable descriptor while an external process reopens it through this process's procfs entry.
     /// The returned authority remains valid if the original <see cref="SafeFileHandle"/> is disposed.
     /// </summary>
@@ -124,7 +239,7 @@ internal static class LinuxSealedFile
         }
     }
 
-    private static void AssertImmutable(SafeFileHandle handle)
+    private static void AssertImmutable(SafeFileHandle handle, int requiredSeals = LinuxSealedFile.RequiredSeals)
     {
         int actual = fcntl(handle, LinuxSealedFile.GetSeals, 0);
         if (actual < 0)
@@ -134,7 +249,7 @@ internal static class LinuxSealedFile
                 new LinuxNativeIOException("fcntl(F_GET_SEALS) failed", Marshal.GetLastWin32Error())
             );
         }
-        if ((actual & LinuxSealedFile.RequiredSeals) != LinuxSealedFile.RequiredSeals)
+        if ((actual & requiredSeals) != requiredSeals)
             throw new PackageSecurityException("Linux anonymous file staging doesn't have every required immutable seal.");
     }
 
@@ -150,6 +265,94 @@ internal static class LinuxSealedFile
         return new PackageSecurityException(
             "This Linux runtime doesn't provide the required anonymous sealed-package staging support.",
             inner
+        );
+    }
+
+    private static SafeFileHandle CreateExecutableWithFlags(
+        string privateName,
+        uint flags,
+        Func<uint, SafeFileHandle>? createOverride
+    )
+    {
+        SafeFileHandle handle;
+        if (createOverride is not null)
+        {
+            handle = createOverride(flags)
+                ?? throw new PackageSecurityException("The Linux executable anonymous-file test seam returned no descriptor.");
+        }
+        else
+        {
+            int descriptor = memfd_create(privateName, flags);
+            if (descriptor < 0)
+                throw new LinuxNativeIOException("memfd_create executable staging failed", Marshal.GetLastWin32Error());
+            handle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        }
+
+        if (handle.IsInvalid || handle.IsClosed)
+        {
+            handle.Dispose();
+            throw new PackageSecurityException("Linux returned an invalid executable anonymous-file descriptor.");
+        }
+        return handle;
+    }
+
+    private static SafeFileHandle CreateDataWithFlags(
+        string privateName,
+        uint flags,
+        Func<uint, SafeFileHandle>? createOverride
+    )
+    {
+        SafeFileHandle handle;
+        if (createOverride is not null)
+        {
+            handle = createOverride(flags)
+                ?? throw new PackageSecurityException("The Linux anonymous-file flags test seam returned no descriptor.");
+        }
+        else
+        {
+            int descriptor = memfd_create(privateName, flags);
+            if (descriptor < 0)
+                throw new LinuxNativeIOException("memfd_create failed", Marshal.GetLastWin32Error());
+            handle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        }
+
+        if (handle.IsInvalid || handle.IsClosed)
+        {
+            handle.Dispose();
+            throw new PackageSecurityException("Linux returned an invalid anonymous sealed-file descriptor.");
+        }
+        return handle;
+    }
+
+    private static PackageSecurityException ExecutableCreationFailed()
+    {
+        return new PackageSecurityException("Linux couldn't create executable anonymous-file staging.");
+    }
+
+    private static PackageSecurityException ExecutableUnsupported()
+    {
+        return new PackageSecurityException("This Linux runtime doesn't provide executable anonymous sealed-file staging.");
+    }
+
+    private static int ApplySeals(
+        SafeFileHandle handle,
+        int seals,
+        Func<int, int>? addSealsOverride
+    )
+    {
+        int error = addSealsOverride is null
+            ? (fcntl(handle, LinuxSealedFile.AddSeals, seals) == 0 ? 0 : Marshal.GetLastWin32Error())
+            : addSealsOverride(seals);
+        if (error < 0)
+            throw new PackageSecurityException("The Linux executable-seal test seam returned an invalid result.");
+        return error;
+    }
+
+    private static PackageSecurityException ExecutableSealFailed(int error)
+    {
+        return new PackageSecurityException(
+            "Linux couldn't seal executable anonymous-file staging.",
+            new LinuxNativeIOException("fcntl(F_ADD_SEALS) failed", error)
         );
     }
 

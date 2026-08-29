@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using FluentAssertions;
 using Microsoft.Win32.SafeHandles;
@@ -10,6 +12,7 @@ namespace StardewModdingAPI.Installer.Core.Tests.Security;
 
 [TestFixture]
 [Platform("Linux")]
+[SupportedOSPlatform("linux")]
 public sealed class LinuxSealedFileTests
 {
     [Test]
@@ -29,6 +32,178 @@ public sealed class LinuxSealedFileTests
 
         lease.Dispose();
         File.Exists(procPath).Should().BeFalse();
+    }
+
+    [Test]
+    public void CreateExecutableAnonymous_RequestsExplicitExecutableFlagsWithoutChangingGenericCreation()
+    {
+        List<uint> requestedFlags = [];
+        List<uint> requestedDataFlags = [];
+
+        using SafeFileHandle executable = LinuxSealedFile.CreateExecutableAnonymous(
+            "smapi-installer-executable-flags-test",
+            flags =>
+            {
+                requestedFlags.Add(flags);
+                return LinuxSealedFile.CreateAnonymous("smapi-installer-executable-flags-fixture");
+            }
+        );
+        using SafeFileHandle data = LinuxSealedFile.CreateAnonymous(
+            "smapi-installer-generic-data-test",
+            createWithFlagsOverride: flags =>
+            {
+                requestedDataFlags.Add(flags);
+                int descriptor = memfd_create("smapi-installer-generic-data-fixture", flags);
+                descriptor.Should().BeGreaterThanOrEqualTo(0, $"memfd_create failed with errno {Marshal.GetLastWin32Error()}");
+                return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+            }
+        );
+
+        requestedFlags.Should().Equal(0x13u);
+        requestedDataFlags.Should().Equal(0x0bu);
+        executable.IsInvalid.Should().BeFalse();
+        data.IsInvalid.Should().BeFalse();
+        fchmod(data, Convert.ToUInt32("500", 8)).Should().Be(-1, "MFD_NOEXEC_SEAL data authority must reject execute bits");
+    }
+
+    [Test]
+    public void CreateAnonymous_OldKernelEinvalFallsBackToExactLegacyDataFlags()
+    {
+        List<uint> requestedFlags = [];
+        using SafeFileHandle data = LinuxSealedFile.CreateAnonymous(
+            "smapi-installer-data-fallback-test",
+            createWithFlagsOverride: flags =>
+            {
+                requestedFlags.Add(flags);
+                if (requestedFlags.Count == 1)
+                    throw new LinuxNativeIOException("synthetic old-kernel data flag rejection", 22);
+                int descriptor = memfd_create("smapi-installer-data-fallback-fixture", flags);
+                descriptor.Should().BeGreaterThanOrEqualTo(0, $"memfd_create failed with errno {Marshal.GetLastWin32Error()}");
+                return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+            }
+        );
+        byte[] expected = "legacy data authority"u8.ToArray();
+        RandomAccess.Write(data, expected, 0);
+
+        LinuxSealedFile.SealImmutable(data);
+
+        requestedFlags.Should().Equal(0x0bu, 0x03u);
+        using LinuxSealedFileLease lease = LinuxSealedFile.LeaseForExternalRead(data);
+        File.ReadAllBytes(lease.ProcPath).Should().Equal(expected);
+    }
+
+    [Test]
+    [CancelAfter(5000)]
+    public async Task CreateExecutableAnonymous_OldKernelEinvalFallsBackAndExactSealedScriptExecutes()
+    {
+        List<uint> requestedFlags = [];
+        using SafeFileHandle executable = LinuxSealedFile.CreateExecutableAnonymous(
+            "smapi-installer-executable-fallback-test",
+            flags =>
+            {
+                requestedFlags.Add(flags);
+                if (requestedFlags.Count == 1)
+                    throw new LinuxNativeIOException("synthetic old-kernel flag rejection", 22);
+                int descriptor = memfd_create("smapi-installer-executable-fallback-fixture", flags);
+                descriptor.Should().BeGreaterThanOrEqualTo(0, $"memfd_create failed with errno {Marshal.GetLastWin32Error()}");
+                return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+            }
+        );
+        byte[] script = Encoding.UTF8.GetBytes("#!/bin/sh\nprintf 'sealed-fallback-ok'\n");
+        RandomAccess.Write(executable, script, 0);
+        fchmod(executable, Convert.ToUInt32("500", 8)).Should().Be(0, $"fchmod failed with errno {Marshal.GetLastWin32Error()}");
+        LinuxSealedFile.SealImmutable(executable);
+        using LinuxSealedFileLease lease = LinuxSealedFile.LeaseForExternalRead(executable);
+        ProcessStartInfo start = new(lease.ProcPath)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        using Process process = Process.Start(start) ?? throw new AssertionException("The fallback executable didn't start.");
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(4));
+        string output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
+        string error = await process.StandardError.ReadToEndAsync(timeout.Token);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        finally
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+        }
+
+        requestedFlags.Should().Equal(0x13u, 0x03u);
+        process.ExitCode.Should().Be(0, error);
+        output.Should().Be("sealed-fallback-ok");
+        File.ReadAllBytes(lease.ProcPath).Should().Equal(script);
+    }
+
+    [Test]
+    public void CreateExecutableAnonymous_EnforcedNoExecFailsClosedWithoutLegacyFallbackOrPrivateError()
+    {
+        List<uint> requestedFlags = [];
+
+        Action create = () => LinuxSealedFile.CreateExecutableAnonymous(
+            "smapi-installer-executable-noexec-test",
+            flags =>
+            {
+                requestedFlags.Add(flags);
+                throw new LinuxNativeIOException("credential-secret-never-disclose", 1);
+            }
+        ).Dispose();
+
+        Exception error = create.Should().Throw<PackageSecurityException>().Which;
+        requestedFlags.Should().Equal(0x13u);
+        error.ToString().Should().NotContain("credential-secret-never-disclose");
+        error.Message.Should().Contain("couldn't create executable");
+    }
+
+    [Test]
+    public void SealExecutableImmutable_SupportedKernelPreventsExecuteModeChanges()
+    {
+        using SafeFileHandle executable = LinuxSealedFile.CreateExecutableAnonymous(
+            "smapi-installer-executable-mode-seal-test"
+        );
+        RandomAccess.Write(executable, "sealed-executable"u8.ToArray(), 0);
+        fchmod(executable, Convert.ToUInt32("500", 8)).Should().Be(0, $"fchmod failed with errno {Marshal.GetLastWin32Error()}");
+
+        bool executeModeSealed = LinuxSealedFile.SealExecutableImmutable(executable);
+
+        if (!executeModeSealed)
+            Assert.Ignore("This kernel predates F_SEAL_EXEC; the deterministic fallback is covered separately.");
+        fchmod(executable, Convert.ToUInt32("400", 8)).Should().Be(-1, "F_SEAL_EXEC must prevent execute-bit changes");
+        using LinuxSealedFileLease lease = LinuxSealedFile.LeaseForExternalRead(executable);
+        File.GetUnixFileMode(lease.ProcPath).Should().Be(UnixFileMode.UserRead | UnixFileMode.UserExecute);
+    }
+
+    [Test]
+    public void SealExecutableImmutable_OldKernelEinvalFallsBackToExactLegacySealSet()
+    {
+        using SafeFileHandle executable = LinuxSealedFile.CreateExecutableAnonymous(
+            "smapi-installer-executable-seal-fallback-test"
+        );
+        byte[] expected = "legacy executable seals"u8.ToArray();
+        RandomAccess.Write(executable, expected, 0);
+        fchmod(executable, Convert.ToUInt32("500", 8)).Should().Be(0, $"fchmod failed with errno {Marshal.GetLastWin32Error()}");
+        List<int> requestedSeals = [];
+
+        bool executeModeSealed = LinuxSealedFile.SealExecutableImmutable(
+            executable,
+            seals =>
+            {
+                requestedSeals.Add(seals);
+                if (requestedSeals.Count == 1)
+                    return 22;
+                return fcntl(executable, 1033, seals) == 0 ? 0 : Marshal.GetLastWin32Error();
+            }
+        );
+
+        executeModeSealed.Should().BeFalse();
+        requestedSeals.Should().Equal(0x2f, 0x0f);
+        using LinuxSealedFileLease lease = LinuxSealedFile.LeaseForExternalRead(executable);
+        File.ReadAllBytes(lease.ProcPath).Should().Equal(expected);
     }
 
     [Test]
@@ -112,4 +287,13 @@ public sealed class LinuxSealedFileTests
         using LinuxSealedFileLease lease = LinuxSealedFile.LeaseForExternalRead(alias);
         File.ReadAllBytes(lease.ProcPath).Should().Equal(expected);
     }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fchmod(SafeFileHandle descriptor, uint mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(SafeFileHandle descriptor, int command, int argument);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int memfd_create(string name, uint flags);
 }
