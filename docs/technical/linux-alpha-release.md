@@ -95,7 +95,7 @@ release_tag='COPY THE EXACT RELEASE TAG HERE'
 release_commit='COPY THE EXACT 40-CHARACTER RELEASE COMMIT HERE'
 sha256sum --check --strict SHA256SUMS
 sha256sum --check --strict "$bundle_name.sha256"
-gh attestation verify "$package_name" \
+attestation_policy=(
   --bundle "$bundle_name" \
   --hostname github.com \
   --repo 4eh5xitv6787h645ebv/SMAPI \
@@ -108,12 +108,16 @@ gh attestation verify "$package_name" \
   --deny-self-hosted-runners \
   --limit 2 \
   --format json
+)
+gh attestation verify "$package_name" "${attestation_policy[@]}"
+gh attestation verify "$manifest_name" "${attestation_policy[@]}"
 ```
 
-Both package/manifest checksum subjects and the bundle checksum must report `OK`. The successful
-attestation statement must identify this repository, the tagged `linux-alpha-release.yml` workflow,
-and the selected release commit, and contain exactly the package and manifest subjects. A pull-request
-build, `develop` build, manual source build, or pre-tag workflow-dispatch candidate is non-authoritative:
+Both package/manifest checksum subjects and the bundle checksum must report `OK`, and both
+attestation-verification commands must succeed against the same downloaded bundle. The successful
+statement must identify this repository, the tagged `linux-alpha-release.yml` workflow, and the
+selected release commit, and contain exactly the package and manifest names and locally computed
+digests. A pull-request build, `develop` build, manual source build, or pre-tag workflow-dispatch candidate is non-authoritative:
 the production workflow records its actual identity and does not invoke the release-manifest
 creation path. The tool's tag-context check prevents accidental candidate minting, but it is not a
 cryptographic provenance boundary and its environment can be reproduced by a local caller. Only
