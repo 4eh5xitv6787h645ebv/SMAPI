@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 
@@ -7,8 +8,7 @@ namespace StardewModdingAPI.Installer.Gui;
 public sealed partial class App : Application
 {
     private readonly GuiLaunchMode LaunchMode;
-    private readonly Func<GuiLaunchMode, GuiMainWindowComposition> CreateMainWindow;
-    private GuiMainWindowComposition? MainWindowComposition;
+    private readonly Func<GuiLaunchMode, Window> CreateMainWindow;
 
     public App()
         : this(GuiLaunchMode.Demo)
@@ -22,7 +22,7 @@ public sealed partial class App : Application
 
     internal App(
         GuiLaunchMode launchMode,
-        Func<GuiLaunchMode, GuiMainWindowComposition> createMainWindow
+        Func<GuiLaunchMode, Window> createMainWindow
     )
     {
         if (!Enum.IsDefined(launchMode))
@@ -39,10 +39,7 @@ public sealed partial class App : Application
     public override void OnFrameworkInitializationCompleted()
     {
         if (this.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
-        {
-            this.MainWindowComposition = this.CreateMainWindow(this.LaunchMode);
-            desktop.MainWindow = this.MainWindowComposition.MainWindow;
-        }
+            desktop.MainWindow = this.CreateMainWindow(this.LaunchMode);
 
         base.OnFrameworkInitializationCompleted();
     }

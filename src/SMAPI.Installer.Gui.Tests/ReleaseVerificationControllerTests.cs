@@ -585,6 +585,61 @@ internal sealed class ReleaseVerificationControllerTests
         await AwaitBounded(controller.DisposeAsync().AsTask());
     }
 
+    [Test]
+    public async Task CancelAcceptedAfterFinalCtsDisposalCannotPublishVerified()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        TaskCompletionSource finalCtsDisposed = NewCompletion();
+        TaskCompletionSource releaseAuthorityHandoff = NewCompletion();
+        FakePreparedPackage package = new();
+        FakeReleaseService service = PreparedService(candidate, package);
+        FakeClient client = new();
+        ReleaseVerificationController controller = new(service, () => client)
+        {
+            AfterAttemptCancellationDisposedForTesting = () =>
+            {
+                finalCtsDisposed.TrySetResult();
+                if (!releaseAuthorityHandoff.Task.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("The deterministic authority-handoff gate wasn't released.");
+            }
+        };
+        List<ReleaseVerificationState> publishedStates = [];
+        object publishedSync = new();
+        controller.Changed += (_, _) =>
+        {
+            lock (publishedSync)
+                publishedStates.Add(controller.Snapshot.State);
+        };
+        await AwaitBounded(controller.LoadCatalogAsync());
+
+        Task running = controller.StartAsync();
+        await AwaitBounded(finalCtsDisposed.Task);
+        controller.Snapshot.State.Should().Be(ReleaseVerificationState.OpeningPackage);
+        controller.Snapshot.CanCancel.Should().BeTrue();
+        controller.Snapshot.VerifiedRelease.Should().BeNull();
+
+        Task cancellation = controller.CancelAsync();
+        controller.Snapshot.State.Should().Be(ReleaseVerificationState.CleaningUp);
+        controller.Snapshot.CanCancel.Should().BeFalse();
+        controller.Snapshot.VerifiedRelease.Should().BeNull();
+        cancellation.IsCompleted.Should().BeFalse();
+
+        releaseAuthorityHandoff.SetResult();
+        await AwaitBounded(cancellation);
+        await AwaitBounded(running);
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Cancelled);
+        snapshot.Error.Should().Be(ReleaseVerificationError.None);
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.CanRetry.Should().BeTrue();
+        package.DisposeCalls.Should().Be(1);
+        client.DisposeCalls.Should().Be(1);
+        lock (publishedSync)
+            publishedStates.Should().NotContain(ReleaseVerificationState.Verified);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
     private static FakeReleaseService PreparedService(
         ReviewedReleaseCandidate candidate,
         FakePreparedPackage package

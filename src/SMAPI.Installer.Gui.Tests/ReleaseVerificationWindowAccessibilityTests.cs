@@ -157,7 +157,7 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
     }
 
     [AvaloniaTest]
-    public async Task AccessKeysAreUniqueAndTabTraversalTracksReadyAndBusyControls()
+    public async Task AccessKeysInvokeReadyAndBusyActionsAndTabTraversalTracksDynamicControls()
     {
         ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
         ReleaseVerificationViewModelTests.FakeReleaseService service = new([candidate]);
@@ -187,18 +187,31 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         selector.IsFocused.Should().BeTrue();
         Press(window, Key.Tab);
         download.IsFocused.Should().BeTrue("forward traversal follows the visible ready-state order");
+        PressAccessKey(window, PhysicalKey.E);
+        selector.IsFocused.Should().BeTrue("Alt+E focuses the release selector in the Ready state");
+        Press(window, Key.Tab);
+        download.IsFocused.Should().BeTrue();
         Press(window, Key.Tab, RawInputModifiers.Shift);
         selector.IsFocused.Should().BeTrue("reverse traversal returns to the release selector");
 
-        viewModel.DownloadAndVerifyCommand.Execute(null);
+        PressAccessKey(window, PhysicalKey.D);
         await service.PreparationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await WaitUntilAsync(() => viewModel.CancelCommand.CanExecute(null) && status.IsFocused);
+        await WaitUntilAsync(() =>
+            viewModel.CancelCommand.CanExecute(null)
+            && viewModel.Heading == "Preparing the selected release…"
+            && status.IsFocused
+        );
         Press(window, Key.Tab);
         cancel.IsFocused.Should().BeTrue("disabled and hidden ready-state controls are skipped while busy");
         Press(window, Key.Tab, RawInputModifiers.Shift);
         status.IsFocused.Should().BeTrue("reverse traversal returns to the busy status region");
 
-        await viewModel.CancelCommand.ExecuteAsync();
+        PressAccessKey(window, PhysicalKey.C);
+        await WaitUntilAsync(() =>
+            viewModel.Heading == "Download cancelled"
+            && !viewModel.CancelCommand.CanExecute(null)
+            && viewModel.DurableState.Contains("nothing has been installed", StringComparison.Ordinal)
+        );
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
     }
@@ -224,6 +237,15 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
     {
         window.KeyPress(key, modifiers, PhysicalKey.None, null);
         window.KeyRelease(key, modifiers, PhysicalKey.None, null);
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    private static void PressAccessKey(ReleaseVerificationWindow window, PhysicalKey physicalKey)
+    {
+        window.KeyPressQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
+        window.KeyPressQwerty(physicalKey, RawInputModifiers.Alt);
+        window.KeyReleaseQwerty(physicalKey, RawInputModifiers.Alt);
+        window.KeyReleaseQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
         Dispatcher.UIThread.RunJobs();
     }
 

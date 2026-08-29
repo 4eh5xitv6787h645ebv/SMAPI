@@ -12,11 +12,13 @@ internal sealed class GuiCompositionTests
     [AvaloniaTest]
     public async Task DefaultCompositionMapsProductionAndDemoToTheirActualWindows()
     {
-        await using GuiMainWindowComposition production = GuiComposition.CreateMainWindow(GuiLaunchMode.Production);
-        await using GuiMainWindowComposition demo = GuiComposition.CreateMainWindow(GuiLaunchMode.Demo);
+        ReleaseVerificationWindow production = GuiComposition.CreateMainWindow(GuiLaunchMode.Production)
+            .Should().BeOfType<ReleaseVerificationWindow>().Subject;
+        MainWindow demo = GuiComposition.CreateMainWindow(GuiLaunchMode.Demo)
+            .Should().BeOfType<MainWindow>().Subject;
 
-        production.MainWindow.Should().BeOfType<ReleaseVerificationWindow>();
-        demo.MainWindow.Should().BeOfType<MainWindow>();
+        await production.DisposeAsync();
+        demo.DataContext.Should().BeOfType<MainWindowViewModel>();
     }
 
     [AvaloniaTest]
@@ -27,7 +29,7 @@ internal sealed class GuiCompositionTests
         int demoFactoryCalls = 0;
         int protocolFactoryCalls = 0;
 
-        GuiMainWindowComposition CreateProduction()
+        ReleaseVerificationWindow CreateProduction()
         {
             productionFactoryCalls++;
             ReleaseVerificationViewModel viewModel = new(new ReleaseVerificationController(
@@ -38,40 +40,39 @@ internal sealed class GuiCompositionTests
                     throw new AssertionException("Composition must not start the backend protocol client.");
                 }
             ));
-            return new GuiMainWindowComposition(new ReleaseVerificationWindow(viewModel), viewModel);
+            return new ReleaseVerificationWindow(viewModel);
         }
 
-        GuiMainWindowComposition CreateDemo()
+        MainWindow CreateDemo()
         {
             demoFactoryCalls++;
-            return new GuiMainWindowComposition(new MainWindow());
+            return new MainWindow();
         }
 
-        await using (GuiMainWindowComposition composition = GuiComposition.CreateMainWindow(
+        ReleaseVerificationWindow window = GuiComposition.CreateMainWindow(
             GuiLaunchMode.Production,
             CreateProduction,
             CreateDemo
-        ))
-        {
-            composition.MainWindow.Should().BeOfType<ReleaseVerificationWindow>();
-            productionFactoryCalls.Should().Be(1);
-            demoFactoryCalls.Should().Be(0);
-            service.LoadCatalogCalls.Should().Be(0);
-            service.PrepareCalls.Should().Be(0);
-            protocolFactoryCalls.Should().Be(0);
-            service.DisposeCalls.Should().Be(0);
-        }
+        ).Should().BeOfType<ReleaseVerificationWindow>().Subject;
 
+        productionFactoryCalls.Should().Be(1);
+        demoFactoryCalls.Should().Be(0);
+        service.LoadCatalogCalls.Should().Be(0);
+        service.PrepareCalls.Should().Be(0);
+        protocolFactoryCalls.Should().Be(0);
+        service.DisposeCalls.Should().Be(0);
+
+        await Task.WhenAll(window.DisposeAsync().AsTask(), window.DisposeAsync().AsTask());
         service.DisposeCalls.Should().Be(1);
     }
 
     [AvaloniaTest]
-    public async Task DemoCompositionDoesNotCreateProductionResources()
+    public void DemoCompositionDoesNotCreateProductionResources()
     {
         int productionFactoryCalls = 0;
         int demoFactoryCalls = 0;
 
-        await using GuiMainWindowComposition composition = GuiComposition.CreateMainWindow(
+        MainWindow window = GuiComposition.CreateMainWindow(
             GuiLaunchMode.Demo,
             () =>
             {
@@ -81,11 +82,11 @@ internal sealed class GuiCompositionTests
             () =>
             {
                 demoFactoryCalls++;
-                return new GuiMainWindowComposition(new MainWindow());
+                return new MainWindow();
             }
-        );
+        ).Should().BeOfType<MainWindow>().Subject;
 
-        composition.MainWindow.Should().BeOfType<MainWindow>();
+        window.DataContext.Should().BeOfType<MainWindowViewModel>();
         productionFactoryCalls.Should().Be(0);
         demoFactoryCalls.Should().Be(1);
     }

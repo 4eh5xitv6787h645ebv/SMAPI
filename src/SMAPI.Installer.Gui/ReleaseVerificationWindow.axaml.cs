@@ -6,9 +6,11 @@ using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui;
 
-internal sealed partial class ReleaseVerificationWindow : Window
+internal sealed partial class ReleaseVerificationWindow : Window, IAsyncDisposable
 {
+    private readonly object DisposeLock = new();
     private readonly ReleaseVerificationViewModel ViewModel;
+    private Task? DisposeTask;
     private bool CloseApproved;
     private bool CloseStarted;
 
@@ -34,6 +36,16 @@ internal sealed partial class ReleaseVerificationWindow : Window
         this.PageGrid.Margin = this.IsNarrowLayout ? new Avalonia.Thickness(14) : new Avalonia.Thickness(28);
     }
 
+    /// <summary>Dispose the production view model, controller, backend session, and release service exactly once.</summary>
+    public ValueTask DisposeAsync()
+    {
+        lock (this.DisposeLock)
+        {
+            this.DisposeTask ??= this.DisposeCoreAsync();
+            return new ValueTask(this.DisposeTask);
+        }
+    }
+
     private async void OnOpened(object? sender, EventArgs e)
     {
         this.StatusRegion.Focus(NavigationMethod.Tab);
@@ -49,15 +61,14 @@ internal sealed partial class ReleaseVerificationWindow : Window
         if (this.CloseStarted)
             return;
         this.CloseStarted = true;
-        await this.ViewModel.DisposeAsync();
+        await this.DisposeAsync();
         this.CloseApproved = true;
         this.Close();
     }
 
     private async void OnClosed(object? sender, EventArgs e)
     {
-        this.ViewModel.FocusRequested -= this.OnFocusRequested;
-        await this.ViewModel.DisposeAsync();
+        await this.DisposeAsync();
     }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
@@ -87,5 +98,11 @@ internal sealed partial class ReleaseVerificationWindow : Window
             },
             DispatcherPriority.Input
         );
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        this.ViewModel.FocusRequested -= this.OnFocusRequested;
+        await this.ViewModel.DisposeAsync();
     }
 }

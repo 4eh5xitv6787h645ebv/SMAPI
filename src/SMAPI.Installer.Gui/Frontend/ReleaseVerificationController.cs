@@ -78,6 +78,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
     private ProtocolNextAction? RejectionNextActionValue;
     private bool RejectionIsTerminalValue;
     private Task? DisposalTask;
+    internal Action? AfterAttemptCancellationDisposedForTesting { get; set; }
 
     public ReleaseVerificationController(
         IReviewedReleaseService releaseService,
@@ -211,6 +212,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             operation = this.ActiveOperation;
             if (operation is null)
                 return;
+            operation.AcceptUserCancellation();
             this.StateValue = ReleaseVerificationState.CleaningUp;
             this.ProgressValue = null;
         }
@@ -290,7 +292,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
     private ControllerOperation BeginOperation(CancellationToken callerCancellation)
     {
         CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellation);
-        ControllerOperation operation = new(++this.GenerationValue, cancellation);
+        ControllerOperation operation = new(++this.GenerationValue, cancellation, callerCancellation);
         this.ActiveOperation = operation;
         return operation;
     }
@@ -420,6 +422,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         ReleaseVerificationError outcomeError = ReleaseVerificationError.BackendUnavailable;
         bool transferVerifiedClient = false;
         bool preparedDisposalAttempted = false;
+        ProtocolReleaseIdentity? openedRelease = null;
         try
         {
             attempt.Client = this.ClientFactory()
@@ -475,8 +478,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                         throw new OperationCanceledException(attempt.Operation.Cancellation.Token);
                     if (attempt.Client.SessionFaulted.IsCompleted)
                         throw new BackendSessionFaultException();
-                    this.VerifiedReleaseValue = success.Release;
                 }
+                openedRelease = success.Release;
                 transferVerifiedClient = true;
                 outcomeState = ReleaseVerificationState.Verified;
                 outcomeError = ReleaseVerificationError.None;
@@ -558,6 +561,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 lock (this.Sync)
                     this.ClearResultAuthority();
             }
+            this.AfterAttemptCancellationDisposedForTesting?.Invoke();
             bool watchVerifiedFault = false;
             lock (this.Sync)
             {
@@ -566,12 +570,15 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                     if (
                         transferVerifiedClient
                         && !this.DisposeStarted
+                        && !attempt.Operation.UserCancellationRequested
                         && attempt.Client?.SessionFaulted.IsCompleted == false
                     )
                     {
                         this.ActiveOperation = null;
                         this.ProgressValue = null;
                         this.VerifiedAttempt = attempt;
+                        this.VerifiedReleaseValue = openedRelease
+                            ?? throw new InvalidOperationException("A verified package-open result lost its release identity.");
                         this.StateValue = ReleaseVerificationState.Verified;
                         this.ErrorValue = ReleaseVerificationError.None;
                         watchVerifiedFault = true;
@@ -584,6 +591,11 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                             outcomeError = ReleaseVerificationError.SessionFaulted;
                         }
                         else if (transferVerifiedClient && this.DisposeStarted)
+                        {
+                            outcomeState = ReleaseVerificationState.Cancelled;
+                            outcomeError = ReleaseVerificationError.None;
+                        }
+                        else if (transferVerifiedClient && attempt.Operation.UserCancellationRequested)
                         {
                             outcomeState = ReleaseVerificationState.Cancelled;
                             outcomeError = ReleaseVerificationError.None;
@@ -872,13 +884,15 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
 
     private sealed class ControllerOperation(
         long generation,
-        CancellationTokenSource cancellation
+        CancellationTokenSource cancellation,
+        CancellationToken callerCancellation
     )
     {
         private readonly object CancellationSync = new();
         private TaskCompletionSource? CancellationSettled;
         private bool CancellationDisposed;
         private bool CancellationFailed;
+        private bool ExplicitUserCancellation;
 
         public long Generation { get; } = generation;
         public CancellationTokenSource Cancellation { get; } = cancellation;
@@ -890,6 +904,22 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 lock (this.CancellationSync)
                     return this.CancellationFailed;
             }
+        }
+        public bool UserCancellationRequested
+        {
+            get
+            {
+                lock (this.CancellationSync)
+                    return this.ExplicitUserCancellation
+                        || callerCancellation.IsCancellationRequested
+                        || this.Cancellation.IsCancellationRequested;
+            }
+        }
+
+        public void AcceptUserCancellation()
+        {
+            lock (this.CancellationSync)
+                this.ExplicitUserCancellation = true;
         }
 
         public Task RequestCancellationAsync()
