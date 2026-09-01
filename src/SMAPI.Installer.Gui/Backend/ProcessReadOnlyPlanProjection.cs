@@ -144,6 +144,72 @@ internal sealed class InstallerExecutionOperation
     public Task RequestCancellationAsync() => this.RequestCancellationCore();
 }
 
+/// <summary>A bounded typed recovery update with no backend text, path, identifier, or filesystem identity.</summary>
+internal sealed record InstallerRecoveryProgress(
+    TransactionStage Stage,
+    int CompletedUnits,
+    int? TotalUnits
+);
+
+/// <summary>A sanitized recovery outcome which never exposes backend text or transport authority.</summary>
+internal abstract record InstallerRecoveryResult;
+
+/// <summary>Bounded aggregate facts from an exact recovery attempt.</summary>
+internal sealed record InstallerRecoveryAttemptSummary(
+    bool? OperationGenerationAdvanced,
+    bool? NamedRootStillSelected,
+    int RecoveredTransactionCount,
+    int RecoveredPathCount
+);
+
+/// <summary>A fully validated terminal event from the exact admitted recovery command.</summary>
+internal sealed record InstallerRecoveryTerminalResult(
+    ProtocolInterruptedRecoveryOutcome Outcome,
+    ProtocolDurableState DurableState,
+    ProtocolTerminalErrorCode? ErrorCode,
+    ProtocolRecoveryDisposition RecoveryDisposition,
+    ProtocolNextAction NextAction,
+    InstallerRecoveryAttemptSummary? Attempt,
+    InstallerBackendSettlement BackendSettlement
+) : InstallerRecoveryResult;
+
+internal enum InstallerRecoveryUncertaintyReason
+{
+    BackendStateCouldNotBeConfirmed
+}
+
+/// <summary>
+/// A conservative result used when transport was lost after recovery may have started. A fresh authenticated
+/// session must inspect the interrupted state; this result never claims that recovery was unchanged or retryable.
+/// </summary>
+internal sealed record InstallerRecoveryStateUnknownResult : InstallerRecoveryResult
+{
+    public InstallerRecoveryUncertaintyReason Reason => InstallerRecoveryUncertaintyReason.BackendStateCouldNotBeConfirmed;
+    public ProtocolDurableState DurableState => ProtocolDurableState.Unknown;
+    public ProtocolTerminalErrorCode? ErrorCode => null;
+    public ProtocolRecoveryDisposition RecoveryDisposition => ProtocolRecoveryDisposition.InterruptedRecoveryRequired;
+    public ProtocolNextAction NextAction => ProtocolNextAction.RecoverInterrupted;
+}
+
+/// <summary>
+/// One admitted non-cancellable recovery attempt. Progress is bounded and coalescing; completion always represents
+/// either an exact correlated terminal or conservative post-admission uncertainty.
+/// </summary>
+internal sealed class InstallerRecoveryOperation
+{
+    public ChannelReader<InstallerRecoveryProgress> Progress { get; }
+    public Task<InstallerRecoveryResult> Completion { get; }
+
+    internal InstallerRecoveryOperation(
+        ChannelReader<InstallerRecoveryProgress> progress,
+        Task<InstallerRecoveryResult> completion
+    )
+    {
+        this.Progress = progress;
+        this.Completion = completion;
+    }
+}
+
 /// <summary>A normal pre-plan domain rejection without backend text, private logs, paths, or opaque IDs.</summary>
 internal sealed record InstallerReadOnlyPlanRejection(
     ProtocolPrePlanErrorCode ErrorCode,

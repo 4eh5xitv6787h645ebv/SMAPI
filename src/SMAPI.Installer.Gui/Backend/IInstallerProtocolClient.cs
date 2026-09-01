@@ -40,6 +40,16 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
         InstallerConfirmedPlanAuthority authority,
         CancellationToken cancellationToken = default
     ) => throw new NotSupportedException("This restricted client doesn't support plan execution.");
+
+    /// <summary>
+    /// Consume one exact valid game-folder candidate issued by this client and attempt interrupted-operation
+    /// recovery once. The candidate's canonical path remains private to the backend transport, and caller
+    /// cancellation is honored only before admission because protocol recovery has no cancellation command.
+    /// </summary>
+    Task<InstallerRecoveryOperation> RecoverInterruptedAsync(
+        ProtocolGameCandidate candidate,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted client doesn't support interrupted-operation recovery.");
 }
 
 /// <summary>
