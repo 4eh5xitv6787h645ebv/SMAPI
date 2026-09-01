@@ -342,6 +342,8 @@ internal sealed partial class PlanReviewPresentationTests
             .And.Contain("cannot be removed individually")
             .And.Contain("0 candidates remain")
             .And.Contain("cannot confirm or execute");
+        viewModel.IsCandidateApprovalCapacityFull.Should().BeFalse();
+        viewModel.CandidateCapacityDetail.Should().BeEmpty();
         viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeTrue();
 
         await viewModel.StartFreshInspectionCommand.ExecuteAsync();
@@ -396,6 +398,8 @@ internal sealed partial class PlanReviewPresentationTests
             .And.Contain("1 candidate remains");
         viewModel.CandidateSelectionAnnouncement.Should().Be("2 approvals already applied and fixed in this preview; 0 of 1 remaining files selected.");
         viewModel.CandidateSelectionAnnouncement.Should().NotContain("third-private.dll");
+        viewModel.IsCandidateApprovalCapacityFull.Should().BeFalse();
+        viewModel.CandidateCapacityDetail.Should().BeEmpty();
         session.ApprovedCandidates.Should().HaveCount(2);
         session.ApprovedCandidates.SelectMany(candidates => candidates).Should().Equal(first, second);
     }
@@ -428,6 +432,15 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.CandidateReviewDetail.Should().Contain($"{ProtocolJsonSerializer.MaxPlanCandidates} additive file approvals are already applied")
             .And.Contain("1 candidate remains")
             .And.Contain("cannot be removed individually");
+        viewModel.IsCandidateApprovalCapacityFull.Should().BeTrue();
+        viewModel.CandidateCapacityDetail.Should().Contain("bounded approval history is full")
+            .And.Contain("no more candidate approvals fit")
+            .And.Contain("Clear local choices only unchecks this screen")
+            .And.Contain("does not free approval capacity")
+            .And.Contain("Start a fresh inspection")
+            .And.Contain("No files change")
+            .And.Contain("cannot confirm or execute");
+        viewModel.CandidateCapacityDetail.Should().NotContain("remaining-private.dll");
         viewModel.IsCandidateSelectionEnabled.Should().BeTrue("the user may still inspect and clear a local choice");
         viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeTrue();
         viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse("the bounded additive approval history is full");

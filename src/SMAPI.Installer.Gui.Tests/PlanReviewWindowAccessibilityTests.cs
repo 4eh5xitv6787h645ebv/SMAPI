@@ -393,6 +393,7 @@ internal sealed partial class PlanReviewPresentationTests
         string cumulativeCount = ControlAutomationPeer.CreatePeerForElement(countStatus).GetName();
         cumulativeCount.Should().Be("1 approval already applied and fixed in this preview; 0 of 0 remaining files selected.");
         cumulativeCount.Should().NotContain("approval.dll");
+        window.FindControl<TextBlock>("CandidateCapacityDetail")!.IsVisible.Should().BeFalse("one applied approval does not fill the bounded history");
         AutomationProperties.GetHelpText(apply).Should().Contain("additive approvals").And.Contain("does not change files, confirm, or execute");
         AutomationProperties.GetHelpText(fresh).Should().Contain("Revokes the current preview").And.Contain("does not undo");
 
@@ -460,6 +461,90 @@ internal sealed partial class PlanReviewPresentationTests
         list.ScrollIntoView(ProtocolJsonSerializer.MaxPlanCandidates - 1);
         Dispatcher.UIThread.RunJobs();
         list.ContainerFromIndex(ProtocolJsonSerializer.MaxPlanCandidates - 1).Should().NotBeNull();
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task PartialApprovalCapacityKeepsApplyUsableAndCapacityWarningHiddenAtTwo()
+    {
+        InstallerReadOnlyPlanCandidate first = CandidateCapability("mods/first-private.dll", false);
+        InstallerReadOnlyPlanCandidate second = CandidateCapability("mods/second-private.dll", false);
+        InstallerReadOnlyPlanCandidate remaining = CandidateCapability("mods/remaining-private.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [first, second, remaining])),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Install, [remaining]))
+        };
+        PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.CandidateChoices[0].IsSelected = true;
+        viewModel.CandidateChoices[1].IsSelected = true;
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.CandidateChoices.Single().IsSelected = true;
+        PlanReviewWindow window = new(viewModel);
+
+        AssertRenderedLayout(window, 620);
+        TextBlock capacity = window.FindControl<TextBlock>("CandidateCapacityDetail")!;
+        Button apply = window.FindControl<Button>("ApplyCandidatesButton")!;
+        Button clear = window.FindControl<Button>("ClearCandidatesButton")!;
+        Border countStatus = window.FindControl<Border>("CandidateSelectionStatusRegion")!;
+
+        capacity.IsVisible.Should().BeFalse();
+        viewModel.CandidateCapacityDetail.Should().BeEmpty();
+        apply.IsEffectivelyEnabled.Should().BeTrue();
+        clear.IsEffectivelyEnabled.Should().BeTrue();
+        string liveName = ControlAutomationPeer.CreatePeerForElement(countStatus).GetName();
+        liveName.Should().Be("2 approvals already applied and fixed in this preview; 1 of 1 remaining files selected.");
+        liveName.Should().NotContain("remaining-private.dll").And.NotContain("history is full");
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task FullApprovalCapacityExplainsDisabledApplyAndUsableLocalClearToVisualAndAutomationUsers()
+    {
+        InstallerReadOnlyPlanCandidate[] maximum = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates)
+            .Select(index => CandidateCapability($"mods/capacity-{index:D3}.dll", false))
+            .ToArray();
+        InstallerReadOnlyPlanCandidate remaining = CandidateCapability("mods/remaining-private.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, maximum)),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Install, [remaining]))
+        };
+        PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        foreach (PlanReviewCandidateChoice choice in viewModel.CandidateChoices)
+            choice.IsSelected = true;
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.CandidateChoices.Single().IsSelected = true;
+        PlanReviewWindow window = new(viewModel);
+
+        AssertRenderedLayout(window, 620);
+        TextBlock capacity = window.FindControl<TextBlock>("CandidateCapacityDetail")!;
+        Button apply = window.FindControl<Button>("ApplyCandidatesButton")!;
+        Button clear = window.FindControl<Button>("ClearCandidatesButton")!;
+        Border countStatus = window.FindControl<Border>("CandidateSelectionStatusRegion")!;
+
+        capacity.IsVisible.Should().BeTrue();
+        string capacityName = ControlAutomationPeer.CreatePeerForElement(capacity).GetName();
+        capacityName.Should().Be(viewModel.CandidateCapacityDetail)
+            .And.Contain("approval history is full")
+            .And.Contain("Clear local choices")
+            .And.Contain("Start a fresh inspection")
+            .And.NotContain("remaining-private.dll");
+        apply.IsEffectivelyEnabled.Should().BeFalse();
+        clear.IsEffectivelyEnabled.Should().BeTrue();
+        string liveName = ControlAutomationPeer.CreatePeerForElement(countStatus).GetName();
+        liveName.Should().Be($"{ProtocolJsonSerializer.MaxPlanCandidates} approvals already applied and fixed in this preview; 1 of 1 remaining files selected.");
+        liveName.Should().NotContain("remaining-private.dll").And.NotContain("history is full");
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
     }

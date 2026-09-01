@@ -323,6 +323,14 @@
                 Text="{Binding CandidateReviewDetail}"
                 TextWrapping="Wrap" />
             <TextBlock
+                x:Name="CandidateCapacityDetail"
+                AutomationProperties.Name="{Binding CandidateCapacityDetail}"
+                Classes="muted"
+                FontWeight="SemiBold"
+                IsVisible="{Binding IsCandidateApprovalCapacityFull}"
+                Text="{Binding CandidateCapacityDetail}"
+                TextWrapping="Wrap" />
+            <TextBlock
                 Classes="muted"
                 Text="A backend-provisional label explains the inspected plan only. It is not your approval. There is intentionally no Select all control."
                 TextWrapping="Wrap" />
