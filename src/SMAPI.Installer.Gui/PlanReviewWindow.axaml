@@ -327,7 +327,7 @@
                 AutomationProperties.Name="{Binding CandidateCapacityDetail}"
                 Classes="muted"
                 FontWeight="SemiBold"
-                IsVisible="{Binding IsCandidateApprovalCapacityFull}"
+                IsVisible="{Binding IsCandidateCapacityDetailVisible}"
                 Text="{Binding CandidateCapacityDetail}"
                 TextWrapping="Wrap" />
             <TextBlock

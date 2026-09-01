@@ -505,6 +505,62 @@ internal sealed partial class PlanReviewPresentationTests
     }
 
     [AvaloniaTest]
+    public async Task SelectionBeyondOneRemainingSlotExplainsDisabledApplyThenClearsWhenReduced()
+    {
+        InstallerReadOnlyPlanCandidate[] initial = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates - 1)
+            .Select(index => CandidateCapability($"mods/applied-{index:D3}.dll", false))
+            .ToArray();
+        InstallerReadOnlyPlanCandidate firstRemaining = CandidateCapability("mods/first-remaining-private.dll", false);
+        InstallerReadOnlyPlanCandidate secondRemaining = CandidateCapability("mods/second-remaining-private.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, initial)),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Install, [firstRemaining, secondRemaining]))
+        };
+        PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        foreach (PlanReviewCandidateChoice choice in viewModel.CandidateChoices)
+            choice.IsSelected = true;
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        foreach (PlanReviewCandidateChoice choice in viewModel.CandidateChoices)
+            choice.IsSelected = true;
+        PlanReviewWindow window = new(viewModel);
+
+        AssertRenderedLayout(window, 620);
+        TextBlock capacity = window.FindControl<TextBlock>("CandidateCapacityDetail")!;
+        Button apply = window.FindControl<Button>("ApplyCandidatesButton")!;
+        Button clear = window.FindControl<Button>("ClearCandidatesButton")!;
+        Border countStatus = window.FindControl<Border>("CandidateSelectionStatusRegion")!;
+
+        capacity.IsVisible.Should().BeTrue();
+        string capacityName = ControlAutomationPeer.CreatePeerForElement(capacity).GetName();
+        capacityName.Should().Be(viewModel.CandidateCapacityDetail)
+            .And.Contain("Only 1 more approval fits")
+            .And.Contain("2 files are selected")
+            .And.Contain("Uncheck files or Clear local choices")
+            .And.NotContain("remaining-private.dll");
+        apply.IsEffectivelyEnabled.Should().BeFalse();
+        clear.IsEffectivelyEnabled.Should().BeTrue();
+        string liveName = ControlAutomationPeer.CreatePeerForElement(countStatus).GetName();
+        liveName.Should().Be($"{ProtocolJsonSerializer.MaxPlanCandidates - 1} approvals already applied and fixed in this preview; 2 of 2 remaining files selected.");
+        liveName.Should().NotContain("remaining-private.dll").And.NotContain("Only 1");
+
+        viewModel.CandidateChoices[1].IsSelected = false;
+        Dispatcher.UIThread.RunJobs();
+
+        capacity.IsVisible.Should().BeFalse();
+        viewModel.CandidateCapacityDetail.Should().BeEmpty();
+        apply.IsEffectivelyEnabled.Should().BeTrue();
+        clear.IsEffectivelyEnabled.Should().BeTrue();
+        ControlAutomationPeer.CreatePeerForElement(countStatus).GetName().Should().Be($"{ProtocolJsonSerializer.MaxPlanCandidates - 1} approvals already applied and fixed in this preview; 1 of 2 remaining files selected.");
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
     public async Task FullApprovalCapacityExplainsDisabledApplyAndUsableLocalClearToVisualAndAutomationUsers()
     {
         InstallerReadOnlyPlanCandidate[] maximum = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates)

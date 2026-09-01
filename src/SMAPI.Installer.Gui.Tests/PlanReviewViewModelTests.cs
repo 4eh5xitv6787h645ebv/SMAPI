@@ -343,6 +343,8 @@ internal sealed partial class PlanReviewPresentationTests
             .And.Contain("0 candidates remain")
             .And.Contain("cannot confirm or execute");
         viewModel.IsCandidateApprovalCapacityFull.Should().BeFalse();
+        viewModel.IsCandidateSelectionOverRemainingCapacity.Should().BeFalse();
+        viewModel.IsCandidateCapacityDetailVisible.Should().BeFalse();
         viewModel.CandidateCapacityDetail.Should().BeEmpty();
         viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeTrue();
 
@@ -399,6 +401,8 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.CandidateSelectionAnnouncement.Should().Be("2 approvals already applied and fixed in this preview; 0 of 1 remaining files selected.");
         viewModel.CandidateSelectionAnnouncement.Should().NotContain("third-private.dll");
         viewModel.IsCandidateApprovalCapacityFull.Should().BeFalse();
+        viewModel.IsCandidateSelectionOverRemainingCapacity.Should().BeFalse();
+        viewModel.IsCandidateCapacityDetailVisible.Should().BeFalse();
         viewModel.CandidateCapacityDetail.Should().BeEmpty();
         session.ApprovedCandidates.Should().HaveCount(2);
         session.ApprovedCandidates.SelectMany(candidates => candidates).Should().Equal(first, second);
@@ -433,6 +437,8 @@ internal sealed partial class PlanReviewPresentationTests
             .And.Contain("1 candidate remains")
             .And.Contain("cannot be removed individually");
         viewModel.IsCandidateApprovalCapacityFull.Should().BeTrue();
+        viewModel.IsCandidateSelectionOverRemainingCapacity.Should().BeTrue();
+        viewModel.IsCandidateCapacityDetailVisible.Should().BeTrue();
         viewModel.CandidateCapacityDetail.Should().Contain("bounded approval history is full")
             .And.Contain("no more candidate approvals fit")
             .And.Contain("Clear local choices only unchecks this screen")
@@ -445,6 +451,57 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeTrue();
         viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse("the bounded additive approval history is full");
         session.ApprovedCandidates.Should().ContainSingle().Which.Should().HaveCount(ProtocolJsonSerializer.MaxPlanCandidates);
+    }
+
+    [AvaloniaTest]
+    public async Task SelectionBeyondRemainingApprovalCapacityExplainsHowToRestoreApply()
+    {
+        InstallerReadOnlyPlanCandidate[] initial = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates - 1)
+            .Select(index => CandidateCapability($"mods/applied-{index:D3}.dll", false))
+            .ToArray();
+        InstallerReadOnlyPlanCandidate firstRemaining = CandidateCapability("mods/first-remaining-private.dll", false);
+        InstallerReadOnlyPlanCandidate secondRemaining = CandidateCapability("mods/second-remaining-private.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, initial)),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Install, [firstRemaining, secondRemaining]))
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        foreach (PlanReviewCandidateChoice choice in viewModel.CandidateChoices)
+            choice.IsSelected = true;
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        foreach (PlanReviewCandidateChoice choice in viewModel.CandidateChoices)
+            choice.IsSelected = true;
+
+        viewModel.IsCandidateApprovalCapacityFull.Should().BeFalse();
+        viewModel.IsCandidateSelectionOverRemainingCapacity.Should().BeTrue();
+        viewModel.IsCandidateCapacityDetailVisible.Should().BeTrue();
+        viewModel.CandidateCapacityDetail.Should().Contain("Only 1 more approval fits")
+            .And.Contain("2 files are selected")
+            .And.Contain("Apply is unavailable")
+            .And.Contain("Uncheck files or Clear local choices")
+            .And.Contain("start a fresh inspection")
+            .And.Contain("No files change")
+            .And.Contain("cannot confirm or execute");
+        viewModel.CandidateCapacityDetail.Should().NotContain("remaining-private.dll");
+        viewModel.CandidateSelectionAnnouncement.Should().Be($"{ProtocolJsonSerializer.MaxPlanCandidates - 1} approvals already applied and fixed in this preview; 2 of 2 remaining files selected.");
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse();
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeTrue();
+
+        viewModel.CandidateChoices[1].IsSelected = false;
+
+        viewModel.IsCandidateSelectionOverRemainingCapacity.Should().BeFalse();
+        viewModel.IsCandidateCapacityDetailVisible.Should().BeFalse();
+        viewModel.CandidateCapacityDetail.Should().BeEmpty();
+        viewModel.CandidateSelectionAnnouncement.Should().Be($"{ProtocolJsonSerializer.MaxPlanCandidates - 1} approvals already applied and fixed in this preview; 1 of 2 remaining files selected.");
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeTrue();
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeTrue();
+        session.ApprovedCandidates.Should().ContainSingle().Which.Should().HaveCount(ProtocolJsonSerializer.MaxPlanCandidates - 1);
     }
 
     [AvaloniaTest]

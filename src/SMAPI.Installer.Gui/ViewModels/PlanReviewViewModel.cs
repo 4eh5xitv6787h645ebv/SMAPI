@@ -324,9 +324,27 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     public bool IsCandidateApprovalCapacityFull
         => this.snapshot.AppliedCandidateApprovalCount >= ProtocolJsonSerializer.MaxPlanCandidates;
 
-    public string CandidateCapacityDetail => this.IsCandidateApprovalCapacityFull
-        ? "This preview's bounded approval history is full, so no more candidate approvals fit in it. Clear local choices only unchecks this screen and does not free approval capacity. Start a fresh inspection to revoke this preview before approving another candidate. No files change, and this screen cannot confirm or execute a plan."
-        : "";
+    public bool IsCandidateSelectionOverRemainingCapacity
+        => this.snapshot.SelectedCandidates.Count > ProtocolJsonSerializer.MaxPlanCandidates - this.snapshot.AppliedCandidateApprovalCount;
+
+    public bool IsCandidateCapacityDetailVisible
+        => this.IsCandidateApprovalCapacityFull || this.IsCandidateSelectionOverRemainingCapacity;
+
+    public string CandidateCapacityDetail
+    {
+        get
+        {
+            if (this.IsCandidateApprovalCapacityFull)
+                return "This preview's bounded approval history is full, so no more candidate approvals fit in it. Clear local choices only unchecks this screen and does not free approval capacity. Start a fresh inspection to revoke this preview before approving another candidate. No files change, and this screen cannot confirm or execute a plan.";
+            if (!this.IsCandidateSelectionOverRemainingCapacity)
+                return "";
+
+            int remaining = ProtocolJsonSerializer.MaxPlanCandidates - this.snapshot.AppliedCandidateApprovalCount;
+            int selected = this.snapshot.SelectedCandidates.Count;
+            string approvalLabel = remaining == 1 ? "approval fits" : "approvals fit";
+            return $"Only {remaining} more {approvalLabel} in this preview, but {selected} files are selected. Apply is unavailable. Uncheck files or Clear local choices to reduce this selection, or start a fresh inspection to revoke this preview. No files change, and this screen cannot confirm or execute a plan.";
+        }
+    }
 
     public bool IsOperationSelectionEnabled => this.snapshot.CanSelect;
 
@@ -882,6 +900,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.OnPropertyChanged(nameof(this.IsCandidateSelectionEnabled));
         this.OnPropertyChanged(nameof(this.CandidateReviewDetail));
         this.OnPropertyChanged(nameof(this.IsCandidateApprovalCapacityFull));
+        this.OnPropertyChanged(nameof(this.IsCandidateSelectionOverRemainingCapacity));
+        this.OnPropertyChanged(nameof(this.IsCandidateCapacityDetailVisible));
         this.OnPropertyChanged(nameof(this.CandidateCapacityDetail));
         this.OnPropertyChanged(nameof(this.StatusLiveSetting));
         this.InspectCommand.NotifyCanExecuteChanged();
