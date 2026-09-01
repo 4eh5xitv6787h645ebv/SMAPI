@@ -15,6 +15,7 @@ internal enum PlanReviewFocusTarget
     Status,
     Result,
     Error,
+    Confirm,
     Retry,
     Exit
 }
@@ -153,6 +154,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     private IReadOnlyList<PlanReviewCandidateChoice> candidateChoices = Array.Empty<PlanReviewCandidateChoice>();
     private string candidateSelectionAnnouncement = "0 of 0 files selected.";
     private bool disposed;
+    private bool confirmationReadyRaised;
+    private bool transitionFailed;
 
     public PlanReviewViewModel(PlanReviewController controller)
     {
@@ -164,7 +167,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.ApplyCandidatesCommand = new(() => controller.ApplyCandidateSelectionAsync(), () => this.snapshot.CanApplyCandidates, this.HandleCandidateActionFailure);
         this.ClearCandidatesCommand = new(this.ClearCandidateSelectionSafely, () => this.snapshot.CanClearCandidates);
         this.StartFreshInspectionCommand = new(() => controller.StartFreshInspectionAsync(), () => this.snapshot.CanStartFreshInspection, this.HandleCandidateActionFailure);
-        this.ExitCommand = new(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.snapshot.CanExit);
+        this.ConfirmCommand = new(() => controller.ConfirmAsync(), () => this.snapshot.CanConfirm, this.HandlePresentationFailure);
+        this.ExitCommand = new(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.snapshot.CanExit || this.transitionFailed);
         this.Controller.Changed += this.OnControllerChanged;
         this.ApplySnapshot(this.snapshot, requestFocus: false);
     }
@@ -172,6 +176,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     public event EventHandler<PlanReviewFocusTarget>? FocusRequested;
 
     public event EventHandler? CloseRequested;
+
+    /// <summary>Signals that workflow code may privately take the confirmed owner from the controller.</summary>
+    public event EventHandler? ConfirmationReady;
 
     public IReadOnlyList<PlanReviewOperationChoice> OperationChoices => FixedOperationChoices;
 
@@ -353,10 +360,20 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
 
     public bool IsBusy => this.snapshot.State is PlanReviewState.Inspecting
         or PlanReviewState.Approving
+        or PlanReviewState.Confirming
         or PlanReviewState.Closing
         or PlanReviewState.Cancelling;
 
     public bool IsResultVisible => this.snapshot.State == PlanReviewState.Available;
+
+    public bool IsConfirmVisible => this.snapshot.State == PlanReviewState.Available
+        && this.snapshot.Result is PlanReviewPlan { HasBlockingConflicts: false };
+
+    public bool IsConfirmationBlockedBySelection => this.IsConfirmVisible && this.snapshot.SelectedCandidates.Count > 0;
+
+    public string ConfirmationDetail => this.IsConfirmationBlockedBySelection
+        ? "Clear or apply the checked file choices before confirming. Unapplied choices cannot affect the exact plan."
+        : "Confirming seals this exact reviewed plan for the final Run screen. Confirmation does not change files or start the operation.";
 
     public bool IsErrorVisible => this.snapshot.State is PlanReviewState.Rejected
         or PlanReviewState.Failed
@@ -366,7 +383,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
 
     public bool IsCancelVisible => this.snapshot.CanCancel;
 
-    public bool IsExitVisible => this.snapshot.CanExit;
+    public bool IsExitVisible => this.snapshot.CanExit || this.transitionFailed;
 
     public bool HasRiskRows => this.RiskRows.Count > 0;
 
@@ -400,6 +417,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
 
     public AsyncRelayCommand StartFreshInspectionCommand { get; }
 
+    public AsyncRelayCommand ConfirmCommand { get; }
+
     public RelayCommand ExitCommand { get; }
 
     public async ValueTask DisposeAsync()
@@ -422,6 +441,16 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             return false;
         candidate.IsSelected = !candidate.IsSelected;
         return true;
+    }
+
+    internal void ReportExecutionTransitionFailure()
+    {
+        this.transitionFailed = true;
+        this.Heading = "The final Run screen could not open";
+        this.Message = "The confirmed owner was closed safely. No installer operation started and no game files were changed. Close and reopen the installer to inspect a fresh plan.";
+        this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
+        this.NotifyDerivedProperties();
+        this.FocusRequested?.Invoke(this, PlanReviewFocusTarget.Exit);
     }
 
     private void OnControllerChanged(object? sender, EventArgs e)
@@ -454,6 +483,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
                 or PlanReviewState.Rejected
                 or PlanReviewState.Inspecting
                 or PlanReviewState.Approving
+                or PlanReviewState.Confirming
+                or PlanReviewState.HandoffReady
+                or PlanReviewState.HandedOff
                 or PlanReviewState.Closing
                 or PlanReviewState.Cancelling
                 or PlanReviewState.Cancelled
@@ -466,6 +498,11 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         bool changed = previousState != next.State || previousGeneration != next.Generation;
         if (requestFocus && changed)
             this.FocusRequested?.Invoke(this, this.GetFocusTarget(next));
+        if (next.HandoffReady && !this.confirmationReadyRaised)
+        {
+            this.confirmationReadyRaised = true;
+            this.ConfirmationReady?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     private (string Heading, string Message) GetCopy(PlanReviewSnapshot value)
@@ -488,6 +525,18 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             PlanReviewState.Approving => (
                 "Applying additive candidate approvals to a refreshed preview…",
                 "The current preview is being revoked and a newly validated read-only preview is being requested. No files are being changed, confirmed, or executed."
+            ),
+            PlanReviewState.Confirming => (
+                "Confirming the exact reviewed plan…",
+                "No files are being changed. Confirmation only prepares a separate final Run screen."
+            ),
+            PlanReviewState.HandoffReady => (
+                "Plan confirmed — opening the final Run screen",
+                "No files have changed and the operation has not started."
+            ),
+            PlanReviewState.HandedOff => (
+                "Confirmed plan transferred safely",
+                "No files have changed. The final Run screen now owns the one-time confirmed plan."
             ),
             PlanReviewState.Closing => (
                 "Closing the read-only plan session safely…",
@@ -597,7 +646,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.ObservedStateDetail = GetObservedStateDetail(plan.ObservedState);
         this.CurrentReleaseDetail = FormatRelease(plan.CurrentRelease, "No receipt-authenticated current fork release was observed.");
         this.TargetReleaseDetail = FormatTargetRelease(plan);
-        this.SafetyDetail = "Recommended default for any later decision: Cancel. Candidate approval only requests a refreshed read-only preview. A separate confirmation would still be required, and this build has no confirmation or execution control.";
+        this.SafetyDetail = "Recommended default: Cancel. Candidate approval only requests a refreshed read-only preview. Confirm plan seals the exact current preview but does not change files; a separate explicit Run action is still required.";
         this.RiskRows = Array.AsReadOnly(plan.Risks
             .Select(risk => GetRiskRow(risk))
             .ToArray());
@@ -873,7 +922,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         return value.State switch
         {
             PlanReviewState.SelectionChanged => PlanReviewFocusTarget.OperationList,
-            PlanReviewState.Inspecting or PlanReviewState.Approving or PlanReviewState.Closing or PlanReviewState.Cancelling => PlanReviewFocusTarget.Status,
+            PlanReviewState.Inspecting or PlanReviewState.Approving or PlanReviewState.Confirming or PlanReviewState.Closing or PlanReviewState.Cancelling => PlanReviewFocusTarget.Status,
             PlanReviewState.Available => PlanReviewFocusTarget.Result,
             PlanReviewState.Rejected => PlanReviewFocusTarget.Error,
             PlanReviewState.Cancelled or PlanReviewState.Failed or PlanReviewState.SessionFaulted => PlanReviewFocusTarget.Exit,
@@ -887,6 +936,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.OnPropertyChanged(nameof(this.IsInspectVisible));
         this.OnPropertyChanged(nameof(this.IsBusy));
         this.OnPropertyChanged(nameof(this.IsResultVisible));
+        this.OnPropertyChanged(nameof(this.IsConfirmVisible));
+        this.OnPropertyChanged(nameof(this.IsConfirmationBlockedBySelection));
+        this.OnPropertyChanged(nameof(this.ConfirmationDetail));
         this.OnPropertyChanged(nameof(this.IsErrorVisible));
         this.OnPropertyChanged(nameof(this.IsRetryVisible));
         this.OnPropertyChanged(nameof(this.IsCancelVisible));
@@ -910,6 +962,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.ApplyCandidatesCommand.NotifyCanExecuteChanged();
         this.ClearCandidatesCommand.NotifyCanExecuteChanged();
         this.StartFreshInspectionCommand.NotifyCanExecuteChanged();
+        this.ConfirmCommand.NotifyCanExecuteChanged();
         this.ExitCommand.NotifyCanExecuteChanged();
     }
 

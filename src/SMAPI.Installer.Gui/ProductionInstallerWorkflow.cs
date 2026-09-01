@@ -15,15 +15,20 @@ internal sealed class ProductionInstallerWorkflow
     private readonly Func<GameDiscoveryViewModel, GameDiscoveryWindow> DiscoveryWindowFactory;
     private readonly Func<GameDiscoveryWindow, Task<string?>> PickFolder;
     private readonly Func<PlanReviewViewModel, PlanReviewWindow> PlanWindowFactory;
+    private readonly Func<ExecutionViewModel, ExecutionWindow> ExecutionWindowFactory;
     private ReleaseVerificationController? ReleaseController;
     private ReleaseVerificationViewModel? ReleaseViewModel;
     private ReleaseVerificationWindow? ReleaseWindow;
     private GameDiscoveryController? DiscoveryController;
     private GameDiscoveryViewModel? DiscoveryViewModel;
     private GameDiscoveryWindow? DiscoveryWindow;
+    private PlanReviewController? PlanController;
+    private PlanReviewViewModel? PlanViewModel;
+    private PlanReviewWindow? PlanWindow;
     private int TransitionStarted;
     private int PlanTransitionStarted;
     private int PickerActive;
+    private int ExecutionTransitionStarted;
 
     public ProductionInstallerWorkflow(
         IReviewedReleaseService releaseService,
@@ -31,7 +36,8 @@ internal sealed class ProductionInstallerWorkflow
         Action<Window> activateNextWindow,
         Func<GameDiscoveryViewModel, GameDiscoveryWindow>? discoveryWindowFactory = null,
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
-        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null
+        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
+        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null
     )
     {
         this.ReleaseService = releaseService ?? throw new ArgumentNullException(nameof(releaseService));
@@ -40,6 +46,7 @@ internal sealed class ProductionInstallerWorkflow
         this.DiscoveryWindowFactory = discoveryWindowFactory ?? (viewModel => new(viewModel));
         this.PickFolder = pickFolder ?? PickFolderAsync;
         this.PlanWindowFactory = planWindowFactory ?? (viewModel => new(viewModel));
+        this.ExecutionWindowFactory = executionWindowFactory ?? (viewModel => new(viewModel));
     }
 
     /// <summary>Create the initial window exactly once without starting network or backend work.</summary>
@@ -126,10 +133,13 @@ internal sealed class ProductionInstallerWorkflow
             controller = new(session);
             session = null;
             viewModel = new(controller);
-            controller = null;
+            viewModel.ConfirmationReady += this.OnConfirmationReady;
             window = this.PlanWindowFactory(viewModel)
                 ?? throw new InvalidOperationException("The plan-review window factory returned null.");
-            viewModel = null;
+
+            this.PlanController = controller;
+            this.PlanViewModel = viewModel;
+            this.PlanWindow = window;
 
             this.ActivateNextWindow(window);
             this.DiscoveryViewModel!.ContinueRequested -= this.OnPlanContinueRequested;
@@ -137,10 +147,17 @@ internal sealed class ProductionInstallerWorkflow
             this.DiscoveryController = null;
             this.DiscoveryViewModel = null;
             this.DiscoveryWindow = null;
+            controller = null;
+            viewModel = null;
             window = null;
         }
         catch
         {
+            if (viewModel is not null)
+                viewModel.ConfirmationReady -= this.OnConfirmationReady;
+            this.PlanController = null;
+            this.PlanViewModel = null;
+            this.PlanWindow = null;
             try
             {
                 if (window is not null)
@@ -157,6 +174,55 @@ internal sealed class ProductionInstallerWorkflow
                 // The transferred authority remains unusable; only sanitized failure state reaches the UI.
             }
             this.DiscoveryViewModel?.ReportTransitionFailure();
+        }
+    }
+
+    private async void OnConfirmationReady(object? sender, EventArgs eventArgs)
+    {
+        if (Interlocked.Exchange(ref this.ExecutionTransitionStarted, 1) != 0)
+            return;
+
+        ConfirmedPlanHandoff? handoff = null;
+        ExecutionController? controller = null;
+        ExecutionViewModel? viewModel = null;
+        ExecutionWindow? window = null;
+        try
+        {
+            handoff = this.PlanController!.TakeConfirmedHandoff();
+            controller = new(handoff.Session, handoff.Presentation);
+            handoff = null;
+            viewModel = new(controller);
+            controller = null;
+            window = this.ExecutionWindowFactory(viewModel)
+                ?? throw new InvalidOperationException("The execution window factory returned null.");
+            viewModel = null;
+
+            this.ActivateNextWindow(window);
+            this.PlanViewModel!.ConfirmationReady -= this.OnConfirmationReady;
+            this.PlanWindow!.Close();
+            this.PlanController = null;
+            this.PlanViewModel = null;
+            this.PlanWindow = null;
+            window = null;
+        }
+        catch
+        {
+            try
+            {
+                if (window is not null)
+                    await window.CloseAfterFailedActivationAsync().ConfigureAwait(true);
+                else if (viewModel is not null)
+                    await viewModel.DisposeAsync().ConfigureAwait(true);
+                else if (controller is not null)
+                    await controller.DisposeAsync().ConfigureAwait(true);
+                else if (handoff is not null)
+                    await handoff.Session.DisposeAsync().ConfigureAwait(true);
+            }
+            catch
+            {
+                // The one-shot confirmed authority remains unusable and no backend detail reaches presentation.
+            }
+            this.PlanViewModel?.ReportExecutionTransitionFailure();
         }
     }
 

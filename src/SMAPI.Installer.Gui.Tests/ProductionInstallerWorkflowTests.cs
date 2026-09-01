@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using Avalonia.Controls;
 using Avalonia.Headless.NUnit;
 using Avalonia.Threading;
@@ -269,12 +270,133 @@ internal sealed class ProductionInstallerWorkflowTests
         client.DisposeCalls.Should().Be(1);
     }
 
+    [AvaloniaTest]
+    public async Task ConfirmedPlanOpensReadyExecutionWindowWithoutRunningUntilExplicitRun()
+    {
+        TrackingClient client = new() { EnablePlan = true };
+        WorkflowContext context = await OpenExecutablePlanAsync(client);
+        await context.Plan.ConfirmCommand.ExecuteAsync();
+        await WaitUntilAsync(() => context.ExecutionWindow is not null);
+
+        client.ConfirmCalls.Should().Be(1);
+        client.ExecuteCalls.Should().Be(0, "confirmation and window activation must not execute");
+        ExecutionViewModel execution = (ExecutionViewModel)context.ExecutionWindow!.DataContext!;
+        execution.IsReady.Should().BeTrue();
+        await execution.RunCommand.ExecuteAsync();
+
+        client.ExecuteCalls.Should().Be(1);
+        await WaitUntilAsync(() => execution.Heading.Contains("completed", StringComparison.Ordinal));
+        execution.Heading.Should().Contain("completed");
+        await context.ExecutionWindow.DisposeAsync();
+        await context.PlanWindow.DisposeAsync();
+        await context.DiscoveryWindow.DisposeAsync();
+        await context.ReleaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
+    public async Task ExecutionConstructionFailureDisposesOwnerAndLeavesSanitizedPlanExit()
+    {
+        TrackingClient client = new() { EnablePlan = true };
+        WorkflowContext context = await OpenExecutablePlanAsync(
+            client,
+            executionFactory: _ => throw new InvalidOperationException("private execution factory /home/user")
+        );
+        await context.Plan.ConfirmCommand.ExecuteAsync();
+        await WaitUntilAsync(() => context.Plan.Heading == "The final Run screen could not open");
+
+        client.ExecuteCalls.Should().Be(0);
+        client.DisposeCalls.Should().Be(1);
+        context.Plan.IsExitVisible.Should().BeTrue();
+        context.Plan.Message.Should().Contain("No installer operation started").And.NotContain("private").And.NotContain("/home");
+        Dispatcher.UIThread.RunJobs();
+        context.PlanWindow.FindControl<Button>("ExitButton")!.IsFocused.Should().BeTrue();
+        context.PlanWindow.Close();
+        await WaitUntilAsync(() => !context.PlanWindow.IsVisible);
+        await context.ReleaseWindow.DisposeAsync();
+    }
+
+    [AvaloniaTest]
+    public async Task PartialExecutionActivationClosesNewWindowWithZeroExecutionAndKeepsPlanExit()
+    {
+        TrackingClient client = new() { EnablePlan = true };
+        ExecutionWindow? partial = null;
+        WorkflowContext context = await OpenExecutablePlanAsync(client, execution =>
+        {
+            partial = execution;
+            execution.Show();
+            throw new InvalidOperationException("private partial execution activation");
+        });
+        await context.Plan.ConfirmCommand.ExecuteAsync();
+        await WaitUntilAsync(() => context.Plan.Heading == "The final Run screen could not open" && partial is { IsVisible: false });
+
+        client.ExecuteCalls.Should().Be(0);
+        client.DisposeCalls.Should().Be(1);
+        context.Plan.IsExitVisible.Should().BeTrue();
+        context.Plan.Message.Should().NotContain("private");
+        context.PlanWindow.Close();
+        await WaitUntilAsync(() => !context.PlanWindow.IsVisible);
+        await context.ReleaseWindow.DisposeAsync();
+    }
+
+    private static async Task<WorkflowContext> OpenExecutablePlanAsync(
+        TrackingClient client,
+        Action<ExecutionWindow>? activateExecution = null,
+        Func<ExecutionViewModel, ExecutionWindow>? executionFactory = null
+    )
+    {
+        client.DiscoveredGames = [new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation")];
+        WorkflowContext context = new();
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next =>
+            {
+                if (next is GameDiscoveryWindow discovery)
+                    context.DiscoveryWindow = discovery;
+                else if (next is PlanReviewWindow plan)
+                {
+                    context.PlanWindow = plan;
+                    plan.Show();
+                }
+                else
+                {
+                    context.ExecutionWindow = (ExecutionWindow)next;
+                    activateExecution?.Invoke(context.ExecutionWindow);
+                }
+            },
+            executionWindowFactory: executionFactory
+        );
+        context.ReleaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)context.ReleaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => context.DiscoveryWindow is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)context.DiscoveryWindow.DataContext!;
+        await discovery.StartAsync();
+        discovery.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => context.PlanWindow is not null);
+        context.Plan = (PlanReviewViewModel)context.PlanWindow.DataContext!;
+        context.Plan.SelectedOperation = context.Plan.OperationChoices.Single(choice => choice.Operation == InstallerOperation.Install);
+        await context.Plan.InspectCommand.ExecuteAsync();
+        return context;
+    }
+
+    private sealed class WorkflowContext
+    {
+        public ReleaseVerificationWindow ReleaseWindow { get; set; } = null!;
+        public GameDiscoveryWindow DiscoveryWindow { get; set; } = null!;
+        public PlanReviewWindow PlanWindow { get; set; } = null!;
+        public PlanReviewViewModel Plan { get; set; } = null!;
+        public ExecutionWindow? ExecutionWindow { get; set; }
+    }
+
     private static ProductionInstallerWorkflow CreateWorkflow(
         TrackingClient client,
         Action<Window> activate,
         Func<GameDiscoveryViewModel, GameDiscoveryWindow>? windowFactory = null,
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
-        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null
+        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
+        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null
     )
     {
         ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
@@ -282,7 +404,7 @@ internal sealed class ProductionInstallerWorkflowTests
         {
             CompletePreparation = true
         };
-        return new(service, () => client, activate, windowFactory, pickFolder, planWindowFactory);
+        return new(service, () => client, activate, windowFactory, pickFolder, planWindowFactory, executionWindowFactory);
     }
 
     private static async Task VerifyAsync(ReleaseVerificationViewModel viewModel)
@@ -312,9 +434,13 @@ internal sealed class ProductionInstallerWorkflowTests
         private readonly TaskCompletionSource<InstallerProtocolClientException> Fault = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int DisposeCalls { get; private set; }
+        public int ConfirmCalls { get; private set; }
+        public int ExecuteCalls { get; private set; }
         public string? ValidatedPath { get; private set; }
-        public IReadOnlyList<ProtocolGameCandidate> DiscoveredGames { get; init; } = [];
+        public IReadOnlyList<ProtocolGameCandidate> DiscoveredGames { get; set; } = [];
         public bool ThrowOnDispose { get; init; }
+        public bool EnablePlan { get; init; }
+        private ProtocolReleaseIdentity? OpenedRelease;
         public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
 
         public void Fail()
@@ -327,7 +453,16 @@ internal sealed class ProductionInstallerWorkflowTests
             return Task.FromResult(new HandshakeEvent(
                 ProtocolSessionId.Parse("11111111111111111111111111111111"),
                 "1",
-                ["verified-local-package", "linux-game-discovery", "linux-game-validation"]
+                [
+                    "verified-local-package",
+                    "linux-game-discovery",
+                    "linux-game-validation",
+                    ProcessInstallerProtocolClient.PlanInspectionCapability,
+                    ProcessInstallerProtocolClient.CandidateApprovalCapability,
+                    ProcessInstallerProtocolClient.ExactCoreProgressCapability,
+                    ProcessInstallerProtocolClient.CancellationCapability,
+                    ProcessInstallerProtocolClient.InterruptedRecoveryCapability
+                ]
             ));
         }
 
@@ -346,6 +481,7 @@ internal sealed class ProductionInstallerWorkflowTests
                 "Release",
                 "linux-x64"
             ));
+            this.OpenedRelease = success.Release;
             return Task.FromResult<InstallerPackageOpenResult>(success);
         }
 
@@ -366,7 +502,52 @@ internal sealed class ProductionInstallerWorkflowTests
             string canonicalGamePath,
             InstallerOperation operation,
             CancellationToken cancellationToken = default
-        ) => throw new AssertionException("The release-to-discovery workflow must not inspect a plan.");
+        )
+        {
+            if (!this.EnablePlan)
+                throw new AssertionException("The release-to-discovery workflow must not inspect a plan.");
+            InstallerPlanRelease release = new(this.OpenedRelease!.Tag, this.OpenedRelease.EmbeddedVersion);
+            return Task.FromResult<InstallerReadOnlyPlanResult>(new InstallerReadOnlyPlanSuccess(
+                operation,
+                ObservedInstallState.NotInstalled,
+                null,
+                release,
+                false,
+                [],
+                ProtocolRecommendedDefault.Cancel,
+                true,
+                [],
+                [],
+                [],
+                0
+            )
+            {
+                Confirmation = new InstallerPlanConfirmation()
+            });
+        }
+
+        public Task<InstallerConfirmedPlanAuthority> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
+        {
+            this.ConfirmCalls++;
+            return Task.FromResult(new InstallerConfirmedPlanAuthority());
+        }
+
+        public Task<InstallerExecutionOperation> ExecutePlanAsync(InstallerConfirmedPlanAuthority authority, CancellationToken cancellationToken = default)
+        {
+            this.ExecuteCalls++;
+            Channel<InstallerExecutionProgress> progress = Channel.CreateBounded<InstallerExecutionProgress>(1);
+            progress.Writer.TryComplete();
+            InstallerExecutionResult result = new InstallerExecutionTerminalResult(
+                ProtocolExecutionOutcome.Succeeded,
+                ProtocolDurableState.Committed,
+                null,
+                ProtocolRecoveryDisposition.NotRequired,
+                ProtocolNextAction.InspectAgain,
+                new(0, null, 0, null, null, null),
+                InstallerBackendSettlement.ConfirmedClosed
+            );
+            return Task.FromResult(new InstallerExecutionOperation(progress.Reader, Task.FromResult(result), () => Task.CompletedTask));
+        }
 
         public ValueTask DisposeAsync()
         {

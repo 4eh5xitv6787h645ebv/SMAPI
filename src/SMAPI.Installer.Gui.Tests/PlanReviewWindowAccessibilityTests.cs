@@ -42,7 +42,7 @@ internal sealed partial class PlanReviewPresentationTests
         gamePeer.GetName().Should().Be("Validated Stardew Valley game folder").And.NotContain(privatePath);
         ControlAutomationPeer.CreatePeerForElement(gameContext).GetName().Should().Be("Bound game folder").And.NotContain(privatePath);
         ControlAutomationPeer.CreatePeerForElement(boundary).GetName().Should()
-            .Contain("Preview only").And.Contain("cannot confirm or run");
+            .Contain("Review first").And.Contain("separate final Run screen").And.Contain("changes no files");
         viewModel.LiveAnnouncement.Should().NotContain(privatePath);
 
         window.Close();
