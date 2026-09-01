@@ -129,7 +129,8 @@ public sealed class ProcessInstallerProtocolClientTests
                 nameof(IInstallerProtocolClient.InspectPlanAsync),
                 nameof(IInstallerProtocolClient.ApprovePlanCandidatesAsync),
                 nameof(IInstallerProtocolClient.ConfirmPlanAsync),
-                nameof(IInstallerProtocolClient.ExecutePlanAsync)
+                nameof(IInstallerProtocolClient.ExecutePlanAsync),
+                nameof(IInstallerProtocolClient.RecoverInterruptedAsync)
             ]);
     }
 
@@ -176,6 +177,28 @@ public sealed class ProcessInstallerProtocolClientTests
                 || property.Name.EndsWith("Id", StringComparison.OrdinalIgnoreCase)
                 || new[] { "Path", "LogPath", "SanitizedLogPath" }.Contains(property.Name));
         }
+        typeof(InstallerRecoveryOperation).GetProperties().Select(property => property.Name).Should().BeEquivalentTo([
+            nameof(InstallerRecoveryOperation.Progress),
+            nameof(InstallerRecoveryOperation.Completion)
+        ]);
+        typeof(InstallerRecoveryOperation).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(method => !method.IsSpecialName)
+            .Should().BeEmpty("the recovery protocol has no cancellation command");
+        foreach (Type projection in new[]
+        {
+            typeof(InstallerRecoveryProgress),
+            typeof(InstallerRecoveryTerminalResult),
+            typeof(InstallerRecoveryStateUnknownResult),
+            typeof(InstallerRecoveryAttemptSummary)
+        })
+        {
+            projection.GetProperties().Should().NotContain(property =>
+                property.PropertyType == typeof(string)
+                || property.Name.Contains("Digest", StringComparison.OrdinalIgnoreCase)
+                || property.Name.EndsWith("Id", StringComparison.OrdinalIgnoreCase)
+                || property.Name.Contains("Path", StringComparison.OrdinalIgnoreCase) && property.Name != nameof(InstallerRecoveryAttemptSummary.RecoveredPathCount)
+                || property.Name.Contains("Generation", StringComparison.OrdinalIgnoreCase) && property.Name != nameof(InstallerRecoveryAttemptSummary.OperationGenerationAdvanced));
+        }
     }
 
     [Test]
@@ -206,6 +229,775 @@ public sealed class ProcessInstallerProtocolClientTests
             ProtocolMessageKind.DiscoverGamesRequest,
             ProtocolMessageKind.ValidateGameRequest
         );
+    }
+
+    [Test]
+    public async Task RecoveryUsesExactCandidateRoutesBoundedProgressAndReturnsSanitizedExactTerminal()
+    {
+        const string privatePath = "/home/private-user/Stardew Valley";
+        ProtocolGameCandidate issued = new(privatePath, LinuxGameFolderStatus.Valid, "hostile private display ;$[]");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, issued) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => SerializeMany(
+                new RecoveryProgressEvent(Session, 4, TransactionStage.Recovering, 7, 10, "private progress detail") { CommandId = recovery.CommandId },
+                CreateRecoveryCompleted(recovery, privatePath, namedRootStillSelected: true)
+            ),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(privatePath);
+
+        InstallerRecoveryOperation operation = await client.RecoverInterruptedAsync(candidate);
+        InstallerRecoveryResult result = await operation.Completion;
+
+        InstallerRecoveryTerminalResult terminal = result.Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+        terminal.Should().BeEquivalentTo(new InstallerRecoveryTerminalResult(
+            ProtocolInterruptedRecoveryOutcome.RecoveryCompleted,
+            ProtocolDurableState.RecoveryCompleted,
+            null,
+            ProtocolRecoveryDisposition.Completed,
+            ProtocolNextAction.InspectAgain,
+            new(true, true, 1, 7),
+            InstallerBackendSettlement.ConfirmedClosed
+        ));
+        List<InstallerRecoveryProgress> observedProgress = [];
+        await foreach (InstallerRecoveryProgress progress in operation.Progress.ReadAllAsync())
+            observedProgress.Add(progress);
+        observedProgress.Should().Equal(new InstallerRecoveryProgress(TransactionStage.Recovering, 7, 10));
+        terminal.ToString().Should().NotContain(privatePath).And.NotContain("private progress").And.NotContain("private log");
+        process.Requests.Select(request => request.Kind).Should().Equal(
+            ProtocolMessageKind.HandshakeRequest,
+            ProtocolMessageKind.ValidateGameRequest,
+            ProtocolMessageKind.RecoverInterruptedRequest
+        );
+        await FluentActions.Awaiting(() => client.DiscoverGamesAsync()).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task RecoveryRejectsReconstructedStaleForeignAndInvalidCandidatesWithoutConsumingCurrentAuthority()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate firstSource = new(path, LinuxGameFolderStatus.Valid, "first");
+        ProtocolGameCandidate secondSource = new(path, LinuxGameFolderStatus.Valid, "second");
+        int validations = 0;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, ++validations == 1 ? firstSource : secondSource) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, namedRootStillSelected: false)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate stale = await client.ValidateGameAsync(path);
+        ProtocolGameCandidate current = await client.ValidateGameAsync(path);
+        ProtocolGameCandidate reconstructed = current with { };
+        ProtocolGameCandidate invalid = new(path, LinuxGameFolderStatus.MissingGameAssembly, "invalid");
+
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(stale)).Should().ThrowAsync<ArgumentException>();
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(reconstructed)).Should().ThrowAsync<ArgumentException>();
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(invalid)).Should().ThrowAsync<ArgumentException>();
+        process.Requests.Should().NotContain(request => request is RecoverInterruptedRequest);
+
+        InstallerRecoveryOperation admitted = await client.RecoverInterruptedAsync(current);
+        (await admitted.Completion).Should().BeOfType<InstallerRecoveryTerminalResult>();
+        process.Requests.OfType<RecoverInterruptedRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task RecoveryRejectsCandidateFromAnotherAuthenticatedClientWithoutWire()
+    {
+        const string path = "/games/Stardew Valley";
+        static byte[] Respond(ProtocolRequest request) => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, new(path, LinuxGameFolderStatus.Valid, "valid")) { CommandId = request.CommandId }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        };
+        ScriptedProcess firstProcess = new(Respond);
+        ScriptedProcess secondProcess = new(Respond);
+        await using ProcessInstallerProtocolClient first = Create(firstProcess);
+        await using ProcessInstallerProtocolClient second = Create(secondProcess);
+        await first.HandshakeAsync("SMAPI GUI", "1");
+        await second.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate foreign = await first.ValidateGameAsync(path);
+        _ = await second.ValidateGameAsync(path);
+
+        await FluentActions.Awaiting(() => second.RecoverInterruptedAsync(foreign)).Should().ThrowAsync<ArgumentException>();
+        secondProcess.Requests.Should().NotContain(request => request is RecoverInterruptedRequest);
+    }
+
+    [Test]
+    public async Task RecoveryCancellationIsAdmissionOnlyAndNeverSendsProtocolCancellation()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, namedRootStillSelected: true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+        using CancellationTokenSource beforeAdmission = new();
+        client.BeforeRecoveryAdmissionForTesting = beforeAdmission.Cancel;
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(candidate, beforeAdmission.Token)).Should().ThrowAsync<OperationCanceledException>();
+        process.Requests.Should().NotContain(request => request is RecoverInterruptedRequest);
+
+        using CancellationTokenSource afterAdmission = new();
+        client.BeforeRecoveryAdmissionForTesting = null;
+        client.BeforeRecoveryWriteForTesting = afterAdmission.Cancel;
+        InstallerRecoveryOperation operation = await client.RecoverInterruptedAsync(candidate, afterAdmission.Token);
+        (await operation.Completion).Should().BeOfType<InstallerRecoveryTerminalResult>();
+        process.Requests.Should().NotContain(request => request is CancelPlanRequest);
+    }
+
+    [Test]
+    public async Task RecoveryRejectsPackageWorkflowHistoryWithoutWire()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            OpenPackageRequest => Serialize(CreateOpened(Session, request.CommandId)),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        _ = await client.OpenPackageAsync(CreatePackage());
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(candidate)).Should().ThrowAsync<InvalidOperationException>();
+        process.Requests.Should().NotContain(request => request is RecoverInterruptedRequest);
+    }
+
+    [TestCase(ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery, ProtocolDurableState.Unchanged, null)]
+    [TestCase(ProtocolInterruptedRecoveryOutcome.PartialFailure, ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.IoFailure)]
+    [TestCase(ProtocolInterruptedRecoveryOutcome.UnexpectedFailure, ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure)]
+    public async Task RecoveryProjectsEachExactFailureTuple(
+        ProtocolInterruptedRecoveryOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolTerminalErrorCode? errorCode
+    )
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryFailure(recovery, path, outcome, errorCode)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryTerminalResult terminal = (await (await client.RecoverInterruptedAsync(candidate)).Completion)
+            .Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+
+        terminal.Outcome.Should().Be(outcome);
+        terminal.DurableState.Should().Be(durableState);
+        terminal.ErrorCode.Should().Be(errorCode);
+        terminal.RecoveryDisposition.Should().Be(ProtocolRecoveryDisposition.InterruptedRecoveryRequired);
+        terminal.NextAction.Should().Be(ProtocolNextAction.RecoverInterrupted);
+        if (outcome == ProtocolInterruptedRecoveryOutcome.PartialFailure)
+            terminal.Attempt.Should().BeEquivalentTo(new InstallerRecoveryAttemptSummary(null, null, 1, 7));
+        else
+            terminal.Attempt.Should().BeNull("this terminal has no exact attempt");
+        terminal.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed);
+    }
+
+    [Test]
+    public async Task RecoveryWrongAttemptPathFailsClosedAsUnknown()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, "/games/other", namedRootStillSelected: true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryResult result = await (await client.RecoverInterruptedAsync(candidate)).Completion;
+
+        result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        process.Terminated.Should().BeTrue();
+        client.SessionFaulted.IsCompleted.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task RecoveryAcceptsIncreasingSequenceGapsButRejectsDuplicateSequence()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        bool duplicate = false;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery when !duplicate => SerializeMany(
+                new RecoveryProgressEvent(Session, 2, TransactionStage.Recovering, 1, 2, "first") { CommandId = recovery.CommandId },
+                new RecoveryProgressEvent(Session, 9, TransactionStage.Recovering, 2, 2, "gap") { CommandId = recovery.CommandId },
+                CreateRecoveryCompleted(recovery, path, namedRootStillSelected: true)
+            ),
+            RecoverInterruptedRequest recovery => SerializeMany(
+                new RecoveryProgressEvent(Session, 3, TransactionStage.Recovering, 1, 2, "first") { CommandId = recovery.CommandId },
+                new RecoveryProgressEvent(Session, 3, TransactionStage.Recovering, 2, 2, "duplicate") { CommandId = recovery.CommandId }
+            ),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using (ProcessInstallerProtocolClient client = Create(process))
+        {
+            await client.HandshakeAsync("SMAPI GUI", "1");
+            ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+            (await (await client.RecoverInterruptedAsync(candidate)).Completion).Should().BeOfType<InstallerRecoveryTerminalResult>();
+        }
+
+        duplicate = true;
+        ScriptedProcess duplicateProcess = new(process.Responder);
+        await using ProcessInstallerProtocolClient duplicateClient = Create(duplicateProcess);
+        await duplicateClient.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate duplicateCandidate = await duplicateClient.ValidateGameAsync(path);
+        InstallerRecoveryResult result = await (await duplicateClient.RecoverInterruptedAsync(duplicateCandidate)).Completion;
+        result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        duplicateProcess.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task RecoveryProgressEventBoundRejectsNPlusOneConservatively()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => SerializeMany(
+                new RecoveryProgressEvent(Session, 0, TransactionStage.Recovering, 0, 2, "one") { CommandId = recovery.CommandId },
+                new RecoveryProgressEvent(Session, 1, TransactionStage.Recovering, 1, 2, "two") { CommandId = recovery.CommandId },
+                CreateRecoveryCompleted(recovery, path, namedRootStillSelected: true)
+            ),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.RecoveryProgressCapacityForTesting = 1;
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryResult result = await (await client.RecoverInterruptedAsync(candidate)).Completion;
+
+        result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task RecoveryProgressEventBoundAcceptsExactN()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => SerializeMany(
+                new RecoveryProgressEvent(Session, 5, TransactionStage.Recovering, 1, 1, "one") { CommandId = recovery.CommandId },
+                CreateRecoveryCompleted(recovery, path, namedRootStillSelected: true)
+            ),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.RecoveryProgressCapacityForTesting = 1;
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        (await (await client.RecoverInterruptedAsync(candidate)).Completion).Should().BeOfType<InstallerRecoveryTerminalResult>();
+    }
+
+    [TestCase("wrong-session")]
+    [TestCase("wrong-command")]
+    [TestCase("wrong-family")]
+    public async Task RecoveryRejectsIncorrectlyCorrelatedFramesConservatively(string fault)
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => fault switch
+            {
+                "wrong-session" => Serialize(CreateRecoveryCompleted(recovery, path, true) with { SessionId = ProtocolSessionId.CreateRandom() }),
+                "wrong-command" => Serialize(CreateRecoveryCompleted(recovery, path, true) with { CommandId = ProtocolCommandId.CreateRandom() }),
+                "wrong-family" => Serialize(new GameDiscoveryEvent(Session, []) { CommandId = recovery.CommandId }),
+                _ => throw new AssertionException("Unknown fault.")
+            },
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryResult result = await (await client.RecoverInterruptedAsync(candidate)).Completion;
+
+        result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        client.SessionFaulted.IsCompleted.Should().BeTrue();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task RecoveryHardAndIdleDeadlinesReturnConservativeUnknown(bool hardDeadline)
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest => null,
+            _ => throw new AssertionException("Unexpected protocol request.")
+        }, completeWaitInitially: false);
+        await using ProcessInstallerProtocolClient client = Create(process, TimeSpan.FromMilliseconds(100));
+        client.RecoveryHardTimeoutForTesting = hardDeadline ? TimeSpan.FromMilliseconds(20) : TimeSpan.FromSeconds(1);
+        client.RecoveryIdleTimeoutForTesting = hardDeadline ? TimeSpan.FromSeconds(1) : TimeSpan.FromMilliseconds(20);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryResult result = await (await client.RecoverInterruptedAsync(candidate)).Completion.WaitAsync(TimeSpan.FromSeconds(2));
+
+        result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task RecoveryWriteFailureAfterAdmissionReturnsUnknownAndConsumesAuthority()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            _ => throw new AssertionException("Recovery should fail before transport serialization.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+        client.BeforeRecoveryWriteForTesting = () => throw new IOException("/home/private/write failure");
+
+        InstallerRecoveryResult result = await (await client.RecoverInterruptedAsync(candidate)).Completion;
+
+        result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        process.Requests.Should().NotContain(request => request is RecoverInterruptedRequest);
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(candidate)).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task RecoveryFlushFollowedByLocalFailurePreservesAlreadyValidatedTerminalTruth()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        TaskCompletionSource terminalRouted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.RecoveryTerminalRoutedForTesting = () => terminalRouted.TrySetResult();
+        client.BeforeRecoveryWrittenCommitForTesting = async () =>
+        {
+            await terminalRouted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            throw new IOException("/home/private/post-flush failure");
+        };
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryTerminalResult result = (await (await client.RecoverInterruptedAsync(candidate)).Completion)
+            .Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+
+        result.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.RecoveryCompleted);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed, "the exact terminal and clean backend EOF are stronger than a later local test-hook failure");
+        process.Requests.OfType<RecoverInterruptedRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task CleanupWinningImmediatelyBeforeRecoveryAdmissionRejectsWithoutRouteOrWire()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            _ => throw new AssertionException("Recovery must not reach the wire.")
+        });
+        ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+        Task? disposal = null;
+        client.BeforeRecoveryAdmissionForTesting = () => disposal = client.DisposeAsync().AsTask();
+
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(candidate)).Should().ThrowAsync<ObjectDisposedException>();
+        await disposal!.WaitAsync(TimeSpan.FromSeconds(2));
+        process.Requests.Should().NotContain(request => request is RecoverInterruptedRequest);
+    }
+
+    [TestCase(640000, true)]
+    [TestCase(640001, false)]
+    public async Task RecoveryProgressUnitBoundHasExactNAndNPlusOneBehavior(int units, bool accepted)
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => SerializeMany(
+                new RecoveryProgressEvent(Session, 0, TransactionStage.Recovering, units, units, "bounded") { CommandId = recovery.CommandId },
+                CreateRecoveryCompleted(recovery, path, true)
+            ),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryResult result = await (await client.RecoverInterruptedAsync(candidate)).Completion;
+
+        if (accepted)
+            result.Should().BeOfType<InstallerRecoveryTerminalResult>();
+        else
+            result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task RecoveryAggregateByteBoundHasExactNAndNPlusOneBehavior(bool addOneFrame)
+    {
+        const string path = "/games/Stardew Valley";
+        const int frameCount = 20;
+        string message = new('x', 4000);
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        static ProtocolEvent[] Frames(RecoverInterruptedRequest recovery, string gamePath, string text, int count)
+        {
+            List<ProtocolEvent> frames = [];
+            for (int index = 0; index < count; index++)
+                frames.Add(new RecoveryProgressEvent(Session, index, TransactionStage.Recovering, index, count, text) { CommandId = recovery.CommandId });
+            frames.Add(CreateRecoveryCompleted(recovery, gamePath, true));
+            return frames.ToArray();
+        }
+        RecoverInterruptedRequest sizingRequest = new(Session, path);
+        long exactBytes = SerializeMany(Frames(sizingRequest, path, message, frameCount)).LongLength;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => SerializeMany(Frames(recovery, path, message, frameCount + (addOneFrame ? 1 : 0))),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.RecoveryProgressByteCapacityForTesting = exactBytes;
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryResult result = await (await client.RecoverInterruptedAsync(candidate)).Completion;
+
+        if (addOneFrame)
+            result.Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        else
+            result.Should().BeOfType<InstallerRecoveryTerminalResult>();
+    }
+
+    [Test]
+    public async Task RecoveryAcceptsExactDiscoveryIssuedCandidate()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            DiscoverGamesRequest => Serialize(new GameDiscoveryEvent(Session, [source]) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = (await client.DiscoverGamesAsync()).Single();
+
+        (await (await client.RecoverInterruptedAsync(candidate)).Completion).Should().BeOfType<InstallerRecoveryTerminalResult>();
+    }
+
+    [Test]
+    public async Task RecoveryBufferedTrailingFramePreservesExactTerminalButMarksSettlementUnconfirmed()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => SerializeMany(
+                CreateRecoveryCompleted(recovery, path, true),
+                new GameDiscoveryEvent(Session, []) { CommandId = ProtocolCommandId.CreateRandom() }
+            ),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryTerminalResult result = (await (await client.RecoverInterruptedAsync(candidate)).Completion)
+            .Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+
+        result.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.RecoveryCompleted);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        client.SessionFaulted.IsCompleted.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task DisposeDuringActiveRecoverySettlesUnknownAndBlocksEveryFurtherCommand()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest => null,
+            _ => throw new AssertionException("Unexpected protocol request.")
+        }, completeWaitInitially: false);
+        ProcessInstallerProtocolClient client = Create(process, TimeSpan.FromMilliseconds(100));
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+        InstallerRecoveryOperation operation = await client.RecoverInterruptedAsync(candidate);
+
+        await client.DisposeAsync();
+
+        (await operation.Completion).Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(candidate)).Should().ThrowAsync<ObjectDisposedException>();
+        await FluentActions.Awaiting(() => client.DiscoverGamesAsync()).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task ExactRecoveryFailureCanOnlyBeRetriedOnFreshClientWithFreshCandidate()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess firstProcess = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryFailure(recovery, path, ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery, null)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient first = Create(firstProcess);
+        await first.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate firstCandidate = await first.ValidateGameAsync(path);
+        (await (await first.RecoverInterruptedAsync(firstCandidate)).Completion).Should().BeOfType<InstallerRecoveryTerminalResult>();
+        await FluentActions.Awaiting(() => first.RecoverInterruptedAsync(firstCandidate)).Should().ThrowAsync<ObjectDisposedException>();
+
+        ScriptedProcess secondProcess = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient second = Create(secondProcess);
+        await second.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate secondCandidate = await second.ValidateGameAsync(path);
+        (await (await second.RecoverInterruptedAsync(secondCandidate)).Completion).Should().BeOfType<InstallerRecoveryTerminalResult>();
+    }
+
+    [Test]
+    public async Task LateUnbufferedFramePreservesExactRecoveryTerminalAndMarksSettlementUnconfirmed()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        TaskCompletionSource settlementEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseSettlement = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.BeforeRecoverySettlementForTesting = async () =>
+        {
+            settlementEntered.TrySetResult();
+            await releaseSettlement.Task;
+        };
+        client.RecoveryTerminalRoutedForTesting = () => process.Publish(Serialize(
+            new GameDiscoveryEvent(Session, []) { CommandId = ProtocolCommandId.CreateRandom() }
+        ));
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryOperation operation = await client.RecoverInterruptedAsync(candidate);
+        await settlementEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        _ = await client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseSettlement.TrySetResult();
+        InstallerRecoveryTerminalResult terminal = (await operation.Completion)
+            .Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+
+        terminal.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.RecoveryCompleted);
+        terminal.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        client.SessionFaulted.IsCompleted.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task RecoveryConfirmedProcessExitStillDrainsPipeBufferedFramesBeforePublishingSettlement()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        TaskCompletionSource secondChunkRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseSecondChunk = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int gateNextChunk = 0;
+        ScriptedProcess process = new(
+            request => request switch
+            {
+                HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+                ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+                RecoverInterruptedRequest => null,
+                _ => throw new AssertionException("Unexpected protocol request.")
+            },
+            completeWaitInitially: false,
+            beforeResponseChunk: async _ =>
+            {
+                if (Interlocked.Exchange(ref gateNextChunk, 0) != 0)
+                {
+                    secondChunkRead.TrySetResult();
+                    await releaseSecondChunk.Task;
+                }
+            }
+        );
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+        InstallerRecoveryOperation operation = await client.RecoverInterruptedAsync(candidate);
+        RecoverInterruptedRequest recovery = process.Requests.OfType<RecoverInterruptedRequest>().Single();
+        TaskCompletionSource routed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.RecoveryTerminalRoutedForTesting = () => routed.TrySetResult();
+        process.Publish(Serialize(CreateRecoveryCompleted(recovery, path, true)));
+        await routed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Volatile.Write(ref gateNextChunk, 1);
+        process.Publish(Serialize(new RecoveryProgressEvent(Session, 1, TransactionStage.Recovering, 1, 1, "pipe buffered") { CommandId = recovery.CommandId }));
+        await secondChunkRead.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        process.CompleteExit();
+
+        operation.Completion.IsCompleted.Should().BeFalse("stdout must reach EOF before settlement is published");
+        releaseSecondChunk.TrySetResult();
+
+        InstallerRecoveryTerminalResult result = (await operation.Completion).Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+    }
+
+    [Test]
+    public async Task RecoveryTerminalWithUnconfirmedReapPreservesExactOutcomeAndReportsUnconfirmedSettlement()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        }, completeWaitInitially: false, completeExitOnTerminate: false);
+        await using ProcessInstallerProtocolClient client = Create(process, TimeSpan.FromMilliseconds(30));
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+
+        InstallerRecoveryTerminalResult terminal = (await (await client.RecoverInterruptedAsync(candidate)).Completion)
+            .Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+
+        terminal.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.RecoveryCompleted);
+        terminal.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        client.CleanupConfirmed.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+        process.CompleteExit();
+        await SpinWaitUntilAsync(() => process.Disposed);
+    }
+
+    [Test]
+    public async Task ActiveRecoveryRejectsSecondRecoveryAndOrdinaryCommandsWithoutAdditionalWire()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest => null,
+            _ => throw new AssertionException("No ordinary or second recovery command may reach the wire.")
+        }, completeWaitInitially: false);
+        ProcessInstallerProtocolClient client = Create(process, TimeSpan.FromMilliseconds(50));
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+        InstallerRecoveryOperation active = await client.RecoverInterruptedAsync(candidate);
+
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(candidate)).Should().ThrowAsync<InvalidOperationException>();
+        await FluentActions.Awaiting(() => client.DiscoverGamesAsync()).Should().ThrowAsync<InvalidOperationException>();
+        process.Requests.OfType<RecoverInterruptedRequest>().Should().ContainSingle();
+
+        await client.DisposeAsync();
+        (await active.Completion).Should().BeOfType<InstallerRecoveryStateUnknownResult>();
+    }
+
+    [Test]
+    public async Task DisposeDuringExactRecoverySettlementPreservesTerminalAndMarksSettlementUnconfirmed()
+    {
+        const string path = "/games/Stardew Valley";
+        ProtocolGameCandidate source = new(path, LinuxGameFolderStatus.Valid, "valid");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(Session, source) { CommandId = request.CommandId }),
+            RecoverInterruptedRequest recovery => Serialize(CreateRecoveryCompleted(recovery, path, true)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        ProcessInstallerProtocolClient client = Create(process);
+        TaskCompletionSource settlementEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseSettlement = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.BeforeRecoverySettlementForTesting = async () =>
+        {
+            settlementEntered.TrySetResult();
+            await releaseSettlement.Task;
+        };
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate candidate = await client.ValidateGameAsync(path);
+        InstallerRecoveryOperation operation = await client.RecoverInterruptedAsync(candidate);
+        await settlementEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Task disposal = client.DisposeAsync().AsTask();
+        await disposal.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseSettlement.TrySetResult();
+        InstallerRecoveryTerminalResult terminal = (await operation.Completion.WaitAsync(TimeSpan.FromSeconds(2)))
+            .Should().BeOfType<InstallerRecoveryTerminalResult>().Subject;
+
+        terminal.Outcome.Should().Be(ProtocolInterruptedRecoveryOutcome.RecoveryCompleted);
+        terminal.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        process.Requests.OfType<RecoverInterruptedRequest>().Should().ContainSingle();
+        process.Disposed.Should().BeTrue();
     }
 
     [TestCase(InstallerOperation.Install, true)]
@@ -3065,6 +3857,70 @@ public sealed class ProcessInstallerProtocolClientTests
             Path.Combine(root, "attestation.json"),
             Path.Combine(root, "attestation.sha256")
         );
+    }
+
+    private static RecoveryCompletedEvent CreateRecoveryCompleted(
+        RecoverInterruptedRequest request,
+        string canonicalPath,
+        bool namedRootStillSelected
+    ) => new(
+        request.SessionId,
+        ProtocolInterruptedRecoveryOutcome.RecoveryCompleted,
+        new(
+            ProtocolDurableState.RecoveryCompleted,
+            null,
+            ProtocolRecoveryDisposition.Completed,
+            namedRootStillSelected ? ProtocolNextAction.InspectAgain : ProtocolNextAction.SelectGameFolder
+        ),
+        new(
+            new(canonicalPath, 1, 2, 3, 2),
+            1,
+            2,
+            namedRootStillSelected,
+            [new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 7)]
+        ),
+        "private recovery summary",
+        "/home/private-user/recovery.log"
+    )
+    {
+        CommandId = request.CommandId
+    };
+
+    private static RecoveryFailureEvent CreateRecoveryFailure(
+        RecoverInterruptedRequest request,
+        string canonicalPath,
+        ProtocolInterruptedRecoveryOutcome outcome,
+        ProtocolTerminalErrorCode? errorCode
+    )
+    {
+        (ProtocolDurableState durable, ProtocolTerminalErrorCode? exactError, ProtocolInterruptedRecoveryAttempt? attempt) = outcome switch
+        {
+            ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery => (ProtocolDurableState.Unchanged, (ProtocolTerminalErrorCode?)null, (ProtocolInterruptedRecoveryAttempt?)null),
+            ProtocolInterruptedRecoveryOutcome.PartialFailure => (
+                ProtocolDurableState.RecoveryRequired,
+                errorCode ?? ProtocolTerminalErrorCode.RecoveryFailed,
+                new(
+                    new(canonicalPath, 1, 2, 3, 1),
+                    1,
+                    null,
+                    null,
+                    [new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 7)]
+                )
+            ),
+            ProtocolInterruptedRecoveryOutcome.UnexpectedFailure => (ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, (ProtocolInterruptedRecoveryAttempt?)null),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+        return new(
+            request.SessionId,
+            outcome,
+            new(durable, exactError, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted),
+            "private recovery failure",
+            "/home/private-user/recovery.log",
+            attempt
+        )
+        {
+            CommandId = request.CommandId
+        };
     }
 
     private static byte[]? CorrectResponse(ProtocolRequest request) => request switch
