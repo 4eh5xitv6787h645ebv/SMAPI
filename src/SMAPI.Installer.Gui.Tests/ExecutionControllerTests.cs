@@ -335,6 +335,106 @@ internal sealed class ExecutionControllerTests
         session.ExecuteCalls.Should().Be(0);
     }
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task RollbackPresentationIsImmutableAndNeverExecutesBeforeExplicitRun(bool downgrade)
+    {
+        List<PlanReviewOperationCount> operationCounts = [new(PlanOperationKind.Restore, 2)];
+        List<ProtocolPlanRisk> risks = downgrade
+            ? [ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade]
+            : [ProtocolPlanRisk.Rollback];
+        ExecutionPlanPresentation source = new(
+            InstallerOperation.Rollback,
+            operationCounts,
+            risks,
+            1
+        );
+        FakeConfirmedSession session = new()
+        {
+            Execute = _ => Task.FromResult(Operation(ExactSuccess()))
+        };
+        ExecutionController controller = new(session, source);
+
+        ExecutionSnapshot initial = controller.Snapshot;
+        initial.State.Should().Be(ExecutionState.Ready);
+        initial.CanRun.Should().BeTrue();
+        initial.Plan.Operation.Should().Be(InstallerOperation.Rollback);
+        initial.Plan.OperationCounts.Should().Equal(new PlanReviewOperationCount(PlanOperationKind.Restore, 2));
+        initial.Plan.Risks.Should().Equal(risks);
+        session.ExecuteCalls.Should().Be(0);
+
+        operationCounts[0] = new(PlanOperationKind.Remove, 9);
+        risks.Clear();
+        initial.Plan.OperationCounts.Should().Equal(new PlanReviewOperationCount(PlanOperationKind.Restore, 2));
+        initial.Plan.Risks.Should().Equal(downgrade
+            ? [ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade]
+            : [ProtocolPlanRisk.Rollback]);
+        Action mutateCounts = () => ((IList<PlanReviewOperationCount>)initial.Plan.OperationCounts)[0] = new(PlanOperationKind.Remove, 1);
+        Action mutateRisks = () => ((IList<ProtocolPlanRisk>)initial.Plan.Risks)[0] = ProtocolPlanRisk.Downgrade;
+        mutateCounts.Should().Throw<NotSupportedException>();
+        mutateRisks.Should().Throw<NotSupportedException>();
+        session.ExecuteCalls.Should().Be(0);
+
+        await controller.RunAsync().WaitAsync(TimeSpan.FromSeconds(2));
+
+        session.ExecuteCalls.Should().Be(1);
+        controller.Snapshot.State.Should().Be(ExecutionState.Terminal);
+        await controller.DisposeAsync();
+    }
+
+    private static IEnumerable<TestCaseData> InvalidRollbackRiskCases()
+    {
+        yield return new TestCaseData(Array.Empty<ProtocolPlanRisk>()).SetName("RollbackRisksRejectMissingRollback");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Downgrade }).SetName("RollbackRisksRejectDowngradeAlone");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Rollback }).SetName("RollbackRisksRejectDuplicateRollback");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Downgrade, ProtocolPlanRisk.Rollback }).SetName("RollbackRisksRejectWrongOrder");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade, ProtocolPlanRisk.Downgrade }).SetName("RollbackRisksRejectDuplicateDowngrade");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Rollback, ProtocolPlanRisk.ModifiedOrUnknownFileApproval }).SetName("RollbackRisksRejectCandidateApproval");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Uninstall }).SetName("RollbackRisksRejectUninstall");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade, ProtocolPlanRisk.ModifiedOrUnknownFileApproval }).SetName("RollbackRisksRejectExtraRisk");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Rollback, ProtocolPlanRisk.RecoveryPrune }).SetName("RollbackRisksRejectRecoveryPrune");
+        yield return new TestCaseData(new[] { ProtocolPlanRisk.Rollback, (ProtocolPlanRisk)int.MaxValue }).SetName("RollbackRisksRejectUnknownRisk");
+    }
+
+    [TestCaseSource(nameof(InvalidRollbackRiskCases))]
+    public void RejectsEveryMalformedRollbackRiskSequenceBeforeItCanExecute(ProtocolPlanRisk[] risks)
+    {
+        FakeConfirmedSession session = new();
+        ExecutionPlanPresentation invalid = new(
+            InstallerOperation.Rollback,
+            [new(PlanOperationKind.Restore, 1)],
+            risks,
+            0
+        );
+
+        Action construct = () => _ = new ExecutionController(session, invalid);
+
+        construct.Should().Throw<ArgumentException>();
+        session.ExecuteCalls.Should().Be(0);
+        session.DisposeCalls.Should().Be(0, "rejected presentation never transfers controller ownership");
+    }
+
+    [TestCase(InstallerOperation.Install)]
+    [TestCase(InstallerOperation.Update)]
+    [TestCase(InstallerOperation.Repair)]
+    [TestCase(InstallerOperation.Uninstall)]
+    [TestCase(InstallerOperation.Backup)]
+    public void RejectsRollbackRiskForEveryNonRollbackOperation(InstallerOperation operation)
+    {
+        FakeConfirmedSession session = new();
+        ExecutionPlanPresentation invalid = new(
+            operation,
+            [new(PlanOperationKind.Restore, 1)],
+            [ProtocolPlanRisk.Rollback],
+            0
+        );
+
+        Action construct = () => _ = new ExecutionController(session, invalid);
+
+        construct.Should().Throw<ArgumentException>();
+        session.ExecuteCalls.Should().Be(0);
+    }
+
     [TestCase(ProtocolExecutionOutcome.Succeeded, "Install completed")]
     [TestCase(ProtocolExecutionOutcome.SucceededWithCleanupWarning, "cleanup is pending")]
     [TestCase(ProtocolExecutionOutcome.FailedBeforeMutation, "failed before changing files")]

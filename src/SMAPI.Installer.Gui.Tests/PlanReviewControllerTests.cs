@@ -8,6 +8,16 @@ namespace StardewModdingAPI.Installer.Gui.Tests;
 
 internal sealed class PlanReviewControllerTests
 {
+    internal enum MalformedRollbackPlan
+    {
+        WrongOperation,
+        WrongTarget,
+        MissingRollbackRisk,
+        CandidateAggregate,
+        CandidateDetail,
+        ReceiptCurrentMismatch
+    }
+
     [Test]
     public async Task StartsWithoutAnImplicitOperationAndRequiresAnExplicitSelection()
     {
@@ -68,6 +78,429 @@ internal sealed class PlanReviewControllerTests
         controller.Snapshot.SelectedOperation.Should().BeNull();
         controller.Snapshot.Result.Should().BeNull();
         session.InspectedOperations.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task RecoveryHistoryIsExplicitRemintedAndNeverDefaultsASelection()
+    {
+        BoundInstallerRecoveryPoint current = RecoveryPoint();
+        BoundInstallerRecoveryPoint checkpoint = RecoveryPoint(
+            2,
+            current: false,
+            OlderRecoveryRelease(),
+            InstallerOperation.Backup
+        );
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([current, checkpoint])
+            )
+        };
+        await using PlanReviewController controller = new(session);
+
+        PlanReviewSnapshot initial = controller.Snapshot;
+        initial.RecoveryState.Should().Be(PlanReviewRecoveryState.NotLoaded);
+        initial.RecoveryPoints.Should().BeEmpty();
+        initial.SelectedRecoveryPoint.Should().BeNull();
+        initial.CanListRecoveries.Should().BeTrue();
+        session.RecoveryListCalls.Should().Be(0, "history lookup must always be an explicit user action");
+
+        await controller.ListRecoveriesAsync();
+
+        PlanReviewSnapshot listed = controller.Snapshot;
+        listed.State.Should().Be(PlanReviewState.Choosing);
+        listed.RecoveryState.Should().Be(PlanReviewRecoveryState.Available);
+        listed.RecoveryPoints.Should().HaveCount(2);
+        listed.SelectedRecoveryPoint.Should().BeNull("listing never chooses a destructive target");
+        listed.CanSelectRecovery.Should().BeTrue();
+        listed.CanInspectRollback.Should().BeFalse();
+        listed.RecoveryPoints[0].Should().NotBeSameAs(current);
+        listed.RecoveryPoints[0].RestoreTarget.Should().BeOfType<PlanReviewRecoveryReleaseTarget>();
+        listed.RecoveryPoints[1].IsUserCheckpoint.Should().BeTrue();
+        typeof(PlanReviewRecoveryPoint).GetProperties().Should().NotContain(property =>
+            property.PropertyType == typeof(BoundInstallerRecoveryPoint)
+            || property.Name.Contains("Id", StringComparison.OrdinalIgnoreCase)
+            || property.Name.Contains("Path", StringComparison.OrdinalIgnoreCase)
+            || property.Name.Contains("Digest", StringComparison.OrdinalIgnoreCase)
+        );
+        session.RecoveryListCalls.Should().Be(1);
+
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+        Func<Task> preCancelledRefresh = () => controller.ListRecoveriesAsync(cancelled.Token);
+        await preCancelledRefresh.Should().ThrowAsync<OperationCanceledException>();
+        controller.Snapshot.RecoveryPoints.Should().Equal(listed.RecoveryPoints);
+        session.RecoveryListCalls.Should().Be(1, "pre-cancellation must preserve the exact current catalog");
+    }
+
+    [Test]
+    public async Task UnchangedNullRecoverySelectionDoesNotClearAnOrdinarySelection()
+    {
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([RecoveryPoint()])
+            )
+        };
+        await using PlanReviewController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        controller.SelectOperation(InstallerOperation.Update);
+        PlanReviewSnapshot before = controller.Snapshot;
+
+        controller.SelectRecoveryPoint(null);
+
+        PlanReviewSnapshot after = controller.Snapshot;
+        after.SelectedOperation.Should().Be(InstallerOperation.Update);
+        after.SelectedRecoveryPoint.Should().BeNull();
+        after.Revision.Should().Be(before.Revision, "an unchanged binding value must be a true no-op");
+        after.CanInspect.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task ExactRecoverySelectionIsConsumedBeforeInspectionAndReusesConfirmationHandoff()
+    {
+        BoundInstallerRecoveryPoint backendPoint = RecoveryPoint(target: OlderRecoveryRelease());
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([backendPoint])
+            ),
+            RollbackInspection = (point, _) =>
+            {
+                point.Should().BeSameAs(backendPoint);
+                return Task.FromResult<InstallerReadOnlyPlanResult>(RollbackPlan(backendPoint.RestoreTarget));
+            }
+        };
+        FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+        session.Confirmation = (_, _) => Task.FromResult<IConfirmedInstallerSession>(confirmed);
+        PlanReviewController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        PlanReviewRecoveryPoint choice = controller.Snapshot.RecoveryPoints.Single();
+        PlanReviewRecoveryPoint reconstructed = new(
+            choice.Ordinal,
+            choice.IsCurrent,
+            choice.IsUserCheckpoint,
+            choice.OriginOperation,
+            choice.RestoreTarget
+        );
+
+        Action foreign = () => controller.SelectRecoveryPoint(reconstructed);
+        foreign.Should().Throw<ArgumentException>();
+        controller.SelectRecoveryPoint(choice);
+        controller.Snapshot.CanInspectRollback.Should().BeTrue();
+        Task inspection = controller.InspectRollbackAsync();
+        controller.Snapshot.RecoveryPoints.Should().BeEmpty("admission consumes every sibling authority before awaiting the backend");
+        controller.Snapshot.SelectedRecoveryPoint.Should().BeNull();
+        Func<Task> reuse = () => controller.InspectRollbackAsync();
+        await reuse.Should().ThrowAsync<InvalidOperationException>();
+        await inspection;
+
+        PlanReviewSnapshot inspected = controller.Snapshot;
+        PlanReviewPlan plan = inspected.Result.Should().BeOfType<PlanReviewPlan>().Subject;
+        plan.Operation.Should().Be(InstallerOperation.Rollback);
+        plan.TargetRelease.Should().Be(new PlanReviewRelease(
+            OlderRecoveryRelease().Tag,
+            OlderRecoveryRelease().EmbeddedVersion
+        ));
+        plan.Risks.Should().Equal(ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade);
+        plan.Candidates.Should().BeEmpty();
+        inspected.CanConfirm.Should().BeTrue();
+        inspected.CanListRecoveries.Should().BeFalse();
+        session.InspectedRecoveryPoints.Should().Equal(backendPoint);
+
+        await controller.ConfirmAsync();
+        ConfirmedPlanHandoff handoff = controller.TakeConfirmedHandoff();
+        handoff.Presentation.Operation.Should().Be(InstallerOperation.Rollback);
+        handoff.Presentation.Risks.Should().Equal(ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade);
+        confirmed.ExecuteCalls.Should().Be(0);
+        await controller.DisposeAsync();
+        await confirmed.DisposeAsync();
+    }
+
+    [Test]
+    public async Task UninstalledRecoveryTargetIsProjectedExactly()
+    {
+        BoundInstallerRecoveryPoint backendPoint = RecoveryPoint(target: new BoundInstallerRecoveryUninstalledTarget());
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([backendPoint])
+            ),
+            RollbackInspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(RollbackPlan(backendPoint.RestoreTarget))
+        };
+        await using PlanReviewController controller = new(session);
+
+        await controller.ListRecoveriesAsync();
+        controller.SelectRecoveryPoint(controller.Snapshot.RecoveryPoints.Single());
+        await controller.InspectRollbackAsync();
+
+        PlanReviewPlan plan = controller.Snapshot.Result.Should().BeOfType<PlanReviewPlan>().Subject;
+        plan.TargetRelease.Should().BeNull();
+        plan.Risks.Should().Equal(ProtocolPlanRisk.Rollback);
+    }
+
+    [Test]
+    public async Task NonterminalRollbackRejectionRevokesEveryPointAndRequiresRelistAndReselection()
+    {
+        BoundInstallerRecoveryPoint first = RecoveryPoint();
+        BoundInstallerRecoveryPoint second = RecoveryPoint();
+        Queue<BoundInstallerRecoveryPoint> catalogs = new([first, second]);
+        int inspections = 0;
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([catalogs.Dequeue()])
+            ),
+            RollbackInspection = (point, _) => Task.FromResult<InstallerReadOnlyPlanResult>(inspections++ == 0
+                ? new InstallerReadOnlyPlanRejection(
+                    ProtocolPrePlanErrorCode.InspectionFailed,
+                    ProtocolNextAction.InspectAgain,
+                    false
+                )
+                : RollbackPlan(point.RestoreTarget))
+        };
+        await using PlanReviewController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        PlanReviewRecoveryPoint stale = controller.Snapshot.RecoveryPoints.Single();
+        controller.SelectRecoveryPoint(stale);
+
+        await controller.InspectRollbackAsync();
+
+        PlanReviewSnapshot rejected = controller.Snapshot;
+        rejected.State.Should().Be(PlanReviewState.Rejected);
+        rejected.RecoveryState.Should().Be(PlanReviewRecoveryState.RelistRequired);
+        rejected.RecoveryPoints.Should().BeEmpty();
+        rejected.CanRetry.Should().BeFalse("rollback retries require a newly listed exact authority");
+        rejected.CanListRecoveries.Should().BeTrue();
+        Action reuse = () => controller.SelectRecoveryPoint(stale);
+        reuse.Should().Throw<InvalidOperationException>();
+
+        await controller.ListRecoveriesAsync();
+        PlanReviewRecoveryPoint fresh = controller.Snapshot.RecoveryPoints.Single();
+        fresh.Should().NotBeSameAs(stale);
+        controller.SelectRecoveryPoint(fresh);
+        await controller.InspectRollbackAsync();
+        controller.Snapshot.State.Should().Be(PlanReviewState.Available);
+        session.InspectedRecoveryPoints.Should().Equal(first, second);
+    }
+
+    [Test]
+    public async Task OrdinaryInspectionPermanentlyClosesRecoveryLookupForThisBoundSession()
+    {
+        BoundInstallerRecoveryPoint point = RecoveryPoint();
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([point])
+            )
+        };
+        await using PlanReviewController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        PlanReviewRecoveryPoint stale = controller.Snapshot.RecoveryPoints.Single();
+
+        controller.SelectOperation(InstallerOperation.Backup);
+        controller.Snapshot.RecoveryPoints.Should().ContainSingle("ordinary selection alone does not consume a backend point");
+        await controller.InspectAsync();
+
+        PlanReviewSnapshot snapshot = controller.Snapshot;
+        snapshot.RecoveryState.Should().Be(PlanReviewRecoveryState.Closed);
+        snapshot.RecoveryPoints.Should().BeEmpty();
+        snapshot.CanListRecoveries.Should().BeFalse();
+        Func<Task> relist = () => controller.ListRecoveriesAsync();
+        await relist.Should().ThrowAsync<InvalidOperationException>();
+        Action reuse = () => controller.SelectRecoveryPoint(stale);
+        reuse.Should().Throw<InvalidOperationException>();
+        session.RecoveryListCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task NoRecoveryHistoryIsAStableEmptyObservationWhichCanBeRefreshed()
+    {
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(new BoundInstallerNoRecoveryHistory())
+        };
+        await using PlanReviewController controller = new(session);
+
+        await controller.ListRecoveriesAsync();
+
+        PlanReviewSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(PlanReviewState.Choosing);
+        snapshot.RecoveryState.Should().Be(PlanReviewRecoveryState.NoHistory);
+        snapshot.RecoveryPoints.Should().BeEmpty();
+        snapshot.CanSelectRecovery.Should().BeFalse();
+        snapshot.CanInspectRollback.Should().BeFalse();
+        snapshot.CanListRecoveries.Should().BeTrue();
+        await controller.ListRecoveriesAsync();
+        session.RecoveryListCalls.Should().Be(2);
+    }
+
+    [Test]
+    public async Task CancellingPendingRecoveryLookupRevokesAuthorityAndCleansUpExactlyOnce()
+    {
+        TaskCompletionSource started = NewCompletion();
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = async token =>
+            {
+                started.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                throw new AssertionException("Cancellation should stop the synthetic recovery lookup.");
+            }
+        };
+        PlanReviewController controller = new(session);
+        Task listing = controller.ListRecoveriesAsync();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await controller.CancelAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await listing.WaitAsync(TimeSpan.FromSeconds(2));
+
+        PlanReviewSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(PlanReviewState.Cancelled);
+        snapshot.RecoveryState.Should().Be(PlanReviewRecoveryState.Closed);
+        snapshot.RecoveryPoints.Should().BeEmpty();
+        snapshot.CanListRecoveries.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task EmptySuccessfulRecoveryCatalogFailsClosed()
+    {
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([])
+            )
+        };
+        PlanReviewController controller = new(session);
+
+        await controller.ListRecoveriesAsync();
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.Failed);
+        controller.Snapshot.RecoveryPoints.Should().BeEmpty();
+        controller.Snapshot.CanListRecoveries.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ConcurrentRollbackInspectionHasExactlyOneWinnerAndConsumesEverySibling()
+    {
+        BoundInstallerRecoveryPoint first = RecoveryPoint();
+        BoundInstallerRecoveryPoint sibling = RecoveryPoint(
+            2,
+            current: false,
+            new BoundInstallerRecoveryUninstalledTarget()
+        );
+        TaskCompletionSource<InstallerReadOnlyPlanResult> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([first, sibling])
+            ),
+            RollbackInspection = (_, _) => completion.Task
+        };
+        await using PlanReviewController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        PlanReviewRecoveryPoint[] points = controller.Snapshot.RecoveryPoints.ToArray();
+        controller.SelectRecoveryPoint(points[0]);
+
+        Task winner = controller.InspectRollbackAsync();
+        await WaitUntilAsync(() => session.InspectedRecoveryPoints.Length == 1);
+        Func<Task> selectedLoser = () => controller.InspectRollbackAsync();
+        await selectedLoser.Should().ThrowAsync<InvalidOperationException>();
+        Action siblingLoser = () => controller.SelectRecoveryPoint(points[1]);
+        siblingLoser.Should().Throw<InvalidOperationException>();
+        completion.SetResult(RollbackPlan(first.RestoreTarget));
+        await winner;
+
+        session.InspectedRecoveryPoints.Should().Equal(first);
+        controller.Snapshot.State.Should().Be(PlanReviewState.Available);
+    }
+
+    [TestCase(MalformedRollbackPlan.WrongOperation)]
+    [TestCase(MalformedRollbackPlan.WrongTarget)]
+    [TestCase(MalformedRollbackPlan.MissingRollbackRisk)]
+    [TestCase(MalformedRollbackPlan.CandidateAggregate)]
+    [TestCase(MalformedRollbackPlan.CandidateDetail)]
+    [TestCase(MalformedRollbackPlan.ReceiptCurrentMismatch)]
+    public async Task MalformedRollbackProjectionFailsClosed(MalformedRollbackPlan malformed)
+    {
+        BoundInstallerRecoveryPoint point = RecoveryPoint(target: OlderRecoveryRelease());
+        InstallerReadOnlyPlanSuccess plan = RollbackPlan(point.RestoreTarget);
+        plan = malformed switch
+        {
+            MalformedRollbackPlan.WrongOperation => CreatePlan(InstallerOperation.Backup),
+            MalformedRollbackPlan.WrongTarget => plan with
+            {
+                TargetRelease = new InstallerPlanRelease(
+                    CurrentRecoveryRelease().Tag,
+                    CurrentRecoveryRelease().EmbeddedVersion
+                ),
+                Risks = [ProtocolPlanRisk.Rollback]
+            },
+            MalformedRollbackPlan.MissingRollbackRisk => plan with { Risks = [ProtocolPlanRisk.Downgrade] },
+            MalformedRollbackPlan.CandidateAggregate => plan with { CandidateCounts = [CandidateCount(1)] },
+            MalformedRollbackPlan.CandidateDetail => plan with
+            {
+                Candidates = [CandidateCapability("mods/private-candidate.dll", false)]
+            },
+            MalformedRollbackPlan.ReceiptCurrentMismatch => plan with { ObservedState = ObservedInstallState.NotInstalled },
+            _ => throw new AssertionException("Unsupported malformed rollback fixture.")
+        };
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([point])
+            ),
+            RollbackInspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(plan)
+        };
+        PlanReviewController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        controller.SelectRecoveryPoint(controller.Snapshot.RecoveryPoints.Single());
+
+        await controller.InspectRollbackAsync();
+
+        PlanReviewSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(PlanReviewState.Failed);
+        snapshot.Result.Should().BeNull();
+        snapshot.RecoveryPoints.Should().BeEmpty();
+        snapshot.CanConfirm.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task RollbackUnreachableRejectionFailsClosedInsteadOfOfferingAFalseRetry()
+    {
+        BoundInstallerRecoveryPoint point = RecoveryPoint();
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess([point])
+            ),
+            RollbackInspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(
+                new InstallerReadOnlyPlanRejection(
+                    ProtocolPrePlanErrorCode.PackageRejected,
+                    ProtocolNextAction.ReopenVerifiedPackage,
+                    false
+                )
+            )
+        };
+        PlanReviewController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        controller.SelectRecoveryPoint(controller.Snapshot.RecoveryPoints.Single());
+
+        await controller.InspectRollbackAsync();
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.Failed);
+        controller.Snapshot.Result.Should().BeNull();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
     }
 
     [Test]
@@ -1250,6 +1683,65 @@ internal sealed class PlanReviewControllerTests
         };
     }
 
+    private static BoundInstallerRecoveryPoint RecoveryPoint(
+        int ordinal = 1,
+        bool current = true,
+        BoundInstallerRecoveryRestoreTarget? target = null,
+        InstallerOperation origin = InstallerOperation.Rollback
+    ) => new(
+        ordinal,
+        current,
+        origin == InstallerOperation.Backup,
+        origin,
+        target ?? CurrentRecoveryRelease()
+    );
+
+    private static BoundInstallerRecoveryReleaseTarget CurrentRecoveryRelease()
+    {
+        ProtocolReleaseIdentity release = GameDiscoveryControllerTests.Release();
+        return new(release.Tag, release.EmbeddedVersion);
+    }
+
+    private static BoundInstallerRecoveryReleaseTarget OlderRecoveryRelease()
+        => new(
+            "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1",
+            "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1"
+        );
+
+    private static InstallerReadOnlyPlanSuccess RollbackPlan(BoundInstallerRecoveryRestoreTarget target)
+    {
+        ProtocolReleaseIdentity current = GameDiscoveryControllerTests.Release();
+        InstallerPlanRelease currentRelease = new(current.Tag, current.EmbeddedVersion);
+        InstallerPlanRelease? targetRelease = target switch
+        {
+            BoundInstallerRecoveryReleaseTarget release => new(release.Tag, release.EmbeddedVersion),
+            BoundInstallerRecoveryUninstalledTarget => null,
+            _ => throw new AssertionException("Unsupported synthetic recovery target.")
+        };
+        ProtocolPlanRisk[] risks = targetRelease is not null
+            && targetRelease.Tag == OlderRecoveryRelease().Tag
+                ? [ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade]
+                : [ProtocolPlanRisk.Rollback];
+        return new(
+            InstallerOperation.Rollback,
+            ObservedInstallState.KnownUnmodified,
+            currentRelease,
+            targetRelease,
+            false,
+            risks,
+            ProtocolRecommendedDefault.Cancel,
+            true,
+            [new InstallerPlanOperationCount(PlanOperationKind.Restore, 1)],
+            [],
+            [],
+            0
+        )
+        {
+            Confirmation = new InstallerPlanConfirmation(),
+            Candidates = []
+        };
+    }
+
     private static InstallerPlanCandidateCount CandidateCount(int count)
         => new(
             FileReplacementCandidateReason.ModifiedReceiptOwned,
@@ -1315,7 +1807,9 @@ internal sealed class PlanReviewControllerTests
         private readonly object Sync = new();
         private readonly List<InstallerOperation> Operations = [];
         private readonly List<InstallerReadOnlyPlanCandidate[]> Approvals = [];
+        private readonly List<BoundInstallerRecoveryPoint> Rollbacks = [];
         private int DisposeCount;
+        private int RecoveryListCount;
 
         public ProtocolReleaseIdentity Release { get; } = GameDiscoveryControllerTests.Release();
         public VerifiedGamePresentation Game { get; init; } = new("/games/Stardew Valley", "Stardew Valley");
@@ -1323,6 +1817,7 @@ internal sealed class PlanReviewControllerTests
         public Task<InstallerProtocolClientException>? FaultNotification { get; init; }
         public Task<InstallerProtocolClientException> SessionFaulted => this.FaultNotification ?? this.Fault.Task;
         public int DisposeCalls => Volatile.Read(ref this.DisposeCount);
+        public int RecoveryListCalls => Volatile.Read(ref this.RecoveryListCount);
         public InstallerOperation[] InspectedOperations
         {
             get
@@ -1339,11 +1834,23 @@ internal sealed class PlanReviewControllerTests
                     return this.Approvals.Select(candidates => candidates.ToArray()).ToArray();
             }
         }
+        public BoundInstallerRecoveryPoint[] InspectedRecoveryPoints
+        {
+            get
+            {
+                lock (this.Sync)
+                    return this.Rollbacks.ToArray();
+            }
+        }
 
         public Func<InstallerOperation, CancellationToken, Task<InstallerReadOnlyPlanResult>> Inspection { get; init; }
             = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(operation));
         public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; }
             = (_, _) => throw new AssertionException("Candidate approval was not expected.");
+        public Func<CancellationToken, Task<BoundInstallerRecoveryCatalogResult>> RecoveryCatalog { get; init; }
+            = _ => throw new AssertionException("Recovery-history listing was not expected.");
+        public Func<BoundInstallerRecoveryPoint, CancellationToken, Task<InstallerReadOnlyPlanResult>> RollbackInspection { get; init; }
+            = (_, _) => throw new AssertionException("Rollback inspection was not expected.");
         public Func<InstallerPlanConfirmation, CancellationToken, Task<IConfirmedInstallerSession>>? Confirmation { get; set; }
         public Func<Task> Disposal { get; init; } = () => Task.CompletedTask;
         public List<InstallerPlanConfirmation> ConfirmedPlans { get; } = [];
@@ -1372,6 +1879,22 @@ internal sealed class PlanReviewControllerTests
             lock (this.Sync)
                 this.Approvals.Add(snapshot);
             return this.Approval(snapshot, cancellationToken);
+        }
+
+        public Task<BoundInstallerRecoveryCatalogResult> ListRecoveriesAsync(CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref this.RecoveryListCount);
+            return this.RecoveryCatalog(cancellationToken);
+        }
+
+        public Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+            BoundInstallerRecoveryPoint point,
+            CancellationToken cancellationToken = default
+        )
+        {
+            lock (this.Sync)
+                this.Rollbacks.Add(point);
+            return this.RollbackInspection(point, cancellationToken);
         }
 
         public Task<IConfirmedInstallerSession> ConfirmPlanAsync(

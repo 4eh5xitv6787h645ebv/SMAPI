@@ -27,6 +27,53 @@ internal enum PlanReviewState
 
 internal sealed record PlanReviewRelease(string Tag, string EmbeddedVersion);
 
+internal enum PlanReviewRecoveryState
+{
+    NotLoaded,
+    Listing,
+    Available,
+    NoHistory,
+    RelistRequired,
+    Closed
+}
+
+/// <summary>
+/// One sanitized recovery-history choice reminted by the plan-review controller. Reference identity is its only
+/// selection authority; protocol identifiers and the bound-session capability remain private to the controller.
+/// </summary>
+internal sealed class PlanReviewRecoveryPoint
+{
+    public int Ordinal { get; }
+    public bool IsCurrent { get; }
+    public bool IsUserCheckpoint { get; }
+    public InstallerOperation OriginOperation { get; }
+    public PlanReviewRecoveryRestoreTarget RestoreTarget { get; }
+
+    internal PlanReviewRecoveryPoint(
+        int ordinal,
+        bool isCurrent,
+        bool isUserCheckpoint,
+        InstallerOperation originOperation,
+        PlanReviewRecoveryRestoreTarget restoreTarget
+    )
+    {
+        this.Ordinal = ordinal;
+        this.IsCurrent = isCurrent;
+        this.IsUserCheckpoint = isUserCheckpoint;
+        this.OriginOperation = originOperation;
+        this.RestoreTarget = restoreTarget ?? throw new ArgumentNullException(nameof(restoreTarget));
+    }
+}
+
+internal abstract record PlanReviewRecoveryRestoreTarget;
+
+internal sealed record PlanReviewRecoveryReleaseTarget(
+    string Tag,
+    string EmbeddedVersion
+) : PlanReviewRecoveryRestoreTarget;
+
+internal sealed record PlanReviewRecoveryUninstalledTarget : PlanReviewRecoveryRestoreTarget;
+
 /// <summary>One atomic pairing of an exact confirmed owner and its same-plan sanitized presentation.</summary>
 internal sealed record ConfirmedPlanHandoff(
     IConfirmedInstallerSession Session,
@@ -118,6 +165,12 @@ internal sealed record PlanReviewSnapshot(
     public bool CanStartFreshInspection { get; init; }
     public bool CanConfirm { get; init; }
     public bool HandoffReady { get; init; }
+    public PlanReviewRecoveryState RecoveryState { get; init; }
+    public IReadOnlyList<PlanReviewRecoveryPoint> RecoveryPoints { get; init; } = [];
+    public PlanReviewRecoveryPoint? SelectedRecoveryPoint { get; init; }
+    public bool CanListRecoveries { get; init; }
+    public bool CanSelectRecovery { get; init; }
+    public bool CanInspectRollback { get; init; }
 }
 
 /// <summary>Serializes bounded read-only plan inspection through one game-bound backend session.</summary>
@@ -147,6 +200,11 @@ internal sealed class PlanReviewController : IAsyncDisposable
     private PlanReviewResult? ResultValue;
     private Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> CurrentCandidateAuthorities = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<PlanReviewCandidate> SelectedCandidates = new(ReferenceEqualityComparer.Instance);
+    private Dictionary<PlanReviewRecoveryPoint, BoundInstallerRecoveryPoint> CurrentRecoveryAuthorities = new(ReferenceEqualityComparer.Instance);
+    private PlanReviewRecoveryPoint[] CurrentRecoveryPoints = [];
+    private PlanReviewRecoveryPoint? SelectedRecoveryPointValue;
+    private PlanReviewRecoveryState RecoveryStateValue = PlanReviewRecoveryState.NotLoaded;
+    private PlanRequestKind? ResultRequestKindValue;
     private InstallerPlanConfirmation? CurrentPlanConfirmation;
     private IConfirmedInstallerSession? ConfirmedSession;
     private ExecutionPlanPresentation? ConfirmedPresentation;
@@ -160,6 +218,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
     private bool SessionHasFaulted;
     private bool DisposeStarted;
     private bool OwnershipTransferred;
+    private bool RecoveryLookupClosed;
     internal Action? BeforeResultCommitForTesting { get; set; }
     internal Action? BeforeSessionFaultCommitForTesting { get; set; }
 
@@ -197,7 +256,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 return;
             bool hadResult = this.ResultValue is not null;
             this.SelectedOperationValue = operation;
+            this.SelectedRecoveryPointValue = null;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = hadResult ? PlanReviewState.SelectionChanged : PlanReviewState.Choosing;
         }
@@ -207,6 +268,113 @@ internal sealed class PlanReviewController : IAsyncDisposable
     public Task InspectAsync(CancellationToken cancellationToken = default)
     {
         return this.StartFreshInspection(requireAppliedApprovals: false, cancellationToken);
+    }
+
+    /// <summary>
+    /// Explicitly refresh the bounded local recovery history. This only lists sanitized choices; it never selects,
+    /// inspects, confirms, or executes a rollback.
+    /// </summary>
+    public Task ListRecoveriesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ActiveOperation operation;
+        lock (this.Sync)
+        {
+            this.AssertCanUseSession();
+            if (!this.CanSelectUnderLock() || this.RecoveryLookupClosed)
+                throw new InvalidOperationException("Recovery history is unavailable after plan inspection starts.");
+
+            operation = new(
+                ++this.GenerationValue,
+                InstallerOperation.Rollback,
+                PlanRequestKind.RecoveryCatalog,
+                [],
+                null,
+                null,
+                0,
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            );
+            this.Operation = operation;
+            this.SelectedOperationValue = null;
+            this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Listing);
+            this.StateValue = PlanReviewState.Inspecting;
+        }
+        this.PublishChanged();
+        _ = this.RunRecoveryCatalogRequestAsync(operation);
+        return operation.Completion.Task;
+    }
+
+    /// <summary>Select one exact current reminted recovery point without contacting the backend.</summary>
+    public void SelectRecoveryPoint(PlanReviewRecoveryPoint? point)
+    {
+        bool changed;
+        lock (this.Sync)
+        {
+            this.AssertCanUseSession();
+            if (!this.CanSelectUnderLock() || this.RecoveryStateValue != PlanReviewRecoveryState.Available)
+                throw new InvalidOperationException("A current recovery catalog is required before selecting rollback.");
+            if (point is not null && !this.CurrentRecoveryAuthorities.ContainsKey(point))
+                throw new ArgumentException("The recovery point must be an exact current choice issued by this controller.", nameof(point));
+            if (point is null && this.SelectedRecoveryPointValue is null)
+                return;
+            changed = !ReferenceEquals(this.SelectedRecoveryPointValue, point)
+                || this.SelectedOperationValue is not null
+                || this.ResultValue is not null;
+            if (!changed)
+                return;
+            this.SelectedRecoveryPointValue = point;
+            this.SelectedOperationValue = null;
+            this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            this.StateValue = PlanReviewState.Choosing;
+        }
+        this.PublishChanged();
+    }
+
+    /// <summary>Consume one exact selected recovery point and request only its read-only rollback plan.</summary>
+    public Task InspectRollbackAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ActiveOperation operation;
+        lock (this.Sync)
+        {
+            this.AssertCanUseSession();
+            if (
+                !this.CanSelectUnderLock()
+                || this.RecoveryStateValue != PlanReviewRecoveryState.Available
+                || this.SelectedRecoveryPointValue is not { } selected
+                || !this.CurrentRecoveryAuthorities.TryGetValue(selected, out BoundInstallerRecoveryPoint? backend)
+            )
+            {
+                throw new InvalidOperationException("Select one exact current recovery point before inspecting rollback.");
+            }
+
+            operation = new(
+                ++this.GenerationValue,
+                InstallerOperation.Rollback,
+                PlanRequestKind.RollbackInspection,
+                [],
+                backend,
+                selected.RestoreTarget,
+                0,
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            );
+            this.Operation = operation;
+            this.SelectedOperationValue = null;
+            this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
+            this.RecoveryLookupClosed = true;
+            this.StateValue = PlanReviewState.Inspecting;
+        }
+        this.PublishChanged();
+        _ = this.RunPlanRequestAsync(operation);
+        return operation.Completion.Task;
     }
 
     /// <summary>
@@ -295,11 +463,14 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 selected,
                 PlanRequestKind.CandidateApproval,
                 backendCandidates,
+                null,
+                null,
                 checked(this.AppliedCandidateApprovalCountValue + backendCandidates.Length),
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
             );
             this.Operation = operation;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: false);
             this.StateValue = PlanReviewState.Approving;
         }
@@ -332,6 +503,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
             );
             this.CurrentPlanConfirmation = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.ConfirmationOperation = operation;
             this.StateValue = PlanReviewState.Confirming;
@@ -362,6 +534,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
             this.OwnershipTransferred = true;
             this.DisposeStarted = true;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = PlanReviewState.HandedOff;
             this.StopWatching.TrySetResult();
         }
@@ -383,6 +558,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 return;
             publish = !this.SessionHasFaulted && !this.SessionFaultNotification.IsCompleted;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             if (publish)
                 this.StateValue = PlanReviewState.Cancelling;
@@ -413,6 +590,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
             ActiveOperation? operation = this.Operation;
             ActiveConfirmation? confirmation = this.ConfirmationOperation;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = operation is null && confirmation is null ? PlanReviewState.Closing : PlanReviewState.Cancelling;
             this.DisposalTask = this.DisposeCoreAsync(operation, confirmation);
@@ -435,17 +614,158 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 selected,
                 PlanRequestKind.FreshInspection,
                 [],
+                null,
+                null,
                 0,
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
             );
             this.Operation = operation;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RecoveryLookupClosed = true;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = PlanReviewState.Inspecting;
         }
         this.PublishChanged();
         _ = this.RunPlanRequestAsync(operation);
         return operation.Completion.Task;
+    }
+
+    private async Task RunRecoveryCatalogRequestAsync(ActiveOperation operation)
+    {
+        await Task.Yield();
+        ProjectedRecoveryCatalog? projected = null;
+        Exception? failure = null;
+        bool cancelled = false;
+        try
+        {
+            BoundInstallerRecoveryCatalogResult result = await this.Session.ListRecoveriesAsync(
+                operation.Cancellation.Token
+            ).ConfigureAwait(false);
+            operation.Cancellation.Token.ThrowIfCancellationRequested();
+            projected = ProjectRecoveryCatalog(result);
+            this.BeforeResultCommitForTesting?.Invoke();
+        }
+        catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
+        {
+            cancelled = true;
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        PlanReviewState finalState;
+        PlanReviewRejection? finalRejection = null;
+        bool requiresCleanup;
+        bool publishClosing;
+        lock (this.Sync)
+        {
+            if (!ReferenceEquals(this.Operation, operation))
+                return;
+            if (this.DisposeStarted)
+            {
+                finalState = PlanReviewState.Disposed;
+                requiresCleanup = true;
+                publishClosing = false;
+            }
+            else if (this.SessionHasFaulted || this.SessionFaultNotification.IsCompleted)
+            {
+                finalState = PlanReviewState.SessionFaulted;
+                requiresCleanup = true;
+                publishClosing = this.StateValue != PlanReviewState.Closing;
+                this.StateValue = PlanReviewState.Closing;
+            }
+            else if (cancelled || operation.Cancellation.IsCancellationRequested)
+            {
+                finalState = PlanReviewState.Cancelled;
+                requiresCleanup = true;
+                publishClosing = this.StateValue != PlanReviewState.Cancelling;
+                this.StateValue = PlanReviewState.Cancelling;
+            }
+            else if (failure is not null || projected is null)
+            {
+                finalState = PlanReviewState.Failed;
+                requiresCleanup = true;
+                publishClosing = this.StateValue != PlanReviewState.Closing;
+                this.StateValue = PlanReviewState.Closing;
+            }
+            else if (projected.Rejection is { } rejection && IsWorkflowTerminal(rejection))
+            {
+                finalState = PlanReviewState.Rejected;
+                finalRejection = rejection;
+                requiresCleanup = true;
+                publishClosing = this.StateValue != PlanReviewState.Closing;
+                this.StateValue = PlanReviewState.Closing;
+            }
+            else
+            {
+                finalState = projected.Rejection is null ? PlanReviewState.Choosing : PlanReviewState.Rejected;
+                finalRejection = projected.Rejection;
+                requiresCleanup = false;
+                publishClosing = false;
+            }
+
+            if (requiresCleanup)
+            {
+                this.ResultValue = null;
+                this.ResultRequestKindValue = null;
+                this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
+                this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            }
+            else
+            {
+                this.Operation = null;
+                this.StateValue = finalState;
+                this.ResultValue = finalRejection;
+                this.ResultRequestKindValue = finalRejection is null ? null : PlanRequestKind.RecoveryCatalog;
+                this.CurrentRecoveryAuthorities = projected!.Authorities;
+                this.CurrentRecoveryPoints = projected.Points.ToArray();
+                this.SelectedRecoveryPointValue = null;
+                this.RecoveryStateValue = projected.State;
+                this.RecoveryLookupClosed = false;
+                operation.Cancellation.Dispose();
+            }
+        }
+        if (publishClosing)
+            this.PublishChanged();
+        if (!requiresCleanup)
+        {
+            this.PublishChanged();
+            operation.Completion.TrySetResult();
+            return;
+        }
+
+        Task cleanup;
+        lock (this.Sync)
+            cleanup = this.StartSessionCleanupUnderLock();
+        await cleanup.ConfigureAwait(false);
+
+        lock (this.Sync)
+        {
+            if (ReferenceEquals(this.Operation, operation))
+                this.Operation = null;
+            this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            this.StateValue = this.DisposeStarted
+                ? PlanReviewState.Disposed
+                : this.SessionHasFaulted || this.SessionFaultNotification.IsCompleted
+                    ? PlanReviewState.SessionFaulted
+                    : cancelled || operation.Cancellation.IsCancellationRequested
+                        ? PlanReviewState.Cancelled
+                        : finalState;
+            if (this.StateValue == PlanReviewState.Rejected)
+            {
+                this.ResultValue = finalRejection;
+                this.ResultRequestKindValue = PlanRequestKind.RecoveryCatalog;
+            }
+            operation.Cancellation.Dispose();
+        }
+        this.PublishChanged();
+        operation.Completion.TrySetResult();
     }
 
     private async Task RunConfirmationAsync(ActiveConfirmation operation)
@@ -491,6 +811,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
                     && !this.SessionFaultNotification.IsCompleted;
                 this.ConfirmationOperation = null;
                 this.ResultValue = accepted ? this.ResultValue : null;
+                this.ResultRequestKindValue = accepted ? this.ResultRequestKindValue : null;
+                this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
                 this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
                 if (accepted)
                 {
@@ -587,10 +909,20 @@ internal sealed class PlanReviewController : IAsyncDisposable
                     operation.BackendCandidates,
                     operation.Cancellation.Token
                 ).ConfigureAwait(false),
+                PlanRequestKind.RollbackInspection => await this.Session.InspectRollbackAsync(
+                    operation.BackendRecoveryPoint
+                        ?? throw new InvalidOperationException("The exact rollback capability was unavailable."),
+                    operation.Cancellation.Token
+                ).ConfigureAwait(false),
                 _ => throw new InvalidOperationException("The plan request kind is unsupported.")
             };
             operation.Cancellation.Token.ThrowIfCancellationRequested();
-            ProjectedPlanResult projection = this.ProjectResult(result, operation.SelectedOperation, operation.Kind);
+            ProjectedPlanResult projection = this.ProjectResult(
+                result,
+                operation.SelectedOperation,
+                operation.Kind,
+                operation.ExpectedRecoveryTarget
+            );
             projected = projection.Result;
             projectedAuthorities = projection.CandidateAuthorities;
             projectedConfirmation = projection.Confirmation;
@@ -671,6 +1003,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 this.Operation = null;
                 this.StateValue = finalState;
                 this.ResultValue = finalResult;
+                this.ResultRequestKindValue = operation.Kind;
                 if (finalResult is PlanReviewPlan)
                 {
                     this.CurrentCandidateAuthorities = projectedAuthorities!;
@@ -679,7 +1012,14 @@ internal sealed class PlanReviewController : IAsyncDisposable
                     this.AppliedCandidateApprovalCountValue = operation.AppliedCandidateApprovalCountAfterSuccess;
                 }
                 else
+                {
                     this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+                    if (operation.Kind == PlanRequestKind.RollbackInspection)
+                    {
+                        this.RecoveryLookupClosed = false;
+                        this.RecoveryStateValue = PlanReviewRecoveryState.RelistRequired;
+                    }
+                }
                 operation.Cancellation.Dispose();
             }
         }
@@ -702,6 +1042,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
             if (ReferenceEquals(this.Operation, operation))
                 this.Operation = null;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = this.DisposeStarted
                 ? PlanReviewState.Disposed
@@ -741,6 +1083,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 return;
             this.SessionHasFaulted = true;
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             operation = this.Operation;
             confirmation = this.ConfirmationOperation;
@@ -788,6 +1132,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
         lock (this.Sync)
         {
             this.ResultValue = null;
+            this.ResultRequestKindValue = null;
+            this.RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState.Closed);
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = PlanReviewState.Disposed;
         }
@@ -803,6 +1149,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         bool canSelectCandidates = this.CanSelectCandidatesUnderLock();
         bool canRetry = this.StateValue == PlanReviewState.Rejected
             && this.ResultValue is PlanReviewRejection rejection
+            && this.ResultRequestKindValue is PlanRequestKind.FreshInspection or PlanRequestKind.CandidateApproval
             && !IsWorkflowTerminal(rejection);
         PlanReviewCandidate[] candidates = this.ResultValue is PlanReviewPlan plan
             ? plan.Candidates.ToArray()
@@ -810,6 +1157,10 @@ internal sealed class PlanReviewController : IAsyncDisposable
         PlanReviewCandidate[] selectedCandidates = candidates
             .Where(this.SelectedCandidates.Contains)
             .ToArray();
+        PlanReviewRecoveryPoint[] recoveryPoints = this.CurrentRecoveryPoints.ToArray();
+        bool canSelectRecovery = canSelect
+            && this.RecoveryStateValue == PlanReviewRecoveryState.Available
+            && recoveryPoints.Length > 0;
         return new(
             this.GenerationValue,
             this.RevisionValue,
@@ -836,7 +1187,15 @@ internal sealed class PlanReviewController : IAsyncDisposable
             CanClearCandidates = canSelectCandidates && selectedCandidates.Length > 0,
             CanStartFreshInspection = canSelect && this.AppliedCandidateApprovalCountValue > 0,
             CanConfirm = this.CanConfirmUnderLock(),
-            HandoffReady = this.StateValue == PlanReviewState.HandoffReady && this.ConfirmedSession is not null
+            HandoffReady = this.StateValue == PlanReviewState.HandoffReady && this.ConfirmedSession is not null,
+            RecoveryState = this.RecoveryStateValue,
+            RecoveryPoints = Array.AsReadOnly(recoveryPoints),
+            SelectedRecoveryPoint = this.SelectedRecoveryPointValue,
+            CanListRecoveries = canSelect && !this.RecoveryLookupClosed,
+            CanSelectRecovery = canSelectRecovery,
+            CanInspectRollback = canSelectRecovery
+                && this.SelectedRecoveryPointValue is { } selectedRecoveryPoint
+                && this.CurrentRecoveryAuthorities.ContainsKey(selectedRecoveryPoint)
         };
     }
 
@@ -903,26 +1262,149 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }
     }
 
+    private static ProjectedRecoveryCatalog ProjectRecoveryCatalog(BoundInstallerRecoveryCatalogResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        switch (result)
+        {
+            case BoundInstallerRecoveryCatalogSuccess success:
+                {
+                    IReadOnlyList<BoundInstallerRecoveryPoint> source = success.RecoveryPoints
+                        ?? throw new InvalidOperationException("The recovery history was missing.");
+                    int count;
+                    try { count = source.Count; }
+                    catch
+                    {
+                        throw new InvalidOperationException("The recovery history could not be read safely.");
+                    }
+                    if (count is <= 0 or > ProtocolJsonSerializer.MaxRecoveryGenerations)
+                        throw new InvalidOperationException("The recovery history exceeded its bound.");
+
+                    PlanReviewRecoveryPoint[] projected = new PlanReviewRecoveryPoint[count];
+                    Dictionary<PlanReviewRecoveryPoint, BoundInstallerRecoveryPoint> authorities = new(ReferenceEqualityComparer.Instance);
+                    HashSet<BoundInstallerRecoveryPoint> backendReferences = new(ReferenceEqualityComparer.Instance);
+                    for (int index = 0; index < count; index++)
+                    {
+                        BoundInstallerRecoveryPoint point;
+                        try { point = source[index]; }
+                        catch
+                        {
+                            throw new InvalidOperationException("The recovery history could not be read safely.");
+                        }
+                        if (
+                            point is null
+                            || !backendReferences.Add(point)
+                            || point.Ordinal != index + 1
+                            || point.IsCurrent != (index == 0)
+                            || !Enum.IsDefined(point.OriginOperation)
+                            || point.IsUserCheckpoint != (point.OriginOperation == InstallerOperation.Backup)
+                        )
+                        {
+                            throw new InvalidOperationException("The recovery history semantics were invalid.");
+                        }
+
+                        PlanReviewRecoveryRestoreTarget target = point.RestoreTarget switch
+                        {
+                            BoundInstallerRecoveryReleaseTarget release => ProjectRecoveryReleaseTarget(release),
+                            BoundInstallerRecoveryUninstalledTarget => new PlanReviewRecoveryUninstalledTarget(),
+                            _ => throw new InvalidOperationException("The recovery target was invalid.")
+                        };
+                        PlanReviewRecoveryPoint choice = new(
+                            point.Ordinal,
+                            point.IsCurrent,
+                            point.IsUserCheckpoint,
+                            point.OriginOperation,
+                            target
+                        );
+                        projected[index] = choice;
+                        authorities.Add(choice, point);
+                    }
+                    return new(
+                        PlanReviewRecoveryState.Available,
+                        Array.AsReadOnly(projected),
+                        authorities,
+                        null
+                    );
+                }
+
+            case BoundInstallerNoRecoveryHistory:
+                return new(
+                    PlanReviewRecoveryState.NoHistory,
+                    Array.Empty<PlanReviewRecoveryPoint>(),
+                    new(ReferenceEqualityComparer.Instance),
+                    null
+                );
+
+            case BoundInstallerRecoveryCatalogRejection rejection:
+                return new(
+                    PlanReviewRecoveryState.RelistRequired,
+                    Array.Empty<PlanReviewRecoveryPoint>(),
+                    new(ReferenceEqualityComparer.Instance),
+                    ProjectRecoveryCatalogRejection(rejection)
+                );
+
+            default:
+                throw new InvalidOperationException("The recovery service returned an unsupported result.");
+        }
+    }
+
+    private static PlanReviewRecoveryReleaseTarget ProjectRecoveryReleaseTarget(BoundInstallerRecoveryReleaseTarget release)
+    {
+        ArgumentNullException.ThrowIfNull(release);
+        ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(release.Tag);
+        if (!string.Equals(release.EmbeddedVersion, identity.EmbeddedVersion, StringComparison.Ordinal))
+            throw new InvalidOperationException("The recovery release presentation was invalid.");
+        return new(identity.Tag, identity.EmbeddedVersion);
+    }
+
+    private static PlanReviewRejection ProjectRecoveryCatalogRejection(BoundInstallerRecoveryCatalogRejection rejection)
+    {
+        bool valid = rejection switch
+        {
+            { ErrorCode: ProtocolPrePlanErrorCode.RequestCancelled, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
+            { ErrorCode: ProtocolPrePlanErrorCode.InvalidGameFolder, NextAction: ProtocolNextAction.SelectGameFolder, IsTerminal: false } => true,
+            { ErrorCode: ProtocolPrePlanErrorCode.RecoveryUnavailable, NextAction: ProtocolNextAction.ListRecoveries, IsTerminal: false } => true,
+            { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
+            { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
+            _ => false
+        };
+        if (!valid)
+            throw new InvalidOperationException("The recovery-history rejection semantics were invalid.");
+        return new(rejection.ErrorCode, rejection.NextAction, rejection.IsTerminal);
+    }
+
     private ProjectedPlanResult ProjectResult(
         InstallerReadOnlyPlanResult result,
         InstallerOperation requested,
-        PlanRequestKind requestKind
+        PlanRequestKind requestKind,
+        PlanReviewRecoveryRestoreTarget? expectedRecoveryTarget
     )
     {
         ArgumentNullException.ThrowIfNull(result);
         return result switch
         {
-            InstallerReadOnlyPlanSuccess success => this.ProjectPlan(success, requested),
+            InstallerReadOnlyPlanSuccess success => this.ProjectPlan(success, requested, requestKind, expectedRecoveryTarget),
             InstallerReadOnlyPlanRejection rejection => new(ProjectRejection(rejection, requestKind), [], null),
             _ => throw new InvalidOperationException("The plan service returned an unsupported result.")
         };
     }
 
-    private ProjectedPlanResult ProjectPlan(InstallerReadOnlyPlanSuccess plan, InstallerOperation requested)
+    private ProjectedPlanResult ProjectPlan(
+        InstallerReadOnlyPlanSuccess plan,
+        InstallerOperation requested,
+        PlanRequestKind requestKind,
+        PlanReviewRecoveryRestoreTarget? expectedRecoveryTarget
+    )
     {
         if (plan.Operation != requested)
             throw new InvalidOperationException("The plan operation did not match the request.");
-        AssertAllowedOperation(plan.Operation);
+        if (requestKind == PlanRequestKind.RollbackInspection)
+        {
+            if (plan.Operation != InstallerOperation.Rollback || expectedRecoveryTarget is null)
+                throw new InvalidOperationException("The rollback plan did not match its exact selected recovery point.");
+        }
+        else
+            AssertAllowedOperation(plan.Operation);
         if (!Enum.IsDefined(plan.ObservedState)
             || plan.RecommendedDefault != ProtocolRecommendedDefault.Cancel
             || !plan.SeparateConfirmationRequired
@@ -935,7 +1417,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
 
         PlanReviewRelease? current = ProjectPlanRelease(plan.CurrentRelease);
         PlanReviewRelease? target = ProjectPlanRelease(plan.TargetRelease);
-        ValidateReleaseSemantics(plan.Operation, plan.ObservedState, current, target, this.VerifiedRelease);
+        ValidateReleaseSemantics(plan.Operation, plan.ObservedState, current, target, this.VerifiedRelease, expectedRecoveryTarget);
 
         ArgumentNullException.ThrowIfNull(plan.Risks);
         ArgumentNullException.ThrowIfNull(plan.OperationCounts);
@@ -950,7 +1432,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }
 
         ProtocolPlanRisk[] risks = plan.Risks.ToArray();
-        if (risks.Any(risk => !Enum.IsDefined(risk) || risk is ProtocolPlanRisk.Rollback or ProtocolPlanRisk.RecoveryPrune)
+        if (risks.Any(risk => !Enum.IsDefined(risk) || risk == ProtocolPlanRisk.RecoveryPrune)
             || risks.Distinct().Count() != risks.Length)
         {
             throw new InvalidOperationException("The plan risk summary was invalid.");
@@ -987,6 +1469,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         if (operationTotal > MaximumOperationCount
             || conflictTotal > MaximumConflictCount
             || candidateTotal > ProtocolJsonSerializer.MaxPlanCandidates
+            || plan.Operation == InstallerOperation.Rollback && candidateTotal != 0
             || plan.HasBlockingConflicts != (conflictTotal > 0))
         {
             throw new InvalidOperationException("The plan summary counts were invalid.");
@@ -994,6 +1477,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
         ValidateRisks(plan.Operation, current, target, candidateTotal, risks);
 
         (PlanReviewCandidate[] detailedCandidates, Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> authorities) = ProjectCandidates(plan.Candidates);
+        if (plan.Operation == InstallerOperation.Rollback && detailedCandidates.Length != 0)
+            throw new InvalidOperationException("Rollback plans cannot expose candidate approval authority.");
         PlanReviewCandidateCount[] detailedCounts = detailedCandidates
             .GroupBy(candidate => (candidate.Reason, candidate.Disposition, candidate.BackendProvisionallyIncluded))
             .OrderBy(group => group.Key.Reason)
@@ -1094,6 +1579,15 @@ internal sealed class PlanReviewController : IAsyncDisposable
             this.AppliedCandidateApprovalCountValue = 0;
     }
 
+    /// <remarks>The caller must hold <see cref="Sync"/>.</remarks>
+    private void RevokeRecoveryAuthorityUnderLock(PlanReviewRecoveryState state)
+    {
+        this.CurrentRecoveryAuthorities.Clear();
+        this.CurrentRecoveryPoints = [];
+        this.SelectedRecoveryPointValue = null;
+        this.RecoveryStateValue = state;
+    }
+
     private static PlanReviewCandidate[] SnapshotCandidateChoices(
         IReadOnlyList<PlanReviewCandidate> candidates,
         string parameterName
@@ -1127,11 +1621,22 @@ internal sealed class PlanReviewController : IAsyncDisposable
         PlanRequestKind requestKind
     )
     {
-        bool valid = requestKind == PlanRequestKind.CandidateApproval
-            ? rejection.ErrorCode == ProtocolPrePlanErrorCode.CandidateApprovalFailed
+        bool valid = requestKind switch
+        {
+            PlanRequestKind.CandidateApproval => rejection.ErrorCode == ProtocolPrePlanErrorCode.CandidateApprovalFailed
                 && rejection.NextAction == ProtocolNextAction.InspectAgain
-                && !rejection.IsTerminal
-            : rejection.ErrorCode switch
+                && !rejection.IsTerminal,
+            PlanRequestKind.RollbackInspection => rejection.ErrorCode switch
+            {
+                ProtocolPrePlanErrorCode.RequestCancelled => rejection.NextAction == ProtocolNextAction.RetryRequest && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.InvalidGameFolder => rejection.NextAction == ProtocolNextAction.SelectGameFolder && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.InspectionFailed => rejection.NextAction == ProtocolNextAction.InspectAgain && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.PermissionDenied => rejection.NextAction == ProtocolNextAction.ReviewFilesystem && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.UnexpectedFailure => rejection.IsTerminal
+                    && rejection.NextAction is ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog,
+                _ => false
+            },
+            PlanRequestKind.FreshInspection => rejection.ErrorCode switch
             {
                 ProtocolPrePlanErrorCode.RequestCancelled => rejection.NextAction == ProtocolNextAction.RetryRequest && !rejection.IsTerminal,
                 ProtocolPrePlanErrorCode.InvalidGameFolder => rejection.NextAction == ProtocolNextAction.SelectGameFolder && !rejection.IsTerminal,
@@ -1141,7 +1646,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 ProtocolPrePlanErrorCode.UnexpectedFailure => rejection.IsTerminal
                     && rejection.NextAction is ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog,
                 _ => false
-            };
+            },
+            _ => false
+        };
         if (!valid)
             throw new InvalidOperationException("The plan rejection semantics were invalid.");
         return new(rejection.ErrorCode, rejection.NextAction, rejection.IsTerminal);
@@ -1174,7 +1681,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
         ObservedInstallState observed,
         PlanReviewRelease? current,
         PlanReviewRelease? target,
-        PlanReviewRelease verified
+        PlanReviewRelease verified,
+        PlanReviewRecoveryRestoreTarget? expectedRecoveryTarget
     )
     {
         bool receiptKnown = observed is ObservedInstallState.KnownUnmodified or ObservedInstallState.KnownModified;
@@ -1186,6 +1694,12 @@ internal sealed class PlanReviewController : IAsyncDisposable
             InstallerOperation.Update or InstallerOperation.Repair => target == verified,
             InstallerOperation.Uninstall => target is null,
             InstallerOperation.Backup => current is null && target is null || current is not null && target == current,
+            InstallerOperation.Rollback => expectedRecoveryTarget switch
+            {
+                PlanReviewRecoveryReleaseTarget release => target == new PlanReviewRelease(release.Tag, release.EmbeddedVersion),
+                PlanReviewRecoveryUninstalledTarget => target is null,
+                _ => false
+            },
             _ => false
         };
         if (!valid)
@@ -1203,6 +1717,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
         List<ProtocolPlanRisk> expected = [];
         if (operation == InstallerOperation.Uninstall)
             expected.Add(ProtocolPlanRisk.Uninstall);
+        if (operation == InstallerOperation.Rollback)
+            expected.Add(ProtocolPlanRisk.Rollback);
         if (current is not null && target is not null && IsEarlierRelease(target.Tag, current.Tag))
             expected.Add(ProtocolPlanRisk.Downgrade);
         if (candidateCount > 0)
@@ -1280,8 +1796,17 @@ internal sealed class PlanReviewController : IAsyncDisposable
     private enum PlanRequestKind
     {
         FreshInspection,
-        CandidateApproval
+        CandidateApproval,
+        RecoveryCatalog,
+        RollbackInspection
     }
+
+    private sealed record ProjectedRecoveryCatalog(
+        PlanReviewRecoveryState State,
+        IReadOnlyList<PlanReviewRecoveryPoint> Points,
+        Dictionary<PlanReviewRecoveryPoint, BoundInstallerRecoveryPoint> Authorities,
+        PlanReviewRejection? Rejection
+    );
 
     private sealed record ProjectedPlanResult(
         PlanReviewResult Result,
@@ -1306,6 +1831,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
         InstallerOperation selectedOperation,
         PlanRequestKind kind,
         InstallerReadOnlyPlanCandidate[] backendCandidates,
+        BoundInstallerRecoveryPoint? backendRecoveryPoint,
+        PlanReviewRecoveryRestoreTarget? expectedRecoveryTarget,
         int appliedCandidateApprovalCountAfterSuccess,
         CancellationTokenSource cancellation
     )
@@ -1314,6 +1841,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
         public InstallerOperation SelectedOperation { get; } = selectedOperation;
         public PlanRequestKind Kind { get; } = kind;
         public IReadOnlyList<InstallerReadOnlyPlanCandidate> BackendCandidates { get; } = Array.AsReadOnly(backendCandidates);
+        public BoundInstallerRecoveryPoint? BackendRecoveryPoint { get; } = backendRecoveryPoint;
+        public PlanReviewRecoveryRestoreTarget? ExpectedRecoveryTarget { get; } = expectedRecoveryTarget;
         public int AppliedCandidateApprovalCountAfterSuccess { get; } = appliedCandidateApprovalCountAfterSuccess;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
