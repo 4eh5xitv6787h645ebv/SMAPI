@@ -95,10 +95,10 @@
                 TabIndex="3"
                 IsVisible="{Binding IsRunVisible}"
                 AutomationProperties.AccessKey="Alt+R"
-                AutomationProperties.Name="Run the exact confirmed operation"
+                AutomationProperties.Name="{Binding RunAccessibleName}"
                 AutomationProperties.HelpText="This explicit action starts the reviewed installer plan exactly once."
                 Command="{Binding RunCommand}"
-                Content="_Run operation" />
+                Content="{Binding RunLabel}" />
             <Button
                 x:Name="RecoverButton"
                 Classes="primary focus-ring"

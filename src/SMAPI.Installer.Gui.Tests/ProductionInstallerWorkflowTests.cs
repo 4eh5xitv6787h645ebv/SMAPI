@@ -5,6 +5,7 @@ using Avalonia.Threading;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Backend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
@@ -295,6 +296,52 @@ internal sealed class ProductionInstallerWorkflowTests
     }
 
     [AvaloniaTest]
+    public async Task ExplicitRollbackSelectionReachesReadyWindowWithoutRunningUntilExplicitRun()
+    {
+        TrackingClient client = new() { EnableRollback = true };
+        WorkflowContext context = await OpenPlanReviewAsync(client);
+
+        context.Plan.RecoveryChoices.Should().BeEmpty();
+        context.Plan.SelectedRecoveryChoice.Should().BeNull();
+        client.RecoveryListCalls.Should().Be(0, "opening the production plan screen must not load recovery history");
+        client.RollbackInspectionCalls.Should().Be(0);
+        client.ExecuteCalls.Should().Be(0);
+
+        await context.Plan.LoadRecoveriesCommand.ExecuteAsync();
+        context.Plan.RecoveryChoices.Should().ContainSingle();
+        context.Plan.SelectedRecoveryChoice.Should().BeNull("listing never chooses a rollback target");
+        context.Plan.SelectedRecoveryChoice = context.Plan.RecoveryChoices.Single();
+        await context.Plan.InspectRollbackCommand.ExecuteAsync();
+
+        context.Plan.Heading.Should().Be("Rollback plan inspected — preview only");
+        context.Plan.ConfirmCommand.CanExecute(null).Should().BeTrue();
+        client.RecoveryListCalls.Should().Be(1);
+        client.RollbackInspectionCalls.Should().Be(1);
+        client.ConfirmCalls.Should().Be(0);
+        client.ExecuteCalls.Should().Be(0);
+
+        await context.Plan.ConfirmCommand.ExecuteAsync();
+        await WaitUntilAsync(() => context.ExecutionWindow is not null);
+
+        ExecutionViewModel execution = (ExecutionViewModel)context.ExecutionWindow!.DataContext!;
+        execution.OperationLabel.Should().Be("Rollback");
+        execution.Heading.Should().Be("Ready to run rollback");
+        execution.Message.Should().Contain("No files have changed").And.Contain("Run operation");
+        client.ConfirmCalls.Should().Be(1);
+        client.ExecuteCalls.Should().Be(0, "listing, selection, inspection, confirmation, and window activation must not execute rollback");
+
+        await execution.RunCommand.ExecuteAsync();
+
+        client.ExecuteCalls.Should().Be(1);
+        await WaitUntilAsync(() => execution.Heading == "Rollback completed");
+        await context.ExecutionWindow.DisposeAsync();
+        await context.PlanWindow.DisposeAsync();
+        await context.DiscoveryWindow.DisposeAsync();
+        await context.ReleaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
     public async Task ExecutionConstructionFailureDisposesOwnerAndLeavesSanitizedPlanExit()
     {
         TrackingClient client = new() { EnablePlan = true };
@@ -345,6 +392,18 @@ internal sealed class ProductionInstallerWorkflowTests
         Func<ExecutionViewModel, ExecutionWindow>? executionFactory = null
     )
     {
+        WorkflowContext context = await OpenPlanReviewAsync(client, activateExecution, executionFactory);
+        context.Plan.SelectedOperation = context.Plan.OperationChoices.Single(choice => choice.Operation == InstallerOperation.Install);
+        await context.Plan.InspectCommand.ExecuteAsync();
+        return context;
+    }
+
+    private static async Task<WorkflowContext> OpenPlanReviewAsync(
+        TrackingClient client,
+        Action<ExecutionWindow>? activateExecution = null,
+        Func<ExecutionViewModel, ExecutionWindow>? executionFactory = null
+    )
+    {
         client.DiscoveredGames = [new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation")];
         WorkflowContext context = new();
         ProductionInstallerWorkflow workflow = CreateWorkflow(
@@ -376,8 +435,6 @@ internal sealed class ProductionInstallerWorkflowTests
         discovery.ContinueCommand.Execute(null);
         await WaitUntilAsync(() => context.PlanWindow is not null);
         context.Plan = (PlanReviewViewModel)context.PlanWindow.DataContext!;
-        context.Plan.SelectedOperation = context.Plan.OperationChoices.Single(choice => choice.Operation == InstallerOperation.Install);
-        await context.Plan.InspectCommand.ExecuteAsync();
         return context;
     }
 
@@ -436,11 +493,15 @@ internal sealed class ProductionInstallerWorkflowTests
         public int DisposeCalls { get; private set; }
         public int ConfirmCalls { get; private set; }
         public int ExecuteCalls { get; private set; }
+        public int RecoveryListCalls { get; private set; }
+        public int RollbackInspectionCalls { get; private set; }
         public string? ValidatedPath { get; private set; }
         public IReadOnlyList<ProtocolGameCandidate> DiscoveredGames { get; set; } = [];
         public bool ThrowOnDispose { get; init; }
         public bool EnablePlan { get; init; }
+        public bool EnableRollback { get; init; }
         private ProtocolReleaseIdentity? OpenedRelease;
+        private InstallerRecoveryPoint? CurrentRecoveryPoint;
         public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
 
         public void Fail()
@@ -523,6 +584,60 @@ internal sealed class ProductionInstallerWorkflowTests
             )
             {
                 Confirmation = new InstallerPlanConfirmation()
+            });
+        }
+
+        public Task<InstallerRecoveryCatalogResult> ListRecoveriesAsync(
+            string canonicalGamePath,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (!this.EnableRollback)
+                throw new AssertionException("This workflow must not list recovery history.");
+            canonicalGamePath.Should().Be("/games/Stardew Valley");
+            this.RecoveryListCalls++;
+            ProtocolReleaseIdentity release = this.OpenedRelease!;
+            InstallerRecoveryPoint point = new(
+                1,
+                true,
+                false,
+                InstallerOperation.Update,
+                new InstallerRecoveryReleaseTarget(release.Tag, release.EmbeddedVersion)
+            );
+            this.CurrentRecoveryPoint = point;
+            return Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([point]));
+        }
+
+        public Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+            string canonicalGamePath,
+            InstallerRecoveryPoint recoveryPoint,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (!this.EnableRollback)
+                throw new AssertionException("This workflow must not inspect rollback.");
+            canonicalGamePath.Should().Be("/games/Stardew Valley");
+            recoveryPoint.Should().BeSameAs(this.CurrentRecoveryPoint);
+            this.RollbackInspectionCalls++;
+            ProtocolReleaseIdentity release = this.OpenedRelease!;
+            InstallerPlanRelease exactRelease = new(release.Tag, release.EmbeddedVersion);
+            return Task.FromResult<InstallerReadOnlyPlanResult>(new InstallerReadOnlyPlanSuccess(
+                InstallerOperation.Rollback,
+                ObservedInstallState.KnownUnmodified,
+                exactRelease,
+                exactRelease,
+                false,
+                [ProtocolPlanRisk.Rollback],
+                ProtocolRecommendedDefault.Cancel,
+                true,
+                [new InstallerPlanOperationCount(PlanOperationKind.Restore, 1)],
+                [],
+                [],
+                0
+            )
+            {
+                Confirmation = new InstallerPlanConfirmation(),
+                Candidates = []
             });
         }
 

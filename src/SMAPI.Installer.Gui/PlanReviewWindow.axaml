@@ -21,7 +21,7 @@
       x:Name="PageScrollViewer"
       HorizontalScrollBarVisibility="Disabled"
       VerticalScrollBarVisibility="Auto">
-    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
       <StackPanel Grid.Row="0" Spacing="4">
         <TextBlock
             AutomationProperties.HeadingLevel="1"
@@ -200,7 +200,120 @@
         </StackPanel>
       </Border>
 
-      <Border Grid.Row="4" Classes="card" IsVisible="{Binding IsResultVisible}">
+      <Border
+          x:Name="RecoveryReviewRegion"
+          Grid.Row="4"
+          Classes="card"
+          IsVisible="{Binding IsRecoverySectionVisible}"
+          AutomationProperties.Name="Rollback from recovery history. Loading, selecting, and inspecting a rollback changes no files. Execution remains on a separate final Run screen.">
+        <StackPanel Spacing="12">
+          <StackPanel Spacing="5">
+            <TextBlock
+                AutomationProperties.HeadingLevel="2"
+                Classes="section-title"
+                Text="Rollback from recovery history" />
+            <TextBlock
+                Text="Recovery history is listed only when you request it. Loading, selecting, and inspecting a rollback changes no files. After confirmation, execution remains on a separate final Run screen."
+                TextWrapping="Wrap" />
+            <TextBlock
+                Classes="muted"
+                Text="No recovery point is selected automatically. Review one exact local recovery point before requesting its read-only rollback plan."
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border
+              x:Name="RecoveryStatusRegion"
+              Classes="keyboard-focus"
+              Focusable="True"
+              TabIndex="6"
+              AutomationProperties.LiveSetting="Off"
+              AutomationProperties.Name="{Binding RecoveryStatusDetail}">
+            <TextBlock
+                FontWeight="SemiBold"
+                Text="{Binding RecoveryStatusDetail}"
+                TextWrapping="Wrap" />
+          </Border>
+
+          <ProgressBar
+              x:Name="RecoveryProgress"
+              Height="12"
+              IsIndeterminate="True"
+              IsVisible="{Binding IsRecoveryBusy}"
+              AutomationProperties.Name="Loading local recovery history" />
+
+          <TextBlock
+              x:Name="RecoveryEmptyDetail"
+              Classes="muted"
+              IsVisible="{Binding IsRecoveryEmptyVisible}"
+              Text="No committed recovery points are available for this game folder."
+              TextWrapping="Wrap" />
+
+          <StackPanel IsVisible="{Binding IsRecoveryListVisible}" Spacing="6">
+            <Label Content="Recovery _point to inspect" Target="{Binding #RecoveryList}" />
+            <ListBox
+                x:Name="RecoveryList"
+                Classes="focus-ring"
+                Focusable="True"
+                MaxHeight="360"
+                MinHeight="120"
+                TabIndex="7"
+                AutomationProperties.AccessKey="Alt+P"
+                AutomationProperties.Name="Local recovery points"
+                AutomationProperties.HelpText="Use Up and Down Arrow to review exact recovery points. No item is selected automatically, and selection changes no files."
+                ItemsSource="{Binding RecoveryChoices}"
+                SelectedItem="{Binding SelectedRecoveryChoice}"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                SelectionMode="Single">
+              <ListBox.ItemsPanel>
+                <ItemsPanelTemplate>
+                  <VirtualizingStackPanel />
+                </ItemsPanelTemplate>
+              </ListBox.ItemsPanel>
+              <ListBox.Styles>
+                <Style Selector="ListBoxItem" x:CompileBindings="False">
+                  <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                </Style>
+              </ListBox.Styles>
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewRecoveryChoice">
+                  <StackPanel Margin="4" MaxWidth="760" Spacing="3">
+                    <TextBlock FontWeight="SemiBold" Text="{Binding Title}" TextWrapping="Wrap" />
+                    <TextBlock Classes="muted" Text="{Binding Detail}" TextWrapping="Wrap" />
+                  </StackPanel>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </StackPanel>
+
+          <WrapPanel Orientation="Horizontal">
+            <Button
+                x:Name="LoadRecoveriesButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="8"
+                AutomationProperties.AccessKey="Alt+H"
+                AutomationProperties.Name="Load or refresh local recovery history"
+                AutomationProperties.HelpText="Explicitly lists bounded local recovery points. It does not select, inspect, confirm, or execute a rollback and changes no files."
+                Command="{Binding LoadRecoveriesCommand}"
+                IsVisible="{Binding IsLoadRecoveriesVisible}"
+                Content="Load or refresh _history" />
+            <Button
+                x:Name="InspectRollbackButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="9"
+                AutomationProperties.AccessKey="Alt+B"
+                AutomationProperties.Name="Inspect selected rollback plan"
+                AutomationProperties.HelpText="Consumes the exact selected recovery point only to request a read-only rollback plan. It changes no files and cannot execute the plan."
+                Command="{Binding InspectRollbackCommand}"
+                IsVisible="{Binding IsInspectRollbackVisible}"
+                Content="Inspect roll_back" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="5" Classes="card" IsVisible="{Binding IsResultVisible}">
         <StackPanel Spacing="16">
           <Border
               x:Name="ResultSummaryRegion"
@@ -310,7 +423,7 @@
 
       <Border
           x:Name="CandidateReviewRegion"
-          Grid.Row="5"
+          Grid.Row="6"
           Classes="card"
           IsVisible="{Binding IsCandidateReviewVisible}"
           AutomationProperties.Name="Candidate review. Choices only refresh the read-only preview; no files change.">
@@ -341,7 +454,7 @@
               x:Name="CandidateSelectionStatusRegion"
               Classes="keyboard-focus"
               Focusable="True"
-              TabIndex="6"
+              TabIndex="10"
               AutomationProperties.LiveSetting="Polite"
               AutomationProperties.Name="{Binding CandidateSelectionAnnouncement}">
             <TextBlock
@@ -358,7 +471,7 @@
                 Focusable="True"
                 MaxHeight="360"
                 MinHeight="120"
-                TabIndex="7"
+                TabIndex="11"
                 AutomationProperties.AccessKey="Alt+F"
                 AutomationProperties.Name="Modified or unknown file candidates"
                 AutomationProperties.HelpText="Use Up and Down Arrow to move through files and Space to toggle one choice. All choices start unchecked."
@@ -400,7 +513,7 @@
                 x:Name="ApplyCandidatesButton"
                 Classes="primary focus-ring"
                 Margin="0,0,12,10"
-                TabIndex="8"
+                TabIndex="12"
                 AutomationProperties.AccessKey="Alt+A"
                 AutomationProperties.Name="Add selected file approvals to a new read-only preview"
                 AutomationProperties.HelpText="Sends only the checked files as additive approvals and requests a newly validated preview. It does not change files, confirm, or execute the plan."
@@ -410,7 +523,7 @@
                 x:Name="ClearCandidatesButton"
                 Classes="focus-ring"
                 Margin="0,0,12,10"
-                TabIndex="9"
+                TabIndex="13"
                 AutomationProperties.AccessKey="Alt+L"
                 AutomationProperties.Name="Clear local candidate choices"
                 AutomationProperties.HelpText="Unchecks the current local choices without contacting the backend."
@@ -420,7 +533,7 @@
                 x:Name="StartFreshInspectionButton"
                 Classes="focus-ring"
                 Margin="0,0,12,10"
-                TabIndex="10"
+                TabIndex="14"
                 AutomationProperties.AccessKey="Alt+R"
                 AutomationProperties.Name="Start a fresh candidate inspection"
                 AutomationProperties.HelpText="Revokes the current preview and requests a new initial read-only inspection. It does not undo prior backend decisions, change files, confirm, or execute the plan."
@@ -431,7 +544,7 @@
       </Border>
 
       <Border
-          Grid.Row="6"
+          Grid.Row="7"
           Classes="card"
           IsVisible="{Binding IsConfirmVisible}"
           AutomationProperties.Name="Final confirmation after plan and candidate review">
@@ -442,7 +555,7 @@
               x:Name="ConfirmButton"
               Classes="primary focus-ring"
               HorizontalAlignment="Left"
-              TabIndex="11"
+              TabIndex="15"
               AutomationProperties.AccessKey="Alt+S"
               AutomationProperties.Name="Confirm this exact reviewed plan"
               AutomationProperties.HelpText="Confirmation changes no files and opens a separate final Run screen."

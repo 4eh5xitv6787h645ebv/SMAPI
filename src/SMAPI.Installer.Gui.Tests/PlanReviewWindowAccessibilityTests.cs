@@ -11,6 +11,7 @@ using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui.Tests;
@@ -48,6 +49,183 @@ internal sealed partial class PlanReviewPresentationTests
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
         session.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
+    public async Task RecoveryCardStartsExplicitUnselectedAndReadOnlyWithoutAutomaticBackendWork()
+    {
+        RecoveryWindowSession session = new(RecoveryPoints(2));
+        PlanReviewViewModel viewModel = new(new PlanReviewController(session));
+        PlanReviewWindow window = new(viewModel);
+        window.Show();
+        Border region = window.FindControl<Border>("RecoveryReviewRegion")!;
+        Border status = window.FindControl<Border>("RecoveryStatusRegion")!;
+        ListBox list = window.FindControl<ListBox>("RecoveryList")!;
+        Button load = window.FindControl<Button>("LoadRecoveriesButton")!;
+        Button inspect = window.FindControl<Button>("InspectRollbackButton")!;
+
+        await WaitUntilAsync(() => window.FindControl<ListBox>("OperationList")!.IsKeyboardFocusWithin);
+
+        region.IsVisible.Should().BeTrue();
+        ControlAutomationPeer.CreatePeerForElement(region).GetName().Should()
+            .Contain("Loading, selecting, and inspecting a rollback changes no files")
+            .And.Contain("separate final Run screen");
+        ControlAutomationPeer.CreatePeerForElement(status).GetLiveSetting().Should().Be(AutomationLiveSetting.Off);
+        AutomationProperties.GetAccessKey(load).Should().Be("Alt+H");
+        AutomationProperties.GetAccessKey(inspect).Should().Be("Alt+B");
+        AutomationProperties.GetAccessKey(list).Should().Be("Alt+P");
+        viewModel.RecoveryChoices.Should().BeEmpty();
+        viewModel.SelectedRecoveryChoice.Should().BeNull();
+        load.IsVisible.Should().BeTrue();
+        inspect.IsVisible.Should().BeFalse();
+        session.ListCalls.Should().Be(0, "opening the window must not list local recovery history");
+        session.RollbackInspectionCalls.Should().Be(0, "opening the window must not inspect a rollback");
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task RecoveryAccessKeysListWithoutDefaultSelectionThenInspectOnlyTheExplicitChoice()
+    {
+        BoundInstallerRecoveryPoint[] points = RecoveryPoints(3);
+        RecoveryWindowSession session = new(points);
+        PlanReviewViewModel viewModel = new(new PlanReviewController(session));
+        PlanReviewWindow window = new(viewModel);
+        window.Show();
+        await WaitUntilAsync(() => window.FindControl<ListBox>("OperationList")!.IsKeyboardFocusWithin);
+
+        PressAccessKey(window, PhysicalKey.H);
+        await WaitUntilAsync(() => viewModel.RecoveryChoices.Count == points.Length);
+        ListBox list = window.FindControl<ListBox>("RecoveryList")!;
+        Button inspect = window.FindControl<Button>("InspectRollbackButton")!;
+
+        list.IsVisible.Should().BeTrue();
+        list.IsKeyboardFocusWithin.Should().BeTrue();
+        list.SelectedItem.Should().BeNull("listing never chooses a destructive target");
+        viewModel.SelectedRecoveryChoice.Should().BeNull();
+        inspect.IsVisible.Should().BeTrue();
+        inspect.IsEffectivelyEnabled.Should().BeFalse("an explicit recovery choice is required");
+        session.ListCalls.Should().Be(1);
+        session.RollbackInspectionCalls.Should().Be(0);
+
+        list.SelectedItem = viewModel.RecoveryChoices[1];
+        await WaitUntilAsync(() => inspect.IsVisible && inspect.IsEffectivelyEnabled);
+        await WaitUntilAsync(() => list.ContainerFromIndex(1) is not null);
+        string itemName = ControlAutomationPeer.CreatePeerForElement(list.ContainerFromIndex(1)!).GetName();
+        itemName.Should().Be(viewModel.RecoveryChoices[1].AccessibleName).And.Contain("Recovery point 2");
+
+        Border recoveryStatus = window.FindControl<Border>("RecoveryStatusRegion")!;
+        Button load = window.FindControl<Button>("LoadRecoveriesButton")!;
+        recoveryStatus.TabIndex.Should().BeLessThan(list.TabIndex);
+        list.TabIndex.Should().BeLessThan(load.TabIndex);
+        load.TabIndex.Should().BeLessThan(inspect.TabIndex);
+        recoveryStatus.Focus();
+        Press(window, Key.Tab);
+        list.IsKeyboardFocusWithin.Should().BeTrue("forward traversal follows the visual recovery-card order");
+        Press(window, Key.Tab);
+        load.IsFocused.Should().BeTrue();
+        Press(window, Key.Tab);
+        inspect.IsFocused.Should().BeTrue();
+        Press(window, Key.Tab, RawInputModifiers.Shift);
+        load.IsFocused.Should().BeTrue();
+        Press(window, Key.Tab, RawInputModifiers.Shift);
+        list.IsKeyboardFocusWithin.Should().BeTrue("reverse traversal returns through the same visual order");
+
+        PressAccessKey(window, PhysicalKey.B);
+        await WaitUntilAsync(() => session.RollbackInspectionCalls == 1 && viewModel.IsResultVisible);
+
+        session.InspectedRecoveryPoints.Should().Equal(points[1]);
+        session.ConfirmCalls.Should().Be(0);
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task RecoveryStatesExposeExactlyOneActiveVisibleLiveRegion()
+    {
+        BoundInstallerRecoveryPoint[] points = RecoveryPoints(1);
+        TaskCompletionSource<BoundInstallerRecoveryCatalogResult> catalog = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        RecoveryWindowSession session = new(points)
+        {
+            RecoveryCatalog = _ => catalog.Task
+        };
+        PlanReviewViewModel viewModel = new(new PlanReviewController(session));
+        PlanReviewWindow window = new(viewModel);
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        Control[] liveRegions =
+        [
+            window.FindControl<Border>("StatusRegion")!,
+            window.FindControl<Border>("RecoveryStatusRegion")!,
+            window.FindControl<Border>("ResultSummaryRegion")!
+        ];
+        int ActiveLiveRegionCount() => liveRegions.Count(control =>
+            control.IsEffectivelyVisible
+            && ControlAutomationPeer.CreatePeerForElement(control).GetLiveSetting() != AutomationLiveSetting.Off
+        );
+
+        ActiveLiveRegionCount().Should().Be(1, "the initial recovery prompt is announced once");
+        Task loading = viewModel.LoadRecoveriesCommand.ExecuteAsync();
+        await WaitUntilAsync(() => viewModel.IsRecoveryBusy);
+        ActiveLiveRegionCount().Should().Be(1, "listing progress is announced once");
+        catalog.SetResult(new BoundInstallerRecoveryCatalogSuccess(points));
+        await loading;
+        Dispatcher.UIThread.RunJobs();
+        viewModel.SelectedRecoveryChoice = viewModel.RecoveryChoices.Single();
+        Dispatcher.UIThread.RunJobs();
+        ActiveLiveRegionCount().Should().Be(1, "selection guidance is announced once");
+
+        await viewModel.InspectRollbackCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.IsResultVisible.Should().BeTrue();
+        ActiveLiveRegionCount().Should().Be(1, "the rollback result is announced only by its result region");
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task ShownRecoveryListClearsSelectionBeforeRefreshOrInspectionReplacesItsItems()
+    {
+        RecoveryWindowSession session = new(RecoveryPoints(2));
+        PlanReviewViewModel viewModel = new(new PlanReviewController(session));
+        PlanReviewWindow window = new(viewModel);
+        window.Show();
+        await viewModel.LoadRecoveriesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        ListBox list = window.FindControl<ListBox>("RecoveryList")!;
+        list.SelectedItem = viewModel.RecoveryChoices[1];
+        await WaitUntilAsync(() => viewModel.SelectedRecoveryChoice is not null);
+        List<bool> selectionWasClearWhenItemsChanged = [];
+        viewModel.PropertyChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.PropertyName == nameof(PlanReviewViewModel.RecoveryChoices))
+                selectionWasClearWhenItemsChanged.Add(viewModel.SelectedRecoveryChoice is null);
+        };
+
+        await viewModel.LoadRecoveriesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        selectionWasClearWhenItemsChanged.Should().NotBeEmpty().And.OnlyContain(value => value);
+        list.SelectedItem.Should().BeNull();
+        viewModel.SelectedRecoveryChoice.Should().BeNull();
+        session.ListCalls.Should().Be(2);
+        session.RollbackInspectionCalls.Should().Be(0);
+
+        selectionWasClearWhenItemsChanged.Clear();
+        list.SelectedItem = viewModel.RecoveryChoices[0];
+        await WaitUntilAsync(() => viewModel.SelectedRecoveryChoice is not null);
+        await viewModel.InspectRollbackCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        selectionWasClearWhenItemsChanged.Should().NotBeEmpty().And.OnlyContain(value => value);
+        viewModel.RecoveryChoices.Should().BeEmpty();
+        viewModel.SelectedRecoveryChoice.Should().BeNull();
+        session.ListCalls.Should().Be(2);
+        session.RollbackInspectionCalls.Should().Be(1);
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
     }
 
     [AvaloniaTest]
@@ -250,7 +428,9 @@ internal sealed partial class PlanReviewPresentationTests
                 window.FindControl<Button>("InspectButton")!,
                 window.FindControl<Button>("RetryButton")!,
                 window.FindControl<Button>("CancelButton")!,
-                window.FindControl<Button>("ExitButton")!
+                window.FindControl<Button>("ExitButton")!,
+                window.FindControl<Button>("LoadRecoveriesButton")!,
+                window.FindControl<Button>("InspectRollbackButton")!
             }
             .Select(AutomationProperties.GetName)
             .ToArray()!;
@@ -262,7 +442,9 @@ internal sealed partial class PlanReviewPresentationTests
             "Inspect selected plan",
             "Try read-only inspection again",
             "Cancel active plan inspection",
-            "Exit installer"
+            "Exit installer",
+            "Load or refresh local recovery history",
+            "Inspect selected rollback plan"
         );
         buttonNames.Should().NotContain(name =>
             name.Contains("approve", StringComparison.OrdinalIgnoreCase)
@@ -275,9 +457,44 @@ internal sealed partial class PlanReviewPresentationTests
             window.FindControl<Button>("InspectButton")!,
             window.FindControl<Button>("RetryButton")!,
             window.FindControl<Button>("CancelButton")!,
-            window.FindControl<Button>("ExitButton")!
+            window.FindControl<Button>("ExitButton")!,
+            window.FindControl<Button>("LoadRecoveriesButton")!,
+            window.FindControl<ListBox>("RecoveryList")!,
+            window.FindControl<Button>("InspectRollbackButton")!
         ];
         keyed.Select(AutomationProperties.GetAccessKey).Should().NotContainNulls().And.OnlyHaveUniqueItems();
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    [TestCase(420d)]
+    [TestCase(620d)]
+    [TestCase(980d)]
+    public async Task MaximumRecoveryListIsVirtualizedReadableAndHasNoHorizontalOverflow(double width)
+    {
+        RecoveryWindowSession session = new(RecoveryPoints(ProtocolJsonSerializer.MaxRecoveryGenerations));
+        PlanReviewViewModel viewModel = new(new PlanReviewController(session));
+        await viewModel.LoadRecoveriesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        PlanReviewWindow window = new(viewModel);
+
+        ScrollViewer scroll = AssertRenderedLayout(window, width);
+        ListBox list = window.FindControl<ListBox>("RecoveryList")!;
+
+        list.Items.Count.Should().Be(ProtocolJsonSerializer.MaxRecoveryGenerations);
+        list.SelectedItem.Should().BeNull();
+        list.ItemsPanelRoot.Should().BeOfType<VirtualizingStackPanel>();
+        int realized = Enumerable.Range(0, ProtocolJsonSerializer.MaxRecoveryGenerations)
+            .Count(index => list.ContainerFromIndex(index) is not null);
+        realized.Should().BeLessThan(ProtocolJsonSerializer.MaxRecoveryGenerations);
+        list.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width);
+        scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        string firstName = ControlAutomationPeer.CreatePeerForElement(list.ContainerFromIndex(0)!).GetName();
+        firstName.Should().Be(viewModel.RecoveryChoices[0].AccessibleName)
+            .And.Contain("Current recovery point")
+            .And.NotContain("/games/");
 
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
@@ -642,12 +859,137 @@ internal sealed partial class PlanReviewPresentationTests
         return scroll;
     }
 
+    private static BoundInstallerRecoveryPoint[] RecoveryPoints(int count)
+    {
+        ProtocolReleaseIdentity release = GameDiscoveryControllerTests.Release();
+        return Enumerable.Range(1, count)
+            .Select(ordinal => new BoundInstallerRecoveryPoint(
+                ordinal,
+                ordinal == 1,
+                false,
+                InstallerOperation.Update,
+                new BoundInstallerRecoveryReleaseTarget(release.Tag, release.EmbeddedVersion)
+            ))
+            .ToArray();
+    }
+
+    private static InstallerReadOnlyPlanSuccess RecoveryRollbackPlan(BoundInstallerRecoveryPoint point)
+    {
+        ProtocolReleaseIdentity release = GameDiscoveryControllerTests.Release();
+        InstallerPlanRelease current = new(release.Tag, release.EmbeddedVersion);
+        InstallerPlanRelease? target = point.RestoreTarget switch
+        {
+            BoundInstallerRecoveryReleaseTarget value => new(value.Tag, value.EmbeddedVersion),
+            BoundInstallerRecoveryUninstalledTarget => null,
+            _ => throw new AssertionException("Unsupported synthetic recovery target.")
+        };
+        return new(
+            InstallerOperation.Rollback,
+            ObservedInstallState.KnownUnmodified,
+            current,
+            target,
+            false,
+            [ProtocolPlanRisk.Rollback],
+            ProtocolRecommendedDefault.Cancel,
+            true,
+            [new InstallerPlanOperationCount(PlanOperationKind.Restore, 1)],
+            [],
+            [],
+            0
+        )
+        {
+            Confirmation = new InstallerPlanConfirmation(),
+            Candidates = []
+        };
+    }
+
+    private sealed class RecoveryWindowSession : IPlanInspectionSession
+    {
+        private readonly IReadOnlyList<BoundInstallerRecoveryPoint> Points;
+        private readonly List<BoundInstallerRecoveryPoint> Inspected = [];
+        private int listCount;
+        private int rollbackInspectionCount;
+        private int confirmCount;
+
+        public RecoveryWindowSession(IReadOnlyList<BoundInstallerRecoveryPoint> points)
+        {
+            this.Points = points;
+        }
+
+        public ProtocolReleaseIdentity Release { get; } = GameDiscoveryControllerTests.Release();
+        public VerifiedGamePresentation Game { get; } = new("/games/Stardew Valley", "Stardew Valley");
+        public TaskCompletionSource<InstallerProtocolClientException> Fault { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
+        public Func<CancellationToken, Task<BoundInstallerRecoveryCatalogResult>>? RecoveryCatalog { get; init; }
+        public int ListCalls => Volatile.Read(ref this.listCount);
+        public int RollbackInspectionCalls => Volatile.Read(ref this.rollbackInspectionCount);
+        public int ConfirmCalls => Volatile.Read(ref this.confirmCount);
+        public BoundInstallerRecoveryPoint[] InspectedRecoveryPoints
+        {
+            get
+            {
+                lock (this.Inspected)
+                    return this.Inspected.ToArray();
+            }
+        }
+
+        public Task<BoundInstallerRecoveryCatalogResult> ListRecoveriesAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref this.listCount);
+            if (this.RecoveryCatalog is not null)
+                return this.RecoveryCatalog(cancellationToken);
+            return Task.FromResult<BoundInstallerRecoveryCatalogResult>(
+                new BoundInstallerRecoveryCatalogSuccess(this.Points)
+            );
+        }
+
+        public Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+            BoundInstallerRecoveryPoint point,
+            CancellationToken cancellationToken = default
+        )
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref this.rollbackInspectionCount);
+            lock (this.Inspected)
+                this.Inspected.Add(point);
+            return Task.FromResult<InstallerReadOnlyPlanResult>(RecoveryRollbackPlan(point));
+        }
+
+        public Task<InstallerReadOnlyPlanResult> InspectPlanAsync(
+            InstallerOperation operation,
+            CancellationToken cancellationToken = default
+        ) => throw new AssertionException("Ordinary plan inspection wasn't expected in this recovery-window test.");
+
+        public Task<IConfirmedInstallerSession> ConfirmPlanAsync(
+            InstallerPlanConfirmation confirmation,
+            CancellationToken cancellationToken = default
+        )
+        {
+            Interlocked.Increment(ref this.confirmCount);
+            throw new AssertionException("Plan confirmation wasn't expected in this recovery-window test.");
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private static void PressAccessKey(PlanReviewWindow window, PhysicalKey physicalKey)
     {
         window.KeyPressQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
         window.KeyPressQwerty(physicalKey, RawInputModifiers.Alt);
         window.KeyReleaseQwerty(physicalKey, RawInputModifiers.Alt);
         window.KeyReleaseQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    private static void Press(
+        PlanReviewWindow window,
+        Key key,
+        RawInputModifiers modifiers = RawInputModifiers.None
+    )
+    {
+        window.KeyPress(key, modifiers, PhysicalKey.None, null);
+        window.KeyRelease(key, modifiers, PhysicalKey.None, null);
         Dispatcher.UIThread.RunJobs();
     }
 
