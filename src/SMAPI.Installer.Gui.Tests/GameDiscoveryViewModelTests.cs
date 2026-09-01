@@ -55,11 +55,10 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         };
         await using GameDiscoveryController controller = new(session);
         await using GameDiscoveryViewModel viewModel = new(controller);
-        viewModel.ContinueRequested += (_, _) => { };
         await controller.DiscoverAsync();
         Dispatcher.UIThread.RunJobs();
         GameDiscoverySnapshot ready = controller.Snapshot;
-        viewModel.IsContinueVisible.Should().BeTrue();
+        ready.CanContinue.Should().BeTrue("the controller retains inert readiness for the future ownership handoff");
 
         session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
         await WaitUntilAsync(() => controller.Snapshot is { State: GameDiscoveryState.SessionFaulted } snapshot
@@ -67,12 +66,10 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         GameDiscoverySnapshot faulted = controller.Snapshot;
         faulted.Revision.Should().BeGreaterThan(ready.Revision);
         viewModel.ApplySnapshotForTesting(faulted);
-        viewModel.IsContinueVisible.Should().BeFalse();
 
         viewModel.ApplySnapshotForTesting(ready);
 
         viewModel.Heading.Should().Be("The verified installer session closed");
-        viewModel.IsContinueVisible.Should().BeFalse();
         viewModel.SelectedCandidate.Should().BeNull();
     }
 
@@ -135,14 +132,17 @@ internal sealed partial class GameDiscoveryAccessibilityTests
                 viewModel.SelectedCandidate!.Candidate.Should().BeSameAs(candidates[0]);
             }
             else
+            {
                 viewModel.SelectedCandidate.Should().BeNull();
-            viewModel.IsContinueVisible.Should().BeFalse();
+                viewModel.Message.Should().Be("Select one folder to review its validation result. Unsupported folders show a safe next step.");
+                viewModel.Message.Should().NotContain("continue");
+            }
             viewModel.Candidates.Should().HaveCount(candidates.Length);
         }
     }
 
     [AvaloniaTest]
-    public async Task ManualInvalidReasonIsTypedAndManualValidContinueNeedsARealHandler()
+    public async Task ManualInvalidReasonIsTypedAndManualValidSelectionRemainsReadOnly()
     {
         ProtocolGameCandidate invalid = GameDiscoveryControllerTests.Candidate("manual", LinuxGameFolderStatus.UnsupportedGameVersion);
         ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("manual", LinuxGameFolderStatus.Valid);
@@ -160,24 +160,12 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         viewModel.IsProblemVisible.Should().BeTrue();
         viewModel.ProblemLiveSetting.Should().Be(AutomationLiveSetting.Polite);
         viewModel.LiveAnnouncement.Should().Be($"{viewModel.Heading}. {viewModel.Message}");
-        viewModel.IsContinueVisible.Should().BeFalse();
 
         await viewModel.ApplyManualFolderAsync("/games/manual");
         Dispatcher.UIThread.RunJobs();
         viewModel.Heading.Should().Be("Selected game folder is valid");
         viewModel.Message.Should().Contain("Nothing has been changed");
-        viewModel.ContinueCommand.CanExecute(null).Should().BeFalse();
-        viewModel.IsContinueVisible.Should().BeFalse();
-
-        ProtocolGameCandidate? continued = null;
-        EventHandler<GameCandidateSelectedEventArgs> handler = (_, args) => continued = args.Candidate;
-        viewModel.ContinueRequested += handler;
-        viewModel.ContinueCommand.CanExecute(null).Should().BeTrue();
-        viewModel.IsContinueVisible.Should().BeTrue();
-        viewModel.ContinueCommand.Execute(null);
-        continued.Should().BeSameAs(valid);
-        viewModel.ContinueRequested -= handler;
-        viewModel.IsContinueVisible.Should().BeFalse();
+        viewModel.SelectedCandidate!.Candidate.Should().BeSameAs(valid);
     }
 
     [AvaloniaTest]
@@ -216,8 +204,12 @@ internal sealed partial class GameDiscoveryAccessibilityTests
             await viewModel.CancelCommand.ExecuteAsync();
             await load;
             Dispatcher.UIThread.RunJobs();
-            viewModel.Heading.Should().Be("Game-folder check cancelled");
-            viewModel.IsRetryVisible.Should().BeTrue();
+            viewModel.Heading.Should().Be("Game-folder check cancelled and session closed");
+            viewModel.Message.Should().Contain("Close and reopen");
+            viewModel.IsRetryVisible.Should().BeFalse();
+            viewModel.IsBrowseVisible.Should().BeFalse();
+            viewModel.SelectedCandidate.Should().BeNull();
+            viewModel.IsExitVisible.Should().BeTrue();
         }
 
         GameDiscoveryControllerTests.FakeVerifiedSession faulted = new();
@@ -229,6 +221,26 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         faultViewModel.LiveAnnouncement.Should().NotContain("SECRET").And.NotContain("/home/name");
         faultViewModel.ProblemLiveSetting.Should().Be(AutomationLiveSetting.Assertive);
         faultViewModel.IsRetryVisible.Should().BeFalse();
+    }
+
+    [AvaloniaTest]
+    public async Task BackendFailureTruthfullyRequiresAClosedSessionRestart()
+    {
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => throw new InstallerProtocolClientException("private SECRET /home/name")
+        };
+        await using GameDiscoveryViewModel viewModel = CreateViewModel(session);
+
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.Heading.Should().Be("The verified installer session stopped safely");
+        viewModel.Message.Should().Contain("Close and reopen");
+        viewModel.LiveAnnouncement.Should().NotContain("SECRET").And.NotContain("/home/name");
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.IsBrowseVisible.Should().BeFalse();
+        viewModel.IsExitVisible.Should().BeTrue();
     }
 
     private static GameDiscoveryViewModel CreateViewModel(GameDiscoveryControllerTests.FakeVerifiedSession session)

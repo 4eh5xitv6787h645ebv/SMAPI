@@ -152,27 +152,27 @@
                 IsVisible="{Binding IsRetryVisible}"
                 Content="_Try automatic detection again" />
             <Button
-                x:Name="ContinueButton"
-                Classes="primary focus-ring"
-                Margin="0,0,12,10"
-                TabIndex="4"
-                AutomationProperties.AccessKey="Alt+N"
-                AutomationProperties.Name="Continue with selected valid game folder"
-                AutomationProperties.HelpText="Continues with the exact validated folder; it does not install immediately."
-                Command="{Binding ContinueCommand}"
-                IsVisible="{Binding IsContinueVisible}"
-                Content="Co_ntinue with this folder" />
-            <Button
                 x:Name="CancelButton"
                 Classes="focus-ring"
                 Margin="0,0,12,10"
-                TabIndex="5"
+                TabIndex="4"
                 AutomationProperties.AccessKey="Alt+C"
                 AutomationProperties.Name="Cancel active game-folder check"
                 AutomationProperties.HelpText="Stops the current read-only discovery or validation request."
                 Command="{Binding CancelCommand}"
                 IsVisible="{Binding IsCancelVisible}"
                 Content="_Cancel" />
+            <Button
+                x:Name="ExitButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="5"
+                AutomationProperties.AccessKey="Alt+E"
+                AutomationProperties.Name="Exit installer"
+                AutomationProperties.HelpText="Closes this terminal installer session. Reopen the installer to start a new session."
+                Command="{Binding ExitCommand}"
+                IsVisible="{Binding IsExitVisible}"
+                Content="_Exit installer" />
           </WrapPanel>
         </StackPanel>
       </Border>

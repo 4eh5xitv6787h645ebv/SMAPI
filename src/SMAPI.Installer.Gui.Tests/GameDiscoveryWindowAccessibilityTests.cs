@@ -49,7 +49,7 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
-    public async Task RealAccessKeysDriveListBrowseContinueAndBusyCancellation()
+    public async Task RealAccessKeysDriveListBrowseAndBusyCancellation()
     {
         ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("valid", LinuxGameFolderStatus.Valid);
         TaskCompletionSource? blockedStarted = null;
@@ -61,21 +61,20 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         GameDiscoveryViewModel viewModel = (GameDiscoveryViewModel)window.DataContext!;
         int pickerRequests = 0;
         window.FolderPickerRequested += (_, _) => pickerRequests++;
-        ProtocolGameCandidate? continued = null;
-        viewModel.ContinueRequested += (_, args) => continued = args.Candidate;
         window.Show();
         await WaitUntilAsync(() => viewModel.Candidates.Count == 1);
 
         ListBox list = window.FindControl<ListBox>("CandidateList")!;
         Button browse = window.FindControl<Button>("BrowseButton")!;
         Button cancel = window.FindControl<Button>("CancelButton")!;
+        Button exit = window.FindControl<Button>("ExitButton")!;
         Control[] keyed =
         [
             list,
             browse,
             window.FindControl<Button>("RetryButton")!,
-            window.FindControl<Button>("ContinueButton")!,
-            cancel
+            cancel,
+            exit
         ];
         keyed.Select(AutomationProperties.GetAccessKey).Should().NotContainNulls().And.OnlyHaveUniqueItems();
 
@@ -83,10 +82,6 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         list.IsKeyboardFocusWithin.Should().BeTrue("Alt+G moves focus into the detected-game list");
         list.SelectedItem = viewModel.Candidates[0];
         Dispatcher.UIThread.RunJobs();
-        await WaitUntilAsync(() => viewModel.IsContinueVisible);
-        PressAccessKey(window, PhysicalKey.N);
-        continued.Should().BeSameAs(valid);
-
         PressAccessKey(window, PhysicalKey.B);
         pickerRequests.Should().Be(1);
         blockedStarted = GameDiscoveryControllerTests.NewCompletion();
@@ -101,10 +96,19 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         await WaitUntilAsync(() => cancel.IsVisible && cancel.IsEffectivelyEnabled);
         PressAccessKey(window, PhysicalKey.C);
         await validation;
-        await WaitUntilAsync(() => viewModel.Heading == "Game-folder check cancelled");
+        await WaitUntilAsync(() => viewModel.Heading == "Game-folder check cancelled and session closed");
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.IsBrowseVisible.Should().BeFalse();
+        viewModel.StatusLiveSetting.Should().Be(AutomationLiveSetting.Polite);
+        exit.IsVisible.Should().BeTrue();
+        exit.IsEffectivelyEnabled.Should().BeTrue();
+        AutomationProperties.GetName(exit).Should().Be("Exit installer");
+        AutomationProperties.GetAccessKey(exit).Should().Be("Alt+E");
+        await WaitUntilAsync(() => exit.IsFocused);
 
-        window.Close();
+        PressClosingAccessKey(window, PhysicalKey.E);
         await WaitUntilAsync(() => !window.IsVisible);
+        session.DisposeCalls.Should().Be(1);
     }
 
     [AvaloniaTest]
@@ -131,7 +135,6 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         problemPeer.GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
         problemPeer.GetName().Should().Be($"{viewModel.Heading}. {viewModel.Message}");
         problemPeer.GetName().Should().Contain("game assembly").And.Contain("not found");
-        viewModel.IsContinueVisible.Should().BeFalse();
         window.FindControl<Button>("BrowseButton")!.IsFocused.Should().BeTrue();
 
         window.Close();
@@ -234,6 +237,12 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         window.KeyReleaseQwerty(physicalKey, RawInputModifiers.Alt);
         window.KeyReleaseQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
         Dispatcher.UIThread.RunJobs();
+    }
+
+    private static void PressClosingAccessKey(GameDiscoveryWindow window, PhysicalKey physicalKey)
+    {
+        window.KeyPressQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
+        window.KeyPressQwerty(physicalKey, RawInputModifiers.Alt);
     }
 
     private static ScrollViewer AssertRenderedLayout(GameDiscoveryWindow window, double width)
