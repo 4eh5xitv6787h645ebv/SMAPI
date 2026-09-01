@@ -210,7 +210,9 @@ internal sealed class VerifiedInstallerSessionTests
 
         InstallerReadOnlyPlanResult actual = await bound.InspectPlanAsync(InstallerOperation.Backup);
 
-        actual.Should().BeSameAs(expected);
+        InstallerReadOnlyPlanSuccess safe = actual.Should().BeOfType<InstallerReadOnlyPlanSuccess>().Which;
+        safe.Should().NotBeSameAs(expected);
+        safe.Should().Be((InstallerReadOnlyPlanSuccess)expected with { Candidates = safe.Candidates });
         bound.Release.Should().BeSameAs(release);
         bound.Game.DisplayPath.Should().Be(valid.CanonicalPath);
         bound.Game.DisplayName.Should().Be(valid.DisplayName);
@@ -705,6 +707,167 @@ internal sealed class VerifiedInstallerSessionTests
         client.DisposeCalls.Should().Be(1);
     }
 
+    [TestCase(false, HostileResultCandidates.NegativeCount)]
+    [TestCase(false, HostileResultCandidates.OversizedCount)]
+    [TestCase(false, HostileResultCandidates.LyingCount)]
+    [TestCase(false, HostileResultCandidates.ChangingAfterCount)]
+    [TestCase(false, HostileResultCandidates.ThrowingCount)]
+    [TestCase(false, HostileResultCandidates.ThrowingIndexer)]
+    [TestCase(false, HostileResultCandidates.NullCollection)]
+    [TestCase(false, HostileResultCandidates.NullCandidate)]
+    [TestCase(true, HostileResultCandidates.NegativeCount)]
+    [TestCase(true, HostileResultCandidates.OversizedCount)]
+    [TestCase(true, HostileResultCandidates.LyingCount)]
+    [TestCase(true, HostileResultCandidates.ChangingAfterCount)]
+    [TestCase(true, HostileResultCandidates.ThrowingCount)]
+    [TestCase(true, HostileResultCandidates.ThrowingIndexer)]
+    [TestCase(true, HostileResultCandidates.NullCollection)]
+    [TestCase(true, HostileResultCandidates.NullCandidate)]
+    public async Task BoundPlanResultsRejectHostileCandidateCollectionsOutsideLifecycleAuthority(
+        bool replacement,
+        HostileResultCandidates fault
+    )
+    {
+        const string privateSentinel = "/home/private-user/hostile-candidate-collection";
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability('4', "mods/initial.dll", false);
+        IReadOnlyList<InstallerReadOnlyPlanCandidate>? hostile = CreateHostileResultCandidates(fault, candidate, privateSentinel);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate($"hostile-{replacement}-{fault}", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with
+            {
+                Candidates = replacement ? [candidate] : hostile!
+            }),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Install) with { Candidates = hostile! })
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        Func<Task> action;
+        if (replacement)
+        {
+            InstallerReadOnlyPlanSuccess initial = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+            action = () => bound.ApprovePlanCandidatesAsync([initial.Candidates.Single()]);
+        }
+        else
+            action = () => bound.InspectPlanAsync(InstallerOperation.Install);
+
+        Exception exception = (await action.Should().ThrowAsync<InstallerProtocolClientException>()).Which;
+
+        exception.ToString().Should().NotContain(privateSentinel);
+        client.DisposeCalls.Should().Be(1);
+        await action.Should().ThrowAsync<ObjectDisposedException>();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task BoundPlanResultsReturnAStableReadOnlySnapshotWithoutRevisitingTheBackendCollection(bool replacement)
+    {
+        const string privateSentinel = "/home/private-user/one-shot-candidate-collection";
+        InstallerReadOnlyPlanCandidate initial = CandidateCapability('4', "mods/initial.dll", false);
+        InstallerReadOnlyPlanCandidate projected = CandidateCapability('5', "mods/projected.dll", false);
+        int countCalls = 0;
+        int indexCalls = 0;
+        HostileCandidateList oneShot = new(
+            () => ++countCalls == 1 ? 1 : throw new InvalidOperationException(privateSentinel),
+            index => index == 0 && ++indexCalls == 1 ? projected : throw new InvalidOperationException(privateSentinel)
+        );
+        int approvals = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate($"stable-result-{replacement}", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with
+            {
+                Candidates = replacement ? [initial] : oneShot
+            }),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Install) with
+            {
+                Candidates = replacement && ++approvals == 1 ? oneShot : []
+            })
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess result = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+        if (replacement)
+            result = (InstallerReadOnlyPlanSuccess)await bound.ApprovePlanCandidatesAsync([result.Candidates.Single()]);
+
+        result.Candidates.Should().NotBeSameAs(oneShot);
+        ((ICollection<InstallerReadOnlyPlanCandidate>)result.Candidates).IsReadOnly.Should().BeTrue();
+        result.Candidates.Should().ContainSingle().Which.Should().BeSameAs(projected);
+        result.Candidates.Single().Should().BeSameAs(projected);
+        result.Candidates.ToArray().Should().ContainSingle().Which.Should().BeSameAs(projected);
+        InstallerReadOnlyPlanSuccess next = (InstallerReadOnlyPlanSuccess)await bound.ApprovePlanCandidatesAsync([result.Candidates.Single()]);
+
+        next.Candidates.Should().BeEmpty();
+        countCalls.Should().Be(1);
+        indexCalls.Should().Be(1);
+        client.ApprovedCandidates.Last().Should().ContainSingle().Which.Should().BeSameAs(projected);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task BoundPlanResultSnapshotAllowsReentrantDisposalWithoutHoldingTheLifecycleLock(bool replacement)
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability('4', "mods/initial.dll", false);
+        IPlanInspectionSession bound = null!;
+        Task? disposal = null;
+        HostileCandidateList reentrant = new(
+            () =>
+            {
+                disposal = bound.DisposeAsync().AsTask();
+                return 0;
+            },
+            _ => throw new AssertionException("a zero-count result must not be indexed")
+        );
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate($"reentrant-dispose-{replacement}", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = replacement ? [candidate] : reentrant }),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Install) with { Candidates = reentrant })
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        Func<Task> action;
+        if (replacement)
+        {
+            InstallerReadOnlyPlanSuccess initial = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+            action = () => bound.ApprovePlanCandidatesAsync([initial.Candidates.Single()]);
+        }
+        else
+            action = () => bound.InspectPlanAsync(InstallerOperation.Install);
+
+        await action.Should().ThrowAsync<ObjectDisposedException>();
+        disposal.Should().NotBeNull();
+        await disposal!.WaitAsync(TimeSpan.FromSeconds(2));
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    private static IReadOnlyList<InstallerReadOnlyPlanCandidate>? CreateHostileResultCandidates(
+        HostileResultCandidates fault,
+        InstallerReadOnlyPlanCandidate candidate,
+        string privateSentinel
+    )
+    {
+        bool countRead = false;
+        return fault switch
+        {
+            HostileResultCandidates.NegativeCount => new HostileCandidateList(() => -1, _ => candidate),
+            HostileResultCandidates.OversizedCount => new HostileCandidateList(() => ProtocolJsonSerializer.MaxPlanCandidates + 1, _ => candidate),
+            HostileResultCandidates.LyingCount => new HostileCandidateList(() => 2, index => index == 0 ? candidate : throw new InvalidOperationException(privateSentinel)),
+            HostileResultCandidates.ChangingAfterCount => new HostileCandidateList(
+                () => { countRead = true; return 1; },
+                _ => countRead ? throw new InvalidOperationException(privateSentinel) : candidate
+            ),
+            HostileResultCandidates.ThrowingCount => new HostileCandidateList(() => throw new InvalidOperationException(privateSentinel), _ => candidate),
+            HostileResultCandidates.ThrowingIndexer => new HostileCandidateList(() => 1, _ => throw new InvalidOperationException(privateSentinel)),
+            HostileResultCandidates.NullCollection => null,
+            HostileResultCandidates.NullCandidate => new HostileCandidateList(() => 1, _ => null!),
+            _ => throw new ArgumentOutOfRangeException(nameof(fault))
+        };
+    }
+
     private static async Task<(
         IPlanInspectionSession Bound,
         RecordingClient Client,
@@ -751,6 +914,29 @@ internal sealed class VerifiedInstallerSessionTests
         selected,
         "private evidence"
     ));
+
+    public enum HostileResultCandidates
+    {
+        NegativeCount,
+        OversizedCount,
+        LyingCount,
+        ChangingAfterCount,
+        ThrowingCount,
+        ThrowingIndexer,
+        NullCollection,
+        NullCandidate
+    }
+
+    private sealed class HostileCandidateList(
+        Func<int> count,
+        Func<int, InstallerReadOnlyPlanCandidate> indexer
+    ) : IReadOnlyList<InstallerReadOnlyPlanCandidate>
+    {
+        public int Count => count();
+        public InstallerReadOnlyPlanCandidate this[int index] => indexer(index);
+        public IEnumerator<InstallerReadOnlyPlanCandidate> GetEnumerator() => throw new AssertionException("backend result enumeration isn't bounded");
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
+    }
 
     private static ProtocolGameCandidate Candidate(string suffix, LinuxGameFolderStatus status)
         => new($"/games/{suffix}", status, $"Stardew Valley {suffix}");
