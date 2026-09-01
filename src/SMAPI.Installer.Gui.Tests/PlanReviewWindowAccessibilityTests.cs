@@ -38,8 +38,7 @@ internal sealed partial class PlanReviewPresentationTests
         AutomationProperties.GetAccessKey(operations).Should().Be("Alt+O");
         ControlAutomationPeer.CreatePeerForElement(status).GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
         AutomationPeer gamePeer = ControlAutomationPeer.CreatePeerForElement(game);
-        gamePeer.IsControlElement().Should().BeFalse();
-        gamePeer.IsContentElement().Should().BeFalse();
+        gamePeer.GetName().Should().Be("Validated Stardew Valley game folder").And.NotContain(privatePath);
         ControlAutomationPeer.CreatePeerForElement(gameContext).GetName().Should().Be("Bound game folder").And.NotContain(privatePath);
         ControlAutomationPeer.CreatePeerForElement(boundary).GetName().Should()
             .Contain("Inspection only").And.Contain("cannot approve, confirm, or run");

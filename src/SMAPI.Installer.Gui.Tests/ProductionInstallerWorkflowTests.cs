@@ -58,6 +58,34 @@ internal sealed class ProductionInstallerWorkflowTests
     }
 
     [AvaloniaTest]
+    public async Task PartialDiscoveryActivationClosesVisibleWindowAndTransferredAuthority()
+    {
+        TrackingClient client = new();
+        GameDiscoveryWindow? partiallyActivated = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next =>
+            {
+                partiallyActivated = next.Should().BeOfType<GameDiscoveryWindow>().Subject;
+                partiallyActivated.Show();
+                throw new InvalidOperationException("synthetic private discovery activation failure");
+            }
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => release.IsErrorVisible && client.DisposeCalls == 1);
+
+        partiallyActivated.Should().NotBeNull();
+        partiallyActivated!.IsVisible.Should().BeFalse();
+        release.Message.Should().NotContain("synthetic").And.Contain("no game files were changed");
+        await releaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
     public async Task ProductionPickerSelectionUsesBackendValidationAndFailureIsSanitized()
     {
         TrackingClient client = new();
@@ -194,6 +222,47 @@ internal sealed class ProductionInstallerWorkflowTests
 
         discovery.Message.Should().Contain("No game files were changed").And.NotContain("synthetic");
         discovery.IsContinueVisible.Should().BeFalse();
+        discovery.IsExitVisible.Should().BeTrue();
+        await discoveryWindow.DisposeAsync();
+        await releaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
+    public async Task PartialPlanWindowActivationClosesVisibleWindowAndTransferredAuthority()
+    {
+        ProtocolGameCandidate game = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation");
+        TrackingClient client = new() { DiscoveredGames = [game] };
+        GameDiscoveryWindow? discoveryWindow = null;
+        PlanReviewWindow? partiallyActivated = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next =>
+            {
+                if (next is GameDiscoveryWindow discovery)
+                    discoveryWindow = discovery;
+                else
+                {
+                    partiallyActivated = next.Should().BeOfType<PlanReviewWindow>().Subject;
+                    partiallyActivated.Show();
+                    throw new InvalidOperationException("synthetic private activation failure");
+                }
+            }
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discoveryWindow is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)discoveryWindow!.DataContext!;
+        await discovery.StartAsync();
+
+        discovery.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discovery.Heading == "The read-only plan screen could not open" && client.DisposeCalls == 1);
+
+        partiallyActivated.Should().NotBeNull();
+        partiallyActivated!.IsVisible.Should().BeFalse();
+        discovery.Message.Should().NotContain("synthetic").And.Contain("No game files were changed");
         discovery.IsExitVisible.Should().BeTrue();
         await discoveryWindow.DisposeAsync();
         await releaseWindow.DisposeAsync();

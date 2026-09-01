@@ -58,6 +58,16 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
         }
     }
 
+    /// <summary>Close a window which may have become visible before activation reported failure.</summary>
+    internal async Task CloseAfterFailedActivationAsync()
+    {
+        await this.DisposeAsync();
+        if (!this.IsVisible)
+            return;
+        this.CloseApproved = true;
+        this.Close();
+    }
+
     private async void OnOpened(object? sender, EventArgs e)
     {
         this.StatusRegion.Focus(NavigationMethod.Tab);

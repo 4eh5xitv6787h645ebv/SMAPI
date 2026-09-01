@@ -23,8 +23,6 @@ internal enum PlanReviewState
 
 internal sealed record PlanReviewRelease(string Tag, string EmbeddedVersion);
 
-internal sealed record PlanReviewGame(string DisplayName, string DisplayPath);
-
 internal abstract record PlanReviewResult;
 
 internal sealed record PlanReviewPlan(
@@ -109,15 +107,12 @@ internal sealed class PlanReviewController : IAsyncDisposable
     {
         this.Session = session ?? throw new ArgumentNullException(nameof(session));
         this.VerifiedRelease = ProjectVerifiedRelease(session.Release);
-        this.Game = ProjectGame(session.Game);
         this.SessionWatcher = this.WatchSessionAsync();
     }
 
     public event EventHandler? Changed;
 
     public PlanReviewRelease VerifiedRelease { get; }
-
-    public PlanReviewGame Game { get; }
 
     public PlanReviewSnapshot Snapshot
     {
@@ -577,18 +572,6 @@ internal sealed class PlanReviewController : IAsyncDisposable
         if (!string.Equals(release.EmbeddedVersion, identity.EmbeddedVersion, StringComparison.Ordinal))
             throw new InvalidOperationException("The plan release presentation was invalid.");
         return new(identity.Tag, identity.EmbeddedVersion);
-    }
-
-    private static PlanReviewGame ProjectGame(VerifiedGamePresentation game)
-    {
-        ArgumentNullException.ThrowIfNull(game);
-        const int maximumEscapedPresentationLength = 4096 * 6;
-        if (string.IsNullOrWhiteSpace(game.DisplayName) || game.DisplayName.Length > maximumEscapedPresentationLength
-            || string.IsNullOrWhiteSpace(game.DisplayPath) || game.DisplayPath.Length > maximumEscapedPresentationLength)
-        {
-            throw new InvalidOperationException("The selected game presentation was invalid.");
-        }
-        return new(game.DisplayName, game.DisplayPath);
     }
 
     private static void ValidateReleaseSemantics(

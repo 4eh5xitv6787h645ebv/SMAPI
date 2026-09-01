@@ -139,7 +139,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         private set => this.SetProperty(ref this.liveAnnouncement, value);
     }
 
-    public string GameDetail => $"Game: {this.Controller.Game.DisplayName}\nFolder: {this.Controller.Game.DisplayPath}";
+    public string GameDetail => "Validated Stardew Valley game folder";
 
     public string GameAccessibleName => "Bound game folder";
 

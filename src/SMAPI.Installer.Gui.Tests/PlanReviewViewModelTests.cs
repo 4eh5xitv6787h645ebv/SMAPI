@@ -208,7 +208,7 @@ internal sealed partial class PlanReviewPresentationTests
         const string privatePath = "/home/private-user/secret-game";
         FakePlanSession session = new(privatePath);
         await using PlanReviewViewModel viewModel = CreateViewModel(session);
-        viewModel.GameDetail.Should().Contain(privatePath, "the escaped path is intentionally visible in non-live text");
+        viewModel.GameDetail.Should().Be("Validated Stardew Valley game folder").And.NotContain(privatePath);
         viewModel.GameAccessibleName.Should().Be("Bound game folder").And.NotContain(privatePath);
         viewModel.LiveAnnouncement.Should().NotContain(privatePath);
 

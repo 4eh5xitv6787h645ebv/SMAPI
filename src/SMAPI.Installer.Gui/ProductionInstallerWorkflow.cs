@@ -95,7 +95,7 @@ internal sealed class ProductionInstallerWorkflow
             try
             {
                 if (window is not null)
-                    await window.DisposeAsync().ConfigureAwait(true);
+                    await window.CloseAfterFailedActivationAsync().ConfigureAwait(true);
                 else if (viewModel is not null)
                     await viewModel.DisposeAsync().ConfigureAwait(true);
                 else if (controller is not null)
@@ -144,7 +144,7 @@ internal sealed class ProductionInstallerWorkflow
             try
             {
                 if (window is not null)
-                    await window.DisposeAsync().ConfigureAwait(true);
+                    await window.CloseAfterFailedActivationAsync().ConfigureAwait(true);
                 else if (viewModel is not null)
                     await viewModel.DisposeAsync().ConfigureAwait(true);
                 else if (controller is not null)

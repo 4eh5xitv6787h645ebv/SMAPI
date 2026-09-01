@@ -545,9 +545,10 @@ internal sealed class PlanReviewControllerTests
 
         await using PlanReviewController controller = new(session);
 
-        controller.Game.DisplayPath.Length.Should().BeGreaterThan(8192).And.BeLessThanOrEqualTo(4096 * 6);
-        controller.Game.DisplayName.Length.Should().Be(4096 * 6);
         controller.Snapshot.State.Should().Be(PlanReviewState.Choosing);
+        typeof(PlanReviewController).GetProperty("Game").Should().BeNull(
+            "the exact game presentation remains private to the bound backend owner"
+        );
     }
 
     [Test]

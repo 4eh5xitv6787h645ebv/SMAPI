@@ -47,6 +47,16 @@ internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
         }
     }
 
+    /// <summary>Close a window which may have become visible before activation reported failure.</summary>
+    internal async Task CloseAfterFailedActivationAsync()
+    {
+        await this.DisposeAsync();
+        if (!this.IsVisible)
+            return;
+        this.CloseApproved = true;
+        this.Close();
+    }
+
     private void OnOpened(object? sender, EventArgs e)
     {
         Dispatcher.UIThread.Post(

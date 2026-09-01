@@ -55,7 +55,6 @@
               AutomationProperties.Name="{Binding GameAccessibleName}">
             <TextBlock
                 x:Name="GameDetail"
-                AutomationProperties.AccessibilityView="Raw"
                 Text="{Binding GameDetail}"
                 TextWrapping="Wrap" />
           </Border>
