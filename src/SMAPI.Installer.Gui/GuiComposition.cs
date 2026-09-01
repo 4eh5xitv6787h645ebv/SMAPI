@@ -11,9 +11,16 @@ internal static class GuiComposition
     /// <summary>Create the selected top-level window.</summary>
     public static Window CreateMainWindow(GuiLaunchMode mode)
     {
+        return CreateMainWindow(mode, window => window.Show());
+    }
+
+    /// <summary>Create the selected top-level window and provide the production next-window activation boundary.</summary>
+    internal static Window CreateMainWindow(GuiLaunchMode mode, Action<Window> activateNextWindow)
+    {
+        ArgumentNullException.ThrowIfNull(activateNextWindow);
         return CreateMainWindow(
             mode,
-            CreateReleaseVerificationWindow,
+            () => CreateReleaseVerificationWindow(activateNextWindow),
             () => new MainWindow()
         );
     }
@@ -36,14 +43,13 @@ internal static class GuiComposition
         };
     }
 
-    private static ReleaseVerificationWindow CreateReleaseVerificationWindow()
+    private static ReleaseVerificationWindow CreateReleaseVerificationWindow(Action<Window> activateNextWindow)
     {
-        ReviewedGitHubReleaseService releaseService = new();
-        ReleaseVerificationController controller = new(
-            releaseService,
-            ProcessInstallerProtocolClient.CreateForCurrentProcess
+        ProductionInstallerWorkflow workflow = new(
+            new ReviewedGitHubReleaseService(),
+            ProcessInstallerProtocolClient.CreateForCurrentProcess,
+            activateNextWindow
         );
-        ReleaseVerificationViewModel viewModel = new(controller);
-        return new ReleaseVerificationWindow(viewModel);
+        return workflow.CreateInitialWindow();
     }
 }

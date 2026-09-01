@@ -1,0 +1,190 @@
+<Window
+    x:Class="StardewModdingAPI.Installer.Gui.GameDiscoveryWindow"
+    x:DataType="vm:GameDiscoveryViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
+    Title="SMAPI Linux Installer — Choose game folder"
+    Width="980"
+    Height="760"
+    MinWidth="420"
+    MinHeight="560"
+    WindowStartupLocation="CenterScreen">
+  <Window.Styles>
+    <Style Selector="Border.keyboard-focus:focus-visible">
+      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderThickness" Value="3" />
+    </Style>
+  </Window.Styles>
+
+  <ScrollViewer
+      x:Name="PageScrollViewer"
+      HorizontalScrollBarVisibility="Disabled"
+      VerticalScrollBarVisibility="Auto">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto" RowSpacing="18">
+      <StackPanel Grid.Row="0" Spacing="4">
+        <TextBlock
+            AutomationProperties.HeadingLevel="1"
+            FontSize="30"
+            FontWeight="Bold"
+            Text="Choose your Stardew Valley folder"
+            TextWrapping="Wrap" />
+        <TextBlock Classes="muted" FontSize="16" Text="Read-only Linux game detection and validation" TextWrapping="Wrap" />
+      </StackPanel>
+
+      <Border Grid.Row="1" Classes="card">
+        <StackPanel Spacing="14">
+          <TextBlock
+              AutomationProperties.Name="Verified release used for game selection"
+              Classes="muted"
+              Text="{Binding ReleaseDetail}"
+              TextWrapping="Wrap" />
+
+          <Border
+              x:Name="StatusRegion"
+              Classes="keyboard-focus"
+              TabIndex="0"
+              Focusable="True"
+              AutomationProperties.LiveSetting="{Binding StatusLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}">
+            <StackPanel Spacing="8">
+              <TextBlock
+                  x:Name="StatusHeading"
+                  AutomationProperties.HeadingLevel="2"
+                  FontSize="22"
+                  FontWeight="SemiBold"
+                  Text="{Binding Heading}"
+                  TextWrapping="Wrap" />
+              <TextBlock Classes="muted" Text="{Binding Message}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border
+              x:Name="ProblemRegion"
+              Classes="keyboard-focus"
+              Padding="12"
+              TabIndex="0"
+              Focusable="True"
+              IsVisible="{Binding IsProblemVisible}"
+              AutomationProperties.LiveSetting="{Binding ProblemLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}"
+              Background="#3B1F26"
+              BorderBrush="#FF8A9A"
+              BorderThickness="2"
+              CornerRadius="6">
+            <TextBlock Text="The folder cannot be used yet. Follow the safe next step in the status message; no game files were changed." TextWrapping="Wrap" />
+          </Border>
+
+          <ProgressBar
+              x:Name="DiscoveryProgress"
+              Height="12"
+              IsIndeterminate="True"
+              IsVisible="{Binding IsBusy}"
+              AutomationProperties.Name="Game-folder check in progress" />
+
+          <StackPanel IsVisible="{Binding IsCandidateListVisible}" Spacing="8">
+            <Label Content="Detected _game folders" Target="{Binding #CandidateList}" />
+            <ListBox
+                x:Name="CandidateList"
+                Classes="focus-ring"
+                Focusable="True"
+                MaxHeight="280"
+                TabIndex="1"
+                AutomationProperties.AccessKey="Alt+G"
+                AutomationProperties.Name="Detected and manually checked game folders"
+                AutomationProperties.HelpText="Select a folder to review why it is or is not usable."
+                ItemsSource="{Binding Candidates}"
+                SelectedItem="{Binding SelectedCandidate}">
+              <ListBox.Styles>
+                <Style Selector="ListBoxItem" x:CompileBindings="False">
+                  <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                </Style>
+              </ListBox.Styles>
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:GameCandidateItem">
+                  <StackPanel Margin="4" Spacing="3">
+                    <TextBlock FontWeight="SemiBold" Text="{Binding DisplayName}" TextWrapping="Wrap" />
+                    <TextBlock Classes="muted" Text="{Binding CanonicalPath}" TextWrapping="Wrap" />
+                    <TextBlock FontWeight="SemiBold" Text="{Binding StatusLabel}" TextWrapping="Wrap" />
+                    <TextBlock Classes="muted" Text="{Binding StatusDetail}" TextWrapping="Wrap" />
+                  </StackPanel>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <TextBlock
+                x:Name="SelectionDetail"
+                AutomationProperties.Name="Selected game-folder result"
+                Text="{Binding SelectionDetail}"
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border Padding="12" Background="#111923" CornerRadius="6">
+            <StackPanel Spacing="3">
+              <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
+              <TextBlock
+                  AutomationProperties.Name="Installer durable state"
+                  FontWeight="SemiBold"
+                  Text="{Binding DurableState}"
+                  TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <WrapPanel Orientation="Horizontal">
+            <Button
+                x:Name="BrowseButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="2"
+                AutomationProperties.AccessKey="Alt+B"
+                AutomationProperties.Name="Choose a game folder"
+                AutomationProperties.HelpText="Requests the desktop folder picker, then validates the selected folder without changing it."
+                Command="{Binding BrowseCommand}"
+                IsVisible="{Binding IsBrowseVisible}"
+                Content="_Browse for game folder" />
+            <Button
+                x:Name="RetryButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="3"
+                AutomationProperties.AccessKey="Alt+T"
+                AutomationProperties.Name="Try automatic game detection again"
+                Command="{Binding RetryCommand}"
+                IsVisible="{Binding IsRetryVisible}"
+                Content="_Try automatic detection again" />
+            <Button
+                x:Name="ContinueButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="4"
+                AutomationProperties.AccessKey="Alt+N"
+                AutomationProperties.Name="Continue with selected valid game folder"
+                AutomationProperties.HelpText="Continues with the exact validated folder; it does not install immediately."
+                Command="{Binding ContinueCommand}"
+                IsVisible="{Binding IsContinueVisible}"
+                Content="Co_ntinue with this folder" />
+            <Button
+                x:Name="CancelButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="5"
+                AutomationProperties.AccessKey="Alt+C"
+                AutomationProperties.Name="Cancel active game-folder check"
+                AutomationProperties.HelpText="Stops the current read-only discovery or validation request."
+                Command="{Binding CancelCommand}"
+                IsVisible="{Binding IsCancelVisible}"
+                Content="_Cancel" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="2" Classes="card">
+        <StackPanel Spacing="8">
+          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="What this step checks" />
+          <TextBlock
+              Text="The installer checks only bounded Stardew Valley folder markers through its local backend. It does not install, update, repair, remove, back up, or roll back files on this screen."
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+    </Grid>
+  </ScrollViewer>
+</Window>

@@ -10,6 +10,7 @@ public enum ProtocolMessageKind
 {
     HandshakeRequest,
     DiscoverGamesRequest,
+    ValidateGameRequest,
     RecoverInterruptedRequest,
     OpenPackageRequest,
     ListRecoveriesRequest,
@@ -26,6 +27,7 @@ public enum ProtocolMessageKind
     CommandAcknowledgedEvent,
     HandshakeEvent,
     GameDiscoveryEvent,
+    GameValidationEvent,
     RecoveryProgressEvent,
     RecoveryCompletedEvent,
     RecoveryFailureEvent,
@@ -246,6 +248,13 @@ public sealed record DiscoverGamesRequest(ProtocolSessionId SessionId) : Protoco
     public override ProtocolMessageKind Kind => ProtocolMessageKind.DiscoverGamesRequest;
 }
 
+/// <summary>Ask the backend to validate one manually selected Linux game folder without changing it.</summary>
+public sealed record ValidateGameRequest(ProtocolSessionId SessionId, string GamePath) : ProtocolRequest
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.ValidateGameRequest;
+}
+
 /// <summary>Recover bounded interrupted installer work before creating any fresh inspection.</summary>
 public sealed record RecoverInterruptedRequest(ProtocolSessionId SessionId, string GamePath) : ProtocolRequest
 {
@@ -413,6 +422,13 @@ public sealed record GameDiscoveryEvent : ProtocolEvent
 
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.GameDiscoveryEvent;
+}
+
+/// <summary>The exact bounded validation result for one manually selected Linux game folder.</summary>
+public sealed record GameValidationEvent(ProtocolSessionId SessionId, ProtocolGameCandidate Candidate) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.GameValidationEvent;
 }
 
 public sealed record RecoveryProgressEvent(

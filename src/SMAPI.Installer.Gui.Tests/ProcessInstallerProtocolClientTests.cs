@@ -3,6 +3,7 @@ using System.Runtime.Versioning;
 using System.Text;
 using System.Threading.Channels;
 using FluentAssertions;
+using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Security;
 using StardewModdingAPI.Installer.Gui.Backend;
@@ -50,7 +51,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 IFS= read -r request || exit 43
                 command_id=$(printf '%s\n' "$request" | sed -n 's/.*"commandId":"\([0-9a-f]*\)".*/\1/p')
                 test "${#command_id}" -eq 32 || exit 44
-                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\"]}}"
+                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\",\"linux-game-discovery\",\"linux-game-validation\"]}}"
                 while IFS= read -r ignored; do :; done
                 """);
             File.SetUnixFileMode(installer, UnixFileMode.UserRead | UnixFileMode.UserExecute);
@@ -117,7 +118,77 @@ public sealed class ProcessInstallerProtocolClientTests
         sent.AttestationBundleChecksumPath.Should().Be(CreatePackage().AttestationBundleChecksumPath);
         typeof(IInstallerProtocolClient).GetMethods().Select(method => method.Name)
             .Where(name => !name.StartsWith("get_", StringComparison.Ordinal))
-            .Should().BeEquivalentTo([nameof(IInstallerProtocolClient.HandshakeAsync), nameof(IInstallerProtocolClient.OpenPackageAsync)]);
+            .Should().BeEquivalentTo([
+                nameof(IInstallerProtocolClient.HandshakeAsync),
+                nameof(IInstallerProtocolClient.OpenPackageAsync),
+                nameof(IInstallerProtocolClient.DiscoverGamesAsync),
+                nameof(IInstallerProtocolClient.ValidateGameAsync)
+            ]);
+    }
+
+    [Test]
+    public async Task CorrelatesDiscoveryAndManualValidationWithinTheAuthenticatedSession()
+    {
+        const string selectedPath = "/games/Stardew Valley";
+        ProtocolGameCandidate discovered = new(selectedPath, LinuxGameFolderStatus.Valid, "Stardew Valley 1.6.15");
+        ProtocolGameCandidate validatedCandidate = new("/real-games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley 1.6.15");
+        ProtocolGameCandidate missing = new("/games/missing", LinuxGameFolderStatus.MissingDirectory, "Stardew Valley folder (missing)");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            DiscoverGamesRequest => Serialize(new GameDiscoveryEvent(Session, [discovered, missing]) { CommandId = request.CommandId }),
+            ValidateGameRequest validate when validate.GamePath == selectedPath => Serialize(new GameValidationEvent(Session, validatedCandidate) { CommandId = request.CommandId }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        IReadOnlyList<ProtocolGameCandidate> candidates = await client.DiscoverGamesAsync();
+        ProtocolGameCandidate validated = await client.ValidateGameAsync(selectedPath);
+
+        candidates.Should().Equal(discovered, missing);
+        candidates.Should().BeAssignableTo<System.Collections.ObjectModel.ReadOnlyCollection<ProtocolGameCandidate>>();
+        validated.Should().Be(validatedCandidate, "safe backend anchoring may resolve a selected symlink to another canonical path");
+        process.Requests.Select(request => request.Kind).Should().Equal(
+            ProtocolMessageKind.HandshakeRequest,
+            ProtocolMessageKind.DiscoverGamesRequest,
+            ProtocolMessageKind.ValidateGameRequest
+        );
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task RejectsUncorrelatedDiscoveryOrValidationAndRevokesTheSession(bool discovery)
+    {
+        const string selectedPath = "/games/Stardew Valley";
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            DiscoverGamesRequest => Serialize(new GameDiscoveryEvent(
+                ProtocolSessionId.CreateRandom(),
+                [new(selectedPath, LinuxGameFolderStatus.Valid, "Stardew Valley")]
+            )
+            {
+                CommandId = request.CommandId
+            }),
+            ValidateGameRequest => Serialize(new GameValidationEvent(
+                ProtocolSessionId.CreateRandom(),
+                new("/games/a-different-root", LinuxGameFolderStatus.Valid, "Stardew Valley")
+            )
+            {
+                CommandId = request.CommandId
+            }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        Func<Task> action = discovery
+            ? async () => await client.DiscoverGamesAsync()
+            : async () => await client.ValidateGameAsync(selectedPath);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -125,7 +196,7 @@ public sealed class ProcessInstallerProtocolClientTests
     {
         ScriptedProcess process = new(request => request switch
         {
-            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
             OpenPackageRequest => [.. Serialize(CreateOpened(Session, request.CommandId)), .. Serialize(CreateOpened(Session, request.CommandId))],
             _ => throw new AssertionException("Unexpected protocol request.")
         });
@@ -144,7 +215,7 @@ public sealed class ProcessInstallerProtocolClientTests
     {
         ScriptedProcess process = new(request => request switch
         {
-            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
             OpenPackageRequest => [.. Serialize(CreateOpened(Session, request.CommandId)), (byte)'{'],
             _ => throw new AssertionException("Unexpected protocol request.")
         });
@@ -288,15 +359,25 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
-    public async Task RejectsHandshakeWithoutVerifiedPackageCapability()
+    public async Task RejectsHandshakeWithoutEveryRequiredCapability()
     {
-        ScriptedProcess process = new(request => Serialize(new HandshakeEvent(Session, "1", ["linux-game-discovery"]) { CommandId = request.CommandId }));
-        await using ProcessInstallerProtocolClient client = Create(process);
+        foreach (string omitted in RequiredCapabilities)
+        {
+            ScriptedProcess process = new(request => Serialize(new HandshakeEvent(
+                Session,
+                "1",
+                RequiredCapabilities.Where(value => value != omitted).ToArray()
+            )
+            {
+                CommandId = request.CommandId
+            }));
+            await using ProcessInstallerProtocolClient client = Create(process);
 
-        Func<Task> action = () => client.HandshakeAsync("SMAPI GUI", "1");
+            Func<Task> action = () => client.HandshakeAsync("SMAPI GUI", "1");
 
-        await action.Should().ThrowAsync<InstallerProtocolClientException>();
-        process.Terminated.Should().BeTrue();
+            await action.Should().ThrowAsync<InstallerProtocolClientException>();
+            process.Terminated.Should().BeTrue();
+        }
     }
 
     [Test]
@@ -304,7 +385,7 @@ public sealed class ProcessInstallerProtocolClientTests
     {
         ScriptedProcess process = new(request => request switch
         {
-            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
             OpenPackageRequest => Serialize(new PrePlanRejectedEvent(
                 Session,
                 ProtocolPrePlanErrorCode.PackageRejected,
@@ -341,7 +422,7 @@ public sealed class ProcessInstallerProtocolClientTests
         {
             ProtocolCommandId command = wrongCommand ? ProtocolCommandId.CreateRandom() : request.CommandId;
             ProtocolSessionId session = wrongCommand ? Session : ProtocolSessionId.CreateRandom();
-            return Serialize(new HandshakeEvent(session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = command });
+            return Serialize(new HandshakeEvent(session, "1", RequiredCapabilities) { CommandId = command });
         });
         await using ProcessInstallerProtocolClient client = Create(process);
 
@@ -349,7 +430,7 @@ public sealed class ProcessInstallerProtocolClientTests
         {
             // A handshake may establish any valid session, so test mismatched session on package open instead.
             process.Responder = request => request is HandshakeRequest
-                ? Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId })
+                ? Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId })
                 : Serialize(CreateOpened(ProtocolSessionId.CreateRandom(), request.CommandId));
             await client.HandshakeAsync("SMAPI GUI", "1");
             Func<Task> open = () => client.OpenPackageAsync(CreatePackage());
@@ -381,7 +462,7 @@ public sealed class ProcessInstallerProtocolClientTests
         };
         ScriptedProcess process = new(request => request switch
         {
-            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
             OpenPackageRequest => mismatch switch
             {
                 "tag" => Serialize(CreateOpened(Session, request.CommandId, alpha: 3)),
@@ -742,7 +823,7 @@ public sealed class ProcessInstallerProtocolClientTests
 
     private static byte[]? CorrectResponse(ProtocolRequest request) => request switch
     {
-        HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", [ProcessInstallerProtocolClient.PackageVerificationCapability]) { CommandId = request.CommandId }),
+        HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
         OpenPackageRequest => Serialize(CreateOpened(Session, request.CommandId)),
         _ => throw new AssertionException("The GUI bridge sent a command outside this slice.")
     };
@@ -769,6 +850,13 @@ public sealed class ProcessInstallerProtocolClientTests
     };
 
     private static string PackageName(int alpha) => $"SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}-linux-x64-installer.zip";
+
+    private static string[] RequiredCapabilities =>
+    [
+        ProcessInstallerProtocolClient.PackageVerificationCapability,
+        ProcessInstallerProtocolClient.GameDiscoveryCapability,
+        ProcessInstallerProtocolClient.GameValidationCapability
+    ];
 
     private static byte[] Serialize(ProtocolEvent value) => Encoding.UTF8.GetBytes(ProtocolJsonSerializer.SerializeLine(value) + "\n");
 

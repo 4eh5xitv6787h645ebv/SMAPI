@@ -33,6 +33,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
     private ReleaseVerificationState? AnnouncedState;
     private int AnnouncedAsset = -1;
     private int AnnouncedPercentBucket = -1;
+    private bool transitionFailed;
     private bool started;
     private bool disposed;
 
@@ -46,7 +47,9 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         this.CancelCommand = new AsyncRelayCommand(this.Controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
         this.ContinueCommand = new RelayCommand(
             () => this.ContinueRequestedValue?.Invoke(this, EventArgs.Empty),
-            () => this.snapshot.State == ReleaseVerificationState.Verified && this.ContinueRequestedValue is not null
+            () => !this.transitionFailed
+                && this.snapshot.State == ReleaseVerificationState.Verified
+                && this.ContinueRequestedValue is not null
         );
         this.Controller.Changed += this.OnControllerChanged;
         this.ApplySnapshot(this.snapshot, requestFocus: false);
@@ -138,7 +141,8 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     public bool IsRetryVisible => this.CanRetry();
 
-    public bool IsContinueVisible => this.snapshot.State == ReleaseVerificationState.Verified
+    public bool IsContinueVisible => !this.transitionFailed
+        && this.snapshot.State == ReleaseVerificationState.Verified
         && this.ContinueRequestedValue is not null;
 
     public bool IsCancelVisible => this.snapshot.CanCancel;
@@ -155,13 +159,13 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         TotalBytes: > 0
     };
 
-    public bool IsErrorVisible => this.snapshot.State == ReleaseVerificationState.Failed;
+    public bool IsErrorVisible => this.transitionFailed || this.snapshot.State == ReleaseVerificationState.Failed;
 
     public AutomationLiveSetting StatusLiveSetting => this.IsErrorVisible
         ? AutomationLiveSetting.Off
         : AutomationLiveSetting.Polite;
 
-    public bool IsVerifiedVisible => this.snapshot.State == ReleaseVerificationState.Verified;
+    public bool IsVerifiedVisible => !this.transitionFailed && this.snapshot.State == ReleaseVerificationState.Verified;
 
     public bool IsEmptyVisible => this.snapshot.State == ReleaseVerificationState.NoCompatibleRelease;
 
@@ -174,6 +178,19 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
     public AsyncRelayCommand CancelCommand { get; }
 
     public RelayCommand ContinueCommand { get; }
+
+    /// <summary>Publish a sanitized fail-closed state if the next local window couldn't take ownership.</summary>
+    internal void ReportTransitionFailure()
+    {
+        if (this.disposed)
+            return;
+        this.transitionFailed = true;
+        this.Heading = "The game-folder step could not open";
+        this.Message = "The verified session was closed safely. Close and reopen the installer before trying again; no game files were changed.";
+        this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
+        this.NotifyDerivedProperties();
+        this.FocusRequested?.Invoke(this, ReleaseVerificationFocusTarget.Status);
+    }
 
     public async Task StartAsync()
     {

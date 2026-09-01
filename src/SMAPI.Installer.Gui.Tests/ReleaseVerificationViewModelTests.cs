@@ -337,6 +337,12 @@ internal sealed class ReleaseVerificationViewModelTests
             return Task.FromResult(result);
         }
 
+        public Task<IReadOnlyList<ProtocolGameCandidate>> DiscoverGamesAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

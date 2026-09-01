@@ -95,6 +95,7 @@ public static class ProtocolJsonSerializer
     {
         [ProtocolMessageKind.HandshakeRequest] = C("handshake.request", typeof(HandshakeRequest), true, "clientName", "clientVersion"),
         [ProtocolMessageKind.DiscoverGamesRequest] = C("discover-games.request", typeof(DiscoverGamesRequest), true, "sessionId"),
+        [ProtocolMessageKind.ValidateGameRequest] = C("validate-game.request", typeof(ValidateGameRequest), true, "sessionId", "gamePath"),
         [ProtocolMessageKind.RecoverInterruptedRequest] = C("recover-interrupted.request", typeof(RecoverInterruptedRequest), true, "sessionId", "gamePath"),
         [ProtocolMessageKind.OpenPackageRequest] = C("open-package.request", typeof(OpenPackageRequest), true, "sessionId", "releaseTag", "expectedSourceCommit", "packagePath", "checksumsPath", "buildMetadataPath", "installManifestPath", "attestationBundlePath", "attestationBundleChecksumPath", "procWorkspaceIdentity"),
         [ProtocolMessageKind.ListRecoveriesRequest] = C("list-recoveries.request", typeof(ListRecoveriesRequest), true, "sessionId", "gamePath"),
@@ -111,6 +112,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.CommandAcknowledgedEvent] = C("command-acknowledged.event", typeof(CommandAcknowledgedEvent), false, "sessionId", "acknowledgement", "planId", "prunePlanId"),
         [ProtocolMessageKind.HandshakeEvent] = C("handshake.event", typeof(HandshakeEvent), false, "sessionId", "serverVersion", "capabilities"),
         [ProtocolMessageKind.GameDiscoveryEvent] = C("game-discovery.event", typeof(GameDiscoveryEvent), false, "sessionId", "candidates"),
+        [ProtocolMessageKind.GameValidationEvent] = C("game-validation.event", typeof(GameValidationEvent), false, "sessionId", "candidate"),
         [ProtocolMessageKind.RecoveryProgressEvent] = C("recovery-progress.event", typeof(RecoveryProgressEvent), false, "sessionId", "sequence", "stage", "completedUnits", "totalUnits", "message"),
         [ProtocolMessageKind.RecoveryCompletedEvent] = C("recovery-completed.event", typeof(RecoveryCompletedEvent), false, "sessionId", "outcome", "terminalState", "attempt", "summary", "sanitizedLogPath"),
         [ProtocolMessageKind.RecoveryFailureEvent] = C("recovery-failure.event", typeof(RecoveryFailureEvent), false, "sessionId", "outcome", "terminalState", "message", "sanitizedLogPath", "attempt"),
@@ -142,6 +144,8 @@ public static class ProtocolJsonSerializer
                 AssertOptionalObject(payload.GetProperty("procWorkspaceIdentity"), ["deviceMajor", "deviceMinor", "inode", "changeSeconds", "changeNanoseconds"], "proc workspace identity"); break;
             case ProtocolMessageKind.GameDiscoveryEvent:
                 AssertObjectArray(payload.GetProperty("candidates"), ["canonicalPath", "state", "displayName"], "game candidate", MaxGameCandidates); break;
+            case ProtocolMessageKind.GameValidationEvent:
+                AssertExactObject(payload.GetProperty("candidate"), ["canonicalPath", "state", "displayName"], "game candidate"); break;
             case ProtocolMessageKind.PackageOpenedEvent:
                 AssertReleaseObject(payload.GetProperty("release"), "release identity"); break;
             case ProtocolMessageKind.RecoveryCatalogEvent:
@@ -184,6 +188,7 @@ public static class ProtocolJsonSerializer
         {
             case HandshakeRequest v: Text(v.ClientName, "clientName"); Text(v.ClientVersion, "clientVersion"); break;
             case DiscoverGamesRequest v: Session(v.SessionId); break;
+            case ValidateGameRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); break;
             case RecoverInterruptedRequest v: Session(v.SessionId); AbsolutePath(v.GamePath, "gamePath"); break;
             case OpenPackageRequest v:
                 Session(v.SessionId); Text(v.ReleaseTag, "releaseTag"); Hex(v.ExpectedSourceCommit, 40, "expectedSourceCommit");
@@ -203,7 +208,8 @@ public static class ProtocolJsonSerializer
             case CancelPruneRequest v: PruneBinding(v.SessionId, v.PrunePlanId, v.PruneDigest); break;
             case CommandAcknowledgedEvent v: ValidateAcknowledgement(v); break;
             case HandshakeEvent v: Session(v.SessionId); Text(v.ServerVersion, "serverVersion"); Strings(v.Capabilities, "capabilities", 256); break;
-            case GameDiscoveryEvent v: Session(v.SessionId); Objects(v.Candidates, "candidates", MaxGameCandidates); foreach (ProtocolGameCandidate c in v.Candidates) { AbsolutePath(c.CanonicalPath, "candidate.canonicalPath"); Defined(c.State, "candidate.state"); Text(c.DisplayName, "candidate.displayName"); } NoDuplicates(v.Candidates.Select(c => c.CanonicalPath), "game candidate path"); break;
+            case GameDiscoveryEvent v: Session(v.SessionId); Objects(v.Candidates, "candidates", MaxGameCandidates); foreach (ProtocolGameCandidate c in v.Candidates) ValidateGameCandidate(c); NoDuplicates(v.Candidates.Select(c => c.CanonicalPath), "game candidate path"); break;
+            case GameValidationEvent v: Session(v.SessionId); ValidateGameCandidate(v.Candidate); break;
             case RecoveryProgressEvent v: Session(v.SessionId); Progress(v.Sequence, v.Stage, v.CompletedUnits, v.TotalUnits, v.Message); break;
             case RecoveryCompletedEvent v: ValidateRecoveryCompleted(v); break;
             case RecoveryFailureEvent v: ValidateRecoveryFailure(v); break;
@@ -248,6 +254,12 @@ public static class ProtocolJsonSerializer
             if ((item.RestoreRelease is null) != item.RestoresUninstalledState)
                 throw new ProtocolException("A recovery generation must identify either one exact restore release or an uninstalled result.");
         }
+    }
+
+    private static void ValidateGameCandidate(ProtocolGameCandidate candidate)
+    {
+        if (candidate is null) throw new ProtocolException("The protocol game candidate can't be null.");
+        AbsolutePath(candidate.CanonicalPath, "candidate.canonicalPath"); Defined(candidate.State, "candidate.state"); Text(candidate.DisplayName, "candidate.displayName");
     }
 
     private static void ValidatePlan(PlanEvent v)
@@ -576,6 +588,8 @@ public static class ProtocolJsonSerializer
             case ProtocolMessageKind.GameDiscoveryEvent:
                 foreach (JsonElement item in payload.GetProperty("candidates").EnumerateArray()) AssertCanonicalEnum<LinuxGameFolderStatus>(item.GetProperty("state"), "candidate.state");
                 break;
+            case ProtocolMessageKind.GameValidationEvent:
+                AssertCanonicalEnum<LinuxGameFolderStatus>(payload.GetProperty("candidate").GetProperty("state"), "candidate.state"); break;
             case ProtocolMessageKind.RecoveryProgressEvent: AssertCanonicalEnum<TransactionStage>(payload.GetProperty("stage"), "stage"); break;
             case ProtocolMessageKind.RecoveryCompletedEvent or ProtocolMessageKind.RecoveryFailureEvent:
                 AssertCanonicalEnum<ProtocolInterruptedRecoveryOutcome>(payload.GetProperty("outcome"), "outcome"); AssertCanonicalTerminalState(payload); break;

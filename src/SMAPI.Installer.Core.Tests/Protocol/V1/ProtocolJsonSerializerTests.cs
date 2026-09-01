@@ -36,7 +36,7 @@ internal sealed class ProtocolJsonSerializerTests
 
         ProtocolRequest[] requests =
         [
-            new HandshakeRequest("gui", "1"), new DiscoverGamesRequest(session), new RecoverInterruptedRequest(session, "/game"),
+            new HandshakeRequest("gui", "1"), new DiscoverGamesRequest(session), new ValidateGameRequest(session, "/game"), new RecoverInterruptedRequest(session, "/game"),
             new OpenPackageRequest(session, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json", "/tmp/bundle.jsonl", "/tmp/bundle.sha256"),
             new ListRecoveriesRequest(session, "/game"), new InspectPlanRequest(session, "/game", InstallerOperation.Repair, package, null),
             new SelectPlanCandidatesRequest(session, plan, digest, [candidate]), new GetPlanPageRequest(session, plan, digest, ProtocolPlanPageKind.Candidates, 0), new ConfirmPlanRequest(session, plan, digest), new ExecutePlanRequest(session, plan, digest), new CancelPlanRequest(session, plan, digest),
@@ -44,7 +44,7 @@ internal sealed class ProtocolJsonSerializerTests
         ];
         ProtocolEvent[] events =
         [
-            new HandshakeEvent(session, "server", ["v1"]), new GameDiscoveryEvent(session, [new("/game", LinuxGameFolderStatus.Valid, "Stardew Valley")]),
+            new HandshakeEvent(session, "server", ["v1"]), new GameDiscoveryEvent(session, [new("/game", LinuxGameFolderStatus.Valid, "Stardew Valley")]), new GameValidationEvent(session, new("/game", LinuxGameFolderStatus.Valid, "Stardew Valley")),
             new RecoveryProgressEvent(session, 0, TransactionStage.Recovering, 0, null, "Recovering."),
             new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, new(ProtocolDurableState.RecoveryCompleted, null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain), new(recoveredRoot, 7, 8, true, [new("11111111111111111111111111111111", 2)]), "Recovered.", null),
             new RecoveryFailureEvent(session, ProtocolInterruptedRecoveryOutcome.PartialFailure, new(ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.RecoveryFailed, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), "Recovery failed.", null, new(new("/game", 1, 2, 3, 7), 7, null, null, [new("11111111111111111111111111111111", 2)])),
@@ -241,6 +241,7 @@ internal sealed class ProtocolJsonSerializerTests
             .Should().Throw<ProtocolException>().WithMessage("*too large*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrePlanRejectedEvent(session, ProtocolPrePlanErrorCode.UnexpectedFailure, new string('x', 4097), ProtocolNextAction.ViewPrivateLog, false, null))).Should().Throw<ProtocolException>();
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new DiscoverGamesRequest(new ProtocolSessionId(new string('0', 32))))).Should().Throw<ProtocolException>().WithMessage("*session ID*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new ValidateGameRequest(session, "relative/game"))).Should().Throw<ProtocolException>().WithMessage("*absolute*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 0))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new InspectPruneRequest(session, ProtocolRecoveryCatalogId.CreateRandom(), 65))).Should().Throw<ProtocolException>().WithMessage("*between 1 and 64*");
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new RecoverInterruptedRequest(session, "relative/game"))).Should().Throw<ProtocolException>().WithMessage("*absolute*");
@@ -271,6 +272,9 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolSessionId session = ProtocolSessionId.CreateRandom();
         string recovery = ProtocolJsonSerializer.SerializeLine(new RecoveryFailureEvent(session, ProtocolInterruptedRecoveryOutcome.PartialFailure, new(ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.RecoveryFailed, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), "Failed.", null, new(new("/game", 1, 2, 3, 7), 7, null, null, [new("11111111111111111111111111111111", 2)])));
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(recovery.Replace("\"changedPathCount\":2", "\"changedPathCount\":2,\"unknown\":true", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*unknown 'unknown'*");
+        string validation = ProtocolJsonSerializer.SerializeLine(new GameValidationEvent(session, new("/game", LinuxGameFolderStatus.Valid, "Game")));
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(validation.Replace("\"displayName\":\"Game\"", "\"displayName\":\"Game\",\"unknown\":true", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*unknown 'unknown'*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(validation.Replace("\"state\":\"valid\"", "\"state\":0", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*canonical camel case*");
     }
 
     [Test]
