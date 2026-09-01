@@ -55,7 +55,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 IFS= read -r request || exit 43
                 command_id=$(printf '%s\n' "$request" | sed -n 's/.*"commandId":"\([0-9a-f]*\)".*/\1/p')
                 test "${#command_id}" -eq 32 || exit 44
-                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\",\"linux-game-discovery\",\"linux-game-validation\",\"install-update-repair-uninstall-backup-rollback\",\"candidate-approval\",\"exact-core-progress\",\"cancellation\",\"interrupted-operation-recovery\"]}}"
+                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\",\"linux-game-discovery\",\"linux-game-validation\",\"install-update-repair-uninstall-backup-rollback\",\"candidate-approval\",\"exact-core-progress\",\"cancellation\",\"interrupted-operation-recovery\",\"recovery-pruning\"]}}"
                 while IFS= read -r ignored; do :; done
                 """);
             File.SetUnixFileMode(installer, UnixFileMode.UserRead | UnixFileMode.UserExecute);
@@ -127,12 +127,520 @@ public sealed class ProcessInstallerProtocolClientTests
                 nameof(IInstallerProtocolClient.OpenPackageAsync),
                 nameof(IInstallerProtocolClient.DiscoverGamesAsync),
                 nameof(IInstallerProtocolClient.ValidateGameAsync),
+                nameof(IInstallerProtocolClient.ListRecoveriesAsync),
                 nameof(IInstallerProtocolClient.InspectPlanAsync),
                 nameof(IInstallerProtocolClient.ApprovePlanCandidatesAsync),
                 nameof(IInstallerProtocolClient.ConfirmPlanAsync),
                 nameof(IInstallerProtocolClient.ExecutePlanAsync),
                 nameof(IInstallerProtocolClient.RecoverInterruptedAsync)
             ]);
+    }
+
+    [Test]
+    public async Task ListsOnlyBoundedSanitizedNewestFirstRecoveryPointsWithoutMutationRequests()
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => Serialize(CreateRecoveryCatalog(list, count: 64)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        InstallerRecoveryCatalogSuccess result = (await client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().BeOfType<InstallerRecoveryCatalogSuccess>().Subject;
+
+        result.RecoveryPoints.Should().HaveCount(ProtocolJsonSerializer.MaxRecoveryGenerations);
+        result.RecoveryPoints.Select(point => point.Ordinal).Should().Equal(Enumerable.Range(1, 64));
+        result.RecoveryPoints.Should().OnlyContain(point => point.IsCurrent == (point.Ordinal == 1));
+        result.RecoveryPoints[0].IsUserCheckpoint.Should().BeTrue();
+        result.RecoveryPoints[0].OriginOperation.Should().Be(InstallerOperation.Backup);
+        InstallerRecoveryReleaseTarget release = result.RecoveryPoints[0].RestoreTarget.Should().BeOfType<InstallerRecoveryReleaseTarget>().Subject;
+        release.Tag.Should().Be(CreateOpened(Session, ProtocolCommandId.CreateRandom()).Release.Tag);
+        release.EmbeddedVersion.Should().Be(CreateOpened(Session, ProtocolCommandId.CreateRandom()).Release.EmbeddedVersion);
+        result.RecoveryPoints[1].RestoreTarget.Should().BeOfType<InstallerRecoveryUninstalledTarget>();
+        foreach (InstallerRecoveryPoint point in result.RecoveryPoints)
+            client.AssertCurrentRecoveryPointForTesting(point);
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeTrue();
+        process.Requests.Select(request => request.Kind).Should().Equal(
+            ProtocolMessageKind.HandshakeRequest,
+            ProtocolMessageKind.ListRecoveriesRequest
+        );
+    }
+
+    [Test]
+    public async Task RecoveryProjectionAndRejectionSurfaceExcludePrivateProtocolAuthorityAndRawText()
+    {
+        const string privateMessage = "private backend message";
+        const string privateLog = "/home/private-user/recovery.log";
+        int response = 0;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list when response++ == 0 => Serialize(CreateRecoveryCatalog(list)),
+            ListRecoveriesRequest list => Serialize(new PrePlanRejectedEvent(
+                Session,
+                ProtocolPrePlanErrorCode.PermissionDenied,
+                privateMessage,
+                ProtocolNextAction.ReviewFilesystem,
+                false,
+                privateLog
+            )
+            { CommandId = list.CommandId }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        InstallerRecoveryCatalogResult catalog = await client.ListRecoveriesAsync(RecoveryGamePath);
+        InstallerRecoveryCatalogResult rejection = await client.ListRecoveriesAsync(RecoveryGamePath);
+
+        typeof(InstallerRecoveryPoint).GetProperties().Select(property => property.Name).Should().BeEquivalentTo([
+            nameof(InstallerRecoveryPoint.Ordinal),
+            nameof(InstallerRecoveryPoint.IsCurrent),
+            nameof(InstallerRecoveryPoint.IsUserCheckpoint),
+            nameof(InstallerRecoveryPoint.OriginOperation),
+            nameof(InstallerRecoveryPoint.RestoreTarget)
+        ]);
+        typeof(InstallerRecoveryPoint).GetFields(BindingFlags.Public | BindingFlags.Instance).Should().BeEmpty();
+        string exposed = System.Text.Json.JsonSerializer.Serialize(catalog, catalog.GetType())
+            + System.Text.Json.JsonSerializer.Serialize(rejection, rejection.GetType());
+        foreach (string forbidden in new[]
+        {
+            RecoveryGamePath,
+            RecoveryCatalogId.Value,
+            RecoveryHead,
+            privateMessage,
+            privateLog,
+            "selectionId",
+            "generationId",
+            "canonicalPath",
+            "deviceMajor",
+            "deviceMinor",
+            "inode",
+            "operationGeneration",
+            "packageSha256",
+            "sourceCommit",
+            "buildWorkflow"
+        })
+        {
+            exposed.Should().NotContain(forbidden);
+        }
+    }
+
+    [Test]
+    public async Task RefreshNoHistoryAndRejectionRevokeOlderExactPointAndKeepNormalAbsenceReady()
+    {
+        int lookup = 0;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => lookup++ switch
+            {
+                0 => Serialize(CreateRecoveryCatalog(list)),
+                1 => Serialize(new NoRecoveryHistoryEvent(Session) { CommandId = list.CommandId }),
+                _ => Serialize(new PrePlanRejectedEvent(
+                    Session,
+                    ProtocolPrePlanErrorCode.RecoveryUnavailable,
+                    "private",
+                    ProtocolNextAction.ListRecoveries,
+                    false,
+                    "/private/log"
+                )
+                { CommandId = list.CommandId })
+            },
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        InstallerRecoveryPoint first = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+
+        (await client.ListRecoveriesAsync(RecoveryGamePath)).Should().BeOfType<InstallerNoRecoveryHistory>();
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(first)).Should().Throw<ArgumentException>();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        (await client.ListRecoveriesAsync(RecoveryGamePath)).Should().BeOfType<InstallerRecoveryCatalogRejection>();
+        client.SessionFaulted.IsCompleted.Should().BeFalse();
+        process.Requests.Count(request => request is ListRecoveriesRequest).Should().Be(3);
+    }
+
+    [Test]
+    public async Task RefreshMakesOldForeignAndReconstructedPointsLocallyInvalid()
+    {
+        int generation = 0;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => Serialize(CreateRecoveryCatalog(list, catalogDigit: ++generation)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        InstallerRecoveryPoint stale = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+        InstallerRecoveryPoint current = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+        InstallerRecoveryPoint reconstructed = new(
+            current.Ordinal,
+            current.IsCurrent,
+            current.IsUserCheckpoint,
+            current.OriginOperation,
+            current.RestoreTarget
+        );
+
+        client.AssertCurrentRecoveryPointForTesting(current);
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(stale)).Should().Throw<ArgumentException>();
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(reconstructed)).Should().Throw<ArgumentException>();
+
+        ScriptedProcess foreignProcess = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient foreign = Create(foreignProcess);
+        await foreign.HandshakeAsync("SMAPI GUI", "1");
+        FluentActions.Invoking(() => foreign.AssertCurrentRecoveryPointForTesting(current)).Should().Throw<ArgumentException>();
+    }
+
+    [TestCase(ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest, false)]
+    [TestCase(ProtocolPrePlanErrorCode.InvalidGameFolder, ProtocolNextAction.SelectGameFolder, false)]
+    [TestCase(ProtocolPrePlanErrorCode.RecoveryUnavailable, ProtocolNextAction.ListRecoveries, false)]
+    [TestCase(ProtocolPrePlanErrorCode.PermissionDenied, ProtocolNextAction.ReviewFilesystem, false)]
+    [TestCase(ProtocolPrePlanErrorCode.UnexpectedFailure, ProtocolNextAction.StartNewSession, true)]
+    [TestCase(ProtocolPrePlanErrorCode.UnexpectedFailure, ProtocolNextAction.ViewPrivateLog, true)]
+    public async Task AcceptsOnlyReachableSanitizedRecoveryLookupRejections(
+        ProtocolPrePlanErrorCode code,
+        ProtocolNextAction action,
+        bool terminal
+    )
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => Serialize(new PrePlanRejectedEvent(
+                Session,
+                code,
+                "private",
+                action,
+                terminal,
+                action == ProtocolNextAction.ViewPrivateLog ? "/private/log" : null
+            )
+            {
+                CommandId = list.CommandId
+            }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        InstallerRecoveryCatalogRejection result = (await client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().BeOfType<InstallerRecoveryCatalogRejection>().Subject;
+
+        result.Should().Be(new InstallerRecoveryCatalogRejection(code, action, terminal));
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        client.SessionFaulted.IsCompleted.Should().BeFalse();
+        process.Terminated.Should().Be(terminal);
+    }
+
+    [Test]
+    public async Task RejectsUnreachableRecoveryRejectionAndRootIdentityMismatchFailClosed()
+    {
+        foreach (bool rootMismatch in new[] { false, true })
+        {
+            ScriptedProcess process = new(request => request switch
+            {
+                HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+                ListRecoveriesRequest list when rootMismatch => Serialize(CreateRecoveryCatalog(list, gamePath: "/alias/to/private-game")),
+                ListRecoveriesRequest list => Serialize(new PrePlanRejectedEvent(
+                    Session,
+                    ProtocolPrePlanErrorCode.PackageRejected,
+                    "private",
+                    ProtocolNextAction.ReopenVerifiedPackage,
+                    false,
+                    "/private/log"
+                )
+                { CommandId = list.CommandId }),
+                _ => throw new AssertionException("Unexpected protocol request.")
+            });
+            await using ProcessInstallerProtocolClient client = Create(process);
+            await client.HandshakeAsync("SMAPI GUI", "1");
+
+            await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath))
+                .Should().ThrowAsync<InstallerProtocolClientException>();
+            process.Terminated.Should().BeTrue();
+            client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        }
+    }
+
+    [Test]
+    public async Task RejectsNonzeroRootOperationGenerationFailClosed()
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => Serialize(CreateRecoveryCatalog(list, operationGeneration: 1)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+    }
+
+    [TestCase("too-many")]
+    [TestCase("duplicate-selection")]
+    [TestCase("duplicate-generation")]
+    [TestCase("current-order")]
+    [TestCase("restore-xor")]
+    [TestCase("extra-field")]
+    public async Task RejectsHostileRecoveryCatalogFramesBeforeProjection(string fault)
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => MutateRecoveryCatalogFrame(CreateRecoveryCatalog(list, count: fault == "too-many" ? 64 : 2), fault),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        process.Terminated.Should().BeTrue();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ListingConsumesPristineInterruptedRecoveryEligibilityWithoutSendingMutation()
+    {
+        ProtocolGameCandidate candidate = new(RecoveryGamePath, LinuxGameFolderStatus.Valid, "private display");
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            DiscoverGamesRequest => Serialize(new GameDiscoveryEvent(Session, [candidate]) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => Serialize(CreateRecoveryCatalog(list)),
+            _ => throw new AssertionException("A mutation request crossed the process boundary.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        ProtocolGameCandidate exact = (await client.DiscoverGamesAsync()).Single();
+        _ = await client.ListRecoveriesAsync(RecoveryGamePath);
+
+        await FluentActions.Awaiting(() => client.RecoverInterruptedAsync(exact))
+            .Should().ThrowAsync<InvalidOperationException>();
+
+        process.Requests.Should().NotContain(request => request is RecoverInterruptedRequest);
+        process.Requests.Select(request => request.Kind).Should().Equal(
+            ProtocolMessageKind.HandshakeRequest,
+            ProtocolMessageKind.DiscoverGamesRequest,
+            ProtocolMessageKind.ListRecoveriesRequest
+        );
+    }
+
+    [Test]
+    public async Task CancellationAtCatalogCommitRevokesAuthorityAndTerminatesSession()
+    {
+        using CancellationTokenSource cancellation = new();
+        ScriptedProcess process = RecoveryCatalogProcess();
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.BeforeRecoveryCatalogCommitForTesting = cancellation.Cancel;
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath, cancellation.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task SessionFaultAtCatalogCommitCannotPublishAuthority()
+    {
+        ScriptedProcess process = RecoveryCatalogProcess();
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.BeforeRecoveryCatalogCommitForTesting = () =>
+        {
+            process.Publish(Serialize(new NoRecoveryHistoryEvent(Session) { CommandId = ProtocolCommandId.CreateRandom() }));
+            _ = client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+        };
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [TestCase("wrong-session")]
+    [TestCase("wrong-command")]
+    [TestCase("duplicate-buffered")]
+    [TestCase("wrong-family")]
+    public async Task WrongCorrelationOrDuplicateCatalogResponseFaultsWithoutAuthority(string fault)
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => CorruptCatalogCorrelation(list, fault),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task DisposeAtCatalogCommitCannotPublishAuthority()
+    {
+        ScriptedProcess process = RecoveryCatalogProcess();
+        ProcessInstallerProtocolClient client = Create(process);
+        Task? disposal = null;
+        client.BeforeRecoveryCatalogCommitForTesting = () => disposal = client.DisposeAsync().AsTask();
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+        await disposal!.WaitAsync(TimeSpan.FromSeconds(2));
+
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.WaitObserved.Should().BeTrue();
+        process.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task FaultDisposePackageAndPlanPivotsRevokeExactRecoveryPoint()
+    {
+        // Session fault.
+        ScriptedProcess faultProcess = RecoveryCatalogProcess();
+        await using (ProcessInstallerProtocolClient faultClient = Create(faultProcess))
+        {
+            await faultClient.HandshakeAsync("SMAPI GUI", "1");
+            InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await faultClient.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+            faultProcess.Publish(Serialize(new NoRecoveryHistoryEvent(Session) { CommandId = ProtocolCommandId.CreateRandom() }));
+            _ = await faultClient.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2));
+            FluentActions.Invoking(() => faultClient.AssertCurrentRecoveryPointForTesting(point)).Should().Throw<ArgumentException>();
+        }
+
+        // Ordinary disposal.
+        ScriptedProcess disposeProcess = RecoveryCatalogProcess();
+        ProcessInstallerProtocolClient disposeClient = Create(disposeProcess);
+        await disposeClient.HandshakeAsync("SMAPI GUI", "1");
+        InstallerRecoveryPoint disposedPoint = ((InstallerRecoveryCatalogSuccess)await disposeClient.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+        await disposeClient.DisposeAsync();
+        FluentActions.Invoking(() => disposeClient.AssertCurrentRecoveryPointForTesting(disposedPoint)).Should().Throw<ArgumentException>();
+
+        // Package pivot.
+        ScriptedProcess packageProcess = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list => Serialize(CreateRecoveryCatalog(list)),
+            OpenPackageRequest open => Serialize(CreateOpened(Session, open.CommandId)),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using (ProcessInstallerProtocolClient packageClient = Create(packageProcess))
+        {
+            await packageClient.HandshakeAsync("SMAPI GUI", "1");
+            InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await packageClient.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+            (await packageClient.OpenPackageAsync(CreatePackage())).Should().BeOfType<InstallerPackageOpenSuccess>();
+            FluentActions.Invoking(() => packageClient.AssertCurrentRecoveryPointForTesting(point)).Should().Throw<ArgumentException>();
+        }
+
+        // Plan pivot.
+        ReadOnlyPlanScript script = new(InstallerOperation.Update);
+        ScriptedProcess planProcess = new(request => request switch
+        {
+            ListRecoveriesRequest list => Serialize(CreateRecoveryCatalog(list)),
+            _ => script.Respond(request)
+        });
+        await using ProcessInstallerProtocolClient planClient = Create(planProcess);
+        await planClient.HandshakeAsync("SMAPI GUI", "1");
+        (await planClient.OpenPackageAsync(CreatePackage())).Should().BeOfType<InstallerPackageOpenSuccess>();
+        InstallerRecoveryPoint plannedPoint = ((InstallerRecoveryCatalogSuccess)await planClient.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+        _ = await planClient.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Update);
+        FluentActions.Invoking(() => planClient.AssertCurrentRecoveryPointForTesting(plannedPoint)).Should().Throw<ArgumentException>();
+        InstallerReadOnlyPlanSuccess plan = (await planClient.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Update))
+            .Should().BeOfType<InstallerReadOnlyPlanSuccess>().Subject;
+        InstallerConfirmedPlanAuthority authority = await planClient.ConfirmPlanAsync(plan.Confirmation!);
+        authority.Should().NotBeNull();
+        FluentActions.Invoking(() => planClient.AssertCurrentRecoveryPointForTesting(plannedPoint)).Should().Throw<ArgumentException>();
+    }
+
+    [Test]
+    public async Task TimedOutRefreshRevokesPreviouslyIssuedPointAndStopsSession()
+    {
+        int lookup = 0;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list when lookup++ == 0 => Serialize(CreateRecoveryCatalog(list)),
+            ListRecoveriesRequest => null,
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process, operation: TimeSpan.FromMilliseconds(30));
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(point)).Should().Throw<ArgumentException>();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task CancelledRefreshRevokesPreviouslyIssuedPointAndStopsSession()
+    {
+        using CancellationTokenSource cancellation = new();
+        ScriptedProcess process = RecoveryCatalogProcess();
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+        client.BeforeRecoveryCatalogCommitForTesting = cancellation.Cancel;
+
+        await FluentActions.Awaiting(() => client.ListRecoveriesAsync(RecoveryGamePath, cancellation.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(point)).Should().Throw<ArgumentException>();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task TerminalRejectionRevokesPreviouslyIssuedPointDuringCleanup()
+    {
+        int lookup = 0;
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            ListRecoveriesRequest list when lookup++ == 0 => Serialize(CreateRecoveryCatalog(list)),
+            ListRecoveriesRequest list => Serialize(new PrePlanRejectedEvent(
+                Session,
+                ProtocolPrePlanErrorCode.UnexpectedFailure,
+                "private",
+                ProtocolNextAction.StartNewSession,
+                true,
+                null
+            )
+            { CommandId = list.CommandId }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath)).RecoveryPoints[0];
+
+        (await client.ListRecoveriesAsync(RecoveryGamePath)).Should().BeOfType<InstallerRecoveryCatalogRejection>();
+
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(point)).Should().Throw<ArgumentException>();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -3958,6 +4466,106 @@ public sealed class ProcessInstallerProtocolClientTests
         _ => throw new AssertionException("The GUI bridge sent a command outside this slice.")
     };
 
+    private const string RecoveryGamePath = "/games/private-user/Stardew Valley";
+    private const string RecoveryHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private static readonly ProtocolRecoveryCatalogId RecoveryCatalogId = ProtocolRecoveryCatalogId.Parse("33333333333333333333333333333333");
+
+    private static ScriptedProcess RecoveryCatalogProcess() => new(request => request switch
+    {
+        HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+        ListRecoveriesRequest list => Serialize(CreateRecoveryCatalog(list)),
+        _ => throw new AssertionException("Unexpected protocol request.")
+    });
+
+    private static RecoveryCatalogEvent CreateRecoveryCatalog(
+        ListRecoveriesRequest request,
+        int count = 2,
+        string? gamePath = null,
+        int catalogDigit = 3,
+        ulong operationGeneration = 0
+    )
+    {
+        ProtocolReleaseIdentity release = CreateOpened(Session, ProtocolCommandId.CreateRandom()).Release;
+        ProtocolRecoveryGeneration[] generations = Enumerable.Range(0, count).Select(index =>
+        {
+            bool restoresRelease = index % 2 == 0;
+            InstallerOperation origin = index == 0 ? InstallerOperation.Backup : InstallerOperation.Update;
+            return new ProtocolRecoveryGeneration(
+                ProtocolRecoverySelectionId.Parse((index + 1).ToString("x32")),
+                (index + 101).ToString("x32"),
+                origin,
+                index == 0,
+                origin == InstallerOperation.Backup,
+                restoresRelease ? release : null,
+                !restoresRelease
+            );
+        }).ToArray();
+        return new(
+            Session,
+            ProtocolRecoveryCatalogId.Parse(new string((char)('0' + catalogDigit), 32)),
+            new(gamePath ?? RecoveryGamePath, 7, 8, 9, operationGeneration),
+            RecoveryHead,
+            generations
+        )
+        {
+            CommandId = request.CommandId
+        };
+    }
+
+    private static byte[] MutateRecoveryCatalogFrame(RecoveryCatalogEvent catalog, string fault)
+    {
+        System.Text.Json.Nodes.JsonObject root = System.Text.Json.Nodes.JsonNode.Parse(ProtocolJsonSerializer.SerializeLine(catalog))!.AsObject();
+        System.Text.Json.Nodes.JsonObject payload = root["payload"]!.AsObject();
+        System.Text.Json.Nodes.JsonArray generations = payload["generations"]!.AsArray();
+        System.Text.Json.Nodes.JsonObject first = generations[0]!.AsObject();
+        System.Text.Json.Nodes.JsonObject second = generations[1]!.AsObject();
+        switch (fault)
+        {
+            case "too-many":
+                generations.Add(first.DeepClone());
+                break;
+            case "duplicate-selection":
+                second["selectionId"] = first["selectionId"]!.DeepClone();
+                break;
+            case "duplicate-generation":
+                second["generationId"] = first["generationId"]!.DeepClone();
+                break;
+            case "current-order":
+                first["isCurrent"] = false;
+                second["isCurrent"] = true;
+                break;
+            case "restore-xor":
+                first["restoresUninstalledState"] = true;
+                break;
+            case "extra-field":
+                payload["privateRoot"] = "/home/private-user";
+                break;
+            default:
+                throw new AssertionException($"Unknown recovery catalog fault '{fault}'.");
+        }
+        return Encoding.UTF8.GetBytes(root.ToJsonString() + "\n");
+    }
+
+    private static byte[] CorruptCatalogCorrelation(ListRecoveriesRequest request, string fault)
+    {
+        RecoveryCatalogEvent valid = CreateRecoveryCatalog(request);
+        return fault switch
+        {
+            "wrong-session" => Serialize(new RecoveryCatalogEvent(
+                ProtocolSessionId.Parse("99999999999999999999999999999999"),
+                valid.CatalogId,
+                valid.GameRoot,
+                valid.HeadSha256,
+                valid.Generations
+            )
+            { CommandId = request.CommandId }),
+            "wrong-command" => Serialize(valid with { CommandId = ProtocolCommandId.CreateRandom() }),
+            "duplicate-buffered" => SerializeMany(valid, new NoRecoveryHistoryEvent(Session) { CommandId = request.CommandId }),
+            "wrong-family" => Serialize(new GameDiscoveryEvent(Session, []) { CommandId = request.CommandId }),
+            _ => throw new AssertionException($"Unknown correlation fault '{fault}'.")
+        };
+    }
+
     private static PackageOpenedEvent CreateOpened(ProtocolSessionId session, ProtocolCommandId command, int alpha = 2, string? sourceCommit = null) => new(
         session,
         ProtocolPackageId.Parse("22222222222222222222222222222222"),
@@ -3990,7 +4598,8 @@ public sealed class ProcessInstallerProtocolClientTests
         ProcessInstallerProtocolClient.CandidateApprovalCapability,
         ProcessInstallerProtocolClient.ExactCoreProgressCapability,
         ProcessInstallerProtocolClient.CancellationCapability,
-        ProcessInstallerProtocolClient.InterruptedRecoveryCapability
+        ProcessInstallerProtocolClient.InterruptedRecoveryCapability,
+        ProcessInstallerProtocolClient.RecoveryPruningCapability
     ];
 
     private static byte[] Serialize(ProtocolEvent value) => Encoding.UTF8.GetBytes(ProtocolJsonSerializer.SerializeLine(value) + "\n");

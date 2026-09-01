@@ -19,6 +19,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     internal const string ExactCoreProgressCapability = "exact-core-progress";
     internal const string CancellationCapability = "cancellation";
     internal const string InterruptedRecoveryCapability = "interrupted-operation-recovery";
+    internal const string RecoveryPruningCapability = "recovery-pruning";
     internal const int MaximumObservedStderrBytes = 64 * 1024;
     internal const int MaximumPlanPageCount = 512;
     internal const int MaximumPlanAggregateUtf8Bytes = 16 * 1024 * 1024;
@@ -66,6 +67,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private ProtocolSessionId? SessionId;
     private ProtocolPackageId? VerifiedPackageId;
     private ProtocolReleaseIdentity? VerifiedRelease;
+    private RetainedRecoveryCatalogBinding? CurrentRecoveryCatalogBinding;
     private RetainedPlanBinding? CurrentPlanBinding;
     private RetainedConfirmedPlanBinding? CurrentConfirmedPlanBinding;
     private readonly HashSet<ProtocolCandidateId> IssuedCandidateIds = [];
@@ -82,6 +84,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private Task? DisposalTask;
     private bool SessionFaultRaised;
     internal Action? BeforePackageAuthorityCommitForTesting { get; set; }
+    internal Action? BeforeRecoveryCatalogCommitForTesting { get; set; }
     internal Action? BeforePlanBindingCommitForTesting { get; set; }
     internal Action? BeforeConfirmationAuthorityCommitForTesting { get; set; }
     internal Action? BeforeExecutionWriteForTesting { get; set; }
@@ -122,6 +125,14 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             lock (this.ResponseLock)
                 return this.VerifiedPackageId is not null && this.VerifiedRelease is not null;
+        }
+    }
+    internal bool HasRetainedRecoveryCatalogForTesting
+    {
+        get
+        {
+            lock (this.ResponseLock)
+                return this.CurrentRecoveryCatalogBinding is not null;
         }
     }
     public Task<InstallerProtocolClientException> SessionFaulted => this.SessionFault.Task;
@@ -210,6 +221,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 || !response.Capabilities.Contains(ExactCoreProgressCapability, StringComparer.Ordinal)
                 || !response.Capabilities.Contains(CancellationCapability, StringComparer.Ordinal)
                 || !response.Capabilities.Contains(InterruptedRecoveryCapability, StringComparer.Ordinal)
+                || !response.Capabilities.Contains(RecoveryPruningCapability, StringComparer.Ordinal)
             )
                 return await this.FailProtocolAsync<HandshakeEvent>().ConfigureAwait(false);
             this.SessionId = response.SessionId;
@@ -229,6 +241,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             this.AssertUsable();
             Volatile.Write(ref this.RecoveryEligibilityLost, 1);
+            lock (this.ResponseLock)
+                this.CurrentRecoveryCatalogBinding = null;
             ProtocolSessionId session = this.SessionId
                 ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
             if (this.HasRetainedPackageAuthority)
@@ -341,6 +355,91 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         }
     }
 
+    public async Task<InstallerRecoveryCatalogResult> ListRecoveriesAsync(string canonicalGamePath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(canonicalGamePath);
+        await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            this.AssertUsable();
+            Volatile.Write(ref this.RecoveryEligibilityLost, 1);
+            ProtocolSessionId session;
+            lock (this.ResponseLock)
+            {
+                session = this.SessionId
+                    ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+                if (this.CurrentPlanBinding is not null || this.CurrentConfirmedPlanBinding is not null)
+                    throw new InvalidOperationException("Recovery history must be listed before a plan is inspected or confirmed.");
+
+                // Refresh revokes every previously issued point before any request byte can be written. A failed,
+                // cancelled, or rejected refresh can never make an older exact-reference capability current again.
+                this.CurrentRecoveryCatalogBinding = null;
+            }
+
+            try
+            {
+                ProtocolEvent response = await this.ExchangeAsync<ProtocolEvent>(
+                    new ListRecoveriesRequest(session, canonicalGamePath),
+                    cancellationToken
+                ).ConfigureAwait(false);
+
+                InstallerRecoveryCatalogResult projected;
+                RetainedRecoveryCatalogBinding? binding = null;
+                switch (response)
+                {
+                    case RecoveryCatalogEvent catalog when catalog.SessionId == session:
+                        try { (projected, binding) = ProjectRecoveryCatalog(canonicalGamePath, catalog); }
+                        catch { return await this.FailProtocolAsync<InstallerRecoveryCatalogResult>().ConfigureAwait(false); }
+                        break;
+
+                    case NoRecoveryHistoryEvent missing when missing.SessionId == session:
+                        projected = new InstallerNoRecoveryHistory();
+                        break;
+
+                    case PrePlanRejectedEvent rejected when rejected.SessionId == session && IsReachableRecoveryCatalogRejection(rejected):
+                        projected = new InstallerRecoveryCatalogRejection(rejected.ErrorCode, rejected.NextAction, rejected.IsTerminal);
+                        break;
+
+                    default:
+                        return await this.FailProtocolAsync<InstallerRecoveryCatalogResult>().ConfigureAwait(false);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (this.SessionFault.Task.IsCompletedSuccessfully)
+                    throw await this.SessionFault.Task.ConfigureAwait(false);
+                this.BeforeRecoveryCatalogCommitForTesting?.Invoke();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (this.SessionFault.Task.IsCompletedSuccessfully)
+                    throw await this.SessionFault.Task.ConfigureAwait(false);
+                if (!this.TryCommitRecoveryCatalog(binding))
+                    return await this.FailProtocolAsync<InstallerRecoveryCatalogResult>().ConfigureAwait(false);
+                if (projected is InstallerRecoveryCatalogRejection { IsTerminal: true })
+                    await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                return projected;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw;
+            }
+        }
+        finally
+        {
+            this.CommandGate.Release();
+        }
+    }
+
+    /// <summary>Internal test seam proving that only an exact current projected point retains selection authority.</summary>
+    internal void AssertCurrentRecoveryPointForTesting(InstallerRecoveryPoint point)
+    {
+        ArgumentNullException.ThrowIfNull(point);
+        lock (this.ResponseLock)
+        {
+            if (this.CurrentRecoveryCatalogBinding is null || !this.CurrentRecoveryCatalogBinding.Points.ContainsKey(point))
+                throw new ArgumentException("The recovery point must be an exact current capability issued by this client.", nameof(point));
+        }
+    }
+
     public async Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(canonicalGamePath);
@@ -361,6 +460,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                     ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
                 if (this.CurrentConfirmedPlanBinding is not null)
                     throw new InvalidOperationException("The confirmed backend session can no longer inspect a plan.");
+                this.CurrentRecoveryCatalogBinding = null;
                 packageId = this.VerifiedPackageId;
                 verifiedRelease = this.VerifiedRelease;
                 this.CurrentPlanBinding = null;
@@ -444,6 +544,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             ProtocolPlanCandidate[] selectedCandidates;
             lock (this.ResponseLock)
             {
+                this.CurrentRecoveryCatalogBinding = null;
                 binding = this.CurrentPlanBinding
                     ?? throw new InvalidOperationException("A current inspected plan is required before approving candidates.");
                 if (binding.Operation is not (InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair or InstallerOperation.Uninstall))
@@ -544,6 +645,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             RetainedPlanBinding binding;
             lock (this.ResponseLock)
             {
+                this.CurrentRecoveryCatalogBinding = null;
                 binding = this.CurrentPlanBinding
                     ?? throw new InvalidOperationException("A current executable inspected plan is required before confirmation.");
                 if (binding.Confirmation is null || !ReferenceEquals(binding.Confirmation, confirmation))
@@ -667,6 +769,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
 
                 // The exact authority is consumed and the route is installed before the first execute byte can be
                 // written. Every post-admission failure is therefore reported conservatively.
+                this.CurrentRecoveryCatalogBinding = null;
                 this.CurrentConfirmedPlanBinding = null;
                 this.ActiveExecution = route;
                 Volatile.Write(ref this.ExecutionAdmitted, 1);
@@ -967,6 +1070,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 // can be written. The client is one-shot from this point, even after an exact terminal.
                 this.VerifiedPackageId = null;
                 this.VerifiedRelease = null;
+                this.CurrentRecoveryCatalogBinding = null;
                 this.CurrentPlanBinding = null;
                 this.CurrentConfirmedPlanBinding = null;
                 this.IssuedCandidateIds.Clear();
@@ -1386,6 +1490,57 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         return risks.ToArray();
     }
 
+    private static (InstallerRecoveryCatalogSuccess Result, RetainedRecoveryCatalogBinding Binding) ProjectRecoveryCatalog(
+        string canonicalGamePath,
+        RecoveryCatalogEvent catalog
+    )
+    {
+        ProtocolRecoveryGeneration[] generations = catalog.Generations;
+        if (
+            catalog.GameRoot.CanonicalPath != canonicalGamePath
+            || catalog.GameRoot.OperationGeneration != 0
+            || generations.Length is <= 0 or > ProtocolJsonSerializer.MaxRecoveryGenerations
+        )
+        {
+            throw new InstallerProtocolClientException("The recovery catalog doesn't match the exact requested game root and bounded lookup contract.");
+        }
+
+        InstallerRecoveryPoint[] points = new InstallerRecoveryPoint[generations.Length];
+        Dictionary<InstallerRecoveryPoint, ProtocolRecoveryGeneration> bindings = new(ReferenceEqualityComparer.Instance);
+        for (int index = 0; index < generations.Length; index++)
+        {
+            ProtocolRecoveryGeneration generation = generations[index];
+            if (
+                generation.IsCurrent != (index == 0)
+                || generation.IsUserCheckpoint != (generation.OriginOperation == InstallerOperation.Backup)
+                || (generation.RestoreRelease is null) != generation.RestoresUninstalledState
+            )
+            {
+                throw new InstallerProtocolClientException("The recovery catalog generation semantics are inconsistent.");
+            }
+
+            InstallerRecoveryRestoreTarget target = generation.RestoreRelease is { } release
+                ? new InstallerRecoveryReleaseTarget(release.Tag, release.EmbeddedVersion)
+                : new InstallerRecoveryUninstalledTarget();
+            InstallerRecoveryPoint point = new(index + 1, generation.IsCurrent, generation.IsUserCheckpoint, generation.OriginOperation, target);
+            points[index] = point;
+            bindings.Add(point, generation);
+        }
+
+        InstallerRecoveryCatalogSuccess result = new(Array.AsReadOnly(points));
+        return (result, new(canonicalGamePath, catalog.CatalogId, catalog.GameRoot, catalog.HeadSha256, bindings));
+    }
+
+    private static bool IsReachableRecoveryCatalogRejection(PrePlanRejectedEvent rejection) => rejection switch
+    {
+        { ErrorCode: ProtocolPrePlanErrorCode.RequestCancelled, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.InvalidGameFolder, NextAction: ProtocolNextAction.SelectGameFolder, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.RecoveryUnavailable, NextAction: ProtocolNextAction.ListRecoveries, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
+        _ => false
+    };
+
     private static bool IsReachableInspectPlanRejection(ProtocolPrePlanErrorCode errorCode) => errorCode is
         ProtocolPrePlanErrorCode.RequestCancelled
         or ProtocolPrePlanErrorCode.InvalidGameFolder
@@ -1416,6 +1571,17 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             foreach (ProtocolCandidateId candidateId in issued)
                 this.IssuedCandidateIds.Add(candidateId);
             this.CurrentPlanBinding = binding;
+            return true;
+        }
+    }
+
+    private bool TryCommitRecoveryCatalog(RetainedRecoveryCatalogBinding? binding)
+    {
+        lock (this.ResponseLock)
+        {
+            if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
+                return false;
+            this.CurrentRecoveryCatalogBinding = binding;
             return true;
         }
     }
@@ -1539,6 +1705,14 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.Warnings = new(warningCount);
         }
     }
+
+    private sealed record RetainedRecoveryCatalogBinding(
+        string CanonicalGamePath,
+        ProtocolRecoveryCatalogId CatalogId,
+        ProtocolGameRootIdentity GameRoot,
+        string HeadSha256,
+        Dictionary<InstallerRecoveryPoint, ProtocolRecoveryGeneration> Points
+    );
 
     private sealed class RetainedPlanBinding
     {
@@ -2232,6 +2406,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.SessionFaultRaised = true;
             this.VerifiedPackageId = null;
             this.VerifiedRelease = null;
+            this.CurrentRecoveryCatalogBinding = null;
             this.CurrentPlanBinding = null;
             this.CurrentConfirmedPlanBinding = null;
             this.IssuedCandidateIds.Clear();
@@ -2261,6 +2436,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
                 return false;
+            this.CurrentRecoveryCatalogBinding = null;
             this.VerifiedPackageId = opened.PackageId;
             this.VerifiedRelease = opened.Release;
             return true;
@@ -2361,6 +2537,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             {
                 this.VerifiedPackageId = null;
                 this.VerifiedRelease = null;
+                this.CurrentRecoveryCatalogBinding = null;
                 this.CurrentPlanBinding = null;
                 this.CurrentConfirmedPlanBinding = null;
                 this.IssuedCandidateIds.Clear();
