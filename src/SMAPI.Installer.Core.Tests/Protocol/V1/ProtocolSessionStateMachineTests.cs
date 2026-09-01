@@ -356,8 +356,8 @@ internal sealed class ProtocolSessionStateMachineTests
     public void PrePlanErrorAndDisposal_EnforceTerminalLifecycle()
     {
         ProtocolSessionStateMachine machine = Ready(); machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.PackageRejected, "Bad package.", ProtocolNextAction.ReopenVerifiedPackage, false, null)); machine.State.Should().Be(ProtocolSessionState.Ready);
-        machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.UnexpectedFailure, "No game.", ProtocolNextAction.ViewPrivateLog, true, null)); machine.State.Should().Be(ProtocolSessionState.Completed);
-        machine.Dispose(); FluentActions.Invoking(() => machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.UnexpectedFailure, "Again.", ProtocolNextAction.ViewPrivateLog, false, null))).Should().Throw<ObjectDisposedException>();
+        machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.UnexpectedFailure, "No game.", ProtocolNextAction.StartNewSession, true, null)); machine.State.Should().Be(ProtocolSessionState.Completed);
+        machine.Dispose(); FluentActions.Invoking(() => machine.RecordPrePlanRejection(new(machine.SessionId, ProtocolPrePlanErrorCode.UnexpectedFailure, "Again.", ProtocolNextAction.StartNewSession, true, null))).Should().Throw<ObjectDisposedException>();
     }
 
     [Test]

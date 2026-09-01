@@ -17,6 +17,7 @@ internal enum GameDiscoveryState
     Cancelled,
     Failed,
     SessionFaulted,
+    Transferred,
     Disposed
 }
 
@@ -49,6 +50,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private long GenerationValue;
     private long RevisionValue;
     private bool SessionHasFaulted;
+    private bool SessionTransferred;
     private bool DisposeStarted;
     internal Action? BeforeDiscoveryCommitForTesting { get; set; }
     internal Action? BeforeManualValidationCommitForTesting { get; set; }
@@ -116,7 +118,10 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             this.AssertNotDisposed();
             if (this.SessionHasFaulted)
                 throw new InvalidOperationException("The verified installer session is no longer available.");
-            if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted)
+            if (this.StateValue is GameDiscoveryState.Cancelled
+                or GameDiscoveryState.Failed
+                or GameDiscoveryState.SessionFaulted
+                or GameDiscoveryState.Transferred)
                 throw new InvalidOperationException("The verified installer session is closed.");
             if (this.Operation is not null)
                 throw new InvalidOperationException("A game-folder operation is still active.");
@@ -126,6 +131,64 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             this.StateValue = GameDiscoveryState.Ready;
         }
         this.PublishChanged();
+    }
+
+    /// <summary>Atomically transfer the exact valid selection and verified backend session to the planning owner once.</summary>
+    public IPlanInspectionSession TakeSelectedGameSession()
+    {
+        IPlanInspectionSession? handoff = null;
+        bool observedFault = false;
+        bool bindingFailed = false;
+        lock (this.Sync)
+        {
+            this.AssertNotDisposed();
+            if (this.SessionTransferred)
+                throw new InvalidOperationException("The selected game and verified installer session were already transferred.");
+            if (this.Operation is not null)
+                throw new InvalidOperationException("A game-folder operation is still active.");
+            if (
+                this.StateValue is not (GameDiscoveryState.Ready or GameDiscoveryState.ManualValid)
+                || this.SelectedCandidateValue is not { State: LinuxGameFolderStatus.Valid } selected
+                || !this.CandidatesValue.Any(candidate => ReferenceEquals(candidate, selected))
+            )
+            {
+                throw new InvalidOperationException("A current valid game-folder selection is required for transfer.");
+            }
+
+            if (this.SessionHasFaulted || this.Session.SessionFaulted.IsCompleted)
+            {
+                observedFault = true;
+                this.SessionHasFaulted = true;
+                this.CloseSession(GameDiscoveryState.SessionFaulted);
+                _ = this.StartSessionCleanupUnderLock();
+            }
+            else
+            {
+                try
+                {
+                    handoff = this.Session.BindToGame(selected)
+                        ?? throw new InvalidOperationException("The verified installer session returned no planning owner.");
+                    this.SessionTransferred = true;
+                    this.DiscoveredCandidatesValue = [];
+                    this.CandidatesValue = [];
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.Transferred;
+                    this.StopWatching.TrySetResult();
+                }
+                catch
+                {
+                    bindingFailed = true;
+                    this.CloseSession(this.Session.SessionFaulted.IsCompleted
+                        ? GameDiscoveryState.SessionFaulted
+                        : GameDiscoveryState.Failed);
+                    _ = this.StartSessionCleanupUnderLock();
+                }
+            }
+        }
+        this.PublishChanged();
+        if (observedFault || bindingFailed)
+            throw new InvalidOperationException("The verified installer session is no longer available.");
+        return handoff!;
     }
 
     public async Task CancelAsync()
@@ -164,9 +227,10 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
             this.DisposeStarted = true;
-            this.StateValue = GameDiscoveryState.Cancelling;
+            bool sessionTransferred = this.SessionTransferred;
+            this.StateValue = sessionTransferred ? GameDiscoveryState.Disposed : GameDiscoveryState.Cancelling;
             this.SelectedCandidateValue = null;
-            return new ValueTask(this.DisposalTask = this.DisposeCoreAsync(this.Operation));
+            return new ValueTask(this.DisposalTask = this.DisposeCoreAsync(this.Operation, sessionTransferred));
         }
     }
 
@@ -324,7 +388,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
         ActiveOperation? operation;
         lock (this.Sync)
         {
-            if (this.DisposeStarted)
+            if (this.DisposeStarted || this.SessionTransferred)
                 return;
             this.SessionHasFaulted = true;
             operation = this.Operation;
@@ -337,7 +401,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             _ = this.StartSessionCleanup();
     }
 
-    private async Task DisposeCoreAsync(ActiveOperation? operation)
+    private async Task DisposeCoreAsync(ActiveOperation? operation, bool sessionTransferred)
     {
         await Task.Yield();
         this.PublishChanged();
@@ -346,7 +410,10 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             await CancelSafelyAsync(operation.Cancellation).ConfigureAwait(false);
             await operation.Completion.Task.ConfigureAwait(false);
         }
-        await this.StartSessionCleanup().ConfigureAwait(false);
+        if (sessionTransferred)
+            await this.SessionWatcher.ConfigureAwait(false);
+        else
+            await this.StartSessionCleanup().ConfigureAwait(false);
         lock (this.Sync)
         {
             this.DiscoveredCandidatesValue = [];
@@ -423,9 +490,11 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     {
         bool idle = this.Operation is null && !this.DisposeStarted && !this.SessionHasFaulted;
         bool sessionUsable = idle
+            && !this.SessionTransferred
             && this.StateValue is not GameDiscoveryState.Cancelled
                 and not GameDiscoveryState.Failed
-                and not GameDiscoveryState.SessionFaulted;
+                and not GameDiscoveryState.SessionFaulted
+                and not GameDiscoveryState.Transferred;
         return new(
             this.GenerationValue,
             this.RevisionValue,
@@ -458,9 +527,14 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private void AssertCanStart()
     {
         this.AssertNotDisposed();
+        if (this.SessionTransferred)
+            throw new InvalidOperationException("The verified installer session was transferred to the next screen.");
         if (this.SessionHasFaulted)
             throw new InvalidOperationException("The verified installer session is no longer available.");
-        if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted)
+        if (this.StateValue is GameDiscoveryState.Cancelled
+            or GameDiscoveryState.Failed
+            or GameDiscoveryState.SessionFaulted
+            or GameDiscoveryState.Transferred)
             throw new InvalidOperationException("The verified installer session is closed.");
         if (this.Operation is not null)
             throw new InvalidOperationException("A game-folder operation is already active.");

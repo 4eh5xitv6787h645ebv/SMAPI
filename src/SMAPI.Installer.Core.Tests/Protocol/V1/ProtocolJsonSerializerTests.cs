@@ -197,6 +197,68 @@ internal sealed class ProtocolJsonSerializerTests
     }
 
     [Test]
+    public void BackupPlan_RequiresBothReleasesAbsentOrExactlyEqual()
+    {
+        ProtocolReleaseIdentity release = CreateRelease();
+        PlanEvent installed = CreateBackupPlan(release, release, ObservedInstallState.KnownUnmodified);
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(installed)).Should().BeEquivalentTo(installed);
+
+        PlanEvent blocked = CreateBackupPlan(null, null, ObservedInstallState.NotInstalled);
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(blocked)).Should().BeEquivalentTo(blocked);
+
+        CreateBackupPlan(null, release, ObservedInstallState.NotInstalled)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*current and target releases*");
+        CreateBackupPlan(release, null, ObservedInstallState.KnownUnmodified)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*current and target releases*");
+        CreateBackupPlan(release, release with { PackageSizeBytes = release.PackageSizeBytes + 1 }, ObservedInstallState.KnownUnmodified)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*current and target releases*");
+    }
+
+    [Test]
+    public void PrePlanRejected_RequiresTheExactServiceCodeActionTerminalAndLogMatrix()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom();
+        Dictionary<ProtocolPrePlanErrorCode, ProtocolNextAction> recoverable = new()
+        {
+            [ProtocolPrePlanErrorCode.RequestCancelled] = ProtocolNextAction.RetryRequest,
+            [ProtocolPrePlanErrorCode.InvalidGameFolder] = ProtocolNextAction.SelectGameFolder,
+            [ProtocolPrePlanErrorCode.PackageRejected] = ProtocolNextAction.ReopenVerifiedPackage,
+            [ProtocolPrePlanErrorCode.RecoveryUnavailable] = ProtocolNextAction.ListRecoveries,
+            [ProtocolPrePlanErrorCode.InspectionFailed] = ProtocolNextAction.InspectAgain,
+            [ProtocolPrePlanErrorCode.CandidateApprovalFailed] = ProtocolNextAction.InspectAgain,
+            [ProtocolPrePlanErrorCode.PermissionDenied] = ProtocolNextAction.ReviewFilesystem,
+            [ProtocolPrePlanErrorCode.InputOutputFailure] = ProtocolNextAction.RetryRequest
+        };
+        recoverable.Keys.Append(ProtocolPrePlanErrorCode.UnexpectedFailure)
+            .Should().BeEquivalentTo(Enum.GetValues<ProtocolPrePlanErrorCode>());
+
+        foreach (ProtocolPrePlanErrorCode code in Enum.GetValues<ProtocolPrePlanErrorCode>())
+        {
+            foreach (string? log in new[] { null, "/tmp/private-installer.log" })
+            {
+                ProtocolNextAction validAction = code == ProtocolPrePlanErrorCode.UnexpectedFailure
+                    ? log is null ? ProtocolNextAction.StartNewSession : ProtocolNextAction.ViewPrivateLog
+                    : recoverable[code];
+                bool validTerminal = code == ProtocolPrePlanErrorCode.UnexpectedFailure;
+                PrePlanRejectedEvent valid = new(session, code, "Rejected safely.", validAction, validTerminal, log);
+                ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(valid)).Should().BeEquivalentTo(valid);
+
+                foreach (ProtocolNextAction action in Enum.GetValues<ProtocolNextAction>())
+                {
+                    foreach (bool terminal in new[] { false, true })
+                    {
+                        if (action == validAction && terminal == validTerminal)
+                            continue;
+                        new PrePlanRejectedEvent(session, code, "Rejected safely.", action, terminal, log)
+                            .Invoking(ProtocolJsonSerializer.SerializeLine)
+                            .Should().Throw<ProtocolException>().WithMessage("*exact error class*");
+                    }
+                }
+            }
+        }
+    }
+
+    [Test]
     public void RollbackDigest_BindsFullCatalogRootHeadAndGenerationAuthority()
     {
         ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId selection = ProtocolRecoverySelectionId.CreateRandom();
@@ -445,6 +507,13 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPlanCandidate[] candidates = [new(candidateId, FileReplacementCandidateReason.LegacyInstaller, FileReplacementCandidateDisposition.Replace, "legacy", HashA, 1, 420, HashB, false, "Observed.")];
         ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
         return new(session, ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
+    }
+
+    private static PlanEvent CreateBackupPlan(ProtocolReleaseIdentity? current, ProtocolReleaseIdentity? target, ObservedInstallState state)
+    {
+        ProtocolPlanOperation[] operations = [new(PlanOperationKind.Backup, "StardewModdingAPI.dll", HashA, HashA)];
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Backup, null, null, GameRoot, current, target, state, operations, [], [], "Backup.", [], true);
+        return new(ProtocolSessionId.CreateRandom(), ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Backup, null, null, GameRoot, current, target, state, operations, [], [], "Backup.", [], true);
     }
 
     private static PlanEvent AlterPlan(PlanEvent plan, string? summary = null, ProtocolPlanCandidate[]? candidates = null, ProtocolPackageId? packageId = null) =>

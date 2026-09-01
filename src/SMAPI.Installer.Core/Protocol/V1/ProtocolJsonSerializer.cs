@@ -228,7 +228,7 @@ public static class ProtocolJsonSerializer
             case PruneFailureEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, null, v.Message, v.SanitizedLogPath, ProtocolPruneOutcome.FailedBeforePublication, ProtocolPruneOutcome.FailedWithCleanupPending); break;
             case PruneInterruptionEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, null, v.Message, v.SanitizedLogPath, ProtocolPruneOutcome.Interrupted, ProtocolPruneOutcome.UnexpectedCoreFailure); break;
             case PruneCancelledEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, v.Summary, null, v.SanitizedLogPath, ProtocolPruneOutcome.CancelledBeforePublication, ProtocolPruneOutcome.CancelledWithCleanupPending); break;
-            case PrePlanRejectedEvent v: Session(v.SessionId); Defined(v.ErrorCode, "errorCode"); Text(v.Message, "message"); Defined(v.NextAction, "nextAction"); OptionalLog(v.SanitizedLogPath); break;
+            case PrePlanRejectedEvent v: ValidatePrePlanRejection(v); break;
             default: throw new ProtocolException("The message isn't part of the version 1 protocol.");
         }
     }
@@ -392,7 +392,8 @@ public static class ProtocolJsonSerializer
     private static void ValidateReleaseSemantics(InstallerOperation operation, ProtocolReleaseIdentity? current, ProtocolReleaseIdentity? target)
     {
         if (operation is InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair) { if (target is null) throw new ProtocolException("This operation requires an exact target release."); }
-        else if (operation is InstallerOperation.Backup or InstallerOperation.Uninstall && target is not null) throw new ProtocolException("This operation must not invent a target release.");
+        else if (operation == InstallerOperation.Backup && ((current is null) != (target is null) || current is not null && current != target)) throw new ProtocolException("A backup operation's current and target releases must both be absent or exactly equal.");
+        else if (operation == InstallerOperation.Uninstall && target is not null) throw new ProtocolException("An uninstall operation must not invent a target release.");
         if (operation == InstallerOperation.Install && current is not null) throw new ProtocolException("A fresh install must not invent a current release.");
     }
 
@@ -404,6 +405,29 @@ public static class ProtocolJsonSerializer
         Objects(recovered, "attempt.recoveredTransactions", InstallerTransactionExecutor.MaximumTransactionStoreEntries);
         if (recovered.Any(result => result.ChangedPathCount is < 0 or > TransactionPlan.MaximumOperationCount) || recovered.Any(result => !Guid.TryParseExact(result.TransactionId, "N", out Guid id) || id == Guid.Empty || result.TransactionId.Any(character => character is >= 'A' and <= 'F')) || recovered.Select(result => result.TransactionId).Distinct(StringComparer.Ordinal).Count() != recovered.Length)
             throw new ProtocolException("The interrupted-recovery attempt has invalid or duplicate transaction results.");
+    }
+
+    private static void ValidatePrePlanRejection(PrePlanRejectedEvent value)
+    {
+        Session(value.SessionId); Defined(value.ErrorCode, "errorCode"); Text(value.Message, "message"); Defined(value.NextAction, "nextAction"); OptionalLog(value.SanitizedLogPath);
+        (ProtocolNextAction ExpectedAction, bool ExpectedTerminal) expected = value.ErrorCode switch
+        {
+            ProtocolPrePlanErrorCode.RequestCancelled => (ProtocolNextAction.RetryRequest, false),
+            ProtocolPrePlanErrorCode.InvalidGameFolder => (ProtocolNextAction.SelectGameFolder, false),
+            ProtocolPrePlanErrorCode.PackageRejected => (ProtocolNextAction.ReopenVerifiedPackage, false),
+            ProtocolPrePlanErrorCode.RecoveryUnavailable => (ProtocolNextAction.ListRecoveries, false),
+            ProtocolPrePlanErrorCode.InspectionFailed => (ProtocolNextAction.InspectAgain, false),
+            ProtocolPrePlanErrorCode.CandidateApprovalFailed => (ProtocolNextAction.InspectAgain, false),
+            ProtocolPrePlanErrorCode.PermissionDenied => (ProtocolNextAction.ReviewFilesystem, false),
+            ProtocolPrePlanErrorCode.InputOutputFailure => (ProtocolNextAction.RetryRequest, false),
+            ProtocolPrePlanErrorCode.UnexpectedFailure => (
+                value.SanitizedLogPath is null ? ProtocolNextAction.StartNewSession : ProtocolNextAction.ViewPrivateLog,
+                true
+            ),
+            _ => throw new ProtocolException("The pre-plan rejection error code isn't defined by version 1.")
+        };
+        if (value.NextAction != expected.ExpectedAction || value.IsTerminal != expected.ExpectedTerminal)
+            throw new ProtocolException("The pre-plan rejection action, terminal state, or private-log availability doesn't match its exact error class.");
     }
 
     private static void ValidateRelease(ProtocolReleaseIdentity? release, string field, bool optional = false)

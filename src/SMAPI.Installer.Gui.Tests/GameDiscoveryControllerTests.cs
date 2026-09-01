@@ -652,9 +652,256 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.CanBrowse.Should().BeFalse();
     }
 
+    [Test]
+    public async Task ReadySelectionTransfersTheExactCandidateAndSessionOwnershipOnce()
+    {
+        ProtocolGameCandidate valid = Candidate("selected", LinuxGameFolderStatus.Valid);
+        ProtocolGameCandidate other = Candidate("other", LinuxGameFolderStatus.Valid);
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid, other])
+        };
+        GameDiscoveryController controller = new(session);
+        await controller.DiscoverAsync();
+        controller.SelectCandidate(valid);
+
+        IPlanInspectionSession handoff = controller.TakeSelectedGameSession();
+
+        session.BoundCandidate.Should().BeSameAs(valid);
+        handoff.Game.DisplayPath.Should().Be(valid.CanonicalPath);
+        handoff.Game.DisplayName.Should().Be(valid.DisplayName);
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Transferred);
+        controller.Snapshot.Candidates.Should().BeEmpty();
+        controller.Snapshot.SelectedCandidate.Should().BeNull();
+        Action secondTake = () => controller.TakeSelectedGameSession();
+        secondTake.Should().Throw<InvalidOperationException>().WithMessage("*already transferred*");
+
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(0, "the transferred owner, not the discovery controller, owns the session");
+        await handoff.DisposeAsync();
+        await handoff.DisposeAsync();
+        session.DisposeCalls.Should().Be(1, "the transferred owner must dispose its child exactly once");
+    }
+
+    [Test]
+    public async Task ManualValidSelectionTransfersTheExactCandidate()
+    {
+        ProtocolGameCandidate valid = Candidate("manual-selected", LinuxGameFolderStatus.Valid);
+        FakeVerifiedSession session = new() { Validation = (_, _) => Task.FromResult(valid) };
+        GameDiscoveryController controller = new(session);
+        await controller.ValidateManualAsync("/games/manual-selected");
+
+        IPlanInspectionSession handoff = controller.TakeSelectedGameSession();
+
+        session.BoundCandidate.Should().BeSameAs(valid);
+        handoff.Game.DisplayPath.Should().Be(valid.CanonicalPath);
+        handoff.Game.DisplayName.Should().Be(valid.DisplayName);
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(0);
+        await handoff.DisposeAsync();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task TransferRejectsIdleAndInvalidReadyOrManualStates()
+    {
+        FakeVerifiedSession idleSession = new();
+        await using (GameDiscoveryController idle = new(idleSession))
+        {
+            Action take = () => idle.TakeSelectedGameSession();
+            take.Should().Throw<InvalidOperationException>().WithMessage("*current valid game-folder selection*");
+        }
+
+        ProtocolGameCandidate invalidDiscovery = Candidate("invalid-discovery", LinuxGameFolderStatus.UnsafeLauncher);
+        FakeVerifiedSession readySession = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([invalidDiscovery])
+        };
+        await using (GameDiscoveryController ready = new(readySession))
+        {
+            await ready.DiscoverAsync();
+            ready.SelectCandidate(invalidDiscovery);
+            ready.Snapshot.State.Should().Be(GameDiscoveryState.Ready);
+            Action take = () => ready.TakeSelectedGameSession();
+            take.Should().Throw<InvalidOperationException>().WithMessage("*current valid game-folder selection*");
+        }
+
+        ProtocolGameCandidate invalidManual = Candidate("invalid-manual", LinuxGameFolderStatus.MissingLauncher);
+        FakeVerifiedSession manualSession = new() { Validation = (_, _) => Task.FromResult(invalidManual) };
+        await using (GameDiscoveryController manual = new(manualSession))
+        {
+            await manual.ValidateManualAsync("/games/invalid-manual");
+            manual.Snapshot.State.Should().Be(GameDiscoveryState.ManualInvalid);
+            Action take = () => manual.TakeSelectedGameSession();
+            take.Should().Throw<InvalidOperationException>().WithMessage("*current valid game-folder selection*");
+        }
+    }
+
+    [Test]
+    public async Task TransferRejectsAnActiveOperation()
+    {
+        TaskCompletionSource<IReadOnlyList<ProtocolGameCandidate>> discovery = NewCompletion<IReadOnlyList<ProtocolGameCandidate>>();
+        FakeVerifiedSession session = new() { Discovery = _ => discovery.Task };
+        await using GameDiscoveryController controller = new(session);
+        Task operation = controller.DiscoverAsync();
+
+        Action take = () => controller.TakeSelectedGameSession();
+        take.Should().Throw<InvalidOperationException>().WithMessage("*still active*");
+
+        discovery.SetResult([]);
+        await operation.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Test]
+    public async Task TransferRejectsACompletedSessionFaultAndDisposesTheChildOnce()
+    {
+        ProtocolGameCandidate valid = Candidate("faulted", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource watcherReachedCommit = NewCompletion();
+        TaskCompletionSource releaseWatcher = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        await using GameDiscoveryController controller = new(session)
+        {
+            BeforeSessionFaultCommitForTesting = () =>
+            {
+                watcherReachedCommit.TrySetResult();
+                releaseWatcher.Task.GetAwaiter().GetResult();
+            }
+        };
+        await controller.DiscoverAsync();
+        session.Fault.SetResult(new InstallerProtocolClientException("faulted before transfer"));
+        await watcherReachedCommit.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            Action take = () => controller.TakeSelectedGameSession();
+            take.Should().Throw<InvalidOperationException>().WithMessage("*no longer available*");
+        }
+        finally
+        {
+            releaseWatcher.TrySetResult();
+        }
+        await WaitUntilAsync(() => session.DisposeCalls == 1);
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.SessionFaulted);
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task TransferRejectsAfterControllerDisposal()
+    {
+        ProtocolGameCandidate valid = Candidate("disposed", LinuxGameFolderStatus.Valid);
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        GameDiscoveryController controller = new(session);
+        await controller.DiscoverAsync();
+        await controller.DisposeAsync();
+
+        Action take = () => controller.TakeSelectedGameSession();
+        take.Should().Throw<ObjectDisposedException>();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ConcurrentTransferHasExactlyOneWinner()
+    {
+        ProtocolGameCandidate valid = Candidate("concurrent", LinuxGameFolderStatus.Valid);
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        GameDiscoveryController controller = new(session);
+        await controller.DiscoverAsync();
+        using ManualResetEventSlim start = new(false);
+
+        Task<(IPlanInspectionSession? Handoff, Exception? Error)>[] attempts = Enumerable.Range(0, 2)
+            .Select(_ => Task.Run(() =>
+            {
+                start.Wait();
+                try
+                {
+                    return (controller.TakeSelectedGameSession(), (Exception?)null);
+                }
+                catch (Exception ex)
+                {
+                    return ((IPlanInspectionSession?)null, ex);
+                }
+            }))
+            .ToArray();
+        start.Set();
+        (IPlanInspectionSession? Handoff, Exception? Error)[] results = await Task.WhenAll(attempts);
+
+        IPlanInspectionSession handoff = results.Should().ContainSingle(result => result.Handoff != null)
+            .Which.Handoff!;
+        results.Count(result => result.Error is InvalidOperationException).Should().Be(1);
+        session.BindCalls.Should().Be(1);
+        session.BoundCandidate.Should().BeSameAs(valid);
+        handoff.Game.DisplayPath.Should().Be(valid.CanonicalPath);
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(0);
+        await handoff.DisposeAsync();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public void BoundGamePresentationEscapesUnsafeDisplayScalarsWithoutExposingAnAuthorityProperty()
+    {
+        const string exactPath = "/games/right-to-left-\u202E-control-\u0007-unpaired-\uD800-game-\U0001F3AE-tag-\U000E0001";
+        const string exactName = "Stardew\u202E Valley\u0001 \uDC00 \U0001F3AE";
+
+        VerifiedGamePresentation presentation = new(exactPath, exactName);
+
+        presentation.DisplayPath.Should().Be("/games/right-to-left-\\u202E-control-\\u0007-unpaired-\\uD800-game-\U0001F3AE-tag-\\uDB40\\uDC01");
+        presentation.DisplayName.Should().Be("Stardew\\u202E Valley\\u0001 \\uDC00 \U0001F3AE");
+        AssertDisplaySafe(presentation.DisplayPath);
+        AssertDisplaySafe(presentation.DisplayName);
+        typeof(VerifiedGamePresentation).GetProperties().Select(property => property.Name).Should().Equal(
+            nameof(VerifiedGamePresentation.DisplayPath),
+            nameof(VerifiedGamePresentation.DisplayName)
+        );
+    }
+
+    [Test]
+    public void BoundGamePresentationHasAClosedSourceAndEscapedDisplayLengthBound()
+    {
+        string exactPath = "/" + new string('\u202E', 4095);
+        string exactName = new('\u202E', 4096);
+
+        VerifiedGamePresentation presentation = new(exactPath, exactName);
+
+        presentation.DisplayPath.Should().HaveLength(1 + 4095 * 6).And.StartWith("/\\u202E");
+        presentation.DisplayName.Should().HaveLength(4096 * 6).And.StartWith("\\u202E");
+        Action longPath = () => _ = new VerifiedGamePresentation("/" + new string('a', 4096), "Stardew Valley");
+        Action longName = () => _ = new VerifiedGamePresentation("/games/Stardew", new string('a', 4097));
+        longPath.Should().Throw<ArgumentException>().WithMessage("*too long*");
+        longName.Should().Throw<ArgumentException>().WithMessage("*too long*");
+    }
+
     internal static ProtocolGameCandidate Candidate(string suffix, LinuxGameFolderStatus status)
     {
         return new($"/games/{suffix}", status, $"Stardew Valley {suffix}");
+    }
+
+    private static void AssertDisplaySafe(string value)
+    {
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value[index];
+            if (char.IsHighSurrogate(current))
+            {
+                (index + 1 < value.Length && char.IsLowSurrogate(value[index + 1])).Should().BeTrue();
+                System.Globalization.CharUnicodeInfo.GetUnicodeCategory(value, index)
+                    .Should().NotBe(System.Globalization.UnicodeCategory.Format);
+                index++;
+                continue;
+            }
+            char.IsLowSurrogate(current).Should().BeFalse();
+            char.IsControl(current).Should().BeFalse();
+            char.GetUnicodeCategory(current).Should().NotBe(System.Globalization.UnicodeCategory.Format);
+        }
     }
 
     internal static ProtocolReleaseIdentity Release()
@@ -695,7 +942,7 @@ internal sealed class GameDiscoveryControllerTests
         }
     }
 
-    internal sealed class FakeVerifiedSession : IVerifiedInstallerSession
+    internal sealed class FakeVerifiedSession : IVerifiedInstallerSession, IVerifiedInstallerSessionBinder
     {
         public ProtocolReleaseIdentity Release { get; } = GameDiscoveryControllerTests.Release();
         public TaskCompletionSource<InstallerProtocolClientException> Fault { get; } = NewCompletion<InstallerProtocolClientException>();
@@ -704,7 +951,9 @@ internal sealed class GameDiscoveryControllerTests
         public Func<string, CancellationToken, Task<ProtocolGameCandidate>> Validation { get; set; } =
             (path, _) => Task.FromResult(Candidate(path.GetHashCode(StringComparison.Ordinal).ToString(), LinuxGameFolderStatus.Valid));
         public List<string> ValidatedPaths { get; } = [];
+        public ProtocolGameCandidate? BoundCandidate { get; private set; }
         public int DiscoverCalls { get; private set; }
+        public int BindCalls { get; private set; }
         public int DisposeCalls { get; private set; }
 
         public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
@@ -721,10 +970,45 @@ internal sealed class GameDiscoveryControllerTests
             return this.Validation(canonicalPath, cancellationToken);
         }
 
+        public IPlanInspectionSession BindToGame(ProtocolGameCandidate candidate)
+        {
+            this.BindCalls++;
+            this.BoundCandidate = candidate;
+            return new FakePlanInspectionSession(this, candidate);
+        }
+
         public ValueTask DisposeAsync()
         {
             this.DisposeCalls++;
             return ValueTask.CompletedTask;
+        }
+
+        private sealed class FakePlanInspectionSession : IPlanInspectionSession
+        {
+            private readonly FakeVerifiedSession Owner;
+            private int DisposeStarted;
+
+            public ProtocolReleaseIdentity Release => this.Owner.Release;
+            public VerifiedGamePresentation Game { get; }
+            public Task<InstallerProtocolClientException> SessionFaulted => this.Owner.SessionFaulted;
+
+            public FakePlanInspectionSession(FakeVerifiedSession owner, ProtocolGameCandidate candidate)
+            {
+                this.Owner = owner;
+                this.Game = new VerifiedGamePresentation(candidate.CanonicalPath, candidate.DisplayName);
+            }
+
+            public Task<InstallerReadOnlyPlanResult> InspectPlanAsync(
+                InstallerOperation operation,
+                CancellationToken cancellationToken = default
+            ) => throw new AssertionException("A discovery handoff test must not inspect a plan.");
+
+            public ValueTask DisposeAsync()
+            {
+                if (Interlocked.Exchange(ref this.DisposeStarted, 1) != 0)
+                    return ValueTask.CompletedTask;
+                return this.Owner.DisposeAsync();
+            }
         }
     }
 }
