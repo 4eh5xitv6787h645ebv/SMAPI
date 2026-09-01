@@ -178,8 +178,8 @@ Scope constraints apply throughout:
 ### Architecture and behavior
 
 - [ ] Build a simple, maintainable Linux desktop GUI around existing installer behavior without duplicating installation rules.
-- [ ] Support game-folder detection.
-- [ ] Support user game-folder selection.
+- [x] Support bounded read-only game-folder detection through the shared installer core ([merged PR #202](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202)).
+- [x] Support user game-folder selection and backend-authoritative manual validation without duplicating installer rules ([exact-head review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202#issuecomment-5491551755)).
 - [ ] Support install.
 - [ ] Support update.
 - [ ] Support repair.
@@ -422,6 +422,18 @@ This bridge still adds no production release-selection controller, GitHub networ
 - [x] Address every actionable architecture, networking, lifetime, cancellation, cleanup, privacy, UX, accessibility, testing, and final-diff finding; merge and close focused PR #200 into `develop` ([merge commit `3fafbbcf`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/3fafbbcf7a6c8691430e5fa2e7bf17f84ae5d0a4)).
 
 Published alpha.1 still has only the older three assets, so the production catalog correctly shows no compatible graphical-installer release and cannot provide real verified-success evidence. This slice performs no game discovery, planning, installation, update, repair, uninstall, backup, rollback, or game-file mutation. It is not yet packaged as a public GUI artifact: every production packaged screenshot, clean-isolated public-artifact qualification, screenshot manifest/gallery, X11/XWayland capture, and HTTP publication check therefore remains unchecked above.
+
+### Reviewed production game-discovery screen slice
+
+- [x] Extend Protocol V1 with strict bounded automatic discovery and manual game-folder validation backed only by the shared read-only Linux discovery service; reject malformed, duplicate, excessive, noncanonical, or mismatched results ([merged PR #202](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202); exact reviewed head [`8a1f6694`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/8a1f6694cf4b5e15e201cd19102c7d5e26e4785b)).
+- [x] Transfer the exact verified package/backend session from release verification into discovery exactly once, require the package, discovery, and validation capabilities, preserve command/session correlation and backend-canonicalized path authority, and fail closed on handoff or session failure ([architecture and security review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202#issuecomment-5491551755)).
+- [x] Present truthful zero-, one-, and multiple-candidate states, automatically select only one valid candidate, support native manual folder selection with typed invalid reasons, and expose retry, cancel, and terminal session-fault behavior without planning or modifying game files ([merged production workflow](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202)).
+- [x] Provide keyboard access, readable focus, semantic live regions, distinct bounded screen-reader row names, bidi/surrogate-safe path display, and rendered 420-DIP plus 100%, 125%, 150%, and 200% scale coverage with awaited window/session teardown ([clean UX/accessibility/test review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202#issuecomment-5491551755)).
+- [x] Make disposal, terminal session faults, explicit cancellation, and linked caller-token cancellation authoritative across success commit, failure outcome, and finalization boundaries for automatic and manual operations; retain at most 64 candidates and sanitize picker/backend failures ([clean architecture/security review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202#issuecomment-5491551755)).
+- [x] Pass 184/184 GUI tests in Debug and Release, 159/159 focused Core protocol/discovery tests, five consecutive 44/44 focused discovery/workflow runs, Release warnings-as-errors, formatting, diff checks, and exact-head required CI ([Linux qualification `33489707978`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33489707978); [performance gates `33489707974`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33489707974)).
+- [x] Address every actionable architecture, concurrency, lifecycle, security/privacy, UX/accessibility, testing, path-display, and final-diff finding; merge and close PR #202 into `develop`, delete its feature branch/worktree locally and on `origin`, and synchronize `develop` ([merge commit `7018b271`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/7018b271ab6092b83011911552c149d430ceb81d)).
+
+This slice is read-only after release verification. It does not plan, install, update, repair, uninstall, back up, roll back, or otherwise mutate game files. It is not packaged in a public GUI artifact, and published alpha.1 cannot reach it because that release lacks the required six-asset authority set. Production screenshot claims remain unchecked until an exact reviewed packaged build can exercise these states in clean isolated qualification.
 
 ### Phase 4 tests, reviews, packaging, and integration
 
