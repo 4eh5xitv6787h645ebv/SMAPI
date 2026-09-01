@@ -6,7 +6,7 @@ using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui;
 
-/// <summary>A read-only plan-review window with no approval, confirmation, or execution controls.</summary>
+/// <summary>A read-only plan-review window with bounded candidate selection and no confirmation or execution controls.</summary>
 internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
 {
     private readonly object DisposeLock = new();
@@ -27,6 +27,7 @@ internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
         this.SizeChanged += (_, eventArgs) => this.ApplyResponsiveLayout(eventArgs.NewSize.Width);
         this.ViewModel.FocusRequested += this.OnFocusRequested;
         this.ViewModel.CloseRequested += this.OnCloseRequested;
+        this.CandidateList.AddHandler(InputElement.KeyDownEvent, this.OnCandidateListKeyDown, RoutingStrategies.Bubble, handledEventsToo: true);
         this.ApplyResponsiveLayout(this.Width);
     }
 
@@ -85,7 +86,13 @@ internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape && this.ViewModel.CancelCommand.CanExecute(null))
+        if (e.Key == Key.Escape && this.ViewModel.ClearCandidatesCommand.CanExecute(null))
+        {
+            this.ViewModel.ClearCandidatesCommand.Execute(null);
+            this.CandidateSelectionStatusRegion.Focus(NavigationMethod.Tab);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && this.ViewModel.CancelCommand.CanExecute(null))
         {
             this.ViewModel.CancelCommand.Execute(null);
             e.Handled = true;
@@ -93,6 +100,19 @@ internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
         else if (e.Key == Key.Escape && this.ViewModel.ExitCommand.CanExecute(null))
         {
             this.ViewModel.ExitCommand.Execute(null);
+            e.Handled = true;
+        }
+    }
+
+    private void OnCandidateListKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (
+            e.Key == Key.Space
+            && e.Source is not CheckBox
+            && this.CandidateList.SelectedItem is PlanReviewCandidateChoice candidate
+            && this.ViewModel.ToggleCandidate(candidate)
+        )
+        {
             e.Handled = true;
         }
     }
@@ -110,6 +130,8 @@ internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
                 Control control = target switch
                 {
                     PlanReviewFocusTarget.OperationList => this.OperationList,
+                    PlanReviewFocusTarget.CandidateList => this.CandidateList,
+                    PlanReviewFocusTarget.CandidateStatus => this.CandidateSelectionStatusRegion,
                     PlanReviewFocusTarget.Result => this.ResultSummaryRegion,
                     PlanReviewFocusTarget.Error => this.ErrorRegion,
                     PlanReviewFocusTarget.Retry => this.RetryButton,

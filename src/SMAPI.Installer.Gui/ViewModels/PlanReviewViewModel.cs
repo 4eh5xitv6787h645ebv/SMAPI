@@ -10,11 +10,73 @@ namespace StardewModdingAPI.Installer.Gui.ViewModels;
 internal enum PlanReviewFocusTarget
 {
     OperationList,
+    CandidateList,
+    CandidateStatus,
     Status,
     Result,
     Error,
     Retry,
     Exit
+}
+
+internal sealed class PlanReviewCandidateChoice : ObservableObject
+{
+    private readonly Action<PlanReviewCandidateChoice, bool> SelectionChanged;
+    private bool isSelected;
+
+    public PlanReviewCandidateChoice(
+        PlanReviewCandidate candidate,
+        string displayPath,
+        string reasonDetail,
+        string dispositionDetail,
+        bool backendProvisionallyIncluded,
+        Action<PlanReviewCandidateChoice, bool> selectionChanged
+    )
+    {
+        this.Candidate = candidate ?? throw new ArgumentNullException(nameof(candidate));
+        this.DisplayPath = displayPath ?? throw new ArgumentNullException(nameof(displayPath));
+        this.ReasonDetail = reasonDetail ?? throw new ArgumentNullException(nameof(reasonDetail));
+        this.DispositionDetail = dispositionDetail ?? throw new ArgumentNullException(nameof(dispositionDetail));
+        this.BackendProvisionallyIncluded = backendProvisionallyIncluded;
+        this.SelectionChanged = selectionChanged ?? throw new ArgumentNullException(nameof(selectionChanged));
+    }
+
+    internal PlanReviewCandidate Candidate { get; }
+
+    public string DisplayPath { get; }
+
+    public string ReasonDetail { get; }
+
+    public string DispositionDetail { get; }
+
+    public bool BackendProvisionallyIncluded { get; }
+
+    public string ProvisionalDetail => this.BackendProvisionallyIncluded
+        ? "The backend provisionally included this file. That is not your approval."
+        : "The backend did not provisionally include this file. No choice is implied.";
+
+    public string AccessibleName => $"{this.DisplayPath}. {this.ReasonDetail} {this.DispositionDetail} {this.ProvisionalDetail}";
+
+    public bool IsSelected
+    {
+        get => this.isSelected;
+        set
+        {
+            if (!this.SetProperty(ref this.isSelected, value))
+                return;
+            this.SelectionChanged(this, value);
+        }
+    }
+
+    internal void SetSelectedFromSnapshot(bool value)
+    {
+        this.SetProperty(ref this.isSelected, value);
+    }
+
+    internal void Deactivate()
+    {
+        this.SetProperty(ref this.isSelected, false);
+    }
 }
 
 internal sealed record PlanReviewOperationChoice(
@@ -88,6 +150,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     private IReadOnlyList<PlanReviewSummaryRow> operationRows = Array.Empty<PlanReviewSummaryRow>();
     private IReadOnlyList<PlanReviewSummaryRow> conflictRows = Array.Empty<PlanReviewSummaryRow>();
     private IReadOnlyList<PlanReviewSummaryRow> candidateRows = Array.Empty<PlanReviewSummaryRow>();
+    private IReadOnlyList<PlanReviewCandidateChoice> candidateChoices = Array.Empty<PlanReviewCandidateChoice>();
+    private string candidateSelectionAnnouncement = "0 of 0 files selected.";
     private bool disposed;
 
     public PlanReviewViewModel(PlanReviewController controller)
@@ -97,6 +161,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.InspectCommand = new(() => controller.InspectAsync(), () => this.snapshot.CanInspect, this.HandlePresentationFailure);
         this.CancelCommand = new(controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
         this.RetryCommand = new(() => controller.InspectAsync(), () => this.snapshot.CanRetry, this.HandlePresentationFailure);
+        this.ApplyCandidatesCommand = new(() => controller.ApplyCandidateSelectionAsync(), () => this.snapshot.CanApplyCandidates, this.HandleCandidateActionFailure);
+        this.ClearCandidatesCommand = new(this.ClearCandidateSelectionSafely, () => this.snapshot.CanClearCandidates);
+        this.StartFreshInspectionCommand = new(() => controller.StartFreshInspectionAsync(), () => this.snapshot.CanStartFreshInspection, this.HandleCandidateActionFailure);
         this.ExitCommand = new(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.snapshot.CanExit);
         this.Controller.Changed += this.OnControllerChanged;
         this.ApplySnapshot(this.snapshot, requestFocus: false);
@@ -227,13 +294,65 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         private set => this.SetProperty(ref this.candidateRows, value);
     }
 
+    public IReadOnlyList<PlanReviewCandidateChoice> CandidateChoices
+    {
+        get => this.candidateChoices;
+        private set => this.SetProperty(ref this.candidateChoices, value);
+    }
+
+    public string CandidateSelectionAnnouncement
+    {
+        get => this.candidateSelectionAnnouncement;
+        private set => this.SetProperty(ref this.candidateSelectionAnnouncement, value);
+    }
+
+    public string CandidateReviewDetail
+    {
+        get
+        {
+            int applied = this.snapshot.AppliedCandidateApprovalCount;
+            int remaining = this.CandidateChoices.Count;
+            if (applied == 0)
+                return "Every choice starts unchecked. Choose only files you want additively approved in a newly validated preview. Applying approvals does not confirm or run the plan, and no files change.";
+
+            string appliedLabel = applied == 1 ? "approval is" : "approvals are";
+            string remainingLabel = remaining == 1 ? "candidate remains" : "candidates remain";
+            return $"{applied} additive file {appliedLabel} already applied and cannot be removed individually from this read-only preview. {remaining} {remainingLabel}. Accepted candidates no longer appear. Start a fresh inspection to revoke this preview and request a new initial plan. No files change, and this screen cannot confirm or execute a plan.";
+        }
+    }
+
+    public bool IsCandidateApprovalCapacityFull
+        => this.snapshot.AppliedCandidateApprovalCount >= ProtocolJsonSerializer.MaxPlanCandidates;
+
+    public bool IsCandidateSelectionOverRemainingCapacity
+        => this.snapshot.SelectedCandidates.Count > ProtocolJsonSerializer.MaxPlanCandidates - this.snapshot.AppliedCandidateApprovalCount;
+
+    public bool IsCandidateCapacityDetailVisible
+        => this.IsCandidateApprovalCapacityFull || this.IsCandidateSelectionOverRemainingCapacity;
+
+    public string CandidateCapacityDetail
+    {
+        get
+        {
+            if (this.IsCandidateApprovalCapacityFull)
+                return "This preview's bounded approval history is full, so no more candidate approvals fit in it. Clear local choices only unchecks this screen and does not free approval capacity. Start a fresh inspection to revoke this preview before approving another candidate. No files change, and this screen cannot confirm or execute a plan.";
+            if (!this.IsCandidateSelectionOverRemainingCapacity)
+                return "";
+
+            int remaining = ProtocolJsonSerializer.MaxPlanCandidates - this.snapshot.AppliedCandidateApprovalCount;
+            int selected = this.snapshot.SelectedCandidates.Count;
+            string approvalLabel = remaining == 1 ? "approval fits" : "approvals fit";
+            return $"Only {remaining} more {approvalLabel} in this preview, but {selected} files are selected. Apply is unavailable. Uncheck files or Clear local choices to reduce this selection, or start a fresh inspection to revoke this preview. No files change, and this screen cannot confirm or execute a plan.";
+        }
+    }
+
     public bool IsOperationSelectionEnabled => this.snapshot.CanSelect;
 
     public bool IsInspectVisible => this.snapshot.State is PlanReviewState.Choosing
-        or PlanReviewState.SelectionChanged
-        or PlanReviewState.Available;
+        or PlanReviewState.SelectionChanged;
 
     public bool IsBusy => this.snapshot.State is PlanReviewState.Inspecting
+        or PlanReviewState.Approving
         or PlanReviewState.Closing
         or PlanReviewState.Cancelling;
 
@@ -257,6 +376,14 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
 
     public bool HasCandidateRows => this.CandidateRows.Count > 0;
 
+    public bool IsCandidateReviewVisible => this.IsResultVisible
+        && (this.CandidateChoices.Count > 0 || this.snapshot.HasAppliedCandidateApprovals)
+        && this.snapshot.SelectedOperation != InstallerOperation.Backup;
+
+    public bool HasCandidateChoices => this.CandidateChoices.Count > 0;
+
+    public bool IsCandidateSelectionEnabled => this.snapshot.CanSelectCandidates;
+
     public AutomationLiveSetting StatusLiveSetting => this.IsResultVisible || this.IsErrorVisible
         ? AutomationLiveSetting.Off
         : AutomationLiveSetting.Polite;
@@ -266,6 +393,12 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     public AsyncRelayCommand CancelCommand { get; }
 
     public AsyncRelayCommand RetryCommand { get; }
+
+    public AsyncRelayCommand ApplyCandidatesCommand { get; }
+
+    public RelayCommand ClearCandidatesCommand { get; }
+
+    public AsyncRelayCommand StartFreshInspectionCommand { get; }
 
     public RelayCommand ExitCommand { get; }
 
@@ -281,6 +414,14 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     internal void ApplySnapshotForTesting(PlanReviewSnapshot value)
     {
         this.ApplySnapshot(value, requestFocus: false);
+    }
+
+    internal bool ToggleCandidate(PlanReviewCandidateChoice candidate)
+    {
+        if (!this.snapshot.CanSelectCandidates || !this.CandidateChoices.Any(choice => ReferenceEquals(choice, candidate)))
+            return false;
+        candidate.IsSelected = !candidate.IsSelected;
+        return true;
     }
 
     private void OnControllerChanged(object? sender, EventArgs e)
@@ -307,10 +448,12 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             : null;
         this.SetProperty(ref this.selectedOperation, selected, nameof(this.SelectedOperation));
         this.ApplyResult(next.Result as PlanReviewPlan);
+        this.ApplyCandidateChoices(next);
         (this.Heading, this.Message) = this.GetCopy(next);
         this.LiveAnnouncement = next.State is PlanReviewState.Available
                 or PlanReviewState.Rejected
                 or PlanReviewState.Inspecting
+                or PlanReviewState.Approving
                 or PlanReviewState.Closing
                 or PlanReviewState.Cancelling
                 or PlanReviewState.Cancelled
@@ -342,17 +485,21 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
                 $"Inspecting the {operation.ToLowerInvariant()} plan…",
                 "Reading a bounded plan from the local installer service. No files are being changed."
             ),
+            PlanReviewState.Approving => (
+                "Applying additive candidate approvals to a refreshed preview…",
+                "The current preview is being revoked and a newly validated read-only preview is being requested. No files are being changed, confirmed, or executed."
+            ),
             PlanReviewState.Closing => (
                 "Closing the read-only plan session safely…",
                 "Waiting for backend cleanup to settle. Retry and exit remain unavailable until the session is closed; no installer action ran."
             ),
             PlanReviewState.Available when value.Result is PlanReviewPlan { HasBlockingConflicts: true } plan => (
                 $"{GetOperationLabel(plan.Operation)} preview has blocking conflicts",
-                $"The inspection observed {Sum(plan.ConflictCounts)} blocking conflict(s). This plan cannot proceed as observed; this screen cannot approve or run it."
+                $"The inspection observed {Sum(plan.ConflictCounts)} blocking conflict(s). Additive candidate approval may refresh this preview, but this screen cannot confirm or execute the plan."
             ),
             PlanReviewState.Available when value.Result is PlanReviewPlan plan => (
                 $"{GetOperationLabel(plan.Operation)} plan inspected — preview only",
-                "No blocking conflicts were observed in this bounded inspection. That is not approval and no action ran."
+                "No blocking conflicts were observed in this bounded inspection. That is not confirmation or a safety guarantee, and no file action ran."
             ),
             PlanReviewState.Rejected when value.Result is PlanReviewRejection rejection => GetRejectionCopy(rejection),
             PlanReviewState.Cancelling => (
@@ -405,7 +552,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             ),
             ProtocolPrePlanErrorCode.CandidateApprovalFailed => (
                 "A candidate decision could not be accepted",
-                "This preview cannot make candidate decisions. Close and reopen the installer; no installer action ran."
+                "The additive candidate approvals were not accepted. No files changed. Start a fresh inspection or close and reopen the installer."
             ),
             ProtocolPrePlanErrorCode.PermissionDenied => (
                 "The game folder could not be read with your permissions",
@@ -450,7 +597,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.ObservedStateDetail = GetObservedStateDetail(plan.ObservedState);
         this.CurrentReleaseDetail = FormatRelease(plan.CurrentRelease, "No receipt-authenticated current fork release was observed.");
         this.TargetReleaseDetail = FormatTargetRelease(plan);
-        this.SafetyDetail = "Recommended default for any later decision: Cancel. A separate confirmation would be required in a future reviewed workflow. This build has no confirmation control.";
+        this.SafetyDetail = "Recommended default for any later decision: Cancel. Candidate approval only requests a refreshed read-only preview. A separate confirmation would still be required, and this build has no confirmation or execution control.";
         this.RiskRows = Array.AsReadOnly(plan.Risks
             .Select(risk => GetRiskRow(risk))
             .ToArray());
@@ -477,10 +624,116 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         int candidates = Sum(plan.CandidateCounts);
         this.CandidateSummary = candidates == 0
             ? "No modified or unknown file candidates were reported."
-            : $"{candidates} modified or unknown file candidate(s) were reported. Provisional inclusion is not approval by you.";
+            : $"{candidates} modified or unknown file candidate(s) were reported. Review the individual choices below; provisional inclusion is not approval by you.";
         this.AdditionalNoticeDetail = plan.AdditionalNoticeCount == 0
             ? "No additional backend notices were reported."
             : $"Additional backend notices observed: {plan.AdditionalNoticeCount}. This summary projection does not expose their text.";
+    }
+
+    private void ApplyCandidateChoices(PlanReviewSnapshot value)
+    {
+        IReadOnlyList<PlanReviewCandidate> candidates = (value.Result as PlanReviewPlan)?.Candidates
+            ?? Array.Empty<PlanReviewCandidate>();
+        HashSet<PlanReviewCandidate> selected = new(value.SelectedCandidates, ReferenceEqualityComparer.Instance);
+        bool sameCandidates = candidates.Count == this.CandidateChoices.Count
+            && candidates.Select((candidate, index) => ReferenceEquals(candidate, this.CandidateChoices[index].Candidate)).All(value => value);
+        if (!sameCandidates)
+        {
+            foreach (PlanReviewCandidateChoice previous in this.CandidateChoices)
+                previous.Deactivate();
+            PlanReviewCandidateChoice[] choices = candidates.Select(candidate => new PlanReviewCandidateChoice(
+                candidate,
+                candidate.DisplayPath,
+                GetCandidateReasonDetail(candidate.Reason),
+                GetCandidateDispositionDetail(candidate.Disposition),
+                candidate.BackendProvisionallyIncluded,
+                this.OnCandidateSelectionChanged
+            )).ToArray();
+            this.CandidateChoices = Array.AsReadOnly(choices);
+        }
+        foreach (PlanReviewCandidateChoice choice in this.CandidateChoices)
+            choice.SetSelectedFromSnapshot(selected.Contains(choice.Candidate));
+        this.CandidateSelectionAnnouncement = value.AppliedCandidateApprovalCount > 0
+            ? $"{value.AppliedCandidateApprovalCount} {GetCountLabel(value.AppliedCandidateApprovalCount, "approval", "approvals")} already applied and fixed in this preview; {selected.Count} of {candidates.Count} remaining files selected."
+            : $"{selected.Count} of {candidates.Count} files selected.";
+    }
+
+    private void OnCandidateSelectionChanged(PlanReviewCandidateChoice choice, bool _)
+    {
+        if (
+            !this.snapshot.CanSelectCandidates
+            || !this.CandidateChoices.Any(candidate => ReferenceEquals(candidate, choice))
+        )
+        {
+            choice.SetSelectedFromSnapshot(this.snapshot.SelectedCandidates.Any(candidate => ReferenceEquals(candidate, choice.Candidate)));
+            return;
+        }
+
+        try
+        {
+            PlanReviewCandidate[] selection = this.CandidateChoices
+                .Where(candidate => candidate.IsSelected)
+                .Select(candidate => candidate.Candidate)
+                .ToArray();
+            this.Controller.SetCandidateSelection(Array.AsReadOnly(selection));
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            PlanReviewSnapshot current = this.Controller.Snapshot;
+            this.ApplySnapshot(current, requestFocus: false);
+        }
+        catch (Exception exception)
+        {
+            this.HandlePresentationFailure(exception);
+        }
+    }
+
+    private void ClearCandidateSelectionSafely()
+    {
+        try
+        {
+            this.Controller.ClearCandidateSelection();
+        }
+        catch (Exception exception)
+        {
+            this.HandleCandidateActionFailure(exception);
+        }
+    }
+
+    private void HandleCandidateActionFailure(Exception exception)
+    {
+        if (exception is ArgumentException or InvalidOperationException)
+        {
+            this.ApplySnapshot(this.Controller.Snapshot, requestFocus: false);
+            return;
+        }
+        this.HandlePresentationFailure(exception);
+    }
+
+    private static string GetCandidateReasonDetail(FileReplacementCandidateReason reason)
+    {
+        return reason switch
+        {
+            FileReplacementCandidateReason.ModifiedReceiptOwned => "Reason: This receipt-owned file differs from its recorded identity. The cause was not observed.",
+            FileReplacementCandidateReason.ModifiedInstalledLauncher => "Reason: This installed launcher differs from its recorded identity. The cause was not observed.",
+            FileReplacementCandidateReason.LegacyInstaller => "Reason: This exact file was classified as a recognized legacy installer file.",
+            FileReplacementCandidateReason.UnknownCollision => "Reason: This file occupies a verified package destination. Its owner and creator are unknown.",
+            FileReplacementCandidateReason.OfficialOrLegacyLauncher => "Reason: Bounded evidence classified this as an official or legacy launcher; ownership is unconfirmed.",
+            FileReplacementCandidateReason.OfficialLauncherBackup => "Reason: This exact backup meets the retained-official-launcher classification.",
+            _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, null)
+        };
+    }
+
+    private static string GetCandidateDispositionDetail(FileReplacementCandidateDisposition disposition)
+    {
+        return disposition switch
+        {
+            FileReplacementCandidateDisposition.Replace => "Proposed disposition: a later confirmed plan may replace this exact observed file.",
+            FileReplacementCandidateDisposition.Remove => "Proposed disposition: a later confirmed plan may remove this exact observed file.",
+            FileReplacementCandidateDisposition.Restore => "Proposed disposition: a later confirmed plan may restore this exact observed file.",
+            FileReplacementCandidateDisposition.TrustRetained => "Proposed disposition: a later confirmed plan may retain and trust this exact observed file.",
+            _ => throw new ArgumentOutOfRangeException(nameof(disposition), disposition, null)
+        };
     }
 
     private static string GetObservedStateDetail(ObservedInstallState state)
@@ -503,7 +756,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             ProtocolPlanRisk.Uninstall => new("Removal requested", "The preview would remove receipt-owned SMAPI files where observed.", 1),
             ProtocolPlanRisk.Rollback => throw new ArgumentOutOfRangeException(nameof(risk), risk, "Rollback risks aren't accepted by this screen."),
             ProtocolPlanRisk.Downgrade => new("Older target release observed", "The verified target is earlier than the receipt-authenticated current release.", 1),
-            ProtocolPlanRisk.ModifiedOrUnknownFileApproval => new("Modified or unknown files observed", "A later separate approval would be required. This screen cannot approve files.", 1),
+            ProtocolPlanRisk.ModifiedOrUnknownFileApproval => new("Modified or unknown files observed", "Explicit additive candidate approval can request a refreshed read-only preview. It does not change files, confirm, or execute the plan.", 1),
             ProtocolPlanRisk.RecoveryPrune => throw new ArgumentOutOfRangeException(nameof(risk), risk, "Recovery-pruning risks aren't accepted by this screen."),
             _ => throw new ArgumentOutOfRangeException(nameof(risk), risk, null)
         };
@@ -598,6 +851,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     private static int Sum(IReadOnlyList<PlanReviewCandidateCount> values)
         => values.Aggregate(0, (sum, value) => checked(sum + value.Count));
 
+    private static string GetCountLabel(int count, string singular, string plural)
+        => count == 1 ? singular : plural;
+
     private static string GetOperationLabel(InstallerOperation operation)
     {
         return operation switch
@@ -617,7 +873,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         return value.State switch
         {
             PlanReviewState.SelectionChanged => PlanReviewFocusTarget.OperationList,
-            PlanReviewState.Inspecting or PlanReviewState.Closing or PlanReviewState.Cancelling => PlanReviewFocusTarget.Status,
+            PlanReviewState.Inspecting or PlanReviewState.Approving or PlanReviewState.Closing or PlanReviewState.Cancelling => PlanReviewFocusTarget.Status,
             PlanReviewState.Available => PlanReviewFocusTarget.Result,
             PlanReviewState.Rejected => PlanReviewFocusTarget.Error,
             PlanReviewState.Cancelled or PlanReviewState.Failed or PlanReviewState.SessionFaulted => PlanReviewFocusTarget.Exit,
@@ -639,10 +895,21 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.OnPropertyChanged(nameof(this.HasOperationRows));
         this.OnPropertyChanged(nameof(this.HasConflictRows));
         this.OnPropertyChanged(nameof(this.HasCandidateRows));
+        this.OnPropertyChanged(nameof(this.IsCandidateReviewVisible));
+        this.OnPropertyChanged(nameof(this.HasCandidateChoices));
+        this.OnPropertyChanged(nameof(this.IsCandidateSelectionEnabled));
+        this.OnPropertyChanged(nameof(this.CandidateReviewDetail));
+        this.OnPropertyChanged(nameof(this.IsCandidateApprovalCapacityFull));
+        this.OnPropertyChanged(nameof(this.IsCandidateSelectionOverRemainingCapacity));
+        this.OnPropertyChanged(nameof(this.IsCandidateCapacityDetailVisible));
+        this.OnPropertyChanged(nameof(this.CandidateCapacityDetail));
         this.OnPropertyChanged(nameof(this.StatusLiveSetting));
         this.InspectCommand.NotifyCanExecuteChanged();
         this.CancelCommand.NotifyCanExecuteChanged();
         this.RetryCommand.NotifyCanExecuteChanged();
+        this.ApplyCandidatesCommand.NotifyCanExecuteChanged();
+        this.ClearCandidatesCommand.NotifyCanExecuteChanged();
+        this.StartFreshInspectionCommand.NotifyCanExecuteChanged();
         this.ExitCommand.NotifyCanExecuteChanged();
     }
 

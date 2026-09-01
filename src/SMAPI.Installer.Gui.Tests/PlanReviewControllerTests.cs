@@ -328,7 +328,11 @@ internal sealed class PlanReviewControllerTests
     {
         TaskCompletionSource atCommit = NewCompletion();
         TaskCompletionSource releaseCommit = NewCompletion();
-        FakePlanSession session = new();
+        InstallerReadOnlyPlanCandidate backend = CandidateCapability("mods/race.dll", provisional: false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [backend]))
+        };
         PlanReviewController controller = new(session)
         {
             BeforeResultCommitForTesting = () =>
@@ -347,7 +351,82 @@ internal sealed class PlanReviewControllerTests
         await WaitUntilAsync(() => controller.Snapshot.State == PlanReviewState.SessionFaulted);
 
         controller.Snapshot.Result.Should().BeNull();
+        controller.Snapshot.Candidates.Should().BeEmpty();
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(0);
         await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task CancellationWinsTheExactCandidateResultCommitGap()
+    {
+        InstallerReadOnlyPlanCandidate backend = CandidateCapability("mods/example.dll", provisional: false);
+        TaskCompletionSource atCommit = NewCompletion();
+        TaskCompletionSource releaseCommit = NewCompletion();
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [backend])),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Install, [
+                CandidateCapability("mods/replacement.dll", provisional: false)
+            ]))
+        };
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Install);
+        await controller.InspectAsync();
+        controller.SetCandidateSelection(controller.Snapshot.Candidates);
+        controller.BeforeResultCommitForTesting = () =>
+        {
+            atCommit.TrySetResult();
+            releaseCommit.Task.GetAwaiter().GetResult();
+        };
+
+        Task approval = controller.ApplyCandidateSelectionAsync();
+        await atCommit.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Task cancellation = controller.CancelAsync();
+        releaseCommit.TrySetResult();
+        await Task.WhenAll(approval, cancellation).WaitAsync(TimeSpan.FromSeconds(2));
+
+        PlanReviewSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(PlanReviewState.Cancelled);
+        snapshot.Result.Should().BeNull();
+        snapshot.Candidates.Should().BeEmpty();
+        snapshot.AppliedCandidateApprovalCount.Should().Be(0);
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task DisposalDuringCandidateApprovalRevokesPresentationAndJoinsCleanup()
+    {
+        InstallerReadOnlyPlanCandidate backend = CandidateCapability("mods/example.dll", provisional: false);
+        TaskCompletionSource approvalStarted = NewCompletion();
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [backend])),
+            Approval = async (_, token) =>
+            {
+                approvalStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                throw new AssertionException("Disposal should cancel candidate approval.");
+            }
+        };
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Install);
+        await controller.InspectAsync();
+        controller.SetCandidateSelection(controller.Snapshot.Candidates);
+        Task approval = controller.ApplyCandidateSelectionAsync();
+        await approvalStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await controller.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        await approval.WaitAsync(TimeSpan.FromSeconds(2));
+
+        PlanReviewSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(PlanReviewState.Disposed);
+        snapshot.Result.Should().BeNull();
+        snapshot.Candidates.Should().BeEmpty();
+        snapshot.SelectedCandidates.Should().BeEmpty();
+        snapshot.AppliedCandidateApprovalCount.Should().Be(0);
         session.DisposeCalls.Should().Be(1);
     }
 
@@ -400,7 +479,8 @@ internal sealed class PlanReviewControllerTests
             Risks = risks,
             OperationCounts = operations,
             ConflictCounts = conflicts,
-            CandidateCounts = candidates
+            CandidateCounts = candidates,
+            Candidates = [CandidateCapability("mods/example.dll", provisional: true)]
         };
         FakePlanSession session = new()
         {
@@ -429,7 +509,258 @@ internal sealed class PlanReviewControllerTests
             1
         ));
         projected.CandidateCounts.Single().ProvisionallyIncluded.Should().BeTrue();
+        projected.Candidates.Single().Should().Match<PlanReviewCandidate>(candidate =>
+            candidate.DisplayPath == "mods/example.dll"
+            && candidate.Reason == FileReplacementCandidateReason.ModifiedReceiptOwned
+            && candidate.Disposition == FileReplacementCandidateDisposition.Replace
+            && candidate.BackendProvisionallyIncluded
+        );
         projected.Risks.Should().BeAssignableTo<System.Collections.ObjectModel.ReadOnlyCollection<ProtocolPlanRisk>>();
+    }
+
+    [Test]
+    public async Task CandidateSelectionRequiresExactCurrentReferencesAndInvalidInputsPreserveTheBinding()
+    {
+        InstallerReadOnlyPlanCandidate firstBackend = CandidateCapability("mods/first.dll", provisional: false);
+        InstallerReadOnlyPlanCandidate secondBackend = CandidateCapability("mods/second.dll", provisional: true);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [firstBackend, secondBackend]))
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Repair);
+        await controller.InspectAsync();
+        PlanReviewCandidate[] choices = controller.Snapshot.Candidates.ToArray();
+
+        controller.Snapshot.SelectedCandidates.Should().BeEmpty("backend provisional inclusion is evidence, not a local user selection");
+        controller.SetCandidateSelection([choices[0]]);
+
+        PlanReviewCandidate reconstructed = new(
+            choices[0].DisplayPath,
+            choices[0].Reason,
+            choices[0].Disposition,
+            choices[0].BackendProvisionallyIncluded
+        );
+        Action reconstructedSet = () => controller.SetCandidateSelection([reconstructed]);
+        reconstructedSet.Should().Throw<ArgumentException>();
+        Action mixedSet = () => controller.SetCandidateSelection([choices[0], reconstructed]);
+        mixedSet.Should().Throw<ArgumentException>();
+        Action duplicateSet = () => controller.SetCandidateSelection([choices[0], choices[0]]);
+        duplicateSet.Should().Throw<ArgumentException>();
+        Action unreadableSet = () => controller.SetCandidateSelection(new ThrowingCandidateList());
+        unreadableSet.Should().Throw<ArgumentException>();
+        Func<Task> prematureFreshInspection = () => controller.StartFreshInspectionAsync();
+        await prematureFreshInspection.Should().ThrowAsync<InvalidOperationException>();
+
+        controller.Snapshot.SelectedCandidates.Should().ContainSingle().Which.Should().BeSameAs(choices[0]);
+        session.ApprovedCandidates.Should().BeEmpty();
+        controller.ClearCandidateSelection();
+        controller.Snapshot.SelectedCandidates.Should().BeEmpty();
+        session.ApprovedCandidates.Should().BeEmpty("clear is presentation-local and cannot invoke the backend");
+    }
+
+    [Test]
+    public async Task CandidateApprovalIsAdditiveBoundedAndFreshInspectionRevokesOldChoices()
+    {
+        InstallerReadOnlyPlanCandidate first = CandidateCapability("mods/first.dll", provisional: false);
+        InstallerReadOnlyPlanCandidate second = CandidateCapability("mods/second.dll", provisional: true);
+        InstallerReadOnlyPlanCandidate subsequent = CandidateCapability("mods/subsequent.dll", provisional: false);
+        InstallerReadOnlyPlanCandidate fresh = CandidateCapability("mods/fresh.dll", provisional: false);
+        int inspectionCount = 0;
+        int approvalCount = 0;
+        TaskCompletionSource approvalStarted = NewCompletion();
+        TaskCompletionSource releaseApproval = NewCompletion();
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(
+                CandidatePlan(operation, Interlocked.Increment(ref inspectionCount) == 1 ? [first, second] : [fresh])
+            ),
+            Approval = async (_, _) =>
+            {
+                int count = Interlocked.Increment(ref approvalCount);
+                if (count == 1)
+                {
+                    approvalStarted.TrySetResult();
+                    await releaseApproval.Task;
+                }
+                return CandidatePlan(InstallerOperation.Repair, count == 1 ? [subsequent] : []);
+            }
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Repair);
+        await controller.InspectAsync();
+        PlanReviewCandidate[] oldChoices = controller.Snapshot.Candidates.ToArray();
+        controller.SetCandidateSelection(oldChoices);
+
+        Task approval = controller.ApplyCandidateSelectionAsync();
+        await approvalStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        controller.Snapshot.State.Should().Be(PlanReviewState.Approving);
+        controller.Snapshot.CanCancel.Should().BeTrue();
+        controller.Snapshot.Candidates.Should().BeEmpty("candidate authority is revoked before the backend call");
+        releaseApproval.TrySetResult();
+        await approval.WaitAsync(TimeSpan.FromSeconds(2));
+
+        session.ApprovedCandidates.Should().ContainSingle().Which.Should().Equal(first, second);
+        PlanReviewSnapshot applied = controller.Snapshot;
+        applied.State.Should().Be(PlanReviewState.Available);
+        applied.Candidates.Should().ContainSingle().Which.DisplayPath.Should().Be("mods/subsequent.dll");
+        applied.AppliedCandidateApprovalCount.Should().Be(2);
+        applied.HasAppliedCandidateApprovals.Should().BeTrue();
+        controller.SetCandidateSelection(applied.Candidates);
+        await controller.ApplyCandidateSelectionAsync();
+        session.ApprovedCandidates.Should().HaveCount(2);
+        session.ApprovedCandidates[1].Should().Equal(subsequent);
+        controller.Snapshot.Candidates.Should().BeEmpty();
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(3);
+        controller.Snapshot.CanStartFreshInspection.Should().BeTrue(
+            "cumulative applied history stays reachable even when the replacement has no candidates"
+        );
+
+        await controller.StartFreshInspectionAsync();
+        PlanReviewSnapshot refreshed = controller.Snapshot;
+        refreshed.AppliedCandidateApprovalCount.Should().Be(0);
+        refreshed.HasAppliedCandidateApprovals.Should().BeFalse();
+        refreshed.Candidates.Should().ContainSingle().Which.DisplayPath.Should().Be("mods/fresh.dll");
+        Action staleSet = () => controller.SetCandidateSelection([oldChoices[0]]);
+        staleSet.Should().Throw<ArgumentException>();
+    }
+
+    [Test]
+    public async Task CandidateApprovalRejectionRevokesAuthorityAndRequiresAFullInspection()
+    {
+        InstallerReadOnlyPlanCandidate backend = CandidateCapability("mods/example.dll", provisional: false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [backend])),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(new InstallerReadOnlyPlanRejection(
+                ProtocolPrePlanErrorCode.CandidateApprovalFailed,
+                ProtocolNextAction.InspectAgain,
+                false
+            ))
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Install);
+        await controller.InspectAsync();
+        controller.SetCandidateSelection(controller.Snapshot.Candidates);
+
+        await controller.ApplyCandidateSelectionAsync();
+
+        PlanReviewSnapshot rejected = controller.Snapshot;
+        rejected.State.Should().Be(PlanReviewState.Rejected);
+        rejected.Result.Should().Be(new PlanReviewRejection(
+            ProtocolPrePlanErrorCode.CandidateApprovalFailed,
+            ProtocolNextAction.InspectAgain,
+            false
+        ));
+        rejected.Candidates.Should().BeEmpty();
+        rejected.AppliedCandidateApprovalCount.Should().Be(0);
+        rejected.CanRetry.Should().BeTrue();
+        rejected.CanInspect.Should().BeTrue();
+        rejected.CanApplyCandidates.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task BackupNeverExposesCandidateApproval()
+    {
+        InstallerReadOnlyPlanCandidate backend = CandidateCapability("mods/example.dll", provisional: false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [backend]))
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Backup);
+        await controller.InspectAsync();
+
+        controller.Snapshot.Candidates.Should().ContainSingle();
+        controller.Snapshot.CanSelectCandidates.Should().BeFalse();
+        Action select = () => controller.SetCandidateSelection(controller.Snapshot.Candidates);
+        select.Should().Throw<InvalidOperationException>();
+        Func<Task> apply = () => controller.ApplyCandidateSelectionAsync();
+        await apply.Should().ThrowAsync<InvalidOperationException>();
+        session.ApprovedCandidates.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task CandidateApprovalCapacityRejectsBeforeRevokingTheCurrentBindingAndOperationChangeClearsHistory()
+    {
+        InstallerReadOnlyPlanCandidate[] maximum = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates)
+            .Select(index => CandidateCapability($"mods/{index:D3}.dll", provisional: false))
+            .ToArray();
+        InstallerReadOnlyPlanCandidate remaining = CandidateCapability("mods/remaining.dll", provisional: false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, maximum)),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Update, [remaining]))
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+        await controller.InspectAsync();
+        controller.SetCandidateSelection(controller.Snapshot.Candidates);
+        await controller.ApplyCandidateSelectionAsync();
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(ProtocolJsonSerializer.MaxPlanCandidates);
+        PlanReviewCandidate remainingChoice = controller.Snapshot.Candidates.Single();
+        controller.Snapshot.CanSelectCandidates.Should().BeTrue();
+        controller.SetCandidateSelection([remainingChoice]);
+        controller.Snapshot.CanApplyCandidates.Should().BeFalse("no cumulative approval capacity remains");
+        controller.Snapshot.CanClearCandidates.Should().BeTrue("capacity must not trap a local selection");
+
+        Func<Task> overCapacity = () => controller.ApplyCandidateSelectionAsync();
+        await overCapacity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*remaining*capacity*");
+        controller.Snapshot.SelectedCandidates.Should().ContainSingle().Which.Should().BeSameAs(remainingChoice);
+        session.ApprovedCandidates.Should().ContainSingle("the invalid request is rejected before a backend call");
+        controller.ClearCandidateSelection();
+        controller.Snapshot.SelectedCandidates.Should().BeEmpty();
+        controller.Snapshot.CanApplyCandidates.Should().BeFalse();
+
+        controller.SelectOperation(InstallerOperation.Backup);
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(0);
+        controller.Snapshot.Candidates.Should().BeEmpty();
+        controller.Snapshot.SelectedCandidates.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task PartialCandidateApprovalCapacityAdvertisesOnlySelectionsThatAdmissionCanAccept()
+    {
+        InstallerReadOnlyPlanCandidate[] initial = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates - 1)
+            .Select(index => CandidateCapability($"mods/initial-{index:D3}.dll", provisional: false))
+            .ToArray();
+        InstallerReadOnlyPlanCandidate firstRemaining = CandidateCapability("mods/remaining-first.dll", provisional: false);
+        InstallerReadOnlyPlanCandidate secondRemaining = CandidateCapability("mods/remaining-second.dll", provisional: false);
+        int approvalCount = 0;
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, initial)),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(
+                InstallerOperation.Update,
+                Interlocked.Increment(ref approvalCount) == 1 ? [firstRemaining, secondRemaining] : []
+            ))
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+        await controller.InspectAsync();
+        controller.SetCandidateSelection(controller.Snapshot.Candidates);
+        controller.Snapshot.CanApplyCandidates.Should().BeTrue();
+        await controller.ApplyCandidateSelectionAsync();
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(ProtocolJsonSerializer.MaxPlanCandidates - 1);
+
+        PlanReviewCandidate[] remainingChoices = controller.Snapshot.Candidates.ToArray();
+        controller.SetCandidateSelection(remainingChoices);
+        PlanReviewSnapshot oversized = controller.Snapshot;
+        oversized.CanSelectCandidates.Should().BeTrue();
+        oversized.CanApplyCandidates.Should().BeFalse("two selected candidates exceed the one remaining approval slot");
+        oversized.CanClearCandidates.Should().BeTrue();
+        Func<Task> overCapacity = () => controller.ApplyCandidateSelectionAsync();
+        await overCapacity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*remaining*capacity*");
+        session.ApprovedCandidates.Should().ContainSingle("capability and admission use the same remaining-capacity bound");
+        controller.Snapshot.SelectedCandidates.Should().Equal(remainingChoices);
+
+        controller.ClearCandidateSelection();
+        controller.SetCandidateSelection([remainingChoices[0]]);
+        controller.Snapshot.CanApplyCandidates.Should().BeTrue("one selected candidate exactly fits the remaining approval slot");
+        await controller.ApplyCandidateSelectionAsync();
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(ProtocolJsonSerializer.MaxPlanCandidates);
+        session.ApprovedCandidates.Should().HaveCount(2);
+        session.ApprovedCandidates[1].Should().Equal(firstRemaining);
     }
 
     [Test]
@@ -456,6 +787,20 @@ internal sealed class PlanReviewControllerTests
             ("invalid candidate pair", valid with { Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval], CandidateCounts = [new(FileReplacementCandidateReason.OfficialLauncherBackup, FileReplacementCandidateDisposition.Replace, false, 1)] }),
             ("candidate risk missing", valid with { CandidateCounts = [CandidateCount(1)] }),
             ("unexpected candidate risk", valid with { Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval] }),
+            ("candidate detail missing", valid with { Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval], CandidateCounts = [CandidateCount(1)] }),
+            ("candidate aggregate missing", valid with { Candidates = [CandidateCapability("mods/detail-only.dll", false)] }),
+            ("duplicate candidate reference", valid with
+            {
+                Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
+                CandidateCounts = [CandidateCount(2)],
+                Candidates = DuplicateCandidateReferences()
+            }),
+            ("duplicate candidate display path", valid with
+            {
+                Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
+                CandidateCounts = [CandidateCount(2)],
+                Candidates = [CandidateCapability("mods/same.dll", false), CandidateCapability("mods/same.dll", false)]
+            }),
             ("excessive conflicts", valid with { HasBlockingConflicts = true, ConflictCounts = [new(PlanConflictCode.UnknownCollision, 257)] }),
             ("count overflow", valid with { OperationCounts = [new(PlanOperationKind.Create, int.MaxValue), new(PlanOperationKind.Replace, 1)] })
         ];
@@ -476,6 +821,41 @@ internal sealed class PlanReviewControllerTests
             controller.Snapshot.Result.Should().BeNull(name);
             controller.Snapshot.CanInspect.Should().BeFalse(name);
             controller.Snapshot.CanExit.Should().BeTrue(name);
+            await controller.DisposeAsync();
+            session.DisposeCalls.Should().Be(1, name);
+        }
+    }
+
+    [Test]
+    public async Task HostileCandidateDetailCollectionsFailClosedWithoutRetainingAuthority()
+    {
+        (string Name, IReadOnlyList<InstallerReadOnlyPlanCandidate> Candidates)[] hostile =
+        [
+            ("throwing count", new ThrowingCountBackendCandidateList()),
+            ("throwing index", new ThrowingIndexBackendCandidateList()),
+            ("oversized count", new OversizedBackendCandidateList())
+        ];
+
+        foreach ((string name, IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates) in hostile)
+        {
+            FakePlanSession session = new()
+            {
+                Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(operation) with
+                {
+                    Candidates = candidates
+                })
+            };
+            PlanReviewController controller = new(session);
+            controller.SelectOperation(InstallerOperation.Install);
+
+            await controller.InspectAsync();
+            await WaitUntilAsync(() => session.DisposeCalls == 1);
+
+            controller.Snapshot.State.Should().Be(PlanReviewState.Failed, name);
+            controller.Snapshot.Result.Should().BeNull(name);
+            controller.Snapshot.Candidates.Should().BeEmpty(name);
+            controller.Snapshot.SelectedCandidates.Should().BeEmpty(name);
+            controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(0, name);
             await controller.DisposeAsync();
             session.DisposeCalls.Should().Be(1, name);
         }
@@ -617,6 +997,44 @@ internal sealed class PlanReviewControllerTests
             count
         );
 
+    private static InstallerReadOnlyPlanSuccess CandidatePlan(
+        InstallerOperation operation,
+        IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates
+    ) => CreatePlan(operation) with
+    {
+        Risks = candidates.Count == 0 ? [] : [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
+        CandidateCounts = candidates
+            .GroupBy(candidate => new { candidate.Reason, candidate.Disposition, candidate.BackendProvisionallyIncluded })
+            .Select(group => new InstallerPlanCandidateCount(
+                group.Key.Reason,
+                group.Key.Disposition,
+                group.Key.BackendProvisionallyIncluded,
+                group.Count()
+            ))
+            .ToArray(),
+        Candidates = candidates
+    };
+
+    private static InstallerReadOnlyPlanCandidate CandidateCapability(string path, bool provisional)
+        => new(new ProtocolPlanCandidate(
+            ProtocolCandidateId.Parse(Guid.NewGuid().ToString("N")),
+            FileReplacementCandidateReason.ModifiedReceiptOwned,
+            FileReplacementCandidateDisposition.Replace,
+            path,
+            new string('a', 64),
+            123,
+            420,
+            new string('b', 64),
+            provisional,
+            "private evidence"
+        ));
+
+    private static IReadOnlyList<InstallerReadOnlyPlanCandidate> DuplicateCandidateReferences()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability("mods/duplicate.dll", false);
+        return [candidate, candidate];
+    }
+
     private static TaskCompletionSource NewCompletion()
         => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -635,6 +1053,7 @@ internal sealed class PlanReviewControllerTests
     {
         private readonly object Sync = new();
         private readonly List<InstallerOperation> Operations = [];
+        private readonly List<InstallerReadOnlyPlanCandidate[]> Approvals = [];
         private int DisposeCount;
 
         public ProtocolReleaseIdentity Release { get; } = GameDiscoveryControllerTests.Release();
@@ -651,9 +1070,19 @@ internal sealed class PlanReviewControllerTests
                     return this.Operations.ToArray();
             }
         }
+        public InstallerReadOnlyPlanCandidate[][] ApprovedCandidates
+        {
+            get
+            {
+                lock (this.Sync)
+                    return this.Approvals.Select(candidates => candidates.ToArray()).ToArray();
+            }
+        }
 
         public Func<InstallerOperation, CancellationToken, Task<InstallerReadOnlyPlanResult>> Inspection { get; init; }
             = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(operation));
+        public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; }
+            = (_, _) => throw new AssertionException("Candidate approval was not expected.");
         public Func<Task> Disposal { get; init; } = () => Task.CompletedTask;
 
         public void Fail()
@@ -671,10 +1100,53 @@ internal sealed class PlanReviewControllerTests
             return this.Inspection(operation, cancellationToken);
         }
 
+        public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(
+            IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates,
+            CancellationToken cancellationToken = default
+        )
+        {
+            InstallerReadOnlyPlanCandidate[] snapshot = candidates.ToArray();
+            lock (this.Sync)
+                this.Approvals.Add(snapshot);
+            return this.Approval(snapshot, cancellationToken);
+        }
+
         public async ValueTask DisposeAsync()
         {
             Interlocked.Increment(ref this.DisposeCount);
             await this.Disposal();
         }
+    }
+
+    private sealed class ThrowingCandidateList : IReadOnlyList<PlanReviewCandidate>
+    {
+        public int Count => 1;
+        public PlanReviewCandidate this[int index] => throw new InvalidOperationException("synthetic caller failure");
+        public IEnumerator<PlanReviewCandidate> GetEnumerator() => throw new AssertionException("Enumeration must not be used.");
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
+    }
+
+    private sealed class ThrowingCountBackendCandidateList : IReadOnlyList<InstallerReadOnlyPlanCandidate>
+    {
+        public int Count => throw new InvalidOperationException("synthetic hostile count");
+        public InstallerReadOnlyPlanCandidate this[int index] => throw new AssertionException("Index must not be read.");
+        public IEnumerator<InstallerReadOnlyPlanCandidate> GetEnumerator() => throw new AssertionException("Enumeration must not be used.");
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
+    }
+
+    private sealed class ThrowingIndexBackendCandidateList : IReadOnlyList<InstallerReadOnlyPlanCandidate>
+    {
+        public int Count => 1;
+        public InstallerReadOnlyPlanCandidate this[int index] => throw new InvalidOperationException("synthetic hostile index");
+        public IEnumerator<InstallerReadOnlyPlanCandidate> GetEnumerator() => throw new AssertionException("Enumeration must not be used.");
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
+    }
+
+    private sealed class OversizedBackendCandidateList : IReadOnlyList<InstallerReadOnlyPlanCandidate>
+    {
+        public int Count => ProtocolJsonSerializer.MaxPlanCandidates + 1;
+        public InstallerReadOnlyPlanCandidate this[int index] => throw new AssertionException("Index must not be read.");
+        public IEnumerator<InstallerReadOnlyPlanCandidate> GetEnumerator() => throw new AssertionException("Enumeration must not be used.");
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
     }
 }
