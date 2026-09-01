@@ -114,6 +114,21 @@ public sealed class ProtocolSessionStateMachine : IDisposable
     public RecoveryCatalogEvent RecordRecoveryCatalog(ListRecoveriesRequest request, RecoveryHistory history, CommittedRecoveryHandle[] handles)
         => this.RecordRecoveryCatalogAuthorities(request, history, handles.Cast<ICommittedRecoveryContentAuthority>().ToArray());
 
+    /// <summary>Record a normal no-history lookup without minting any empty or synthetic recovery authority.</summary>
+    internal NoRecoveryHistoryEvent RecordNoRecoveryHistory(ListRecoveriesRequest request, GameRootIdentity observedGameRoot)
+    {
+        this.AssertUsable(); this.RequireReadyLookup(request.SessionId); ArgumentNullException.ThrowIfNull(observedGameRoot); ProtocolJsonSerializer.SerializeLine(request);
+        if (request.GamePath != observedGameRoot.CanonicalPath) throw new ProtocolException("The absent recovery history game root doesn't match the requested path.");
+        foreach (ProtocolRecoveryCatalogId old in this.Catalogs
+            .Where(pair => pair.Value.GameRoot.CanonicalPath == observedGameRoot.CanonicalPath)
+            .Select(pair => pair.Key)
+            .ToArray())
+        {
+            this.RemoveCatalog(old);
+        }
+        NoRecoveryHistoryEvent result = new(this.SessionId) { CommandId = request.CommandId }; ProtocolJsonSerializer.SerializeLine(result); return result;
+    }
+
     internal RecoveryCatalogEvent RecordRecoveryCatalogAuthorities(ListRecoveriesRequest request, RecoveryHistory history, ICommittedRecoveryContentAuthority[] handles)
     {
         this.AssertUsable(); this.RequireReadyLookup(request.SessionId); ArgumentNullException.ThrowIfNull(history); ProtocolJsonSerializer.SerializeLine(request);

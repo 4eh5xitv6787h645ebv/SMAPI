@@ -48,6 +48,48 @@ internal sealed class LinuxInstallerProtocolJsonlHostTests
         session.Disposed.Should().BeTrue();
     }
 
+    [Test]
+    public async Task RunAsync_NoRecoveryHistoryRemainsAMinimalCorrelatedResponseAndDoesNotStopFollowingRequests()
+    {
+        ListRecoveriesRequest list = new(Session, "/game");
+        ValidateGameRequest validate = new(Session, "/game");
+        FakeSession session = new((request, _) => Task.FromResult<ProtocolEvent>(request switch
+        {
+            ListRecoveriesRequest => new NoRecoveryHistoryEvent(Session) { CommandId = request.CommandId },
+            ValidateGameRequest => new GameValidationEvent(Session, new("/game", StardewModdingAPI.Installer.Core.Engine.LinuxGameFolderStatus.Valid, "Stardew Valley")) { CommandId = request.CommandId },
+            _ => throw new AssertionException("Unexpected request type.")
+        }));
+
+        (int exit, byte[] output, string diagnostics) = await RunAsync(new MemoryStream(Encoding.UTF8.GetBytes(Lines(list, validate))), session);
+
+        exit.Should().Be(0);
+        diagnostics.Should().BeEmpty();
+        ProtocolEvent[] responses = ParseEvents(output);
+        responses.Should().HaveCount(2);
+        responses[0].Should().BeOfType<NoRecoveryHistoryEvent>().Which.CommandId.Should().Be(list.CommandId);
+        responses[1].Should().BeOfType<GameValidationEvent>().Which.CommandId.Should().Be(validate.CommandId);
+        Encoding.UTF8.GetString(output).Should().NotContain("catalogId").And.NotContain("gamePath").And.NotContain("headSha256");
+        session.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task RunAsync_RejectsNoRecoveryHistoryEventInputIncludingAnExtraField()
+    {
+        NoRecoveryHistoryEvent response = new(Session);
+        string canonical = ProtocolJsonSerializer.SerializeLine(response);
+        string extra = canonical.Replace("\"sessionId\":", "\"catalogId\":\"33333333333333333333333333333333\",\"sessionId\":", StringComparison.Ordinal);
+
+        foreach (string line in new[] { canonical, extra })
+        {
+            FakeSession session = new((request, _) => Task.FromResult<ProtocolEvent>(Response(request)));
+            (int exit, byte[] output, string diagnostics) = await RunAsync(new MemoryStream(Encoding.UTF8.GetBytes(line + "\n")), session);
+
+            exit.Should().Be(LinuxInstallerProtocolJsonlHost.InvalidInputExitCode);
+            output.Should().BeEmpty();
+            diagnostics.Should().Be("Protocol input was rejected." + Environment.NewLine);
+        }
+    }
+
     [TestCase(ProtocolJsonSerializer.MaxLineBytes - 1, true)]
     [TestCase(ProtocolJsonSerializer.MaxLineBytes, true)]
     [TestCase(ProtocolJsonSerializer.MaxLineBytes + 1, false)]

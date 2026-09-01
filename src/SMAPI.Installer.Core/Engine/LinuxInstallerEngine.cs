@@ -682,14 +682,25 @@ public sealed class LinuxInstallerEngine
         cancellationToken.ThrowIfCancellationRequested();
         using InstallerInspectionLease inspection = InstallerInspectionLease.Open(gameRoot);
         AnchoredCoreStateAuthority state = AnchoredCoreStateAuthority.Inspect(inspection.Game, inspection.RootIdentity);
-        RecoveryHistory result = CommittedRecoveryHandle.ListHistory(
-            inspection.Game,
-            inspection.CanonicalGameRoot,
-            inspection.RootIdentity,
-            state,
-            cancellationToken,
-            this.Progress
-        );
+        RecoveryHistory result;
+        try
+        {
+            result = CommittedRecoveryHandle.ListHistory(
+                inspection.Game,
+                inspection.CanonicalGameRoot,
+                inspection.RootIdentity,
+                state,
+                cancellationToken,
+                this.Progress
+            );
+        }
+        catch (NoCommittedRecoveryHistoryException)
+        {
+            state.AssertUsable(inspection.Game, inspection.RootIdentity);
+            inspection.AssertStable();
+            this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1));
+            throw;
+        }
         inspection.AssertStable();
         this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1));
         return result;

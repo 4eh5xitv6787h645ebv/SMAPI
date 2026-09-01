@@ -32,6 +32,74 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
     }
 
     [Test]
+    public async Task AbsentPointerIsNonterminalButMalformedPointerStillFailsClosed()
+    {
+        string game = this.CreateDirectory();
+        RecordingProgress progress = new();
+        using LinuxInstallerProtocolService service = CreateRealService(progress);
+        await Handshake(service);
+        ListRecoveriesRequest firstRequest = new(service.SessionId, game);
+
+        NoRecoveryHistoryEvent first = (NoRecoveryHistoryEvent)await service.HandleAsync(firstRequest);
+        NoRecoveryHistoryEvent retry = (NoRecoveryHistoryEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, game));
+
+        first.CommandId.Should().Be(firstRequest.CommandId);
+        retry.CommandId.Should().NotBe(first.CommandId);
+        service.State.Should().Be(ProtocolSessionState.Ready);
+        progress.Values.Should().ContainInOrder(
+            new TransactionProgress(TransactionStage.VerifyingRecovery, 0, null),
+            new TransactionProgress(TransactionStage.VerifyingRecovery, 1, 1),
+            new TransactionProgress(TransactionStage.VerifyingRecovery, 0, null),
+            new TransactionProgress(TransactionStage.VerifyingRecovery, 1, 1)
+        );
+
+        string installerState = Path.Combine(game, ".smapi-installer");
+        string recoveryState = Path.Combine(installerState, "recovery");
+        Directory.CreateDirectory(recoveryState);
+        File.SetUnixFileMode(installerState, (UnixFileMode)0x1c0);
+        File.SetUnixFileMode(recoveryState, (UnixFileMode)0x1c0);
+        string marker = Path.Combine(installerState, InstallerTransactionExecutor.WorkspaceMarkerName);
+        File.WriteAllText(marker, InstallerTransactionExecutor.WorkspaceMarkerContents);
+        File.SetUnixFileMode(marker, (UnixFileMode)0x180);
+        string pointer = Path.Combine(recoveryState, "current.json");
+        File.WriteAllText(pointer, "{\"private-corrupt-pointer\":true}");
+        File.SetUnixFileMode(pointer, (UnixFileMode)0x180);
+
+        ProtocolEvent corrupt = await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, game));
+
+        corrupt.Should().BeOfType<PrePlanRejectedEvent>();
+        PrePlanRejectedEvent rejected = (PrePlanRejectedEvent)corrupt;
+        rejected.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.UnexpectedFailure);
+        rejected.Message.Should().NotContain("private-corrupt-pointer");
+        rejected.IsTerminal.Should().BeTrue();
+        service.State.Should().Be(ProtocolSessionState.Completed);
+    }
+
+    [Test]
+    public async Task AbsentPointerThroughRootSymlinkIsRejectedUntilTheCanonicalPathIsRequested()
+    {
+        string game = this.CreateDirectory();
+        string alias = Path.Combine(Path.GetTempPath(), $"smapi-real-protocol-alias-{Guid.NewGuid():N}");
+        Directory.CreateSymbolicLink(alias, game);
+        try
+        {
+            using LinuxInstallerProtocolService service = CreateRealService();
+            await Handshake(service);
+
+            Func<Task> aliased = async () => await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, alias));
+
+            await aliased.Should().ThrowAsync<ProtocolException>().WithMessage("*doesn't match the requested path*");
+            service.State.Should().Be(ProtocolSessionState.Ready);
+            (await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, game))).Should().BeOfType<NoRecoveryHistoryEvent>();
+            service.State.Should().Be(ProtocolSessionState.Ready);
+        }
+        finally
+        {
+            Directory.Delete(alias);
+        }
+    }
+
+    [Test]
     public async Task BackupCatalogAndPruneExecuteDurablyThroughTheRealProtocolEngine()
     {
         string game = this.CreateDirectory();
@@ -99,10 +167,10 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         (await new LinuxInstallerEngine().ListRecoveriesAsync(game)).Generations.Should().ContainSingle();
     }
 
-    private static LinuxInstallerProtocolService CreateRealService()
+    private static LinuxInstallerProtocolService CreateRealService(ITransactionProgressSink? observedProgress = null)
         => new(
             "test",
-            progress => new LinuxInstallerProtocolEngine(new LinuxInstallerEngine(progress)),
+            progress => new LinuxInstallerProtocolEngine(new LinuxInstallerEngine(new CompositeProgress(progress, observedProgress))),
             new UnusedDiscovery(),
             new UnusedPackageOpener()
         );
@@ -154,6 +222,21 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         string path = Path.Combine(root, relativePath);
         File.WriteAllText(path, contents);
         File.SetUnixFileMode(path, (UnixFileMode)mode);
+    }
+
+    private sealed class CompositeProgress(ITransactionProgressSink protocol, ITransactionProgressSink? observed) : ITransactionProgressSink
+    {
+        public void Report(TransactionProgress progress)
+        {
+            protocol.Report(progress);
+            observed?.Report(progress);
+        }
+    }
+
+    private sealed class RecordingProgress : ITransactionProgressSink
+    {
+        public List<TransactionProgress> Values { get; } = [];
+        public void Report(TransactionProgress progress) => this.Values.Add(progress);
     }
 
     private sealed class FilePackageAuthority : IVerifiedPackageContentAuthority, IDisposable

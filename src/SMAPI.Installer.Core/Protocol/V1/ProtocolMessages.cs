@@ -33,6 +33,7 @@ public enum ProtocolMessageKind
     RecoveryFailureEvent,
     PackageOpenedEvent,
     RecoveryCatalogEvent,
+    NoRecoveryHistoryEvent,
     PlanEvent,
     PlanPageEvent,
     PrunePlanEvent,
@@ -591,6 +592,16 @@ public sealed record RecoveryCatalogEvent : ProtocolEvent
 
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.RecoveryCatalogEvent;
+}
+
+/// <summary>
+/// A correlated nonterminal result reporting that bounded anchored inspection observed no committed recovery pointer.
+/// This deliberately carries no empty catalog, game-root identity, digest, or selection authority.
+/// </summary>
+public sealed record NoRecoveryHistoryEvent(ProtocolSessionId SessionId) : ProtocolEvent
+{
+    [JsonIgnore]
+    public override ProtocolMessageKind Kind => ProtocolMessageKind.NoRecoveryHistoryEvent;
 }
 
 public sealed record ProtocolPlanOperation(PlanOperationKind Kind, string Path, string? ExpectedCurrentSha256, string? ResultSha256);

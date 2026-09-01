@@ -181,6 +181,80 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void NoRecoveryHistory_IsCorrelatedReadyAndRevokesEarlierAuthoritiesWithoutMintingACatalog()
+    {
+        ProtocolSessionStateMachine machine = Ready();
+        FakeRecoveryAuthority recovery = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+        RecoveryCatalogEvent staleCatalog = Catalog(machine, [recovery]);
+        ProtocolRecoverySelectionId staleSelection = staleCatalog.Generations.Single().SelectionId;
+        ListRecoveriesRequest request = new(machine.SessionId, "/game");
+
+        NoRecoveryHistoryEvent result = machine.RecordNoRecoveryHistory(request, Root);
+
+        result.SessionId.Should().Be(machine.SessionId);
+        result.CommandId.Should().Be(request.CommandId);
+        machine.State.Should().Be(ProtocolSessionState.Ready);
+        machine.CurrentPlanId.Should().BeNull();
+        machine.CurrentPrunePlanId.Should().BeNull();
+        recovery.DisposeCount.Should().Be(1);
+        FluentActions.Invoking(() => machine.ResolveInspectionAuthorities(new(machine.SessionId, "/game", InstallerOperation.Rollback, null, staleSelection)))
+            .Should().Throw<ProtocolException>().WithMessage("*unknown, stale, or missing*");
+
+        ValidateGameRequest followUp = new(machine.SessionId, "/game");
+        machine.RecordGameValidation(followUp, new("/game", LinuxGameFolderStatus.Valid, "Game")).CommandId.Should().Be(followUp.CommandId);
+    }
+
+    [Test]
+    public void NoRecoveryHistory_RejectsWrongSessionWithoutRevokingLiveAuthorities()
+    {
+        ProtocolSessionStateMachine machine = Ready();
+        FakeRecoveryAuthority recovery = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+        RecoveryCatalogEvent catalog = Catalog(machine, [recovery]);
+
+        FluentActions.Invoking(() => machine.RecordNoRecoveryHistory(new(ProtocolSessionId.CreateRandom(), "/game"), Root))
+            .Should().Throw<ProtocolException>().WithMessage("*session ID*");
+
+        recovery.DisposeCount.Should().Be(0);
+        machine.ResolveInspectionAuthorities(new(machine.SessionId, "/game", InstallerOperation.Rollback, null, catalog.Generations.Single().SelectionId)).Recovery.Should().BeSameAs(recovery);
+    }
+
+    [Test]
+    public void NoRecoveryHistory_RevokesAllCatalogsForTheObservedCanonicalPathOnly()
+    {
+        ProtocolSessionStateMachine machine = Ready();
+        FakeRecoveryAuthority sameRoot = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+        GameRootIdentity replacedRoot = new("/game", 40, 50, 60);
+        FakeRecoveryAuthority replacedSamePath = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, replacedRoot);
+        GameRootIdentity otherRoot = new("/other", 4, 5, 6);
+        FakeRecoveryAuthority otherPath = Recovery(Guid.ParseExact("33333333333333333333333333333333", "N"), HashA, otherRoot);
+        _ = Catalog(machine, [sameRoot]);
+        _ = Catalog(machine, [replacedSamePath]);
+        RecoveryCatalogEvent otherCatalog = Catalog(machine, [otherPath], "/other");
+
+        machine.RecordNoRecoveryHistory(new(machine.SessionId, "/game"), Root);
+
+        sameRoot.DisposeCount.Should().Be(1);
+        replacedSamePath.DisposeCount.Should().Be(1);
+        otherPath.DisposeCount.Should().Be(0);
+        machine.ResolveInspectionAuthorities(new(machine.SessionId, "/other", InstallerOperation.Rollback, null, otherCatalog.Generations.Single().SelectionId)).Recovery.Should().BeSameAs(otherPath);
+    }
+
+    [Test]
+    public void NoRecoveryHistory_RejectsAliasPathWithoutRevokingTheAnchoredRootsLiveCatalog()
+    {
+        ProtocolSessionStateMachine machine = Ready();
+        FakeRecoveryAuthority recovery = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+        RecoveryCatalogEvent catalog = Catalog(machine, [recovery]);
+
+        FluentActions.Invoking(() => machine.RecordNoRecoveryHistory(new(machine.SessionId, "/alias"), Root))
+            .Should().Throw<ProtocolException>().WithMessage("*doesn't match the requested path*");
+
+        recovery.DisposeCount.Should().Be(0);
+        machine.State.Should().Be(ProtocolSessionState.Ready);
+        machine.ResolveInspectionAuthorities(new(machine.SessionId, "/game", InstallerOperation.Rollback, null, catalog.Generations.Single().SelectionId)).Recovery.Should().BeSameAs(recovery);
+    }
+
+    [Test]
     public void RecoveryCatalogStillRejectsAValueDifferentRestoreRelease()
     {
         ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority recovery = Recovery(Guid.NewGuid(), HashA, Root);
@@ -438,10 +512,10 @@ internal sealed class ProtocolSessionStateMachineTests
         return machine.RegisterPackageAuthority(new(machine.SessionId, release.Tag, release.SourceCommit, "/tmp/package.zip", "/tmp/SHA256SUMS", "/tmp/build.json", "/tmp/install.json", "/tmp/bundle.jsonl", "/tmp/bundle.sha256"), release, authority, authority);
     }
 
-    private static RecoveryCatalogEvent Catalog(ProtocolSessionStateMachine machine, FakeRecoveryAuthority[] recoveries)
+    private static RecoveryCatalogEvent Catalog(ProtocolSessionStateMachine machine, FakeRecoveryAuthority[] recoveries, string gamePath = "/game")
     {
         RecoveryHistory history = new(Sha256Digest.Parse(HashA), recoveries.Select((recovery, index) => new RecoveryGenerationInfo(recovery.GenerationId, recovery.OriginAction, index == 0, recovery.OriginAction == InstallationAction.Backup, recovery.RestoreRelease)));
-        return machine.RecordRecoveryCatalogAuthorities(new(machine.SessionId, "/game"), history, recoveries);
+        return machine.RecordRecoveryCatalogAuthorities(new(machine.SessionId, gamePath), history, recoveries);
     }
 
     private static InspectedInstallationState Inspection(
