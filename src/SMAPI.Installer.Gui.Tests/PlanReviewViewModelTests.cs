@@ -337,7 +337,11 @@ internal sealed partial class PlanReviewPresentationTests
         session.ApprovedCandidates.Should().ContainSingle().Which.Should().ContainSingle().Which.Should().BeSameAs(candidate);
         viewModel.CandidateChoices.Should().BeEmpty("accepted candidates disappear from the refreshed preview");
         viewModel.IsCandidateReviewVisible.Should().BeTrue("fresh inspection must remain reachable after the final candidate disappears");
-        viewModel.CandidateSelectionAnnouncement.Should().Be("0 candidates remain; approvals applied to this preview.");
+        viewModel.CandidateSelectionAnnouncement.Should().Be("1 approval already applied and fixed in this preview; 0 of 0 remaining files selected.");
+        viewModel.CandidateReviewDetail.Should().Contain("1 additive file approval is already applied")
+            .And.Contain("cannot be removed individually")
+            .And.Contain("0 candidates remain")
+            .And.Contain("cannot confirm or execute");
         viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeTrue();
 
         await viewModel.StartFreshInspectionCommand.ExecuteAsync();
@@ -346,6 +350,88 @@ internal sealed partial class PlanReviewPresentationTests
         inspections.Should().Be(2);
         viewModel.CandidateChoices.Should().ContainSingle().Which.IsSelected.Should().BeFalse();
         viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeFalse();
+    }
+
+    [AvaloniaTest]
+    public async Task MultipleApprovalRoundsReportImmutableCumulativeAndRemainingCountsWithoutPaths()
+    {
+        InstallerReadOnlyPlanCandidate first = CandidateCapability("mods/first-private.dll", false);
+        InstallerReadOnlyPlanCandidate second = CandidateCapability("mods/second-private.dll", false);
+        InstallerReadOnlyPlanCandidate third = CandidateCapability("mods/third-private.dll", false);
+        Queue<InstallerReadOnlyPlanResult> approvalResults = new(
+        [
+            CandidatePlan(InstallerOperation.Install, [second, third]),
+            CandidatePlan(InstallerOperation.Install, [third])
+        ]);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [first, second, third])),
+            Approval = (_, _) => Task.FromResult(approvalResults.Dequeue())
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.CandidateChoices[0].IsSelected = true;
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.CandidateReviewDetail.Should().Contain("1 additive file approval is already applied")
+            .And.Contain("cannot be removed individually")
+            .And.Contain("2 candidates remain");
+        viewModel.CandidateSelectionAnnouncement.Should().Be("1 approval already applied and fixed in this preview; 0 of 2 remaining files selected.");
+        viewModel.CandidateSelectionAnnouncement.Should().NotContain("private.dll");
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse();
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeFalse();
+        viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeTrue();
+
+        viewModel.CandidateChoices.Single(choice => choice.DisplayPath.Contains("second", StringComparison.Ordinal)).IsSelected = true;
+        viewModel.CandidateSelectionAnnouncement.Should().Be("1 approval already applied and fixed in this preview; 1 of 2 remaining files selected.");
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeTrue();
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.CandidateReviewDetail.Should().Contain("2 additive file approvals are already applied")
+            .And.Contain("1 candidate remains");
+        viewModel.CandidateSelectionAnnouncement.Should().Be("2 approvals already applied and fixed in this preview; 0 of 1 remaining files selected.");
+        viewModel.CandidateSelectionAnnouncement.Should().NotContain("third-private.dll");
+        session.ApprovedCandidates.Should().HaveCount(2);
+        session.ApprovedCandidates.SelectMany(candidates => candidates).Should().Equal(first, second);
+    }
+
+    [AvaloniaTest]
+    public async Task FullApprovalHistoryLeavesRemainingChoiceSelectableButDisablesApply()
+    {
+        InstallerReadOnlyPlanCandidate[] maximum = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates)
+            .Select(index => CandidateCapability($"mods/capacity-{index:D3}.dll", false))
+            .ToArray();
+        InstallerReadOnlyPlanCandidate remaining = CandidateCapability("mods/remaining-private.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, maximum)),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Install, [remaining]))
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        foreach (PlanReviewCandidateChoice choice in viewModel.CandidateChoices)
+            choice.IsSelected = true;
+
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.CandidateChoices.Single().IsSelected = true;
+
+        viewModel.CandidateSelectionAnnouncement.Should().Be($"{ProtocolJsonSerializer.MaxPlanCandidates} approvals already applied and fixed in this preview; 1 of 1 remaining files selected.");
+        viewModel.CandidateSelectionAnnouncement.Should().NotContain("remaining-private.dll");
+        viewModel.CandidateReviewDetail.Should().Contain($"{ProtocolJsonSerializer.MaxPlanCandidates} additive file approvals are already applied")
+            .And.Contain("1 candidate remains")
+            .And.Contain("cannot be removed individually");
+        viewModel.IsCandidateSelectionEnabled.Should().BeTrue("the user may still inspect and clear a local choice");
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeTrue();
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse("the bounded additive approval history is full");
+        session.ApprovedCandidates.Should().ContainSingle().Which.Should().HaveCount(ProtocolJsonSerializer.MaxPlanCandidates);
     }
 
     [AvaloniaTest]

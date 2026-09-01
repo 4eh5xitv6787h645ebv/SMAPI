@@ -306,9 +306,20 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         private set => this.SetProperty(ref this.candidateSelectionAnnouncement, value);
     }
 
-    public string CandidateReviewDetail => this.snapshot.HasAppliedCandidateApprovals && this.CandidateChoices.Count == 0
-        ? "All accepted candidate approvals have been applied to this read-only preview. Accepted candidates no longer appear. Start a fresh inspection to revoke this preview and request a new initial plan."
-        : "Every choice starts unchecked. Choose only files you want additively approved in a newly validated preview. Applying approvals does not confirm or run the plan, and no files change.";
+    public string CandidateReviewDetail
+    {
+        get
+        {
+            int applied = this.snapshot.AppliedCandidateApprovalCount;
+            int remaining = this.CandidateChoices.Count;
+            if (applied == 0)
+                return "Every choice starts unchecked. Choose only files you want additively approved in a newly validated preview. Applying approvals does not confirm or run the plan, and no files change.";
+
+            string appliedLabel = applied == 1 ? "approval is" : "approvals are";
+            string remainingLabel = remaining == 1 ? "candidate remains" : "candidates remain";
+            return $"{applied} additive file {appliedLabel} already applied and cannot be removed individually from this read-only preview. {remaining} {remainingLabel}. Accepted candidates no longer appear. Start a fresh inspection to revoke this preview and request a new initial plan. No files change, and this screen cannot confirm or execute a plan.";
+        }
+    }
 
     public bool IsOperationSelectionEnabled => this.snapshot.CanSelect;
 
@@ -617,8 +628,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         }
         foreach (PlanReviewCandidateChoice choice in this.CandidateChoices)
             choice.SetSelectedFromSnapshot(selected.Contains(choice.Candidate));
-        this.CandidateSelectionAnnouncement = value.HasAppliedCandidateApprovals && candidates.Count == 0
-            ? "0 candidates remain; approvals applied to this preview."
+        this.CandidateSelectionAnnouncement = value.AppliedCandidateApprovalCount > 0
+            ? $"{value.AppliedCandidateApprovalCount} {GetCountLabel(value.AppliedCandidateApprovalCount, "approval", "approvals")} already applied and fixed in this preview; {selected.Count} of {candidates.Count} remaining files selected."
             : $"{selected.Count} of {candidates.Count} files selected.";
     }
 
@@ -814,6 +825,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
 
     private static int Sum(IReadOnlyList<PlanReviewCandidateCount> values)
         => values.Aggregate(0, (sum, value) => checked(sum + value.Count));
+
+    private static string GetCountLabel(int count, string singular, string plural)
+        => count == 1 ? singular : plural;
 
     private static string GetOperationLabel(InstallerOperation operation)
     {

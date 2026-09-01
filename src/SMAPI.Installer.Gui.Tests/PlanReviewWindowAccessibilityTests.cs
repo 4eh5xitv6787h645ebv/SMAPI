@@ -389,6 +389,10 @@ internal sealed partial class PlanReviewPresentationTests
         PressAccessKey(window, PhysicalKey.A);
         await WaitUntilAsync(() => viewModel.CandidateChoices.Count == 0 && fresh.IsEffectivelyEnabled);
         session.ApprovedCandidates.Should().ContainSingle();
+        Border countStatus = window.FindControl<Border>("CandidateSelectionStatusRegion")!;
+        string cumulativeCount = ControlAutomationPeer.CreatePeerForElement(countStatus).GetName();
+        cumulativeCount.Should().Be("1 approval already applied and fixed in this preview; 0 of 0 remaining files selected.");
+        cumulativeCount.Should().NotContain("approval.dll");
         AutomationProperties.GetHelpText(apply).Should().Contain("additive approvals").And.Contain("does not change files, confirm, or execute");
         AutomationProperties.GetHelpText(fresh).Should().Contain("Revokes the current preview").And.Contain("does not undo");
 
