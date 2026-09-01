@@ -20,6 +20,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     }
 
     private readonly IInstallerProtocolClient Client;
+    private readonly Func<IInstallerProtocolClient>? FreshClientFactory;
     private readonly SemaphoreSlim CommandGate = new(1, 1);
     private readonly CancellationTokenSource Lifetime = new();
     private readonly object DisposeLock = new();
@@ -31,11 +32,13 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private InstallerConfirmedPlanAuthority? CurrentConfirmedAuthority;
     private ConfirmedInstallerSession? CurrentConfirmedOwner;
     private InstallerExecutionOperation? CurrentExecution;
+    private Task<InstallerExecutionResult>? CurrentExecutionCompletion;
     private CancellationTokenSource? CurrentExecutionLifetime;
     private TaskCompletionSource<InstallerExecutionOperation?>? CurrentExecutionPublication;
     private ProtocolGameCandidate? LatestManualCandidate;
     private Task? DisposalTask;
     private bool ConfirmedOwnershipTransferred;
+    private bool RecoveryOwnershipTransferred;
     private SessionStage Stage = SessionStage.Discovery;
     private int AdmittedDiscoveryCommands;
     internal int IssuedPlanCandidateCapacityForTesting { get; set; } = InstallerCandidateSelection.MaximumIssuedCandidatesPerSession;
@@ -43,10 +46,15 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     public ProtocolReleaseIdentity Release { get; }
     public Task<InstallerProtocolClientException> SessionFaulted => this.Client.SessionFaulted;
 
-    public VerifiedInstallerSession(ProtocolReleaseIdentity release, IInstallerProtocolClient client)
+    public VerifiedInstallerSession(
+        ProtocolReleaseIdentity release,
+        IInstallerProtocolClient client,
+        Func<IInstallerProtocolClient>? freshClientFactory = null
+    )
     {
         this.Release = release ?? throw new ArgumentNullException(nameof(release));
         this.Client = client ?? throw new ArgumentNullException(nameof(client));
+        this.FreshClientFactory = freshClientFactory;
     }
 
     public async Task<IReadOnlyList<ProtocolGameCandidate>> DiscoverGamesAsync(CancellationToken cancellationToken = default)
@@ -415,6 +423,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     }
 
     private async Task<IConfirmedInstallerSession> ConfirmBoundPlanAsync(
+        string exactCanonicalPath,
         VerifiedGamePresentation game,
         InstallerPlanConfirmation confirmation,
         CancellationToken cancellationToken
@@ -462,7 +471,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 if (this.Client.SessionFaulted.IsCompleted)
                     throw new InstallerProtocolClientException("The verified installer session faulted before confirmation ownership could be accepted.");
                 request.Token.ThrowIfCancellationRequested();
-                ConfirmedInstallerSession confirmed = new(this, this.Release, game);
+                ConfirmedInstallerSession confirmed = new(this, this.Release, exactCanonicalPath, game);
                 this.CurrentConfirmedAuthority = authority;
                 this.CurrentConfirmedOwner = confirmed;
                 this.ConfirmedOwnershipTransferred = true;
@@ -527,6 +536,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 if (!ReferenceEquals(this.CurrentConfirmedOwner, owner) || this.Stage is not (SessionStage.Executing or SessionStage.Disposing))
                     throw new ObjectDisposedException(nameof(IConfirmedInstallerSession));
                 this.CurrentExecution = execution;
+                this.CurrentExecutionCompletion = execution.Completion;
             }
             publication.TrySetResult(execution);
             _ = this.TrackExecutionAsync(owner, execution, request);
@@ -590,6 +600,153 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         }
     }
 
+    private async Task<InstallerPostExecutionRecoveryOwner> TakePostExecutionRecoveryOwnerAsync(
+        ConfirmedInstallerSession owner,
+        string exactCanonicalPath,
+        CancellationToken cancellationToken
+    )
+    {
+        Task<InstallerExecutionResult> completion;
+        Func<IInstallerProtocolClient> factory;
+        lock (this.DisposeLock)
+        {
+            if (!ReferenceEquals(this.CurrentConfirmedOwner, owner) || this.RecoveryOwnershipTransferred)
+                throw new ObjectDisposedException(nameof(IConfirmedInstallerSession));
+            completion = this.CurrentExecutionCompletion
+                ?? throw new InvalidOperationException("An execution must be admitted before interrupted recovery can be requested.");
+            factory = this.FreshClientFactory
+                ?? throw new InvalidOperationException("Fresh interrupted-recovery sessions aren't available from this backend owner.");
+        }
+
+        InstallerExecutionResult result;
+        try
+        {
+            result = await completion.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            result = new InstallerExecutionStateUnknownResult();
+        }
+
+        if (!ExecutionRequiresRecoveryOrIsUncertain(result))
+            throw new InvalidOperationException("The exact execution result doesn't require interrupted recovery.");
+
+        InstallerPostExecutionRecoveryOwner recovery;
+        lock (this.DisposeLock)
+        {
+            if (!ReferenceEquals(this.CurrentConfirmedOwner, owner) || this.RecoveryOwnershipTransferred)
+                throw new ObjectDisposedException(nameof(IConfirmedInstallerSession));
+            if (this.Stage == SessionStage.Executing)
+                this.Stage = SessionStage.ConfirmedTerminal;
+            if (this.Stage != SessionStage.ConfirmedTerminal)
+                throw new ObjectDisposedException(nameof(IConfirmedInstallerSession));
+            this.RecoveryOwnershipTransferred = true;
+            recovery = new(factory, exactCanonicalPath, this.Release);
+        }
+
+        // Mint and transfer the recovery owner before settling the old process. Cleanup failure can't revoke the
+        // exact private path or explicit retry authority; a production factory will remain quarantined until safe.
+        Task oldBackendSettlement;
+        try { oldBackendSettlement = this.DisposeFromConfirmedSessionAsync(owner).AsTask(); }
+        catch { oldBackendSettlement = Task.CompletedTask; }
+        recovery.AttachPriorBackendSettlement(oldBackendSettlement);
+        return recovery;
+    }
+
+    private static bool ExecutionRequiresRecoveryOrIsUncertain(InstallerExecutionResult? result)
+    {
+        if (result is InstallerExecutionStateUnknownResult)
+            return true;
+        if (result is not InstallerExecutionTerminalResult terminal)
+            return true;
+        if (
+            !Enum.IsDefined(terminal.Outcome)
+            || !Enum.IsDefined(terminal.DurableState)
+            || terminal.ErrorCode is { } error && !Enum.IsDefined(error)
+            || !Enum.IsDefined(terminal.RecoveryDisposition)
+            || !Enum.IsDefined(terminal.NextAction)
+            || !Enum.IsDefined(terminal.BackendSettlement)
+        )
+        {
+            return true;
+        }
+
+        bool exact = terminal switch
+        {
+            { Outcome: ProtocolExecutionOutcome.Succeeded, DurableState: ProtocolDurableState.Committed, ErrorCode: null, RecoveryDisposition: ProtocolRecoveryDisposition.NotRequired, NextAction: ProtocolNextAction.InspectAgain } => true,
+            { Outcome: ProtocolExecutionOutcome.SucceededWithCleanupWarning, DurableState: ProtocolDurableState.Committed, ErrorCode: not null and not ProtocolTerminalErrorCode.UnexpectedCoreFailure, RecoveryDisposition: ProtocolRecoveryDisposition.CleanupPending, NextAction: ProtocolNextAction.InspectAgain } => true,
+            { Outcome: ProtocolExecutionOutcome.FailedBeforeMutation, DurableState: ProtocolDurableState.Unchanged, ErrorCode: not null and not ProtocolTerminalErrorCode.UnexpectedCoreFailure, RecoveryDisposition: ProtocolRecoveryDisposition.NotRequired, NextAction: ProtocolNextAction.InspectAgain } => true,
+            { Outcome: ProtocolExecutionOutcome.CancelledBeforeMutation, DurableState: ProtocolDurableState.Unchanged, ErrorCode: null, RecoveryDisposition: ProtocolRecoveryDisposition.NotRequired, NextAction: ProtocolNextAction.InspectAgain } => true,
+            { Outcome: ProtocolExecutionOutcome.CancelledAndRolledBack, DurableState: ProtocolDurableState.RolledBack, ErrorCode: null, RecoveryDisposition: ProtocolRecoveryDisposition.Completed, NextAction: ProtocolNextAction.InspectAgain } => true,
+            { Outcome: ProtocolExecutionOutcome.FailedAndRolledBack, DurableState: ProtocolDurableState.RolledBack, ErrorCode: not null and not ProtocolTerminalErrorCode.UnexpectedCoreFailure, RecoveryDisposition: ProtocolRecoveryDisposition.Completed, NextAction: ProtocolNextAction.InspectAgain } => true,
+            { Outcome: ProtocolExecutionOutcome.InterruptedRecoveryRequired, DurableState: ProtocolDurableState.RecoveryRequired, ErrorCode: not null and not ProtocolTerminalErrorCode.UnexpectedCoreFailure, RecoveryDisposition: ProtocolRecoveryDisposition.InterruptedRecoveryRequired, NextAction: ProtocolNextAction.RecoverInterrupted } => true,
+            { Outcome: ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired, DurableState: ProtocolDurableState.RecoveryCompleted, ErrorCode: ProtocolTerminalErrorCode.PathChanged, RecoveryDisposition: ProtocolRecoveryDisposition.Completed, NextAction: ProtocolNextAction.InspectAgain } => true,
+            { Outcome: ProtocolExecutionOutcome.UnexpectedCoreFailure, DurableState: ProtocolDurableState.Unknown, ErrorCode: ProtocolTerminalErrorCode.UnexpectedCoreFailure, RecoveryDisposition: ProtocolRecoveryDisposition.InterruptedRecoveryRequired, NextAction: ProtocolNextAction.RecoverInterrupted } => true,
+            _ => false
+        };
+        if (!exact || !IsValidExecutionSummary(terminal.Summary, terminal.Outcome))
+            return true;
+        return terminal.NextAction == ProtocolNextAction.RecoverInterrupted;
+    }
+
+    private static bool IsValidExecutionSummary(InstallerExecutionSummary? summary, ProtocolExecutionOutcome outcome)
+    {
+        if (summary is null)
+            return false;
+        int?[] counts =
+        [
+            summary.ManagedFileChangeCount,
+            summary.RolledBackManagedFileCount,
+            summary.InternalStateChangeCount,
+            summary.RolledBackInternalStateCount,
+            summary.RecoveredTransactionCount,
+            summary.RecoveredPathCount
+        ];
+        bool unknown = outcome == ProtocolExecutionOutcome.UnexpectedCoreFailure;
+        if (unknown)
+            return counts.All(value => value is null);
+        if (counts.Any(value => value is null or < 0))
+            return false;
+
+        int managed = summary.ManagedFileChangeCount!.Value;
+        int rolledBackManaged = summary.RolledBackManagedFileCount!.Value;
+        int internalState = summary.InternalStateChangeCount!.Value;
+        int rolledBackInternal = summary.RolledBackInternalStateCount!.Value;
+        int recoveredTransactions = summary.RecoveredTransactionCount!.Value;
+        int recoveredPaths = summary.RecoveredPathCount!.Value;
+        long changedTotal = (long)managed + internalState;
+        long rolledBackTotal = (long)rolledBackManaged + rolledBackInternal;
+        if (
+            managed > 20_000
+            || internalState > 20_000
+            || changedTotal > 20_000
+            || rolledBackManaged > managed
+            || rolledBackInternal > internalState
+            || rolledBackTotal > changedTotal
+            || recoveredTransactions > ProcessInstallerProtocolClient.MaximumRecoveryTransactions
+            || recoveredPaths > ProcessInstallerProtocolClient.MaximumExecutionProgressUnits
+        )
+        {
+            return false;
+        }
+
+        bool noChanges = managed == 0 && rolledBackManaged == 0 && internalState == 0 && rolledBackInternal == 0 && recoveredTransactions == 0 && recoveredPaths == 0;
+        bool fullRollback = managed == rolledBackManaged && internalState == rolledBackInternal;
+        return outcome switch
+        {
+            ProtocolExecutionOutcome.Succeeded or ProtocolExecutionOutcome.SucceededWithCleanupWarning => rolledBackManaged == 0 && rolledBackInternal == 0 && recoveredTransactions == 0 && recoveredPaths == 0,
+            ProtocolExecutionOutcome.FailedBeforeMutation or ProtocolExecutionOutcome.CancelledBeforeMutation => noChanges,
+            ProtocolExecutionOutcome.FailedAndRolledBack or ProtocolExecutionOutcome.CancelledAndRolledBack => fullRollback && recoveredTransactions == 0 && recoveredPaths == 0,
+            ProtocolExecutionOutcome.InterruptedRecoveryRequired => recoveredTransactions == 0 && recoveredPaths == 0,
+            ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired => managed == 0 && rolledBackManaged == 0 && internalState == 0 && rolledBackInternal == 0 && recoveredTransactions > 0,
+            _ => false
+        };
+    }
+
     private async Task DisposeExecutingCoreAsync(
         TaskCompletionSource<InstallerExecutionOperation?> publication,
         CancellationTokenSource request
@@ -623,6 +780,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             this.IssuedPlanCandidates.Clear();
             this.ClearCurrentPlanConfirmation();
             this.CurrentExecution = null;
+            this.CurrentExecutionCompletion = null;
             this.CurrentExecutionPublication = null;
             this.CurrentExecutionLifetime = null;
             this.CurrentConfirmedAuthority = null;
@@ -779,6 +937,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 this.CurrentConfirmedAuthority = null;
                 this.CurrentConfirmedOwner = null;
                 this.CurrentExecution = null;
+                this.CurrentExecutionCompletion = null;
                 this.CurrentExecutionPublication = null;
                 this.CurrentExecutionLifetime = null;
                 this.Stage = SessionStage.Disposed;
@@ -829,12 +988,13 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             => this.Owner.ApproveBoundPlanCandidatesAsync(candidates, cancellationToken);
 
         public Task<IConfirmedInstallerSession> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
-            => this.Owner.ConfirmBoundPlanAsync(this.Game, confirmation, cancellationToken);
+            => this.Owner.ConfirmBoundPlanAsync(this.ExactCanonicalPath, this.Game, confirmation, cancellationToken);
     }
 
     private sealed class ConfirmedInstallerSession : IConfirmedInstallerSession
     {
         private readonly VerifiedInstallerSession Owner;
+        private readonly string ExactCanonicalPath;
 
         public ProtocolReleaseIdentity Release { get; }
         public VerifiedGamePresentation Game { get; }
@@ -843,16 +1003,21 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         public ConfirmedInstallerSession(
             VerifiedInstallerSession owner,
             ProtocolReleaseIdentity release,
+            string exactCanonicalPath,
             VerifiedGamePresentation game
         )
         {
             this.Owner = owner;
+            this.ExactCanonicalPath = exactCanonicalPath;
             this.Release = release;
             this.Game = game;
         }
 
         public Task<InstallerExecutionOperation> ExecuteAsync(CancellationToken cancellationToken = default)
             => this.Owner.ExecuteConfirmedPlanAsync(this, cancellationToken);
+
+        public Task<InstallerPostExecutionRecoveryOwner> TakePostExecutionRecoveryOwnerAsync(CancellationToken cancellationToken = default)
+            => this.Owner.TakePostExecutionRecoveryOwnerAsync(this, this.ExactCanonicalPath, cancellationToken);
 
         public ValueTask DisposeAsync() => this.Owner.DisposeFromConfirmedSessionAsync(this);
     }

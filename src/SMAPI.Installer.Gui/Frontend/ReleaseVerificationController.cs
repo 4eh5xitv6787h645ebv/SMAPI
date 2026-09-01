@@ -57,8 +57,6 @@ internal sealed record ReleaseVerificationSnapshot(
 internal sealed class ReleaseVerificationController : IAsyncDisposable
 {
     internal const int MaximumAttempts = 3;
-    private const string ProtocolClientName = "SMAPI Linux GUI";
-    private const string ProtocolClientVersion = "1";
 
     private readonly object Sync = new();
     private readonly IReviewedReleaseService ReleaseService;
@@ -243,7 +241,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             if (client.SessionFaulted.IsCompleted)
                 throw new InvalidOperationException("The verified installer session has already faulted.");
 
-            VerifiedInstallerSession session = new(release, client);
+            VerifiedInstallerSession session = new(release, client, this.ClientFactory);
             AttemptContext attempt = this.VerifiedAttempt;
             this.VerifiedAttempt = null;
             this.VerifiedSessionTaken = true;
@@ -459,8 +457,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             attempt.Client = this.ClientFactory()
                 ?? throw new InvalidOperationException("The installer protocol client factory returned null.");
             Task handshake = attempt.Client.HandshakeAsync(
-                ProtocolClientName,
-                ProtocolClientVersion,
+                InstallerProtocolClientIdentity.Name,
+                InstallerProtocolClientIdentity.Version,
                 attempt.Operation.Cancellation.Token
             );
             await this.AwaitWithSessionFaultAsync(handshake, attempt).ConfigureAwait(false);

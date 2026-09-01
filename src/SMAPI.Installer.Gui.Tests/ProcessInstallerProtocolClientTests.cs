@@ -154,11 +154,18 @@ public sealed class ProcessInstallerProtocolClientTests
         typeof(IConfirmedInstallerSession).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(method => !method.IsSpecialName)
             .Select(method => method.Name)
-            .Should().Equal(nameof(IConfirmedInstallerSession.ExecuteAsync));
+            .Should().BeEquivalentTo([
+                nameof(IConfirmedInstallerSession.ExecuteAsync),
+                nameof(IConfirmedInstallerSession.TakePostExecutionRecoveryOwnerAsync)
+            ]);
         MethodInfo execute = typeof(IConfirmedInstallerSession).GetMethod(nameof(IConfirmedInstallerSession.ExecuteAsync))!;
         execute.ReturnType.Should().Be(typeof(Task<InstallerExecutionOperation>));
         execute.GetParameters().Should().ContainSingle().Which.ParameterType.Should().Be(typeof(CancellationToken));
         execute.GetParameters().Single().HasDefaultValue.Should().BeTrue();
+        MethodInfo takeRecovery = typeof(IConfirmedInstallerSession).GetMethod(nameof(IConfirmedInstallerSession.TakePostExecutionRecoveryOwnerAsync))!;
+        takeRecovery.ReturnType.Should().Be(typeof(Task<InstallerPostExecutionRecoveryOwner>));
+        takeRecovery.GetParameters().Should().ContainSingle().Which.ParameterType.Should().Be(typeof(CancellationToken));
+        takeRecovery.GetParameters().Single().HasDefaultValue.Should().BeTrue();
         typeof(IConfirmedInstallerSession).GetInterfaces().Should().Equal(typeof(IAsyncDisposable));
 
         Type[] authorityTypes = [

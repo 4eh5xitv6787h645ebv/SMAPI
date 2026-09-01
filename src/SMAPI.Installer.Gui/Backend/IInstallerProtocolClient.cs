@@ -2,6 +2,13 @@ using StardewModdingAPI.Installer.Core.Protocol.V1;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
 
+/// <summary>The fixed authenticated protocol identity shared by normal and fresh recovery sessions.</summary>
+internal static class InstallerProtocolClientIdentity
+{
+    public const string Name = "SMAPI Linux GUI";
+    public const string Version = "1";
+}
+
 /// <summary>The deliberately narrow backend surface retained within the authenticated GUI workflow.</summary>
 internal interface IInstallerProtocolClient : IAsyncDisposable
 {

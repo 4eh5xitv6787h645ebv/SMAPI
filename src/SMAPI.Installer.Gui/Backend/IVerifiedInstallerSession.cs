@@ -43,6 +43,13 @@ internal interface IConfirmedInstallerSession : IAsyncDisposable
 
     /// <summary>Consume the exact confirmed plan and admit its one execution.</summary>
     Task<InstallerExecutionOperation> ExecuteAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// After the exact execution terminal requires interrupted recovery (or local post-admission uncertainty),
+    /// transfer a sealed owner which can explicitly start fresh authenticated recovery attempts.
+    /// </summary>
+    Task<InstallerPostExecutionRecoveryOwner> TakePostExecutionRecoveryOwnerAsync(CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("This confirmed session doesn't support post-execution recovery ownership.");
 }
 
 /// <summary>Bounded, non-authoritative display data for an exact valid game-folder selection.</summary>
