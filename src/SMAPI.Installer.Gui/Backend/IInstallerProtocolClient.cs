@@ -27,6 +27,13 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
     /// <summary>Ask the authenticated backend session to validate one exact canonical Linux game-folder path.</summary>
     Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// List one exact canonical game's bounded authenticated recovery history as a sanitized newest-first projection.
+    /// Point object identity remains a private client-scoped selection capability for a later rollback operation.
+    /// </summary>
+    Task<InstallerRecoveryCatalogResult> ListRecoveriesAsync(string canonicalGamePath, CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("This restricted client doesn't support recovery-history listing.");
+
     /// <summary>Inspect one non-rollback operation and return a sanitized projection whose candidate references carry only scoped approval authority.</summary>
     Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default);
 
