@@ -1,0 +1,311 @@
+<Window
+    x:Class="StardewModdingAPI.Installer.Gui.PlanReviewWindow"
+    x:DataType="vm:PlanReviewViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
+    Title="SMAPI Linux Installer — Plan review"
+    Width="980"
+    Height="760"
+    MinWidth="420"
+    MinHeight="560"
+    WindowStartupLocation="CenterScreen">
+  <Window.Styles>
+    <Style Selector="Border.keyboard-focus:focus-visible">
+      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderThickness" Value="3" />
+    </Style>
+  </Window.Styles>
+
+  <ScrollViewer
+      x:Name="PageScrollViewer"
+      HorizontalScrollBarVisibility="Disabled"
+      VerticalScrollBarVisibility="Auto">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
+      <StackPanel Grid.Row="0" Spacing="4">
+        <TextBlock
+            AutomationProperties.HeadingLevel="1"
+            FontSize="30"
+            FontWeight="Bold"
+            Text="Review an installer plan"
+            TextWrapping="Wrap" />
+        <TextBlock Classes="muted" FontSize="16" Text="Bounded read-only Linux plan inspection" TextWrapping="Wrap" />
+      </StackPanel>
+
+      <Border
+          x:Name="InspectionBoundary"
+          Grid.Row="1"
+          Padding="14"
+          AutomationProperties.Name="Inspection only. This screen cannot approve, confirm, or run a plan. No files change here."
+          Background="#192C43"
+          BorderBrush="#5AA7E8"
+          BorderThickness="1"
+          CornerRadius="8">
+        <TextBlock
+            FontWeight="SemiBold"
+            Text="Inspection only. This screen cannot approve, confirm, or run a plan. No files change here."
+            TextWrapping="Wrap" />
+      </Border>
+
+      <Border Grid.Row="2" Classes="card">
+        <StackPanel Spacing="10">
+          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Bound verified context" />
+          <Border
+              x:Name="GameContextRegion"
+              AutomationProperties.Name="{Binding GameAccessibleName}">
+            <TextBlock
+                x:Name="GameDetail"
+                Text="{Binding GameDetail}"
+                TextWrapping="Wrap" />
+          </Border>
+          <TextBlock
+              x:Name="ReleaseDetail"
+              AutomationProperties.Name="{Binding ReleaseAccessibleName}"
+              Text="{Binding ReleaseDetail}"
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="3" Classes="card">
+        <StackPanel Spacing="14">
+          <Border
+              x:Name="StatusRegion"
+              Classes="keyboard-focus"
+              TabIndex="0"
+              Focusable="True"
+              AutomationProperties.LiveSetting="{Binding StatusLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}">
+            <StackPanel Spacing="8">
+              <TextBlock
+                  x:Name="StatusHeading"
+                  AutomationProperties.HeadingLevel="2"
+                  FontSize="22"
+                  FontWeight="SemiBold"
+                  Text="{Binding Heading}"
+                  TextWrapping="Wrap" />
+              <TextBlock Classes="muted" Text="{Binding Message}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border
+              x:Name="ErrorRegion"
+              Classes="keyboard-focus"
+              Padding="12"
+              TabIndex="0"
+              Focusable="True"
+              IsVisible="{Binding IsErrorVisible}"
+              AutomationProperties.LiveSetting="Assertive"
+              AutomationProperties.Name="{Binding LiveAnnouncement}"
+              Background="#3B1F26"
+              BorderBrush="#FF8A9A"
+              BorderThickness="2"
+              CornerRadius="6">
+            <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+          </Border>
+
+          <ProgressBar
+              x:Name="InspectionProgress"
+              Height="12"
+              IsIndeterminate="True"
+              IsVisible="{Binding IsBusy}"
+              AutomationProperties.Name="Read-only plan inspection in progress" />
+
+          <StackPanel Spacing="8">
+            <Label Content="_Operation to inspect" Target="{Binding #OperationList}" />
+            <ListBox
+                x:Name="OperationList"
+                Classes="focus-ring"
+                Focusable="True"
+                MaxHeight="330"
+                TabIndex="1"
+                AutomationProperties.AccessKey="Alt+O"
+                AutomationProperties.Name="Read-only installer operations"
+                AutomationProperties.HelpText="Choose exactly one operation, then use Inspect plan. Selecting an item does not run a backend request."
+                IsEnabled="{Binding IsOperationSelectionEnabled}"
+                ItemsSource="{Binding OperationChoices}"
+                SelectedItem="{Binding SelectedOperation}">
+              <ListBox.Styles>
+                <Style Selector="ListBoxItem" x:CompileBindings="False">
+                  <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                </Style>
+              </ListBox.Styles>
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewOperationChoice">
+                  <StackPanel Margin="4" Spacing="3">
+                    <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                    <TextBlock Classes="muted" Text="{Binding Summary}" TextWrapping="Wrap" />
+                  </StackPanel>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </StackPanel>
+
+          <Border Padding="12" Background="#111923" CornerRadius="6">
+            <StackPanel Spacing="3">
+              <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
+              <TextBlock
+                  x:Name="DurableState"
+                  AutomationProperties.Name="Installer durable state"
+                  FontWeight="SemiBold"
+                  Text="{Binding DurableState}"
+                  TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <WrapPanel Orientation="Horizontal">
+            <Button
+                x:Name="InspectButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="2"
+                AutomationProperties.AccessKey="Alt+I"
+                AutomationProperties.Name="Inspect selected plan"
+                AutomationProperties.HelpText="Requests a bounded read-only plan summary. It cannot approve, confirm, or run a plan."
+                Command="{Binding InspectCommand}"
+                IsVisible="{Binding IsInspectVisible}"
+                Content="_Inspect plan" />
+            <Button
+                x:Name="RetryButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="3"
+                AutomationProperties.AccessKey="Alt+T"
+                AutomationProperties.Name="Try read-only inspection again"
+                Command="{Binding RetryCommand}"
+                IsVisible="{Binding IsRetryVisible}"
+                Content="_Try inspection again" />
+            <Button
+                x:Name="CancelButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="4"
+                AutomationProperties.AccessKey="Alt+C"
+                AutomationProperties.Name="Cancel active plan inspection"
+                AutomationProperties.HelpText="Stops the read-only request and closes this verified backend session."
+                Command="{Binding CancelCommand}"
+                IsVisible="{Binding IsCancelVisible}"
+                Content="_Cancel" />
+            <Button
+                x:Name="ExitButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="5"
+                AutomationProperties.AccessKey="Alt+E"
+                AutomationProperties.Name="Exit installer"
+                AutomationProperties.HelpText="Closes this terminal plan-review session. Reopen the installer to start another verified session."
+                Command="{Binding ExitCommand}"
+                IsVisible="{Binding IsExitVisible}"
+                Content="_Exit installer" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="4" Classes="card" IsVisible="{Binding IsResultVisible}">
+        <StackPanel Spacing="16">
+          <Border
+              x:Name="ResultSummaryRegion"
+              Classes="keyboard-focus"
+              TabIndex="0"
+              Focusable="True"
+              AutomationProperties.LiveSetting="Polite"
+              AutomationProperties.Name="{Binding LiveAnnouncement}">
+            <StackPanel Spacing="6">
+              <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Inspected plan summary" />
+              <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <StackPanel Spacing="7">
+            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Observed installation state" />
+            <TextBlock Text="{Binding ObservedStateDetail}" TextWrapping="Wrap" />
+            <TextBlock Classes="muted" Text="{Binding CurrentReleaseDetail}" TextWrapping="Wrap" />
+            <TextBlock Classes="muted" Text="{Binding TargetReleaseDetail}" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border Padding="12" Background="#192C43" BorderBrush="#5AA7E8" BorderThickness="1" CornerRadius="6">
+            <StackPanel Spacing="5">
+              <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Inspection safety boundary" />
+              <TextBlock Text="{Binding SafetyDetail}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <StackPanel Spacing="7">
+            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Risk categories" />
+            <TextBlock Classes="muted" Text="{Binding RiskSummary}" TextWrapping="Wrap" />
+            <ItemsControl IsVisible="{Binding HasRiskRows}" ItemsSource="{Binding RiskRows}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#111923" CornerRadius="5">
+                    <StackPanel Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                      <TextBlock Classes="muted" Text="{Binding Detail}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+
+          <StackPanel Spacing="7">
+            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Planned file actions" />
+            <TextBlock Classes="muted" Text="{Binding OperationSummary}" TextWrapping="Wrap" />
+            <ItemsControl IsVisible="{Binding HasOperationRows}" ItemsSource="{Binding OperationRows}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#111923" CornerRadius="5">
+                    <StackPanel Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding CountText}" />
+                      <TextBlock Classes="muted" Text="{Binding Detail}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+
+          <StackPanel Spacing="7">
+            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Blocking conflicts" />
+            <TextBlock Classes="muted" Text="{Binding ConflictSummary}" TextWrapping="Wrap" />
+            <ItemsControl IsVisible="{Binding HasConflictRows}" ItemsSource="{Binding ConflictRows}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#3B1F26" CornerRadius="5">
+                    <StackPanel Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding CountText}" />
+                      <TextBlock Classes="muted" Text="{Binding Detail}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+
+          <StackPanel Spacing="7">
+            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Modified or unknown file candidates" />
+            <TextBlock Classes="muted" Text="{Binding CandidateSummary}" TextWrapping="Wrap" />
+            <ItemsControl IsVisible="{Binding HasCandidateRows}" ItemsSource="{Binding CandidateRows}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#111923" CornerRadius="5">
+                    <StackPanel Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding CountText}" />
+                      <TextBlock Classes="muted" Text="{Binding Detail}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+
+          <StackPanel Spacing="5">
+            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Additional notices" />
+            <TextBlock Text="{Binding AdditionalNoticeDetail}" TextWrapping="Wrap" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </ScrollViewer>
+</Window>

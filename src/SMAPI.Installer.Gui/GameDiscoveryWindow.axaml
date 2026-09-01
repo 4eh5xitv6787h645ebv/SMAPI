@@ -163,10 +163,21 @@
                 IsVisible="{Binding IsCancelVisible}"
                 Content="_Cancel" />
             <Button
-                x:Name="ExitButton"
+                x:Name="ContinueButton"
                 Classes="primary focus-ring"
                 Margin="0,0,12,10"
                 TabIndex="5"
+                AutomationProperties.AccessKey="Alt+P"
+                AutomationProperties.Name="Open read-only plan review"
+                AutomationProperties.HelpText="Transfers this exact validated folder and verified release to a preview-only plan screen. Nothing is changed."
+                Command="{Binding ContinueCommand}"
+                IsVisible="{Binding IsContinueVisible}"
+                Content="Review _plan" />
+            <Button
+                x:Name="ExitButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="6"
                 AutomationProperties.AccessKey="Alt+E"
                 AutomationProperties.Name="Exit installer"
                 AutomationProperties.HelpText="Closes this terminal installer session. Reopen the installer to start a new session."

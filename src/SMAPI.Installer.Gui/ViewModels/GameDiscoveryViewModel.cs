@@ -14,6 +14,7 @@ internal enum GameDiscoveryFocusTarget
     CandidateList,
     Browse,
     Retry,
+    Continue,
     Exit
 }
 
@@ -142,8 +143,10 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     private string message = "The installer can inspect common Linux game locations or validate a folder you choose.";
     private string liveAnnouncement = "Ready to find Stardew Valley.";
     private EventHandler? FolderPickerRequestedValue;
+    private EventHandler? ContinueRequestedValue;
     private bool folderPickerPending;
     private bool folderPickerFailed;
+    private bool transitionFailed;
     private bool started;
     private bool disposed;
 
@@ -154,6 +157,10 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.RetryCommand = new AsyncRelayCommand(() => controller.DiscoverAsync(), () => this.snapshot.CanRetry, this.HandlePresentationFailure);
         this.BrowseCommand = new RelayCommand(this.RequestFolderPicker, this.CanBrowse);
         this.CancelCommand = new AsyncRelayCommand(controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
+        this.ContinueCommand = new RelayCommand(
+            () => this.ContinueRequestedValue?.Invoke(this, EventArgs.Empty),
+            () => this.IsContinueVisible
+        );
         this.ExitCommand = new RelayCommand(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.IsExitVisible);
         this.Controller.Changed += this.OnControllerChanged;
         this.ApplySnapshot(this.snapshot, requestFocus: false);
@@ -176,6 +183,23 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     }
 
     public event EventHandler<GameDiscoveryFocusTarget>? FocusRequested;
+
+    /// <summary>Raised only when a current valid backend-issued game can be atomically transferred.</summary>
+    public event EventHandler? ContinueRequested
+    {
+        add
+        {
+            this.ContinueRequestedValue += value;
+            this.OnPropertyChanged(nameof(this.IsContinueVisible));
+            this.ContinueCommand.NotifyCanExecuteChanged();
+        }
+        remove
+        {
+            this.ContinueRequestedValue -= value;
+            this.OnPropertyChanged(nameof(this.IsContinueVisible));
+            this.ContinueCommand.NotifyCanExecuteChanged();
+        }
+    }
 
     public event EventHandler? CloseRequested;
 
@@ -231,6 +255,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public bool IsEmptyVisible => this.snapshot.State == GameDiscoveryState.NoCandidates;
 
     public bool IsProblemVisible => this.folderPickerFailed
+        || this.transitionFailed
         || this.snapshot.SelectedCandidate is { State: not LinuxGameFolderStatus.Valid }
         || this.snapshot.State is GameDiscoveryState.ManualInvalid
         or GameDiscoveryState.Failed
@@ -252,7 +277,11 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
 
     public bool IsCancelVisible => this.snapshot.CanCancel;
 
-    public bool IsExitVisible => this.snapshot.State is GameDiscoveryState.Cancelled
+    public bool IsContinueVisible => !this.transitionFailed
+        && this.snapshot.CanContinue
+        && this.ContinueRequestedValue is not null;
+
+    public bool IsExitVisible => this.transitionFailed || this.snapshot.State is GameDiscoveryState.Cancelled
         or GameDiscoveryState.Failed
         or GameDiscoveryState.SessionFaulted;
 
@@ -261,6 +290,8 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public RelayCommand BrowseCommand { get; }
 
     public AsyncRelayCommand CancelCommand { get; }
+
+    public RelayCommand ContinueCommand { get; }
 
     public RelayCommand ExitCommand { get; }
 
@@ -290,6 +321,19 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
         this.NotifyDerivedProperties();
         this.FocusRequested?.Invoke(this, GameDiscoveryFocusTarget.Status);
+    }
+
+    /// <summary>Publish a sanitized terminal failure after the planning owner was transferred but its window could not open.</summary>
+    internal void ReportTransitionFailure()
+    {
+        if (this.disposed)
+            return;
+        this.transitionFailed = true;
+        this.Heading = "The read-only plan screen could not open";
+        this.Message = "The verified installer session closed safely. No game files were changed. Close and reopen the installer before trying again.";
+        this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
+        this.NotifyDerivedProperties();
+        this.FocusRequested?.Invoke(this, GameDiscoveryFocusTarget.Exit);
     }
 
     public async Task StartAsync()
@@ -447,6 +491,8 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     {
         return value.State switch
         {
+            GameDiscoveryState.Ready or GameDiscoveryState.ManualValid
+                when value.SelectedCandidate?.State == LinuxGameFolderStatus.Valid => GameDiscoveryFocusTarget.Continue,
             GameDiscoveryState.Ready => GameDiscoveryFocusTarget.CandidateList,
             GameDiscoveryState.NoCandidates or GameDiscoveryState.ManualInvalid when this.BrowseCommand.CanExecute(null) => GameDiscoveryFocusTarget.Browse,
             GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted => GameDiscoveryFocusTarget.Exit,
@@ -465,10 +511,12 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.OnPropertyChanged(nameof(this.IsBrowseVisible));
         this.OnPropertyChanged(nameof(this.IsRetryVisible));
         this.OnPropertyChanged(nameof(this.IsCancelVisible));
+        this.OnPropertyChanged(nameof(this.IsContinueVisible));
         this.OnPropertyChanged(nameof(this.IsExitVisible));
         this.RetryCommand.NotifyCanExecuteChanged();
         this.BrowseCommand.NotifyCanExecuteChanged();
         this.CancelCommand.NotifyCanExecuteChanged();
+        this.ContinueCommand.NotifyCanExecuteChanged();
         this.ExitCommand.NotifyCanExecuteChanged();
     }
 
