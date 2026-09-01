@@ -545,33 +545,57 @@ internal sealed class ExecutionController : IAsyncDisposable
     private static ExecutionPlanPresentation ValidatePlan(ExecutionPlanPresentation plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        if (!Enum.IsDefined(plan.Operation) || plan.Operation == InstallerOperation.Rollback)
+        if (!Enum.IsDefined(plan.Operation))
             throw new ArgumentOutOfRangeException(nameof(plan));
         if (plan.OperationCounts is null || plan.Risks is null || plan.AdditionalNoticeCount is < 0 or > 256)
             throw new ArgumentException("The confirmed plan presentation is invalid.", nameof(plan));
+
+        PlanReviewOperationCount[] operationCounts;
+        ProtocolPlanRisk[] planRisks;
+        try
+        {
+            operationCounts = plan.OperationCounts.ToArray();
+            planRisks = plan.Risks.ToArray();
+        }
+        catch
+        {
+            throw new ArgumentException("The confirmed plan presentation could not be read safely.", nameof(plan));
+        }
+
         int aggregate = 0;
         HashSet<PlanOperationKind> kinds = [];
-        foreach (PlanReviewOperationCount item in plan.OperationCounts)
+        foreach (PlanReviewOperationCount item in operationCounts)
         {
-            if (!Enum.IsDefined(item.Kind) || item.Count is < 0 or > 20_000 || !kinds.Add(item.Kind))
+            if (item is null || !Enum.IsDefined(item.Kind) || item.Count is < 0 or > 20_000 || !kinds.Add(item.Kind))
                 throw new ArgumentException("The confirmed plan operation summary is invalid.", nameof(plan));
             aggregate = checked(aggregate + item.Count);
             if (aggregate > 20_000)
                 throw new ArgumentException("The confirmed plan operation summary is too large.", nameof(plan));
         }
-        HashSet<ProtocolPlanRisk> risks = [];
-        foreach (ProtocolPlanRisk risk in plan.Risks)
+
+        if (plan.Operation == InstallerOperation.Rollback)
         {
-            if (risk is not (ProtocolPlanRisk.Uninstall or ProtocolPlanRisk.Downgrade or ProtocolPlanRisk.ModifiedOrUnknownFileApproval)
-                || !risks.Add(risk))
+            bool validRollbackRisks = planRisks.AsSpan().SequenceEqual([ProtocolPlanRisk.Rollback])
+                || planRisks.AsSpan().SequenceEqual([ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade]);
+            if (!validRollbackRisks)
+                throw new ArgumentException("The confirmed rollback risk summary is invalid.", nameof(plan));
+        }
+        else
+        {
+            HashSet<ProtocolPlanRisk> risks = [];
+            foreach (ProtocolPlanRisk risk in planRisks)
             {
-                throw new ArgumentException("The confirmed plan risk summary is invalid.", nameof(plan));
+                if (risk is not (ProtocolPlanRisk.Uninstall or ProtocolPlanRisk.Downgrade or ProtocolPlanRisk.ModifiedOrUnknownFileApproval)
+                    || !risks.Add(risk))
+                {
+                    throw new ArgumentException("The confirmed plan risk summary is invalid.", nameof(plan));
+                }
             }
         }
         return plan with
         {
-            OperationCounts = Array.AsReadOnly(plan.OperationCounts.ToArray()),
-            Risks = Array.AsReadOnly(plan.Risks.ToArray())
+            OperationCounts = Array.AsReadOnly(operationCounts),
+            Risks = Array.AsReadOnly(planRisks)
         };
     }
 
