@@ -128,11 +128,84 @@ internal sealed class ProductionInstallerWorkflowTests
         client.DisposeCalls.Should().Be(1);
     }
 
+    [AvaloniaTest]
+    public async Task ValidGameTransfersOneBoundSessionIntoReadOnlyPlanWindow()
+    {
+        ProtocolGameCandidate game = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation");
+        TrackingClient client = new() { DiscoveredGames = [game] };
+        GameDiscoveryWindow? discoveryWindow = null;
+        PlanReviewWindow? planWindow = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next =>
+            {
+                if (next is GameDiscoveryWindow discovery)
+                    discoveryWindow = discovery;
+                else
+                    planWindow = next.Should().BeOfType<PlanReviewWindow>().Subject;
+            }
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discoveryWindow is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)discoveryWindow!.DataContext!;
+        await discovery.StartAsync();
+        discovery.IsContinueVisible.Should().BeTrue();
+
+        discovery.ContinueCommand.Execute(null);
+        discovery.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => planWindow is not null);
+        PlanReviewViewModel plan = (PlanReviewViewModel)planWindow!.DataContext!;
+
+        discovery.IsContinueVisible.Should().BeFalse();
+        plan.OperationChoices.Should().HaveCount(5).And.NotContain(choice => choice.Operation == InstallerOperation.Rollback);
+        plan.SelectedOperation.Should().BeNull();
+        client.DisposeCalls.Should().Be(0);
+        await discoveryWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(0, "the plan window owns the transferred backend session");
+        await planWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+        await releaseWindow.DisposeAsync();
+    }
+
+    [AvaloniaTest]
+    public async Task PlanWindowConstructionFailureClosesTransferredAuthorityAndShowsSafeError()
+    {
+        ProtocolGameCandidate game = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation");
+        TrackingClient client = new() { DiscoveredGames = [game] };
+        GameDiscoveryWindow? discoveryWindow = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next => discoveryWindow = next.Should().BeOfType<GameDiscoveryWindow>().Subject,
+            planWindowFactory: _ => throw new InvalidOperationException("synthetic private plan-window failure")
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discoveryWindow is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)discoveryWindow!.DataContext!;
+        await discovery.StartAsync();
+
+        discovery.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discovery.Heading == "The read-only plan screen could not open" && client.DisposeCalls == 1);
+
+        discovery.Message.Should().Contain("No game files were changed").And.NotContain("synthetic");
+        discovery.IsContinueVisible.Should().BeFalse();
+        discovery.IsExitVisible.Should().BeTrue();
+        await discoveryWindow.DisposeAsync();
+        await releaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
     private static ProductionInstallerWorkflow CreateWorkflow(
         TrackingClient client,
         Action<Window> activate,
         Func<GameDiscoveryViewModel, GameDiscoveryWindow>? windowFactory = null,
-        Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null
+        Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
+        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null
     )
     {
         ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
@@ -140,7 +213,7 @@ internal sealed class ProductionInstallerWorkflowTests
         {
             CompletePreparation = true
         };
-        return new(service, () => client, activate, windowFactory, pickFolder);
+        return new(service, () => client, activate, windowFactory, pickFolder, planWindowFactory);
     }
 
     private static async Task VerifyAsync(ReleaseVerificationViewModel viewModel)
@@ -171,6 +244,7 @@ internal sealed class ProductionInstallerWorkflowTests
 
         public int DisposeCalls { get; private set; }
         public string? ValidatedPath { get; private set; }
+        public IReadOnlyList<ProtocolGameCandidate> DiscoveredGames { get; init; } = [];
         public bool ThrowOnDispose { get; init; }
         public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
 
@@ -191,7 +265,7 @@ internal sealed class ProductionInstallerWorkflowTests
         public Task<InstallerPackageOpenResult> OpenPackageAsync(InstallerPackageOpenInput package, CancellationToken cancellationToken = default)
         {
             InstallerPackageOpenSuccess success = new(new ProtocolReleaseIdentity(
-                ForkReleaseIdentity.Repository,
+                ForkReleaseIdentity.RepositoryUrl,
                 package.ReleaseTag,
                 ForkReleaseIdentity.Parse(package.ReleaseTag).EmbeddedVersion,
                 Path.GetFileName(package.PackagePath),
@@ -207,7 +281,7 @@ internal sealed class ProductionInstallerWorkflowTests
         }
 
         public Task<IReadOnlyList<ProtocolGameCandidate>> DiscoverGamesAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([]);
+            => Task.FromResult(this.DiscoveredGames);
 
         public Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default)
         {

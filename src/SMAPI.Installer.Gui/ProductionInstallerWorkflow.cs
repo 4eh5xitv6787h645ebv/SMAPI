@@ -14,10 +14,15 @@ internal sealed class ProductionInstallerWorkflow
     private readonly Action<Window> ActivateNextWindow;
     private readonly Func<GameDiscoveryViewModel, GameDiscoveryWindow> DiscoveryWindowFactory;
     private readonly Func<GameDiscoveryWindow, Task<string?>> PickFolder;
+    private readonly Func<PlanReviewViewModel, PlanReviewWindow> PlanWindowFactory;
     private ReleaseVerificationController? ReleaseController;
     private ReleaseVerificationViewModel? ReleaseViewModel;
     private ReleaseVerificationWindow? ReleaseWindow;
+    private GameDiscoveryController? DiscoveryController;
+    private GameDiscoveryViewModel? DiscoveryViewModel;
+    private GameDiscoveryWindow? DiscoveryWindow;
     private int TransitionStarted;
+    private int PlanTransitionStarted;
     private int PickerActive;
 
     public ProductionInstallerWorkflow(
@@ -25,7 +30,8 @@ internal sealed class ProductionInstallerWorkflow
         Func<IInstallerProtocolClient> clientFactory,
         Action<Window> activateNextWindow,
         Func<GameDiscoveryViewModel, GameDiscoveryWindow>? discoveryWindowFactory = null,
-        Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null
+        Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
+        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null
     )
     {
         this.ReleaseService = releaseService ?? throw new ArgumentNullException(nameof(releaseService));
@@ -33,6 +39,7 @@ internal sealed class ProductionInstallerWorkflow
         this.ActivateNextWindow = activateNextWindow ?? throw new ArgumentNullException(nameof(activateNextWindow));
         this.DiscoveryWindowFactory = discoveryWindowFactory ?? (viewModel => new(viewModel));
         this.PickFolder = pickFolder ?? PickFolderAsync;
+        this.PlanWindowFactory = planWindowFactory ?? (viewModel => new(viewModel));
     }
 
     /// <summary>Create the initial window exactly once without starting network or backend work.</summary>
@@ -63,16 +70,73 @@ internal sealed class ProductionInstallerWorkflow
             controller = new(session);
             session = null;
             viewModel = new(controller);
-            controller = null;
             window = this.DiscoveryWindowFactory(viewModel)
                 ?? throw new InvalidOperationException("The game-discovery window factory returned null.");
-            viewModel = null;
             GameDiscoveryWindow transitionedWindow = window;
             transitionedWindow.FolderPickerRequested += (_, _) => this.OnFolderPickerRequested(transitionedWindow);
+            viewModel.ContinueRequested += this.OnPlanContinueRequested;
+
+            this.DiscoveryController = controller;
+            this.DiscoveryViewModel = viewModel;
+            this.DiscoveryWindow = window;
 
             this.ActivateNextWindow(transitionedWindow);
             this.ReleaseViewModel!.ContinueRequested -= this.OnContinueRequested;
             this.ReleaseWindow!.Close();
+            controller = null;
+            viewModel = null;
+            window = null;
+        }
+        catch
+        {
+            this.DiscoveryController = null;
+            this.DiscoveryViewModel = null;
+            this.DiscoveryWindow = null;
+            try
+            {
+                if (window is not null)
+                    await window.DisposeAsync().ConfigureAwait(true);
+                else if (viewModel is not null)
+                    await viewModel.DisposeAsync().ConfigureAwait(true);
+                else if (controller is not null)
+                    await controller.DisposeAsync().ConfigureAwait(true);
+                else if (session is not null)
+                    await session.DisposeAsync().ConfigureAwait(true);
+            }
+            catch
+            {
+                // The transferred authority remains unusable; only sanitized failure state reaches the UI.
+            }
+            this.ReleaseViewModel?.ReportTransitionFailure();
+        }
+    }
+
+    private async void OnPlanContinueRequested(object? sender, EventArgs eventArgs)
+    {
+        if (Interlocked.Exchange(ref this.PlanTransitionStarted, 1) != 0)
+            return;
+
+        IPlanInspectionSession? session = null;
+        PlanReviewController? controller = null;
+        PlanReviewViewModel? viewModel = null;
+        PlanReviewWindow? window = null;
+        try
+        {
+            session = this.DiscoveryController!.TakeSelectedGameSession();
+            controller = new(session);
+            session = null;
+            viewModel = new(controller);
+            controller = null;
+            window = this.PlanWindowFactory(viewModel)
+                ?? throw new InvalidOperationException("The plan-review window factory returned null.");
+            viewModel = null;
+
+            this.ActivateNextWindow(window);
+            this.DiscoveryViewModel!.ContinueRequested -= this.OnPlanContinueRequested;
+            this.DiscoveryWindow!.Close();
+            this.DiscoveryController = null;
+            this.DiscoveryViewModel = null;
+            this.DiscoveryWindow = null;
             window = null;
         }
         catch
@@ -92,7 +156,7 @@ internal sealed class ProductionInstallerWorkflow
             {
                 // The transferred authority remains unusable; only sanitized failure state reaches the UI.
             }
-            this.ReleaseViewModel?.ReportTransitionFailure();
+            this.DiscoveryViewModel?.ReportTransitionFailure();
         }
     }
 

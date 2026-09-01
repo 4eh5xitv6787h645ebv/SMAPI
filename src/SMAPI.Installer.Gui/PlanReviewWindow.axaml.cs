@@ -6,16 +6,16 @@ using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui;
 
-/// <summary>A read-only discovery window. The host owns the native folder-picker implementation through an event seam.</summary>
-internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
+/// <summary>A read-only plan-review window with no approval, confirmation, or execution controls.</summary>
+internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
 {
     private readonly object DisposeLock = new();
-    private readonly GameDiscoveryViewModel ViewModel;
+    private readonly PlanReviewViewModel ViewModel;
     private Task? DisposeTask;
     private bool CloseApproved;
     private bool CloseStarted;
 
-    public GameDiscoveryWindow(GameDiscoveryViewModel viewModel)
+    public PlanReviewWindow(PlanReviewViewModel viewModel)
     {
         this.InitializeComponent();
         this.ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
@@ -30,18 +30,7 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
         this.ApplyResponsiveLayout(this.Width);
     }
 
-    public event EventHandler? FolderPickerRequested
-    {
-        add => this.ViewModel.FolderPickerRequested += value;
-        remove => this.ViewModel.FolderPickerRequested -= value;
-    }
-
     internal bool IsNarrowLayout { get; private set; }
-
-    public Task ApplyManualFolderAsync(string? path)
-    {
-        return this.ViewModel.ApplyManualFolderAsync(path);
-    }
 
     internal void ApplyResponsiveLayout(double viewportWidth)
     {
@@ -58,10 +47,12 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
         }
     }
 
-    private async void OnOpened(object? sender, EventArgs e)
+    private void OnOpened(object? sender, EventArgs e)
     {
-        this.StatusRegion.Focus(NavigationMethod.Tab);
-        await this.ViewModel.StartAsync();
+        Dispatcher.UIThread.Post(
+            () => this.OperationList.Focus(NavigationMethod.Tab),
+            DispatcherPriority.Input
+        );
     }
 
     private async void OnClosing(object? sender, WindowClosingEventArgs e)
@@ -101,19 +92,18 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
         this.Close();
     }
 
-    private void OnFocusRequested(object? sender, GameDiscoveryFocusTarget target)
+    private void OnFocusRequested(object? sender, PlanReviewFocusTarget target)
     {
         Dispatcher.UIThread.Post(
             () =>
             {
                 Control control = target switch
                 {
-                    GameDiscoveryFocusTarget.CandidateList => this.CandidateList,
-                    GameDiscoveryFocusTarget.Browse => this.BrowseButton,
-                    GameDiscoveryFocusTarget.Retry => this.RetryButton,
-                    GameDiscoveryFocusTarget.Continue => this.ContinueButton,
-                    GameDiscoveryFocusTarget.Exit => this.ExitButton,
-                    _ when this.ViewModel.IsProblemVisible => this.ProblemRegion,
+                    PlanReviewFocusTarget.OperationList => this.OperationList,
+                    PlanReviewFocusTarget.Result => this.ResultSummaryRegion,
+                    PlanReviewFocusTarget.Error => this.ErrorRegion,
+                    PlanReviewFocusTarget.Retry => this.RetryButton,
+                    PlanReviewFocusTarget.Exit => this.ExitButton,
                     _ => this.StatusRegion
                 };
                 if (control.IsVisible && control.IsEffectivelyEnabled)
