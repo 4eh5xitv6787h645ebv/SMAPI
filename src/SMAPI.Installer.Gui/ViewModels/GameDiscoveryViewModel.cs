@@ -401,7 +401,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
             ),
             GameDiscoveryState.Ready => (
                 value.Candidates.Count == 1 ? "One possible game folder was found" : $"{value.Candidates.Count} possible game folders were found",
-                "Select one folder to review its validation result. Only a supported folder can continue."
+                "Select one folder to review its validation result. Unsupported folders show a safe next step."
             ),
             GameDiscoveryState.ValidatingManual => (
                 "Checking the selected folder…",

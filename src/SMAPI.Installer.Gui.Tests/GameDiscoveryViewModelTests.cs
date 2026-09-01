@@ -132,7 +132,11 @@ internal sealed partial class GameDiscoveryAccessibilityTests
                 viewModel.SelectedCandidate!.Candidate.Should().BeSameAs(candidates[0]);
             }
             else
+            {
                 viewModel.SelectedCandidate.Should().BeNull();
+                viewModel.Message.Should().Be("Select one folder to review its validation result. Unsupported folders show a safe next step.");
+                viewModel.Message.Should().NotContain("continue");
+            }
             viewModel.Candidates.Should().HaveCount(candidates.Length);
         }
     }
