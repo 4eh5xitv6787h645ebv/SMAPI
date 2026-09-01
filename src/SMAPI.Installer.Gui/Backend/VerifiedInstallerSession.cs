@@ -1,4 +1,5 @@
 using System.Runtime.ExceptionServices;
+using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
@@ -27,6 +28,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private readonly HashSet<ProtocolGameCandidate> DiscoveredCandidates = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<InstallerReadOnlyPlanCandidate> CurrentPlanCandidates = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<InstallerReadOnlyPlanCandidate> IssuedPlanCandidates = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<BoundInstallerRecoveryPoint, InstallerRecoveryPoint> CurrentRecoveryPoints = new(ReferenceEqualityComparer.Instance);
     private InstallerPlanConfirmation? CurrentPlanConfirmation;
     private InstallerPlanConfirmation? CurrentClientConfirmation;
     private InstallerConfirmedPlanAuthority? CurrentConfirmedAuthority;
@@ -39,9 +41,14 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private Task? DisposalTask;
     private bool ConfirmedOwnershipTransferred;
     private bool RecoveryOwnershipTransferred;
+    private bool RecoveryLookupClosed;
     private SessionStage Stage = SessionStage.Discovery;
     private int AdmittedDiscoveryCommands;
     internal int IssuedPlanCandidateCapacityForTesting { get; set; } = InstallerCandidateSelection.MaximumIssuedCandidatesPerSession;
+    internal Action? BeforePlanAdmissionForTesting { get; set; }
+    internal Action? BeforeRecoveryListAdmissionForTesting { get; set; }
+    internal Action? BeforeRollbackAdmissionForTesting { get; set; }
+    internal Action? BeforeCandidateApprovalAdmissionForTesting { get; set; }
 
     public ProtocolReleaseIdentity Release { get; }
     public Task<InstallerProtocolClientException> SessionFaulted => this.Client.SessionFaulted;
@@ -243,6 +250,9 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         InstallerReadOnlyPlanCandidate[]? stableResultCandidates = null;
         InstallerPlanConfirmation? clientConfirmation = null;
         InstallerPlanConfirmation? sessionConfirmation = null;
+        bool admitted = false;
+        bool advancedOwnerWon = false;
+        bool preserveSessionOnFailure = false;
         Exception? failure = null;
         try
         {
@@ -260,12 +270,23 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
 
         try
         {
+            this.BeforePlanAdmissionForTesting?.Invoke();
             lock (this.DisposeLock)
             {
                 if (this.Stage != SessionStage.Bound)
+                {
+                    if (this.IsAdvancedOwnershipStageUnderLock())
+                    {
+                        advancedOwnerWon = true;
+                        throw new InvalidOperationException("Another operation already advanced this bound session to confirmed ownership.");
+                    }
                     throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                }
+                this.RecoveryLookupClosed = true;
+                this.CurrentRecoveryPoints.Clear();
                 this.CurrentPlanCandidates.Clear();
                 this.ClearCurrentPlanConfirmation();
+                admitted = true;
             }
             result = await this.Client.InspectPlanAsync(
                 exactCanonicalPath,
@@ -300,6 +321,11 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 }
             }
         }
+        catch (InvalidOperationException exception) when (!admitted && advancedOwnerWon)
+        {
+            failure = exception;
+            preserveSessionOnFailure = true;
+        }
         catch (Exception exception)
         {
             failure = this.GetPlanFailure(exception);
@@ -311,7 +337,260 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
 
         if (failure is not null)
         {
+            if (!preserveSessionOnFailure)
+                await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+        if (result is InstallerReadOnlyPlanRejection { IsTerminal: true })
             await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+        return result!;
+    }
+
+    private async Task<BoundInstallerRecoveryCatalogResult> ListBoundRecoveriesAsync(
+        string exactCanonicalPath,
+        CancellationToken cancellationToken
+    )
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        CancellationToken lifetime;
+        lock (this.DisposeLock)
+        {
+            if (this.Stage != SessionStage.Bound)
+                throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+            if (this.RecoveryLookupClosed)
+                throw new InvalidOperationException("Recovery history must be listed before any plan inspection starts.");
+            lifetime = this.Lifetime.Token;
+        }
+
+        using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
+        bool gateEntered = false;
+        bool admitted = false;
+        bool preserveSessionOnFailure = false;
+        BoundInstallerRecoveryCatalogResult? result = null;
+        Dictionary<BoundInstallerRecoveryPoint, InstallerRecoveryPoint>? projectedAuthorities = null;
+        Exception? failure = null;
+        try
+        {
+            await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
+            gateEntered = true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        if (failure is not null)
+        {
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        try
+        {
+            this.BeforeRecoveryListAdmissionForTesting?.Invoke();
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Bound)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                if (this.RecoveryLookupClosed)
+                    throw new InvalidOperationException("Recovery history must be listed before any plan inspection starts.");
+                request.Token.ThrowIfCancellationRequested();
+
+                // A refresh revokes every older wrapper capability before the process client can write its request.
+                this.CurrentRecoveryPoints.Clear();
+                this.CurrentPlanCandidates.Clear();
+                this.ClearCurrentPlanConfirmation();
+                admitted = true;
+            }
+
+            InstallerRecoveryCatalogResult backend = await this.Client.ListRecoveriesAsync(
+                exactCanonicalPath,
+                request.Token
+            ).ConfigureAwait(false);
+            (result, projectedAuthorities) = ProjectBoundRecoveryCatalog(backend);
+
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Bound)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                if (this.Client.SessionFaulted.IsCompleted)
+                    throw new InstallerProtocolClientException("The verified installer session faulted before recovery history could be accepted.");
+                request.Token.ThrowIfCancellationRequested();
+                if (this.RecoveryLookupClosed)
+                    throw new InstallerProtocolClientException("The recovery-history mode was closed before its result could be accepted.");
+                if (result is BoundInstallerRecoveryCatalogRejection { IsTerminal: true })
+                    this.Stage = SessionStage.BoundTerminal;
+                if (projectedAuthorities is not null)
+                {
+                    foreach ((BoundInstallerRecoveryPoint point, InstallerRecoveryPoint authority) in projectedAuthorities)
+                        this.CurrentRecoveryPoints.Add(point, authority);
+                }
+            }
+        }
+        catch (InvalidOperationException exception) when (!admitted)
+        {
+            failure = exception;
+            preserveSessionOnFailure = true;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        finally
+        {
+            if (gateEntered)
+                this.CommandGate.Release();
+        }
+
+        if (failure is not null)
+        {
+            if (!preserveSessionOnFailure)
+                await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+        if (result is BoundInstallerRecoveryCatalogRejection { IsTerminal: true })
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+        return result!;
+    }
+
+    private async Task<InstallerReadOnlyPlanResult> InspectBoundRollbackAsync(
+        string exactCanonicalPath,
+        BoundInstallerRecoveryPoint point,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(point);
+        cancellationToken.ThrowIfCancellationRequested();
+        CancellationToken lifetime;
+        lock (this.DisposeLock)
+        {
+            if (this.Stage != SessionStage.Bound)
+                throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+            if (this.RecoveryLookupClosed || !this.CurrentRecoveryPoints.ContainsKey(point))
+                throw new ArgumentException("The recovery point must be an exact current capability issued by this bound session.", nameof(point));
+            lifetime = this.Lifetime.Token;
+        }
+
+        using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
+        bool gateEntered = false;
+        bool admitted = false;
+        bool preserveSessionOnFailure = false;
+        InstallerReadOnlyPlanResult? result = null;
+        InstallerPlanConfirmation? clientConfirmation = null;
+        InstallerPlanConfirmation? sessionConfirmation = null;
+        Exception? failure = null;
+        try
+        {
+            await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
+            gateEntered = true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        if (failure is not null)
+        {
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        try
+        {
+            this.BeforeRollbackAdmissionForTesting?.Invoke();
+            InstallerRecoveryPoint backendPoint;
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Bound)
+                {
+                    if (
+                        this.IsAdvancedOwnershipStageUnderLock()
+                        && !this.CurrentRecoveryPoints.ContainsKey(point)
+                    )
+                    {
+                        throw new ArgumentException("The recovery point is stale because another operation already consumed its catalog.", nameof(point));
+                    }
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                }
+                request.Token.ThrowIfCancellationRequested();
+                if (this.RecoveryLookupClosed || !this.CurrentRecoveryPoints.TryGetValue(point, out backendPoint!))
+                    throw new ArgumentException("The recovery point must be an exact current capability issued by this bound session.", nameof(point));
+
+                // Selection is one-shot. Once admitted, no cancellation, rejection, or malformed response can
+                // resurrect this catalog or a sibling point from it.
+                this.RecoveryLookupClosed = true;
+                this.CurrentRecoveryPoints.Clear();
+                this.CurrentPlanCandidates.Clear();
+                this.ClearCurrentPlanConfirmation();
+                admitted = true;
+            }
+
+            result = await this.Client.InspectRollbackAsync(
+                exactCanonicalPath,
+                backendPoint,
+                request.Token
+            ).ConfigureAwait(false);
+            if (result is InstallerReadOnlyPlanSuccess success)
+            {
+                if (success.Operation != InstallerOperation.Rollback)
+                    throw new InstallerProtocolClientException("The installer backend returned a plan for the wrong operation.");
+                InstallerReadOnlyPlanCandidate[] candidates = SnapshotBackendResultCandidates(success.Candidates);
+                if (candidates.Length != 0 || success.CandidateCounts.Count != 0)
+                    throw new InstallerProtocolClientException("A rollback plan returned unexpected candidate authority.");
+                (clientConfirmation, sessionConfirmation) = RemintConfirmation(success);
+                result = success with
+                {
+                    Candidates = Array.AsReadOnly(candidates),
+                    Confirmation = sessionConfirmation
+                };
+            }
+
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Bound)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                if (this.Client.SessionFaulted.IsCompleted)
+                    throw new InstallerProtocolClientException("The verified installer session faulted before the rollback plan could be accepted.");
+                request.Token.ThrowIfCancellationRequested();
+                if (result is InstallerReadOnlyPlanRejection rejection)
+                {
+                    if (rejection.IsTerminal)
+                        this.Stage = SessionStage.BoundTerminal;
+                    else
+                        this.RecoveryLookupClosed = false;
+                }
+                if (result is InstallerReadOnlyPlanSuccess)
+                {
+                    this.CurrentClientConfirmation = clientConfirmation;
+                    this.CurrentPlanConfirmation = sessionConfirmation;
+                }
+            }
+        }
+        catch (ArgumentException exception) when (!admitted)
+        {
+            failure = exception;
+            preserveSessionOnFailure = true;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        finally
+        {
+            if (gateEntered)
+                this.CommandGate.Release();
+        }
+
+        if (failure is not null)
+        {
+            if (!preserveSessionOnFailure)
+                await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
             ExceptionDispatchInfo.Capture(failure).Throw();
         }
         if (result is InstallerReadOnlyPlanRejection { IsTerminal: true })
@@ -355,6 +634,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
 
         try
         {
+            this.BeforeCandidateApprovalAdmissionForTesting?.Invoke();
             lock (this.DisposeLock)
             {
                 if (this.Stage != SessionStage.Bound)
@@ -776,6 +1056,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         lock (this.DisposeLock)
         {
             this.ClearIssuedCandidates();
+            this.CurrentRecoveryPoints.Clear();
             this.CurrentPlanCandidates.Clear();
             this.IssuedPlanCandidates.Clear();
             this.ClearCurrentPlanConfirmation();
@@ -806,6 +1087,104 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             throw new InstallerProtocolClientException("The installer backend omitted confirmation authority for an executable plan.");
         return (client, new InstallerPlanConfirmation());
     }
+
+    private static (
+        BoundInstallerRecoveryCatalogResult Result,
+        Dictionary<BoundInstallerRecoveryPoint, InstallerRecoveryPoint>? Authorities
+    ) ProjectBoundRecoveryCatalog(InstallerRecoveryCatalogResult backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        switch (backend)
+        {
+            case InstallerRecoveryCatalogSuccess success:
+                {
+                    IReadOnlyList<InstallerRecoveryPoint> source = success.RecoveryPoints
+                        ?? throw new InstallerProtocolClientException("The installer backend returned an invalid recovery-point collection.");
+                    int count;
+                    try { count = source.Count; }
+                    catch
+                    {
+                        throw new InstallerProtocolClientException("The installer backend returned an invalid recovery-point collection.");
+                    }
+                    if (count is <= 0 or > ProtocolJsonSerializer.MaxRecoveryGenerations)
+                        throw new InstallerProtocolClientException("The installer backend returned an invalid recovery-point collection.");
+
+                    BoundInstallerRecoveryPoint[] projected = new BoundInstallerRecoveryPoint[count];
+                    Dictionary<BoundInstallerRecoveryPoint, InstallerRecoveryPoint> authorities = new(ReferenceEqualityComparer.Instance);
+                    HashSet<InstallerRecoveryPoint> backendReferences = new(ReferenceEqualityComparer.Instance);
+                    for (int index = 0; index < count; index++)
+                    {
+                        InstallerRecoveryPoint point;
+                        try { point = source[index]; }
+                        catch
+                        {
+                            throw new InstallerProtocolClientException("The installer backend returned an invalid recovery-point collection.");
+                        }
+                        if (
+                            point is null
+                            || !backendReferences.Add(point)
+                            || point.Ordinal != index + 1
+                            || point.IsCurrent != (index == 0)
+                            || !Enum.IsDefined(point.OriginOperation)
+                            || point.IsUserCheckpoint != (point.OriginOperation == InstallerOperation.Backup)
+                        )
+                        {
+                            throw new InstallerProtocolClientException("The installer backend returned invalid recovery-point semantics.");
+                        }
+
+                        BoundInstallerRecoveryRestoreTarget target = point.RestoreTarget switch
+                        {
+                            InstallerRecoveryReleaseTarget release => ProjectBoundRecoveryRelease(release),
+                            InstallerRecoveryUninstalledTarget => new BoundInstallerRecoveryUninstalledTarget(),
+                            _ => throw new InstallerProtocolClientException("The installer backend returned an invalid recovery restore target.")
+                        };
+                        BoundInstallerRecoveryPoint reminted = new(
+                            point.Ordinal,
+                            point.IsCurrent,
+                            point.IsUserCheckpoint,
+                            point.OriginOperation,
+                            target
+                        );
+                        projected[index] = reminted;
+                        authorities.Add(reminted, point);
+                    }
+                    return (new BoundInstallerRecoveryCatalogSuccess(Array.AsReadOnly(projected)), authorities);
+                }
+
+            case InstallerNoRecoveryHistory:
+                return (new BoundInstallerNoRecoveryHistory(), null);
+
+            case InstallerRecoveryCatalogRejection rejection when IsValidBoundRecoveryRejection(rejection):
+                return (new BoundInstallerRecoveryCatalogRejection(rejection.ErrorCode, rejection.NextAction, rejection.IsTerminal), null);
+
+            default:
+                throw new InstallerProtocolClientException("The installer backend returned an invalid recovery-history result.");
+        }
+    }
+
+    private static BoundInstallerRecoveryReleaseTarget ProjectBoundRecoveryRelease(InstallerRecoveryReleaseTarget release)
+    {
+        ArgumentNullException.ThrowIfNull(release);
+        ForkReleaseIdentity identity;
+        try { identity = ForkReleaseIdentity.Parse(release.Tag); }
+        catch
+        {
+            throw new InstallerProtocolClientException("The installer backend returned an invalid recovery release.");
+        }
+        if (!StringComparer.Ordinal.Equals(release.EmbeddedVersion, identity.EmbeddedVersion))
+            throw new InstallerProtocolClientException("The installer backend returned an invalid recovery release.");
+        return new(identity.Tag, identity.EmbeddedVersion);
+    }
+
+    private static bool IsValidBoundRecoveryRejection(InstallerRecoveryCatalogRejection rejection) => rejection switch
+    {
+        { ErrorCode: ProtocolPrePlanErrorCode.RequestCancelled, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.InvalidGameFolder, NextAction: ProtocolNextAction.SelectGameFolder, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.RecoveryUnavailable, NextAction: ProtocolNextAction.ListRecoveries, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
+        _ => false
+    };
 
     /// <remarks>The caller must hold <see cref="DisposeLock"/>.</remarks>
     private void ClearCurrentPlanConfirmation()
@@ -880,6 +1259,13 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         }
     }
 
+    /// <remarks>The caller must hold <see cref="DisposeLock"/>.</remarks>
+    private bool IsAdvancedOwnershipStageUnderLock() => this.Stage is
+        SessionStage.Confirming
+        or SessionStage.Confirmed
+        or SessionStage.Executing
+        or SessionStage.ConfirmedTerminal;
+
     private static void AssertSupportedPlanOperation(InstallerOperation operation)
     {
         if (operation is not (InstallerOperation.Install
@@ -931,6 +1317,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             lock (this.DisposeLock)
             {
                 this.ClearIssuedCandidates();
+                this.CurrentRecoveryPoints.Clear();
                 this.CurrentPlanCandidates.Clear();
                 this.IssuedPlanCandidates.Clear();
                 this.ClearCurrentPlanConfirmation();
@@ -983,6 +1370,14 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
 
         public Task<InstallerReadOnlyPlanResult> InspectPlanAsync(InstallerOperation operation, CancellationToken cancellationToken = default)
             => this.Owner.InspectBoundPlanAsync(this.ExactCanonicalPath, operation, cancellationToken);
+
+        public Task<BoundInstallerRecoveryCatalogResult> ListRecoveriesAsync(CancellationToken cancellationToken = default)
+            => this.Owner.ListBoundRecoveriesAsync(this.ExactCanonicalPath, cancellationToken);
+
+        public Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+            BoundInstallerRecoveryPoint point,
+            CancellationToken cancellationToken = default
+        ) => this.Owner.InspectBoundRollbackAsync(this.ExactCanonicalPath, point, cancellationToken);
 
         public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
             => this.Owner.ApproveBoundPlanCandidatesAsync(candidates, cancellationToken);

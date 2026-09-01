@@ -440,6 +440,107 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         }
     }
 
+    public async Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+        string canonicalGamePath,
+        InstallerRecoveryPoint recoveryPoint,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(canonicalGamePath);
+        ArgumentNullException.ThrowIfNull(recoveryPoint);
+
+        await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            this.AssertUsable();
+            Volatile.Write(ref this.RecoveryEligibilityLost, 1);
+            ProtocolSessionId session;
+            ProtocolReleaseIdentity verifiedRelease;
+            RetainedRecoveryCatalogBinding catalog;
+            ProtocolRecoveryGeneration selectedGeneration;
+            lock (this.ResponseLock)
+            {
+                session = this.SessionId
+                    ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+                if (this.CurrentConfirmedPlanBinding is not null)
+                    throw new InvalidOperationException("The confirmed backend session can no longer inspect a plan.");
+                catalog = this.CurrentRecoveryCatalogBinding
+                    ?? throw new InvalidOperationException("A current recovery catalog is required before inspecting rollback.");
+                if (!string.Equals(canonicalGamePath, catalog.CanonicalGamePath, StringComparison.Ordinal))
+                    throw new ArgumentException("The rollback game path must match the exact current recovery catalog.", nameof(canonicalGamePath));
+                if (!catalog.Points.TryGetValue(recoveryPoint, out selectedGeneration!))
+                    throw new ArgumentException("The recovery point must be an exact current capability issued by this client.", nameof(recoveryPoint));
+                verifiedRelease = this.VerifiedRelease
+                    ?? throw new InstallerProtocolClientException("A verified package session is required before inspecting an operation.");
+
+                // Consuming the point revokes the entire catalog before any request byte can be written. A failed,
+                // cancelled, or rejected inspection can never make this or another point current again.
+                this.CurrentRecoveryCatalogBinding = null;
+                this.CurrentPlanBinding = null;
+            }
+
+            using CancellationTokenSource aggregateTimeout = new(this.OperationTimeout);
+            using CancellationTokenSource aggregate = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, aggregateTimeout.Token);
+            try
+            {
+                ProtocolEvent response = await this.ExchangeAsync<ProtocolEvent>(
+                    new InspectPlanRequest(session, canonicalGamePath, InstallerOperation.Rollback, null, selectedGeneration.SelectionId),
+                    aggregate.Token
+                ).ConfigureAwait(false);
+
+                if (response is PrePlanRejectedEvent rejected && rejected.SessionId == session)
+                {
+                    if (!IsReachableRollbackInspectionRejection(rejected))
+                        return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+                    InstallerReadOnlyPlanRejection result = new(rejected.ErrorCode, rejected.NextAction, rejected.IsTerminal);
+                    if (rejected.IsTerminal)
+                        await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                    return result;
+                }
+                if (
+                    response is not PlanEvent plan
+                    || !ValidateRollbackPlanHeader(plan, session, catalog, selectedGeneration)
+                )
+                    return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+
+                PlanCollections collections = await this.FetchAllPlanPagesAsync(plan, session, aggregate.Token).ConfigureAwait(false);
+                if (!ValidateCompletePlan(plan, collections))
+                    return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+
+                (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates) projection;
+                try { projection = ProjectPlan(plan, collections); }
+                catch { return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false); }
+                (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates) = projection;
+                aggregate.Token.ThrowIfCancellationRequested();
+                if (this.SessionFault.Task.IsCompletedSuccessfully)
+                    throw await this.SessionFault.Task.ConfigureAwait(false);
+                this.BeforePlanBindingCommitForTesting?.Invoke();
+                aggregate.Token.ThrowIfCancellationRequested();
+                if (this.SessionFault.Task.IsCompletedSuccessfully)
+                    throw await this.SessionFault.Task.ConfigureAwait(false);
+                if (!this.TryRetainPlanBinding(new(canonicalGamePath, InstallerOperation.Rollback, null, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, candidates, projected.Confirmation)))
+                    return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+                return projected;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && aggregateTimeout.IsCancellationRequested)
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw new InstallerProtocolClientException(this.CleanupConfirmed
+                    ? "The installer backend rollback inspection exceeded its bounded deadline and was stopped."
+                    : "The installer backend rollback inspection exceeded its bounded deadline, and termination could not be confirmed.");
+            }
+        }
+        finally
+        {
+            this.CommandGate.Release();
+        }
+    }
+
     public async Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(canonicalGamePath);
@@ -1371,6 +1472,51 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         return operation != InstallerOperation.Install || plan.CurrentRelease is null;
     }
 
+    private static bool ValidateRollbackPlanHeader(
+        PlanEvent plan,
+        ProtocolSessionId session,
+        RetainedRecoveryCatalogBinding catalog,
+        ProtocolRecoveryGeneration selectedGeneration
+    )
+    {
+        ProtocolRecoveryAuthority? authority = plan.RecoveryAuthority;
+        if (
+            plan.SessionId != session
+            || plan.Operation != InstallerOperation.Rollback
+            || plan.PackageId is not null
+            || authority is null
+            || authority.CatalogId != catalog.CatalogId
+            || authority.SelectionId != selectedGeneration.SelectionId
+            || !string.Equals(authority.HeadSha256, catalog.HeadSha256, StringComparison.Ordinal)
+            || authority.Generation != selectedGeneration
+            || plan.GameRoot != authority.GameRoot
+            || !HasSameAnchoredRoot(authority.GameRoot, catalog.GameRoot)
+            || plan.RecommendedDefault != ProtocolRecommendedDefault.Cancel
+            || !plan.RequiresConfirmation
+            || plan.CanExecute != (plan.ConflictCount == 0)
+        )
+            return false;
+
+        bool knownReceipt = plan.ObservedState is ObservedInstallState.KnownUnmodified or ObservedInstallState.KnownModified;
+        if (knownReceipt != (plan.CurrentRelease is not null))
+            return false;
+
+        ProtocolReleaseIdentity? expectedTarget = selectedGeneration.RestoresUninstalledState
+            ? null
+            : selectedGeneration.RestoreRelease;
+        return plan.TargetRelease == expectedTarget;
+    }
+
+    /// <summary>
+    /// Compare the durable anchored identity without comparing operation generation. Recovery catalogs are issued
+    /// at generation zero, while rollback inspection reports the independently observed current generation.
+    /// </summary>
+    private static bool HasSameAnchoredRoot(ProtocolGameRootIdentity inspected, ProtocolGameRootIdentity catalog) =>
+        string.Equals(inspected.CanonicalPath, catalog.CanonicalPath, StringComparison.Ordinal)
+        && inspected.DeviceMajor == catalog.DeviceMajor
+        && inspected.DeviceMinor == catalog.DeviceMinor
+        && inspected.Inode == catalog.Inode;
+
     private static bool ValidateCompletePlan(PlanEvent plan, PlanCollections collections)
     {
         if (
@@ -1378,6 +1524,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             || collections.Conflicts.Count != plan.ConflictCount
             || collections.Candidates.Count != plan.CandidateCount
             || collections.Warnings.Count != plan.WarningCount
+            || plan.Operation == InstallerOperation.Rollback && collections.Candidates.Count != 0
             || !IsCanonicalOperationSequence(collections.Operations)
             || !IsCanonicalConflictSequence(collections.Conflicts)
             || collections.Candidates.Select(item => item.CandidateId).Distinct().Count() != collections.Candidates.Count
@@ -1483,6 +1630,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         List<ProtocolPlanRisk> risks = [];
         if (operation == InstallerOperation.Uninstall)
             risks.Add(ProtocolPlanRisk.Uninstall);
+        if (operation == InstallerOperation.Rollback)
+            risks.Add(ProtocolPlanRisk.Rollback);
         if (currentRelease is not null && targetRelease is not null && IsEarlierRelease(targetRelease.Tag, currentRelease.Tag))
             risks.Add(ProtocolPlanRisk.Downgrade);
         if (candidateCount > 0)
@@ -1536,6 +1685,16 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         { ErrorCode: ProtocolPrePlanErrorCode.RequestCancelled, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
         { ErrorCode: ProtocolPrePlanErrorCode.InvalidGameFolder, NextAction: ProtocolNextAction.SelectGameFolder, IsTerminal: false } => true,
         { ErrorCode: ProtocolPrePlanErrorCode.RecoveryUnavailable, NextAction: ProtocolNextAction.ListRecoveries, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
+        _ => false
+    };
+
+    private static bool IsReachableRollbackInspectionRejection(PrePlanRejectedEvent rejection) => rejection switch
+    {
+        { ErrorCode: ProtocolPrePlanErrorCode.RequestCancelled, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.InvalidGameFolder, NextAction: ProtocolNextAction.SelectGameFolder, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.InspectionFailed, NextAction: ProtocolNextAction.InspectAgain, IsTerminal: false } => true,
         { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
         { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
         _ => false

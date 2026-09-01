@@ -34,6 +34,16 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
     Task<InstallerRecoveryCatalogResult> ListRecoveriesAsync(string canonicalGamePath, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted client doesn't support recovery-history listing.");
 
+    /// <summary>
+    /// Consume one exact current recovery point and inspect its rollback plan without sending package authority.
+    /// The point must be the same reference issued by the latest successful recovery-history lookup.
+    /// </summary>
+    Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+        string canonicalGamePath,
+        InstallerRecoveryPoint recoveryPoint,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted client doesn't support rollback plan inspection.");
+
     /// <summary>Inspect one non-rollback operation and return a sanitized projection whose candidate references carry only scoped approval authority.</summary>
     Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default);
 

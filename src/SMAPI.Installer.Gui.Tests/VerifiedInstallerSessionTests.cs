@@ -281,6 +281,427 @@ internal sealed class VerifiedInstallerSessionTests
     }
 
     [Test]
+    public async Task BoundRecoveryCatalogRemintsExactPointsAndUsesOnlyThePrivateBoundPath()
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-remint", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = (_, point, _) =>
+            {
+                point.Should().BeSameAs(backendPoint);
+                return Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Rollback));
+            }
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        BoundInstallerRecoveryCatalogSuccess catalog = (BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync();
+        BoundInstallerRecoveryPoint point = catalog.RecoveryPoints.Should().ContainSingle().Subject;
+
+        client.RecoveryCatalogPaths.Should().Equal("/games/rollback-remint");
+        point.Ordinal.Should().Be(1);
+        point.IsCurrent.Should().BeTrue();
+        point.RestoreTarget.Should().BeOfType<BoundInstallerRecoveryReleaseTarget>();
+        typeof(BoundInstallerRecoveryPoint).GetProperties()
+            .Should().NotContain(property => property.PropertyType == typeof(InstallerRecoveryPoint));
+
+        BoundInstallerRecoveryPoint reconstructed = new(
+            point.Ordinal,
+            point.IsCurrent,
+            point.IsUserCheckpoint,
+            point.OriginOperation,
+            point.RestoreTarget
+        );
+        Func<Task> foreign = () => bound.InspectRollbackAsync(reconstructed);
+        await foreign.Should().ThrowAsync<ArgumentException>();
+        client.RollbackInspections.Should().BeEmpty();
+
+        InstallerReadOnlyPlanSuccess rollback = (InstallerReadOnlyPlanSuccess)await bound.InspectRollbackAsync(point);
+        rollback.Operation.Should().Be(InstallerOperation.Rollback);
+        rollback.Confirmation.Should().NotBeNull();
+        client.RollbackInspections.Should().ContainSingle().Which.Path.Should().Be("/games/rollback-remint");
+    }
+
+    [Test]
+    public async Task RecoveryRefreshAndNormalInspectionRevokeEveryOlderWrapperPoint()
+    {
+        InstallerRecoveryPoint first = RecoveryPoint(1, current: true);
+        InstallerRecoveryPoint second = RecoveryPoint(1, current: true);
+        Queue<InstallerRecoveryPoint> catalogs = new([first, second]);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-refresh", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([catalogs.Dequeue()])),
+            RollbackInspection = (_, _, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Rollback))
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint old = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPoint current = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+
+        Func<Task> stale = () => bound.InspectRollbackAsync(old);
+        await stale.Should().ThrowAsync<ArgumentException>();
+        await bound.InspectPlanAsync(InstallerOperation.Backup);
+        Func<Task> staleAfterOrdinary = () => bound.InspectRollbackAsync(current);
+        await staleAfterOrdinary.Should().ThrowAsync<ArgumentException>();
+        Func<Task> relist = () => bound.ListRecoveriesAsync();
+        await relist.Should().ThrowAsync<InvalidOperationException>().WithMessage("*before any plan inspection*");
+        client.RollbackInspections.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task PreCancelledRollbackSelectionPreservesTheExactPointForOneAdmission()
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-cancel", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = (_, _, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Rollback))
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        Func<Task> first = () => bound.InspectRollbackAsync(point, cancelled.Token);
+        await first.Should().ThrowAsync<OperationCanceledException>();
+        client.RollbackInspections.Should().BeEmpty();
+
+        _ = await bound.InspectRollbackAsync(point);
+        client.RollbackInspections.Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task NonterminalRollbackRejectionRequiresFreshCatalogAndReselection()
+    {
+        InstallerRecoveryPoint firstBackendPoint = RecoveryPoint(1, current: true);
+        InstallerRecoveryPoint secondBackendPoint = RecoveryPoint(1, current: true);
+        Queue<InstallerRecoveryPoint> catalogs = new([firstBackendPoint, secondBackendPoint]);
+        int inspections = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-retry", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([catalogs.Dequeue()])),
+            RollbackInspection = (_, point, _) => Task.FromResult<InstallerReadOnlyPlanResult>(inspections++ == 0
+                ? new InstallerReadOnlyPlanRejection(ProtocolPrePlanErrorCode.InspectionFailed, ProtocolNextAction.InspectAgain, false)
+                : Plan(InstallerOperation.Rollback))
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint stale = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+
+        InstallerReadOnlyPlanRejection rejection = (InstallerReadOnlyPlanRejection)await bound.InspectRollbackAsync(stale);
+        rejection.NextAction.Should().Be(ProtocolNextAction.InspectAgain);
+        Func<Task> reuse = () => bound.InspectRollbackAsync(stale);
+        await reuse.Should().ThrowAsync<ArgumentException>();
+
+        BoundInstallerRecoveryPoint fresh = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        InstallerReadOnlyPlanSuccess retry = (InstallerReadOnlyPlanSuccess)await bound.InspectRollbackAsync(fresh);
+        retry.Operation.Should().Be(InstallerOperation.Rollback);
+        client.RollbackInspections.Select(call => call.Point).Should().Equal(firstBackendPoint, secondBackendPoint);
+    }
+
+    [Test]
+    public async Task ConcurrentRollbackSelectionHasOneWinnerWithoutDestroyingItsConfirmation()
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        TaskCompletionSource<InstallerReadOnlyPlanResult> result = NewCompletion<InstallerReadOnlyPlanResult>();
+        InstallerPlanConfirmation backendConfirmation = new();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-race", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = async (_, _, _) => await result.Task
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+
+        Task<InstallerReadOnlyPlanResult> winner = bound.InspectRollbackAsync(point);
+        await WaitUntilAsync(() => client.RollbackInspections.Count == 1);
+        Task<InstallerReadOnlyPlanResult> loser = bound.InspectRollbackAsync(point);
+        result.SetResult(Plan(InstallerOperation.Rollback) with { Confirmation = backendConfirmation });
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await winner;
+        Func<Task> awaitLoser = async () => await loser;
+        await awaitLoser.Should().ThrowAsync<ArgumentException>();
+
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        client.ConfirmedPlans.Should().ContainSingle().Which.Should().BeSameAs(backendConfirmation);
+        await confirmed.DisposeAsync();
+    }
+
+    [Test]
+    public async Task QueuedRollbackLoserCannotInvalidateWinnerDuringImmediateConfirmation()
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        TaskCompletionSource<InstallerReadOnlyPlanResult> inspectionResult = NewCompletion<InstallerReadOnlyPlanResult>();
+        TaskCompletionSource<InstallerConfirmedPlanAuthority> confirmationResult = NewCompletion<InstallerConfirmedPlanAuthority>();
+        using ManualResetEventSlim winnerEnteredGate = new();
+        using ManualResetEventSlim releaseWinner = new();
+        using ManualResetEventSlim loserEnteredGate = new();
+        using ManualResetEventSlim releaseLoser = new();
+        InstallerPlanConfirmation backendConfirmation = new();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-confirm-race", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = async (_, _, _) => await inspectionResult.Task,
+            Confirmation = (_, _) => confirmationResult.Task
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        int gateAdmissions = 0;
+        session.BeforeRollbackAdmissionForTesting = () =>
+        {
+            int admission = Interlocked.Increment(ref gateAdmissions);
+            if (admission == 1)
+            {
+                winnerEnteredGate.Set();
+                releaseWinner.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+            }
+            else if (admission == 2)
+            {
+                loserEnteredGate.Set();
+                releaseLoser.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+            }
+        };
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+
+        Task<InstallerReadOnlyPlanResult> winner = Task.Run(async () => await bound.InspectRollbackAsync(point));
+        winnerEnteredGate.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+        Task<InstallerReadOnlyPlanResult> loser = bound.InspectRollbackAsync(point);
+        releaseWinner.Set();
+        await WaitUntilAsync(() => client.RollbackInspections.Count == 1);
+        inspectionResult.SetResult(Plan(InstallerOperation.Rollback) with { Confirmation = backendConfirmation });
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await winner;
+        loserEnteredGate.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+
+        Task<IConfirmedInstallerSession> confirming = bound.ConfirmPlanAsync(plan.Confirmation!);
+        releaseLoser.Set();
+        Func<Task> awaitLoser = async () => await loser;
+        await awaitLoser.Should().ThrowAsync<ArgumentException>();
+        await client.ConfirmationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        client.DisposeCalls.Should().Be(0);
+
+        confirmationResult.SetResult(new InstallerConfirmedPlanAuthority());
+        await using IConfirmedInstallerSession confirmed = await confirming;
+        client.ConfirmedPlans.Should().ContainSingle().Which.Should().BeSameAs(backendConfirmation);
+        client.DisposeCalls.Should().Be(0);
+    }
+
+    [Test]
+    public async Task QueuedOrdinaryInspectionCannotInvalidateRollbackWinnerDuringImmediateConfirmation()
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        TaskCompletionSource<InstallerReadOnlyPlanResult> rollbackResult = NewCompletion<InstallerReadOnlyPlanResult>();
+        TaskCompletionSource<InstallerConfirmedPlanAuthority> confirmationResult = NewCompletion<InstallerConfirmedPlanAuthority>();
+        using ManualResetEventSlim rollbackEnteredGate = new();
+        using ManualResetEventSlim releaseRollback = new();
+        using ManualResetEventSlim ordinaryEnteredGate = new();
+        using ManualResetEventSlim releaseOrdinary = new();
+        InstallerPlanConfirmation backendConfirmation = new();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-ordinary-race", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = async (_, _, _) => await rollbackResult.Task,
+            Confirmation = (_, _) => confirmationResult.Task
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        session.BeforeRollbackAdmissionForTesting = () =>
+        {
+            rollbackEnteredGate.Set();
+            releaseRollback.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+        };
+        session.BeforePlanAdmissionForTesting = () =>
+        {
+            ordinaryEnteredGate.Set();
+            releaseOrdinary.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+        };
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+
+        Task<InstallerReadOnlyPlanResult> rollback = Task.Run(async () => await bound.InspectRollbackAsync(point));
+        rollbackEnteredGate.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+        Task<InstallerReadOnlyPlanResult> ordinary = bound.InspectPlanAsync(InstallerOperation.Backup);
+        releaseRollback.Set();
+        await WaitUntilAsync(() => client.RollbackInspections.Count == 1);
+        rollbackResult.SetResult(Plan(InstallerOperation.Rollback) with { Confirmation = backendConfirmation });
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await rollback;
+        ordinaryEnteredGate.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+
+        Task<IConfirmedInstallerSession> confirming = bound.ConfirmPlanAsync(plan.Confirmation!);
+        releaseOrdinary.Set();
+        Func<Task> awaitOrdinary = async () => await ordinary;
+        await awaitOrdinary.Should().ThrowAsync<InvalidOperationException>();
+        await client.ConfirmationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        client.InspectedOperations.Should().BeEmpty();
+        client.DisposeCalls.Should().Be(0);
+
+        confirmationResult.SetResult(new InstallerConfirmedPlanAuthority());
+        await using IConfirmedInstallerSession confirmed = await confirming;
+        client.ConfirmedPlans.Should().ContainSingle().Which.Should().BeSameAs(backendConfirmation);
+        client.DisposeCalls.Should().Be(0);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task QueuedRecoveryListOrCandidateApprovalCannotInvalidateRollbackWinnerDuringImmediateConfirmation(bool approval)
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        TaskCompletionSource<InstallerReadOnlyPlanResult> rollbackResult = NewCompletion<InstallerReadOnlyPlanResult>();
+        TaskCompletionSource<InstallerConfirmedPlanAuthority> confirmationResult = NewCompletion<InstallerConfirmedPlanAuthority>();
+        using ManualResetEventSlim rollbackEnteredGate = new();
+        using ManualResetEventSlim releaseRollback = new();
+        using ManualResetEventSlim queuedEnteredGate = new();
+        using ManualResetEventSlim releaseQueued = new();
+        InstallerPlanConfirmation backendConfirmation = new();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-adjacent-race", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = async (_, _, _) => await rollbackResult.Task,
+            Confirmation = (_, _) => confirmationResult.Task
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        session.BeforeRollbackAdmissionForTesting = () =>
+        {
+            rollbackEnteredGate.Set();
+            releaseRollback.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+        };
+        Action queuedHook = () =>
+        {
+            queuedEnteredGate.Set();
+            releaseQueued.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+        };
+        if (approval)
+            session.BeforeCandidateApprovalAdmissionForTesting = queuedHook;
+        else
+            session.BeforeRecoveryListAdmissionForTesting = queuedHook;
+
+        Task<InstallerReadOnlyPlanResult> rollback = Task.Run(async () => await bound.InspectRollbackAsync(point));
+        rollbackEnteredGate.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+        Task queued = approval
+            ? bound.ApprovePlanCandidatesAsync([CandidateCapability('9', "mods/stale.dll", false)])
+            : bound.ListRecoveriesAsync();
+        releaseRollback.Set();
+        await WaitUntilAsync(() => client.RollbackInspections.Count == 1);
+        rollbackResult.SetResult(Plan(InstallerOperation.Rollback) with { Confirmation = backendConfirmation });
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await rollback;
+        queuedEnteredGate.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+
+        Task<IConfirmedInstallerSession> confirming = bound.ConfirmPlanAsync(plan.Confirmation!);
+        releaseQueued.Set();
+        Func<Task> awaitQueued = async () => await queued;
+        await awaitQueued.Should().ThrowAsync<ObjectDisposedException>();
+        await client.ConfirmationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        client.RecoveryCatalogPaths.Should().ContainSingle("/games/rollback-adjacent-race");
+        client.ApprovedCandidates.Should().BeEmpty();
+        client.DisposeCalls.Should().Be(0);
+
+        confirmationResult.SetResult(new InstallerConfirmedPlanAuthority());
+        await using IConfirmedInstallerSession confirmed = await confirming;
+        client.ConfirmedPlans.Should().ContainSingle().Which.Should().BeSameAs(backendConfirmation);
+        client.DisposeCalls.Should().Be(0);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task ThrowingAdmissionHookReleasesCommandGateBeforeCleanup(bool rollback)
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("hook-failure", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint]))
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint? point = rollback
+            ? ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single()
+            : null;
+        Action failure = () => throw new InvalidOperationException("synthetic admission-hook failure");
+        if (rollback)
+            session.BeforeRollbackAdmissionForTesting = failure;
+        else
+            session.BeforePlanAdmissionForTesting = failure;
+
+        Func<Task> action = () => (rollback
+            ? bound.InspectRollbackAsync(point!)
+            : bound.InspectPlanAsync(InstallerOperation.Backup)).WaitAsync(TimeSpan.FromSeconds(2));
+
+        await action.Should().ThrowAsync<InvalidOperationException>().WithMessage("synthetic admission-hook failure");
+        client.DisposeCalls.Should().Be(1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task RollbackRejectsCandidateAuthorityAndCleansTheSessionExactlyOnce()
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability('9', "mods/rollback.dll", false);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-candidate", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = (_, _, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Rollback) with
+            {
+                CandidateCounts = [new(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, false, 1)],
+                Candidates = [candidate]
+            })
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+
+        Func<Task> inspect = () => bound.InspectRollbackAsync(point);
+        await inspect.Should().ThrowAsync<InstallerProtocolClientException>().WithMessage("*unexpected candidate*");
+        client.DisposeCalls.Should().Be(1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ListRollbackConfirmExecuteReusesTheExactExistingOwnershipPipeline()
+    {
+        InstallerRecoveryPoint backendPoint = RecoveryPoint(1, current: true);
+        InstallerPlanConfirmation backendConfirmation = new();
+        InstallerConfirmedPlanAuthority executionAuthority = new();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("rollback-pipeline", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([backendPoint])),
+            RollbackInspection = (_, _, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Rollback) with { Confirmation = backendConfirmation }),
+            Confirmation = (confirmation, _) =>
+            {
+                confirmation.Should().BeSameAs(backendConfirmation);
+                return Task.FromResult(executionAuthority);
+            }
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectRollbackAsync(point);
+
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        InstallerExecutionOperation execution = await confirmed.ExecuteAsync();
+        _ = await execution.Completion;
+
+        client.RecoveryCatalogPaths.Should().Equal("/games/rollback-pipeline");
+        client.RollbackInspections.Should().ContainSingle();
+        client.ConfirmedPlans.Should().ContainSingle().Which.Should().BeSameAs(backendConfirmation);
+        client.ExecutedAuthorities.Should().ContainSingle().Which.Should().BeSameAs(executionAuthority);
+        await confirmed.DisposeAsync();
+    }
+
+    [Test]
     public async Task TerminalPlanRejectionCleansUpBeforePublishingAndRevokesTheChild()
     {
         ProtocolGameCandidate valid = Candidate("terminal", LinuxGameFolderStatus.Valid);
@@ -1508,6 +1929,18 @@ internal sealed class VerifiedInstallerSessionTests
 
     private static ProtocolReleaseIdentity CreateRelease() => GameDiscoveryControllerTests.Release();
 
+    private static InstallerRecoveryPoint RecoveryPoint(int ordinal, bool current)
+    {
+        ProtocolReleaseIdentity release = CreateRelease();
+        return new(
+            ordinal,
+            current,
+            false,
+            InstallerOperation.Update,
+            new InstallerRecoveryReleaseTarget(release.Tag, release.EmbeddedVersion)
+        );
+    }
+
     private static TaskCompletionSource NewCompletion()
         => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -1560,6 +1993,10 @@ internal sealed class VerifiedInstallerSessionTests
             (path, _) => Task.FromResult(Candidate(path.GetHashCode(StringComparison.Ordinal).ToString(), LinuxGameFolderStatus.Valid));
         public Func<string, InstallerOperation, CancellationToken, Task<InstallerReadOnlyPlanResult>> Inspection { get; init; } =
             (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation));
+        public Func<string, CancellationToken, Task<InstallerRecoveryCatalogResult>> RecoveryCatalog { get; init; } =
+            (_, _) => throw new AssertionException("Recovery history wasn't expected.");
+        public Func<string, InstallerRecoveryPoint, CancellationToken, Task<InstallerReadOnlyPlanResult>> RollbackInspection { get; init; } =
+            (_, _, _) => throw new AssertionException("Rollback inspection wasn't expected.");
         public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; } =
             (_, _) => throw new AssertionException("Candidate approval wasn't expected.");
         public Func<InstallerPlanConfirmation, CancellationToken, Task<InstallerConfirmedPlanAuthority>> Confirmation { get; init; } =
@@ -1568,6 +2005,8 @@ internal sealed class VerifiedInstallerSessionTests
             (_, _) => Task.FromResult(ExecutionOperation());
         public List<string> InspectedPaths { get; } = [];
         public List<InstallerOperation> InspectedOperations { get; } = [];
+        public List<string> RecoveryCatalogPaths { get; } = [];
+        public List<(string Path, InstallerRecoveryPoint Point)> RollbackInspections { get; } = [];
         public List<IReadOnlyList<InstallerReadOnlyPlanCandidate>> ApprovedCandidates { get; } = [];
         public List<InstallerPlanConfirmation> ConfirmedPlans { get; } = [];
         public List<InstallerConfirmedPlanAuthority> ExecutedAuthorities { get; } = [];
@@ -1613,6 +2052,25 @@ internal sealed class VerifiedInstallerSessionTests
             this.InspectedOperations.Add(operation);
             this.InspectionStarted.TrySetResult();
             return this.Inspection(canonicalGamePath, operation, cancellationToken);
+        }
+
+        public Task<InstallerRecoveryCatalogResult> ListRecoveriesAsync(
+            string canonicalGamePath,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.RecoveryCatalogPaths.Add(canonicalGamePath);
+            return this.RecoveryCatalog(canonicalGamePath, cancellationToken);
+        }
+
+        public Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+            string canonicalGamePath,
+            InstallerRecoveryPoint point,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.RollbackInspections.Add((canonicalGamePath, point));
+            return this.RollbackInspection(canonicalGamePath, point, cancellationToken);
         }
 
         public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(

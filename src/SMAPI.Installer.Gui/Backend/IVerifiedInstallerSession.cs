@@ -19,6 +19,19 @@ internal interface IPlanInspectionSession : IAsyncDisposable
     /// <summary>Inspect one supported operation for only the game fixed by this bound session.</summary>
     Task<InstallerReadOnlyPlanResult> InspectPlanAsync(InstallerOperation operation, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// List the bound game's recovery history without exposing its canonical path or the process client's exact
+    /// recovery-point capabilities.
+    /// </summary>
+    Task<BoundInstallerRecoveryCatalogResult> ListRecoveriesAsync(CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("This restricted session doesn't support recovery-history listing.");
+
+    /// <summary>Consume one exact current bound-session recovery point to inspect a rollback plan.</summary>
+    Task<InstallerReadOnlyPlanResult> InspectRollbackAsync(
+        BoundInstallerRecoveryPoint point,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted session doesn't support rollback inspection.");
+
     /// <summary>Reinspect the current plan with an additive set of exact backend-issued file candidates.</summary>
     Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted session doesn't support candidate approval.");
@@ -30,6 +43,67 @@ internal interface IPlanInspectionSession : IAsyncDisposable
     Task<IConfirmedInstallerSession> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted session doesn't support plan confirmation.");
 }
+
+/// <summary>
+/// A capability-reduced recovery-history result. It contains no canonical path, filesystem identity, transport
+/// identifier, digest, package identity, raw backend text, log path, or process-client authority.
+/// </summary>
+internal abstract record BoundInstallerRecoveryCatalogResult;
+
+/// <summary>A bounded newest-first catalog whose points are exact bound-session reference capabilities.</summary>
+internal sealed record BoundInstallerRecoveryCatalogSuccess(
+    IReadOnlyList<BoundInstallerRecoveryPoint> RecoveryPoints
+) : BoundInstallerRecoveryCatalogResult;
+
+/// <summary>A normal bounded observation that the selected game has no committed recovery history.</summary>
+internal sealed record BoundInstallerNoRecoveryHistory : BoundInstallerRecoveryCatalogResult;
+
+/// <summary>A sanitized recovery lookup rejection with no backend message or private log path.</summary>
+internal sealed record BoundInstallerRecoveryCatalogRejection(
+    ProtocolPrePlanErrorCode ErrorCode,
+    ProtocolNextAction NextAction,
+    bool IsTerminal
+) : BoundInstallerRecoveryCatalogResult;
+
+/// <summary>
+/// One sanitized recovery point reminted by the bound session. Its object identity is the only selection capability;
+/// it contains no process-client point or protocol authority.
+/// </summary>
+internal sealed class BoundInstallerRecoveryPoint
+{
+    public int Ordinal { get; }
+    public bool IsCurrent { get; }
+    public bool IsUserCheckpoint { get; }
+    public InstallerOperation OriginOperation { get; }
+    public BoundInstallerRecoveryRestoreTarget RestoreTarget { get; }
+
+    internal BoundInstallerRecoveryPoint(
+        int ordinal,
+        bool isCurrent,
+        bool isUserCheckpoint,
+        InstallerOperation originOperation,
+        BoundInstallerRecoveryRestoreTarget restoreTarget
+    )
+    {
+        if (ordinal is < 1 or > ProtocolJsonSerializer.MaxRecoveryGenerations)
+            throw new ArgumentOutOfRangeException(nameof(ordinal));
+        this.Ordinal = ordinal;
+        this.IsCurrent = isCurrent;
+        this.IsUserCheckpoint = isUserCheckpoint;
+        this.OriginOperation = originOperation;
+        this.RestoreTarget = restoreTarget ?? throw new ArgumentNullException(nameof(restoreTarget));
+    }
+}
+
+/// <summary>The mutually exclusive sanitized state restored by one bound recovery point.</summary>
+internal abstract record BoundInstallerRecoveryRestoreTarget;
+
+internal sealed record BoundInstallerRecoveryReleaseTarget(
+    string Tag,
+    string EmbeddedVersion
+) : BoundInstallerRecoveryRestoreTarget;
+
+internal sealed record BoundInstallerRecoveryUninstalledTarget : BoundInstallerRecoveryRestoreTarget;
 
 /// <summary>
 /// The sealed capability-reduced owner produced after exact plan confirmation. It can consume its exact confirmed
