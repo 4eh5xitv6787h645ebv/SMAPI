@@ -90,6 +90,7 @@ internal sealed class ProcAssetProtocolHostIntegrationTests
                 {
                     HandshakeEvent handshake = await client.HandshakeAsync("SMAPI GUI proc integration test", "1");
                     handshake.Capabilities.Should().Contain(ProcessInstallerProtocolClient.PackageVerificationCapability);
+                    handshake.Capabilities.Should().Contain(ProcessInstallerProtocolClient.CandidateApprovalCapability);
 
                     InstallerPackageOpenRejection retainedAssetRejection = (await client.OpenPackageAsync(validProcInput))
                         .Should().BeOfType<InstallerPackageOpenRejection>().Subject;

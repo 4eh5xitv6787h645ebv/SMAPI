@@ -40,7 +40,8 @@ internal sealed class ReviewedReleaseProtocolAssetMapperTests
                 nameof(IInstallerProtocolClient.OpenPackageAsync),
                 nameof(IInstallerProtocolClient.DiscoverGamesAsync),
                 nameof(IInstallerProtocolClient.ValidateGameAsync),
-                nameof(IInstallerProtocolClient.InspectPlanAsync)
+                nameof(IInstallerProtocolClient.InspectPlanAsync),
+                nameof(IInstallerProtocolClient.ApprovePlanCandidatesAsync)
             );
     }
 }
