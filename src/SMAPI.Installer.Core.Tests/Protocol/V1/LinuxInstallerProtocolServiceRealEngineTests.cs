@@ -15,6 +15,7 @@ using StardewModdingAPI.Installer.Core.Transactions;
 namespace StardewModdingAPI.Installer.Core.Tests.Protocol.V1;
 
 [TestFixture]
+[Platform("Linux")]
 [SupportedOSPlatform("linux")]
 internal sealed class LinuxInstallerProtocolServiceRealEngineTests
 {
