@@ -27,6 +27,12 @@ internal enum PlanReviewState
 
 internal sealed record PlanReviewRelease(string Tag, string EmbeddedVersion);
 
+/// <summary>One atomic pairing of an exact confirmed owner and its same-plan sanitized presentation.</summary>
+internal sealed record ConfirmedPlanHandoff(
+    IConfirmedInstallerSession Session,
+    ExecutionPlanPresentation Presentation
+);
+
 internal abstract record PlanReviewResult;
 
 internal sealed record PlanReviewPlan(
@@ -143,6 +149,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
     private readonly HashSet<PlanReviewCandidate> SelectedCandidates = new(ReferenceEqualityComparer.Instance);
     private InstallerPlanConfirmation? CurrentPlanConfirmation;
     private IConfirmedInstallerSession? ConfirmedSession;
+    private ExecutionPlanPresentation? ConfirmedPresentation;
     private int AppliedCandidateApprovalCountValue;
     private ActiveOperation? Operation;
     private ActiveConfirmation? ConfirmationOperation;
@@ -312,8 +319,16 @@ internal sealed class PlanReviewController : IAsyncDisposable
             if (!this.CanConfirmUnderLock() || this.CurrentPlanConfirmation is not { } confirmation)
                 throw new InvalidOperationException("An exact current executable plan is required before confirmation.");
 
+            if (this.ResultValue is not PlanReviewPlan exactPlan)
+                throw new InvalidOperationException("The exact reviewed plan presentation was unavailable.");
             operation = new(
                 confirmation,
+                new ExecutionPlanPresentation(
+                    exactPlan.Operation,
+                    Array.AsReadOnly(exactPlan.OperationCounts.ToArray()),
+                    Array.AsReadOnly(exactPlan.Risks.ToArray()),
+                    exactPlan.AdditionalNoticeCount
+                ),
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
             );
             this.CurrentPlanConfirmation = null;
@@ -327,16 +342,23 @@ internal sealed class PlanReviewController : IAsyncDisposable
     }
 
     /// <summary>Transfer the confirmed owner exactly once after confirmation has fully committed.</summary>
-    public IConfirmedInstallerSession TakeConfirmedSession()
+    public ConfirmedPlanHandoff TakeConfirmedHandoff()
     {
         IConfirmedInstallerSession result;
+        ExecutionPlanPresentation presentation;
         lock (this.Sync)
         {
             this.AssertNotDisposed();
-            if (this.StateValue != PlanReviewState.HandoffReady || this.ConfirmedSession is not { } confirmed)
+            if (
+                this.StateValue != PlanReviewState.HandoffReady
+                || this.ConfirmedSession is not { } confirmed
+                || this.ConfirmedPresentation is not { } exactPresentation
+            )
                 throw new InvalidOperationException("A confirmed installer session is not ready for handoff.");
             result = confirmed;
+            presentation = exactPresentation;
             this.ConfirmedSession = null;
+            this.ConfirmedPresentation = null;
             this.OwnershipTransferred = true;
             this.DisposeStarted = true;
             this.ResultValue = null;
@@ -344,7 +366,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
             this.StopWatching.TrySetResult();
         }
         this.PublishChanged();
-        return result;
+        return new(result, presentation);
     }
 
     public async Task CancelAsync()
@@ -473,6 +495,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 if (accepted)
                 {
                     this.ConfirmedSession = confirmed;
+                    this.ConfirmedPresentation = operation.Presentation;
                     this.StateValue = PlanReviewState.HandoffReady;
                 }
                 else
@@ -1268,10 +1291,12 @@ internal sealed class PlanReviewController : IAsyncDisposable
 
     private sealed class ActiveConfirmation(
         InstallerPlanConfirmation confirmation,
+        ExecutionPlanPresentation presentation,
         CancellationTokenSource cancellation
     )
     {
         public InstallerPlanConfirmation Confirmation { get; } = confirmation;
+        public ExecutionPlanPresentation Presentation { get; } = presentation;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }

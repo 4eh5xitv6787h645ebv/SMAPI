@@ -1,0 +1,164 @@
+<Window
+    x:Class="StardewModdingAPI.Installer.Gui.ExecutionWindow"
+    x:DataType="vm:ExecutionViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
+    Title="SMAPI Linux Installer — Run operation"
+    Width="860"
+    Height="700"
+    MinWidth="420"
+    MinHeight="540"
+    WindowStartupLocation="CenterScreen">
+  <Window.Styles>
+    <Style Selector="Border.keyboard-focus:focus-visible">
+      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderThickness" Value="3" />
+    </Style>
+  </Window.Styles>
+
+  <ScrollViewer x:Name="PageScrollViewer" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
+      <StackPanel Grid.Row="0" Spacing="4">
+        <TextBlock AutomationProperties.HeadingLevel="1" FontSize="30" FontWeight="Bold" Text="Run confirmed installer plan" TextWrapping="Wrap" />
+        <TextBlock Classes="muted" FontSize="16" Text="Linux desktop installer" TextWrapping="Wrap" />
+      </StackPanel>
+
+      <Border Grid.Row="1" Padding="14" Background="#192C43" BorderBrush="#5AA7E8" BorderThickness="1" CornerRadius="8">
+        <StackPanel Spacing="6">
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Safety boundary" />
+          <TextBlock Text="{Binding BoundaryDetail}" TextWrapping="Wrap" />
+          <TextBlock Classes="muted" Text="{Binding PlanDetail}" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="2" Classes="card">
+        <StackPanel Spacing="14">
+          <Border
+              x:Name="StatusRegion"
+              Classes="keyboard-focus"
+              Focusable="True"
+              TabIndex="0"
+              AutomationProperties.LiveSetting="{Binding StatusLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}">
+            <StackPanel Spacing="7">
+              <TextBlock AutomationProperties.HeadingLevel="2" FontSize="23" FontWeight="SemiBold" Text="{Binding Heading}" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border
+              x:Name="ProblemRegion"
+              Classes="keyboard-focus"
+              Focusable="True"
+              TabIndex="1"
+              IsVisible="{Binding IsProblemVisible}"
+              AutomationProperties.LiveSetting="Assertive"
+              AutomationProperties.Name="{Binding LiveAnnouncement}"
+              Padding="12"
+              Background="#3B1F26"
+              BorderBrush="#FF8A9A"
+              BorderThickness="2"
+              CornerRadius="6">
+            <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+          </Border>
+
+          <StackPanel IsVisible="{Binding IsProgressVisible}" Spacing="8">
+            <ProgressBar
+                x:Name="OperationProgress"
+                Height="14"
+                IsIndeterminate="{Binding IsProgressIndeterminate}"
+                Maximum="{Binding ProgressMaximum}"
+                Value="{Binding ProgressValue}"
+                AutomationProperties.Name="{Binding ProgressDetail}" />
+            <TextBlock Text="{Binding ProgressDetail}" TextWrapping="Wrap" />
+            <Border x:Name="StageLiveRegion" IsVisible="{Binding HasProgressStage}" AutomationProperties.LiveSetting="{Binding StageLiveSetting}" AutomationProperties.Name="{Binding StageAnnouncement}">
+              <TextBlock Classes="muted" Text="{Binding StageAnnouncement}" TextWrapping="Wrap" />
+            </Border>
+          </StackPanel>
+
+          <WrapPanel x:Name="ActionPanel" Orientation="Horizontal">
+            <Button
+                x:Name="CancelButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="2"
+                IsVisible="{Binding IsCancelVisible}"
+                AutomationProperties.AccessKey="Alt+C"
+                AutomationProperties.Name="Cancel or close safely"
+                Command="{Binding CancelCommand}"
+                Content="{Binding CancelLabel}" />
+            <Button
+                x:Name="RunButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="3"
+                IsVisible="{Binding IsRunVisible}"
+                AutomationProperties.AccessKey="Alt+R"
+                AutomationProperties.Name="Run the exact confirmed operation"
+                AutomationProperties.HelpText="This explicit action starts the reviewed installer plan exactly once."
+                Command="{Binding RunCommand}"
+                Content="_Run operation" />
+            <Button
+                x:Name="RecoverButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="4"
+                IsVisible="{Binding IsRecoverVisible}"
+                AutomationProperties.AccessKey="Alt+V"
+                AutomationProperties.Name="Run interrupted recovery"
+                AutomationProperties.HelpText="Starts a fresh authenticated recovery attempt. After admission it cannot be cancelled."
+                Command="{Binding RecoverCommand}"
+                Content="Run reco_very" />
+            <Button
+                x:Name="ExitButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="5"
+                IsVisible="{Binding IsExitVisible}"
+                AutomationProperties.AccessKey="Alt+X"
+                AutomationProperties.Name="Close installer"
+                Command="{Binding ExitCommand}"
+                Content="E_xit" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border
+          x:Name="ResultRegion"
+          Grid.Row="3"
+          Classes="card keyboard-focus"
+          Focusable="True"
+          TabIndex="6"
+          IsVisible="{Binding IsResultVisible}"
+          AutomationProperties.LiveSetting="{Binding ResultLiveSetting}"
+          AutomationProperties.Name="{Binding LiveAnnouncement}">
+        <StackPanel Spacing="10">
+          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Exact durable result" />
+          <ItemsControl ItemsSource="{Binding ResultRows}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ExecutionFactRow">
+                <Grid Margin="0,3" ColumnDefinitions="2*,3*" AutomationProperties.Name="{Binding AccessibleName}">
+                  <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <Border
+          Grid.Row="4"
+          Padding="12"
+          IsVisible="{Binding IsSettlementWarningVisible}"
+          Background="#3B3216"
+          BorderBrush="#FFD166"
+          BorderThickness="1"
+          CornerRadius="6"
+          AutomationProperties.Name="{Binding SettlementWarning}">
+        <TextBlock x:Name="SettlementWarningText" Text="{Binding SettlementWarning}" TextWrapping="Wrap" />
+      </Border>
+    </Grid>
+  </ScrollViewer>
+</Window>

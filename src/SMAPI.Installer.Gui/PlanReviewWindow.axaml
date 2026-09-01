@@ -21,7 +21,7 @@
       x:Name="PageScrollViewer"
       HorizontalScrollBarVisibility="Disabled"
       VerticalScrollBarVisibility="Auto">
-    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
       <StackPanel Grid.Row="0" Spacing="4">
         <TextBlock
             AutomationProperties.HeadingLevel="1"
@@ -36,14 +36,14 @@
           x:Name="InspectionBoundary"
           Grid.Row="1"
           Padding="14"
-          AutomationProperties.Name="Preview only. Candidate choices can refresh this read-only plan. This screen cannot confirm or run it. No files change here."
+          AutomationProperties.Name="Review first. Candidate choices can refresh this read-only plan. Confirming prepares a separate final Run screen and changes no files."
           Background="#192C43"
           BorderBrush="#5AA7E8"
           BorderThickness="1"
           CornerRadius="8">
         <TextBlock
             FontWeight="SemiBold"
-            Text="Preview only. Candidate choices can refresh this read-only plan. This screen cannot confirm or run it. No files change here."
+            Text="Review first. Candidate choices can refresh this read-only plan. Confirming prepares a separate final Run screen and changes no files."
             TextWrapping="Wrap" />
       </Border>
 
@@ -304,6 +304,7 @@
             <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Additional notices" />
             <TextBlock Text="{Binding AdditionalNoticeDetail}" TextWrapping="Wrap" />
           </StackPanel>
+
         </StackPanel>
       </Border>
 
@@ -426,6 +427,27 @@
                 Command="{Binding StartFreshInspectionCommand}"
                 Content="Start f_resh inspection" />
           </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border
+          Grid.Row="6"
+          Classes="card"
+          IsVisible="{Binding IsConfirmVisible}"
+          AutomationProperties.Name="Final confirmation after plan and candidate review">
+        <StackPanel Spacing="10">
+          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Confirm this exact plan" />
+          <TextBlock Text="{Binding ConfirmationDetail}" TextWrapping="Wrap" />
+          <Button
+              x:Name="ConfirmButton"
+              Classes="primary focus-ring"
+              HorizontalAlignment="Left"
+              TabIndex="11"
+              AutomationProperties.AccessKey="Alt+S"
+              AutomationProperties.Name="Confirm this exact reviewed plan"
+              AutomationProperties.HelpText="Confirmation changes no files and opens a separate final Run screen."
+              Command="{Binding ConfirmCommand}"
+              Content="Confirm reviewed plan (_S)" />
         </StackPanel>
       </Border>
     </Grid>

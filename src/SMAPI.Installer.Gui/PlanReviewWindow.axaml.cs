@@ -6,7 +6,7 @@ using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui;
 
-/// <summary>A read-only plan-review window with bounded candidate selection and no confirmation or execution controls.</summary>
+/// <summary>A bounded plan-review window whose explicit confirmation performs no filesystem mutation.</summary>
 internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
 {
     private readonly object DisposeLock = new();
@@ -134,6 +134,7 @@ internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
                     PlanReviewFocusTarget.CandidateStatus => this.CandidateSelectionStatusRegion,
                     PlanReviewFocusTarget.Result => this.ResultSummaryRegion,
                     PlanReviewFocusTarget.Error => this.ErrorRegion,
+                    PlanReviewFocusTarget.Confirm => this.ConfirmButton,
                     PlanReviewFocusTarget.Retry => this.RetryButton,
                     PlanReviewFocusTarget.Exit => this.ExitButton,
                     _ => this.StatusRegion

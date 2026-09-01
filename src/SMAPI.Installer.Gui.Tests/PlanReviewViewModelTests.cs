@@ -93,7 +93,7 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.CandidateSummary.Should().Contain("not approval");
         viewModel.CandidateRows.Single().Detail.Should().Contain("Provisionally included").And.Contain("not approved by you");
         viewModel.AdditionalNoticeDetail.Should().Contain("3").And.Contain("does not expose their text");
-        viewModel.SafetyDetail.Should().Contain("Cancel").And.Contain("no confirmation or execution control");
+        viewModel.SafetyDetail.Should().Contain("Cancel").And.Contain("Confirm plan").And.Contain("does not change files").And.Contain("explicit Run");
         viewModel.DurableState.Should().Contain("no installer action has run");
     }
 
@@ -217,7 +217,7 @@ internal sealed partial class PlanReviewPresentationTests
     }
 
     [Test]
-    public void ViewModelExposesOnlyBoundedPreviewApprovalAndNoConfirmationOrExecutionCommand()
+    public void ViewModelExposesBoundedConfirmationButNoExecutionCommandOrAuthority()
     {
         string[] commandNames = typeof(PlanReviewViewModel).GetProperties()
             .Where(property => property.Name.EndsWith("Command", StringComparison.Ordinal))
@@ -231,11 +231,12 @@ internal sealed partial class PlanReviewPresentationTests
             nameof(PlanReviewViewModel.ApplyCandidatesCommand),
             nameof(PlanReviewViewModel.ClearCandidatesCommand),
             nameof(PlanReviewViewModel.StartFreshInspectionCommand),
+            nameof(PlanReviewViewModel.ConfirmCommand),
             nameof(PlanReviewViewModel.ExitCommand)
         );
         commandNames.Should().NotContain(name =>
-            name.Contains("Confirm", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Execute", StringComparison.OrdinalIgnoreCase)
+            name.Contains("Execute", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Run", StringComparison.OrdinalIgnoreCase)
         );
     }
 

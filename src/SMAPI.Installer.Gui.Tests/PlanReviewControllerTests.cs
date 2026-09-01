@@ -131,8 +131,11 @@ internal sealed class PlanReviewControllerTests
         session.ConfirmedPlans.Should().ContainSingle();
         confirmed.ExecuteCalls.Should().Be(0, "confirmation alone must not mutate files");
 
-        controller.TakeConfirmedSession().Should().BeSameAs(confirmed);
-        Action secondTake = () => controller.TakeConfirmedSession();
+        ConfirmedPlanHandoff handoff = controller.TakeConfirmedHandoff();
+        handoff.Session.Should().BeSameAs(confirmed);
+        handoff.Presentation.Operation.Should().Be(InstallerOperation.Install);
+        handoff.Presentation.OperationCounts.Should().BeEmpty();
+        Action secondTake = () => controller.TakeConfirmedHandoff();
         secondTake.Should().Throw<ObjectDisposedException>();
         await controller.DisposeAsync();
         confirmed.DisposeCalls.Should().Be(0, "cleanup ownership was transferred to the caller");
@@ -306,7 +309,7 @@ internal sealed class PlanReviewControllerTests
             Task take = Task.Run(async () =>
             {
                 await start.Task;
-                try { taken = controller.TakeConfirmedSession(); }
+                try { taken = controller.TakeConfirmedHandoff().Session; }
                 catch (ObjectDisposedException) { }
                 catch (InvalidOperationException) { }
             });
@@ -349,7 +352,7 @@ internal sealed class PlanReviewControllerTests
             IConfirmedInstallerSession? taken = null;
             Task take = Task.Run(() =>
             {
-                try { taken = controller.TakeConfirmedSession(); }
+                try { taken = controller.TakeConfirmedHandoff().Session; }
                 catch (ObjectDisposedException) { }
                 catch (InvalidOperationException) { }
             });
