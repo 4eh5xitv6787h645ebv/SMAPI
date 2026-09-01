@@ -12,6 +12,9 @@ internal enum PlanReviewState
     SelectionChanged,
     Inspecting,
     Approving,
+    Confirming,
+    HandoffReady,
+    HandedOff,
     Closing,
     Available,
     Rejected,
@@ -107,6 +110,8 @@ internal sealed record PlanReviewSnapshot(
     public bool CanApplyCandidates { get; init; }
     public bool CanClearCandidates { get; init; }
     public bool CanStartFreshInspection { get; init; }
+    public bool CanConfirm { get; init; }
+    public bool HandoffReady { get; init; }
 }
 
 /// <summary>Serializes bounded read-only plan inspection through one game-bound backend session.</summary>
@@ -136,14 +141,18 @@ internal sealed class PlanReviewController : IAsyncDisposable
     private PlanReviewResult? ResultValue;
     private Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> CurrentCandidateAuthorities = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<PlanReviewCandidate> SelectedCandidates = new(ReferenceEqualityComparer.Instance);
+    private InstallerPlanConfirmation? CurrentPlanConfirmation;
+    private IConfirmedInstallerSession? ConfirmedSession;
     private int AppliedCandidateApprovalCountValue;
     private ActiveOperation? Operation;
+    private ActiveConfirmation? ConfirmationOperation;
     private Task? SessionCleanupTask;
     private Task? DisposalTask;
     private long GenerationValue;
     private long RevisionValue;
     private bool SessionHasFaulted;
     private bool DisposeStarted;
+    private bool OwnershipTransferred;
     internal Action? BeforeResultCommitForTesting { get; set; }
     internal Action? BeforeSessionFaultCommitForTesting { get; set; }
 
@@ -292,15 +301,63 @@ internal sealed class PlanReviewController : IAsyncDisposable
         return operation.Completion.Task;
     }
 
+    /// <summary>Consume the exact current executable-plan confirmation without performing filesystem mutation.</summary>
+    public Task ConfirmAsync(CancellationToken cancellationToken = default)
+    {
+        ActiveConfirmation operation;
+        lock (this.Sync)
+        {
+            this.AssertCanUseSession();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!this.CanConfirmUnderLock() || this.CurrentPlanConfirmation is not { } confirmation)
+                throw new InvalidOperationException("An exact current executable plan is required before confirmation.");
+
+            operation = new(
+                confirmation,
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            );
+            this.CurrentPlanConfirmation = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            this.ConfirmationOperation = operation;
+            this.StateValue = PlanReviewState.Confirming;
+        }
+        this.PublishChanged();
+        _ = this.RunConfirmationAsync(operation);
+        return operation.Completion.Task;
+    }
+
+    /// <summary>Transfer the confirmed owner exactly once after confirmation has fully committed.</summary>
+    public IConfirmedInstallerSession TakeConfirmedSession()
+    {
+        IConfirmedInstallerSession result;
+        lock (this.Sync)
+        {
+            this.AssertNotDisposed();
+            if (this.StateValue != PlanReviewState.HandoffReady || this.ConfirmedSession is not { } confirmed)
+                throw new InvalidOperationException("A confirmed installer session is not ready for handoff.");
+            result = confirmed;
+            this.ConfirmedSession = null;
+            this.OwnershipTransferred = true;
+            this.DisposeStarted = true;
+            this.ResultValue = null;
+            this.StateValue = PlanReviewState.HandedOff;
+            this.StopWatching.TrySetResult();
+        }
+        this.PublishChanged();
+        return result;
+    }
+
     public async Task CancelAsync()
     {
         ActiveOperation? operation;
+        ActiveConfirmation? confirmation;
         bool publish;
         lock (this.Sync)
         {
             this.AssertNotDisposed();
             operation = this.Operation;
-            if (operation is null)
+            confirmation = this.ConfirmationOperation;
+            if (operation is null && confirmation is null)
                 return;
             publish = !this.SessionHasFaulted && !this.SessionFaultNotification.IsCompleted;
             this.ResultValue = null;
@@ -310,22 +367,33 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }
         if (publish)
             this.PublishChanged();
-        await CancelSafelyAsync(operation.Cancellation).ConfigureAwait(false);
-        await operation.Completion.Task.ConfigureAwait(false);
+        if (operation is not null)
+        {
+            await CancelSafelyAsync(operation.Cancellation).ConfigureAwait(false);
+            await operation.Completion.Task.ConfigureAwait(false);
+        }
+        else
+        {
+            await CancelSafelyAsync(confirmation!.Cancellation).ConfigureAwait(false);
+            await confirmation.Completion.Task.ConfigureAwait(false);
+        }
     }
 
     public ValueTask DisposeAsync()
     {
         lock (this.Sync)
         {
+            if (this.OwnershipTransferred)
+                return ValueTask.CompletedTask;
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
             this.DisposeStarted = true;
             ActiveOperation? operation = this.Operation;
+            ActiveConfirmation? confirmation = this.ConfirmationOperation;
             this.ResultValue = null;
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
-            this.StateValue = operation is null ? PlanReviewState.Closing : PlanReviewState.Cancelling;
-            this.DisposalTask = this.DisposeCoreAsync(operation);
+            this.StateValue = operation is null && confirmation is null ? PlanReviewState.Closing : PlanReviewState.Cancelling;
+            this.DisposalTask = this.DisposeCoreAsync(operation, confirmation);
             return new ValueTask(this.DisposalTask);
         }
     }
@@ -358,11 +426,130 @@ internal sealed class PlanReviewController : IAsyncDisposable
         return operation.Completion.Task;
     }
 
+    private async Task RunConfirmationAsync(ActiveConfirmation operation)
+    {
+        await Task.Yield();
+        IConfirmedInstallerSession? confirmed = null;
+        bool exactConfirmed = false;
+        Exception? failure = null;
+        bool cancelled = false;
+        try
+        {
+            confirmed = await this.Session.ConfirmPlanAsync(
+                operation.Confirmation,
+                operation.Cancellation.Token
+            ).ConfigureAwait(false);
+            exactConfirmed = this.IsExactConfirmedOwner(confirmed);
+            if (!exactConfirmed)
+                throw new InvalidOperationException("The confirmed installer owner was invalid.");
+            operation.Cancellation.Token.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
+        {
+            cancelled = true;
+        }
+        catch (Exception error)
+        {
+            failure = error;
+        }
+
+        bool accepted;
+        lock (this.Sync)
+        {
+            if (!ReferenceEquals(this.ConfirmationOperation, operation))
+                accepted = false;
+            else
+            {
+                accepted = confirmed is not null
+                    && failure is null
+                    && !cancelled
+                    && !operation.Cancellation.IsCancellationRequested
+                    && !this.DisposeStarted
+                    && !this.SessionHasFaulted
+                    && !this.SessionFaultNotification.IsCompleted;
+                this.ConfirmationOperation = null;
+                this.ResultValue = accepted ? this.ResultValue : null;
+                this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+                if (accepted)
+                {
+                    this.ConfirmedSession = confirmed;
+                    this.StateValue = PlanReviewState.HandoffReady;
+                }
+                else
+                {
+                    this.StateValue = this.DisposeStarted
+                        ? PlanReviewState.Disposed
+                        : this.SessionHasFaulted || this.SessionFaultNotification.IsCompleted
+                            ? PlanReviewState.SessionFaulted
+                            : cancelled || operation.Cancellation.IsCancellationRequested
+                                ? PlanReviewState.Cancelled
+                                : PlanReviewState.Failed;
+                }
+                operation.Cancellation.Dispose();
+            }
+        }
+
+        if (!accepted)
+        {
+            if (confirmed is not null)
+            {
+                if (exactConfirmed)
+                {
+                    Task ownerCleanup = DisposeOwnerAsync(confirmed);
+                    Task? priorCleanup;
+                    lock (this.Sync)
+                    {
+                        priorCleanup = this.SessionCleanupTask;
+                        this.SessionCleanupTask ??= ownerCleanup;
+                    }
+                    if (priorCleanup is not null)
+                        await Task.WhenAll(priorCleanup, ownerCleanup).ConfigureAwait(false);
+                    else
+                        await ownerCleanup.ConfigureAwait(false);
+                }
+                else
+                {
+                    await DisposeOwnerAsync(confirmed).ConfigureAwait(false);
+                    Task cleanup;
+                    lock (this.Sync)
+                        cleanup = this.StartSessionCleanupUnderLock();
+                    await cleanup.ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                Task cleanup;
+                lock (this.Sync)
+                    cleanup = this.StartSessionCleanupUnderLock();
+                await cleanup.ConfigureAwait(false);
+            }
+        }
+        this.PublishChanged();
+        operation.Completion.TrySetResult();
+    }
+
+    private bool IsExactConfirmedOwner(IConfirmedInstallerSession? confirmed)
+    {
+        if (confirmed is null)
+            return false;
+        try
+        {
+            return ReferenceEquals(confirmed.Release, this.Session.Release)
+                && ReferenceEquals(confirmed.Game, this.Session.Game)
+                && ReferenceEquals(confirmed.SessionFaulted, this.SessionFaultNotification);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private async Task RunPlanRequestAsync(ActiveOperation operation)
     {
         await Task.Yield();
         PlanReviewResult? projected = null;
         Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate>? projectedAuthorities = null;
+        InstallerPlanConfirmation? projectedConfirmation = null;
         Exception? failure = null;
         bool cancelled = false;
         try
@@ -383,6 +570,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
             ProjectedPlanResult projection = this.ProjectResult(result, operation.SelectedOperation, operation.Kind);
             projected = projection.Result;
             projectedAuthorities = projection.CandidateAuthorities;
+            projectedConfirmation = projection.Confirmation;
             this.BeforeResultCommitForTesting?.Invoke();
         }
         catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
@@ -463,6 +651,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 if (finalResult is PlanReviewPlan)
                 {
                     this.CurrentCandidateAuthorities = projectedAuthorities!;
+                    this.CurrentPlanConfirmation = projectedConfirmation;
                     this.SelectedCandidates.Clear();
                     this.AppliedCandidateApprovalCountValue = operation.AppliedCandidateApprovalCountAfterSuccess;
                 }
@@ -522,6 +711,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         this.BeforeSessionFaultCommitForTesting?.Invoke();
 
         ActiveOperation? operation;
+        ActiveConfirmation? confirmation;
         lock (this.Sync)
         {
             if (this.DisposeStarted)
@@ -530,12 +720,13 @@ internal sealed class PlanReviewController : IAsyncDisposable
             this.ResultValue = null;
             this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             operation = this.Operation;
+            confirmation = this.ConfirmationOperation;
             this.StateValue = PlanReviewState.Closing;
         }
-        if (operation is not null)
+        if (operation is not null || confirmation is not null)
         {
             this.PublishChanged();
-            await CancelSafelyAsync(operation.Cancellation).ConfigureAwait(false);
+            await CancelSafelyAsync(operation?.Cancellation ?? confirmation!.Cancellation).ConfigureAwait(false);
             return;
         }
 
@@ -552,13 +743,18 @@ internal sealed class PlanReviewController : IAsyncDisposable
         this.PublishChanged();
     }
 
-    private async Task DisposeCoreAsync(ActiveOperation? operation)
+    private async Task DisposeCoreAsync(ActiveOperation? operation, ActiveConfirmation? confirmation)
     {
         await Task.Yield();
         if (operation is not null)
         {
             await CancelSafelyAsync(operation.Cancellation).ConfigureAwait(false);
             await operation.Completion.Task.ConfigureAwait(false);
+        }
+        else if (confirmation is not null)
+        {
+            await CancelSafelyAsync(confirmation.Cancellation).ConfigureAwait(false);
+            await confirmation.Completion.Task.ConfigureAwait(false);
         }
         this.StopWatching.TrySetResult();
         Task cleanup;
@@ -576,7 +772,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
     }
 
     private Task StartSessionCleanupUnderLock()
-        => this.SessionCleanupTask ??= DisposeSessionAsync(this.Session);
+        => this.SessionCleanupTask ??= DisposeOwnerAsync((IAsyncDisposable?)this.ConfirmedSession ?? this.Session);
 
     private PlanReviewSnapshot CreateSnapshot()
     {
@@ -599,7 +795,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
             this.ResultValue,
             canSelect,
             canSelect && this.SelectedOperationValue is not null,
-            this.Operation is not null && this.StateValue is PlanReviewState.Inspecting or PlanReviewState.Approving,
+            this.Operation is not null && this.StateValue is PlanReviewState.Inspecting or PlanReviewState.Approving
+                || this.ConfirmationOperation is not null && this.StateValue == PlanReviewState.Confirming,
             canRetry,
             this.StateValue is PlanReviewState.Cancelled or PlanReviewState.Failed or PlanReviewState.SessionFaulted
                 || this.StateValue == PlanReviewState.Rejected && this.ResultValue is PlanReviewRejection terminal && IsWorkflowTerminal(terminal)
@@ -614,7 +811,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 && selectedCandidates.Length > 0
                 && selectedCandidates.Length <= ProtocolJsonSerializer.MaxPlanCandidates - this.AppliedCandidateApprovalCountValue,
             CanClearCandidates = canSelectCandidates && selectedCandidates.Length > 0,
-            CanStartFreshInspection = canSelect && this.AppliedCandidateApprovalCountValue > 0
+            CanStartFreshInspection = canSelect && this.AppliedCandidateApprovalCountValue > 0,
+            CanConfirm = this.CanConfirmUnderLock(),
+            HandoffReady = this.StateValue == PlanReviewState.HandoffReady && this.ConfirmedSession is not null
         };
     }
 
@@ -622,11 +821,19 @@ internal sealed class PlanReviewController : IAsyncDisposable
         => !this.DisposeStarted
             && !this.SessionHasFaulted
             && this.Operation is null
+            && this.ConfirmationOperation is null
             && this.StateValue is PlanReviewState.Choosing
                 or PlanReviewState.SelectionChanged
                 or PlanReviewState.Available
                 or PlanReviewState.Rejected
             && !(this.ResultValue is PlanReviewRejection rejection && IsWorkflowTerminal(rejection));
+
+    private bool CanConfirmUnderLock()
+        => this.CanSelectUnderLock()
+            && this.StateValue == PlanReviewState.Available
+            && this.ResultValue is PlanReviewPlan { HasBlockingConflicts: false }
+            && this.SelectedCandidates.Count == 0
+            && this.CurrentPlanConfirmation is not null;
 
     private bool CanSelectCandidatesUnderLock()
         => this.CanSelectUnderLock()
@@ -683,7 +890,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         return result switch
         {
             InstallerReadOnlyPlanSuccess success => this.ProjectPlan(success, requested),
-            InstallerReadOnlyPlanRejection rejection => new(ProjectRejection(rejection, requestKind), []),
+            InstallerReadOnlyPlanRejection rejection => new(ProjectRejection(rejection, requestKind), [], null),
             _ => throw new InvalidOperationException("The plan service returned an unsupported result.")
         };
     }
@@ -700,6 +907,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
         {
             throw new InvalidOperationException("The plan summary contained unsafe semantics.");
         }
+        if (plan.HasBlockingConflicts != (plan.Confirmation is null))
+            throw new InvalidOperationException("The plan confirmation authority did not match its executable state.");
 
         PlanReviewRelease? current = ProjectPlanRelease(plan.CurrentRelease);
         PlanReviewRelease? target = ProjectPlanRelease(plan.TargetRelease);
@@ -799,7 +1008,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         {
             Candidates = Array.AsReadOnly(detailedCandidates)
         };
-        return new(result, authorities);
+        return new(result, authorities, plan.Confirmation);
     }
 
     private static (
@@ -855,6 +1064,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
     /// <remarks>The caller must hold <see cref="Sync"/>.</remarks>
     private void RevokeCandidateAuthorityUnderLock(bool clearAppliedApprovals)
     {
+        this.CurrentPlanConfirmation = null;
         this.CurrentCandidateAuthorities.Clear();
         this.SelectedCandidates.Clear();
         if (clearAppliedApprovals)
@@ -899,16 +1109,16 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 && rejection.NextAction == ProtocolNextAction.InspectAgain
                 && !rejection.IsTerminal
             : rejection.ErrorCode switch
-        {
-            ProtocolPrePlanErrorCode.RequestCancelled => rejection.NextAction == ProtocolNextAction.RetryRequest && !rejection.IsTerminal,
-            ProtocolPrePlanErrorCode.InvalidGameFolder => rejection.NextAction == ProtocolNextAction.SelectGameFolder && !rejection.IsTerminal,
-            ProtocolPrePlanErrorCode.PackageRejected => rejection.NextAction == ProtocolNextAction.ReopenVerifiedPackage && !rejection.IsTerminal,
-            ProtocolPrePlanErrorCode.InspectionFailed => rejection.NextAction == ProtocolNextAction.InspectAgain && !rejection.IsTerminal,
-            ProtocolPrePlanErrorCode.PermissionDenied => rejection.NextAction == ProtocolNextAction.ReviewFilesystem && !rejection.IsTerminal,
-            ProtocolPrePlanErrorCode.UnexpectedFailure => rejection.IsTerminal
-                && rejection.NextAction is ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog,
-            _ => false
-        };
+            {
+                ProtocolPrePlanErrorCode.RequestCancelled => rejection.NextAction == ProtocolNextAction.RetryRequest && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.InvalidGameFolder => rejection.NextAction == ProtocolNextAction.SelectGameFolder && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.PackageRejected => rejection.NextAction == ProtocolNextAction.ReopenVerifiedPackage && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.InspectionFailed => rejection.NextAction == ProtocolNextAction.InspectAgain && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.PermissionDenied => rejection.NextAction == ProtocolNextAction.ReviewFilesystem && !rejection.IsTerminal,
+                ProtocolPrePlanErrorCode.UnexpectedFailure => rejection.IsTerminal
+                    && rejection.NextAction is ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog,
+                _ => false
+            };
         if (!valid)
             throw new InvalidOperationException("The plan rejection semantics were invalid.");
         return new(rejection.ErrorCode, rejection.NextAction, rejection.IsTerminal);
@@ -1031,7 +1241,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }
     }
 
-    private static async Task DisposeSessionAsync(IPlanInspectionSession session)
+    private static async Task DisposeOwnerAsync(IAsyncDisposable session)
     {
         await Task.Yield();
         try
@@ -1052,8 +1262,19 @@ internal sealed class PlanReviewController : IAsyncDisposable
 
     private sealed record ProjectedPlanResult(
         PlanReviewResult Result,
-        Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> CandidateAuthorities
+        Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> CandidateAuthorities,
+        InstallerPlanConfirmation? Confirmation
     );
+
+    private sealed class ActiveConfirmation(
+        InstallerPlanConfirmation confirmation,
+        CancellationTokenSource cancellation
+    )
+    {
+        public InstallerPlanConfirmation Confirmation { get; } = confirmation;
+        public CancellationTokenSource Cancellation { get; } = cancellation;
+        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
     private sealed class ActiveOperation(
         long generation,

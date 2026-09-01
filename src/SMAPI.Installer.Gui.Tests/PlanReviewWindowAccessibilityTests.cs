@@ -619,6 +619,7 @@ internal sealed partial class PlanReviewPresentationTests
         return CandidatePlan(InstallerOperation.Install, candidates) with
         {
             HasBlockingConflicts = true,
+            Confirmation = null,
             Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
             OperationCounts = Enum.GetValues<PlanOperationKind>().Select(kind => new InstallerPlanOperationCount(kind, 1)).ToArray(),
             ConflictCounts = Enum.GetValues<PlanConflictCode>().Select(code => new InstallerPlanConflictCount(code, 1)).ToArray(),

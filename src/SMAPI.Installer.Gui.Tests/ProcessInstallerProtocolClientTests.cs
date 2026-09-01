@@ -10,6 +10,7 @@ using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Security;
 using StardewModdingAPI.Installer.Core.Transactions;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Frontend;
 
 namespace StardewModdingAPI.Installer.Gui.Tests;
 
@@ -152,8 +153,28 @@ public sealed class ProcessInstallerProtocolClientTests
         ]);
         typeof(IConfirmedInstallerSession).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(method => !method.IsSpecialName)
-            .Should().BeEmpty("the confirmed owner deliberately has no execution, cancellation, recovery, rollback, or mutation method yet");
+            .Select(method => method.Name)
+            .Should().Equal(nameof(IConfirmedInstallerSession.ExecuteAsync));
+        MethodInfo execute = typeof(IConfirmedInstallerSession).GetMethod(nameof(IConfirmedInstallerSession.ExecuteAsync))!;
+        execute.ReturnType.Should().Be(typeof(Task<InstallerExecutionOperation>));
+        execute.GetParameters().Should().ContainSingle().Which.ParameterType.Should().Be(typeof(CancellationToken));
+        execute.GetParameters().Single().HasDefaultValue.Should().BeTrue();
         typeof(IConfirmedInstallerSession).GetInterfaces().Should().Equal(typeof(IAsyncDisposable));
+
+        Type[] authorityTypes = [
+            typeof(InstallerPlanConfirmation),
+            typeof(InstallerConfirmedPlanAuthority),
+            typeof(IConfirmedInstallerSession)
+        ];
+        foreach (Type presentation in new[] { typeof(PlanReviewSnapshot), typeof(PlanReviewResult), typeof(PlanReviewPlan), typeof(PlanReviewRejection) })
+        {
+            presentation.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                .Select(property => property.PropertyType)
+                .Should().NotContain(type => authorityTypes.Contains(type));
+            presentation.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                .Select(field => field.FieldType)
+                .Should().NotContain(type => authorityTypes.Contains(type));
+        }
 
         typeof(InstallerExecutionOperation).GetProperties().Select(property => property.Name).Should().BeEquivalentTo([
             nameof(InstallerExecutionOperation.Progress),

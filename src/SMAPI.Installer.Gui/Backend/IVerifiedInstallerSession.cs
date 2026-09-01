@@ -32,14 +32,17 @@ internal interface IPlanInspectionSession : IAsyncDisposable
 }
 
 /// <summary>
-/// The sealed capability-reduced owner produced after exact plan confirmation. This slice deliberately exposes no
-/// execution, progress, cancellation, recovery, rollback, or mutation command.
+/// The sealed capability-reduced owner produced after exact plan confirmation. It can consume its exact confirmed
+/// plan once; all progress, cancellation, and terminal data remain bounded and sanitized by the protocol client.
 /// </summary>
 internal interface IConfirmedInstallerSession : IAsyncDisposable
 {
     ProtocolReleaseIdentity Release { get; }
     VerifiedGamePresentation Game { get; }
     Task<InstallerProtocolClientException> SessionFaulted { get; }
+
+    /// <summary>Consume the exact confirmed plan and admit its one execution.</summary>
+    Task<InstallerExecutionOperation> ExecuteAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>Bounded, non-authoritative display data for an exact valid game-folder selection.</summary>

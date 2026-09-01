@@ -12,7 +12,9 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         Bound,
         Confirming,
         Confirmed,
-        Terminal,
+        Executing,
+        BoundTerminal,
+        ConfirmedTerminal,
         Disposing,
         Disposed
     }
@@ -27,8 +29,13 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private InstallerPlanConfirmation? CurrentPlanConfirmation;
     private InstallerPlanConfirmation? CurrentClientConfirmation;
     private InstallerConfirmedPlanAuthority? CurrentConfirmedAuthority;
+    private ConfirmedInstallerSession? CurrentConfirmedOwner;
+    private InstallerExecutionOperation? CurrentExecution;
+    private CancellationTokenSource? CurrentExecutionLifetime;
+    private TaskCompletionSource<InstallerExecutionOperation?>? CurrentExecutionPublication;
     private ProtocolGameCandidate? LatestManualCandidate;
     private Task? DisposalTask;
+    private bool ConfirmedOwnershipTransferred;
     private SessionStage Stage = SessionStage.Discovery;
     private int AdmittedDiscoveryCommands;
     internal int IssuedPlanCandidateCapacityForTesting { get; set; } = InstallerCandidateSelection.MaximumIssuedCandidatesPerSession;
@@ -95,9 +102,11 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     {
         lock (this.DisposeLock)
         {
+            if (this.ConfirmedOwnershipTransferred)
+                return ValueTask.CompletedTask;
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
-            if (this.Stage is SessionStage.Bound or SessionStage.Confirming or SessionStage.Confirmed or SessionStage.Terminal)
+            if (this.Stage is SessionStage.Bound or SessionStage.Confirming or SessionStage.Confirmed or SessionStage.Executing or SessionStage.BoundTerminal or SessionStage.ConfirmedTerminal)
                 return ValueTask.CompletedTask;
             this.Stage = SessionStage.Disposing;
             return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
@@ -163,11 +172,13 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     {
         lock (this.DisposeLock)
         {
+            if (this.ConfirmedOwnershipTransferred)
+                return ValueTask.CompletedTask;
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
-            if (this.Stage == SessionStage.Confirmed)
+            if (this.Stage is SessionStage.Confirmed or SessionStage.Executing or SessionStage.ConfirmedTerminal)
                 return ValueTask.CompletedTask;
-            if (this.Stage is not (SessionStage.Bound or SessionStage.Confirming or SessionStage.Terminal))
+            if (this.Stage is not (SessionStage.Bound or SessionStage.Confirming or SessionStage.BoundTerminal))
                 return this.Stage == SessionStage.Disposed
                     ? ValueTask.CompletedTask
                     : throw new InvalidOperationException("The bound installer session no longer owns backend cleanup.");
@@ -176,14 +187,27 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         }
     }
 
-    private ValueTask DisposeFromConfirmedSessionAsync(InstallerConfirmedPlanAuthority authority)
+    private ValueTask DisposeFromConfirmedSessionAsync(ConfirmedInstallerSession owner)
     {
-        ArgumentNullException.ThrowIfNull(authority);
+        ArgumentNullException.ThrowIfNull(owner);
         lock (this.DisposeLock)
         {
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
-            if (this.Stage != SessionStage.Confirmed || !ReferenceEquals(this.CurrentConfirmedAuthority, authority))
+            if (!ReferenceEquals(this.CurrentConfirmedOwner, owner))
+                return this.Stage == SessionStage.Disposed
+                    ? ValueTask.CompletedTask
+                    : throw new InvalidOperationException("The confirmed installer session no longer owns backend cleanup.");
+            if (this.Stage == SessionStage.Executing && this.CurrentExecutionPublication is { } publication)
+            {
+                this.Stage = SessionStage.Disposing;
+                return new ValueTask(this.DisposalTask = this.DisposeExecutingCoreAsync(
+                    publication,
+                    this.CurrentExecutionLifetime
+                        ?? throw new InvalidOperationException("The admitted execution had no lifetime owner.")
+                ));
+            }
+            if (this.Stage is not (SessionStage.Confirmed or SessionStage.ConfirmedTerminal))
                 return this.Stage == SessionStage.Disposed
                     ? ValueTask.CompletedTask
                     : throw new InvalidOperationException("The confirmed installer session no longer owns backend cleanup.");
@@ -258,7 +282,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                     throw new InstallerProtocolClientException("The verified installer session faulted before the plan result could be accepted.");
                 request.Token.ThrowIfCancellationRequested();
                 if (result is InstallerReadOnlyPlanRejection { IsTerminal: true })
-                    this.Stage = SessionStage.Terminal;
+                    this.Stage = SessionStage.BoundTerminal;
                 if (result is InstallerReadOnlyPlanSuccess)
                 {
                     if (!this.TryRetainIssuedPlanCandidates(stableResultCandidates!))
@@ -360,7 +384,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                         throw new InstallerProtocolClientException("The verified installer session faulted before the replacement plan could be accepted.");
                     request.Token.ThrowIfCancellationRequested();
                     if (result is InstallerReadOnlyPlanRejection { IsTerminal: true })
-                        this.Stage = SessionStage.Terminal;
+                        this.Stage = SessionStage.BoundTerminal;
                     if (result is InstallerReadOnlyPlanSuccess)
                     {
                         if (!this.TryRetainIssuedPlanCandidates(stableResultCandidates!))
@@ -438,9 +462,12 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 if (this.Client.SessionFaulted.IsCompleted)
                     throw new InstallerProtocolClientException("The verified installer session faulted before confirmation ownership could be accepted.");
                 request.Token.ThrowIfCancellationRequested();
+                ConfirmedInstallerSession confirmed = new(this, this.Release, game);
                 this.CurrentConfirmedAuthority = authority;
+                this.CurrentConfirmedOwner = confirmed;
+                this.ConfirmedOwnershipTransferred = true;
                 this.Stage = SessionStage.Confirmed;
-                return new ConfirmedInstallerSession(this, this.Release, game, authority);
+                return confirmed;
             }
         }
         catch (Exception exception)
@@ -456,6 +483,154 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
         ExceptionDispatchInfo.Capture(failure!).Throw();
         throw new InvalidOperationException("The confirmation failure did not propagate.");
+    }
+
+    private async Task<InstallerExecutionOperation> ExecuteConfirmedPlanAsync(
+        ConfirmedInstallerSession owner,
+        CancellationToken cancellationToken
+    )
+    {
+        CancellationTokenSource request;
+        TaskCompletionSource<InstallerExecutionOperation?> publication;
+        InstallerConfirmedPlanAuthority authority;
+        lock (this.DisposeLock)
+        {
+            if (
+                this.Stage != SessionStage.Confirmed
+                || !ReferenceEquals(this.CurrentConfirmedOwner, owner)
+                || this.CurrentConfirmedAuthority is not { } current
+            )
+            {
+                throw new ObjectDisposedException(nameof(IConfirmedInstallerSession));
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Execution admission is synchronous: the exact authority disappears before this method first awaits.
+            authority = current;
+            this.CurrentConfirmedAuthority = null;
+            this.Stage = SessionStage.Executing;
+            request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, this.Lifetime.Token);
+            this.CurrentExecutionLifetime = request;
+            publication = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            this.CurrentExecutionPublication = publication;
+        }
+
+        InstallerExecutionOperation? execution = null;
+        try
+        {
+            InstallerExecutionOperation? returned = await this.Client.ExecutePlanAsync(authority, request.Token).ConfigureAwait(false);
+            if (returned is null || returned.Completion is null || returned.Progress is null)
+                throw new InstallerProtocolClientException("The installer backend returned an invalid execution operation.");
+            execution = returned;
+            lock (this.DisposeLock)
+            {
+                if (!ReferenceEquals(this.CurrentConfirmedOwner, owner) || this.Stage is not (SessionStage.Executing or SessionStage.Disposing))
+                    throw new ObjectDisposedException(nameof(IConfirmedInstallerSession));
+                this.CurrentExecution = execution;
+            }
+            publication.TrySetResult(execution);
+            _ = this.TrackExecutionAsync(owner, execution, request);
+            return execution;
+        }
+        catch (Exception error)
+        {
+            bool cancellationRequested = request.IsCancellationRequested;
+            publication.TrySetResult(execution);
+            lock (this.DisposeLock)
+            {
+                if (ReferenceEquals(this.CurrentExecutionLifetime, request) && execution is null && this.DisposalTask is null)
+                {
+                    request.Dispose();
+                    this.CurrentExecutionLifetime = null;
+                }
+                if (this.Stage == SessionStage.Executing)
+                    this.Stage = SessionStage.ConfirmedTerminal;
+            }
+            await this.DisposeFromConfirmedSessionAsync(owner).ConfigureAwait(false);
+            if (error is OperationCanceledException && cancellationRequested)
+            {
+                CancellationToken cancelled = cancellationToken.IsCancellationRequested
+                    ? cancellationToken
+                    : new CancellationToken(canceled: true);
+                throw new OperationCanceledException("The verified installer execution was cancelled safely.", cancelled);
+            }
+            throw new InstallerProtocolClientException("The verified installer execution could not be started safely.");
+        }
+    }
+
+    private async Task TrackExecutionAsync(
+        ConfirmedInstallerSession owner,
+        InstallerExecutionOperation execution,
+        CancellationTokenSource request
+    )
+    {
+        try { _ = await execution.Completion.ConfigureAwait(false); }
+        catch { }
+        finally
+        {
+            try
+            {
+                request.Dispose();
+            }
+            finally
+            {
+                lock (this.DisposeLock)
+                {
+                    if (ReferenceEquals(this.CurrentExecutionLifetime, request))
+                        this.CurrentExecutionLifetime = null;
+                    if (ReferenceEquals(this.CurrentExecution, execution))
+                    {
+                        this.CurrentExecution = null;
+                        this.CurrentExecutionPublication = null;
+                    }
+                    if (ReferenceEquals(this.CurrentConfirmedOwner, owner) && this.Stage == SessionStage.Executing)
+                        this.Stage = SessionStage.ConfirmedTerminal;
+                }
+            }
+        }
+    }
+
+    private async Task DisposeExecutingCoreAsync(
+        TaskCompletionSource<InstallerExecutionOperation?> publication,
+        CancellationTokenSource request
+    )
+    {
+        bool cleanupFailed = false;
+        try { await request.CancelAsync().ConfigureAwait(false); }
+        catch (ObjectDisposedException) { }
+        catch { cleanupFailed = true; }
+        InstallerExecutionOperation? execution = null;
+        try { execution = await publication.Task.ConfigureAwait(false); }
+        catch { cleanupFailed = true; }
+        if (execution is not null)
+        {
+            try { await execution.RequestCancellationAsync().ConfigureAwait(false); }
+            catch { cleanupFailed = true; }
+            try { _ = await execution.Completion.ConfigureAwait(false); }
+            catch { cleanupFailed = true; }
+        }
+        try { await this.Client.DisposeAsync().ConfigureAwait(false); }
+        catch { cleanupFailed = true; }
+        try { this.CurrentExecutionLifetime?.Dispose(); }
+        catch { cleanupFailed = true; }
+        try { this.Lifetime.Dispose(); }
+        catch { cleanupFailed = true; }
+        this.CommandGate.Dispose();
+        lock (this.DisposeLock)
+        {
+            this.ClearIssuedCandidates();
+            this.CurrentPlanCandidates.Clear();
+            this.IssuedPlanCandidates.Clear();
+            this.ClearCurrentPlanConfirmation();
+            this.CurrentExecution = null;
+            this.CurrentExecutionPublication = null;
+            this.CurrentExecutionLifetime = null;
+            this.CurrentConfirmedAuthority = null;
+            this.CurrentConfirmedOwner = null;
+            this.Stage = SessionStage.Disposed;
+        }
+        if (cleanupFailed)
+            throw new InstallerProtocolClientException("The verified installer session could not be cleaned up safely.");
     }
 
     private static (InstallerPlanConfirmation? Client, InstallerPlanConfirmation? Session) RemintConfirmation(
@@ -542,7 +717,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             if (this.Client.SessionFaulted.IsCompleted)
                 return new InstallerProtocolClientException("The verified installer session faulted before the plan result could be accepted.");
             if (this.Stage is SessionStage.Bound or SessionStage.Confirming)
-                this.Stage = SessionStage.Terminal;
+                this.Stage = SessionStage.BoundTerminal;
             return failure;
         }
     }
@@ -602,6 +777,10 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 this.IssuedPlanCandidates.Clear();
                 this.ClearCurrentPlanConfirmation();
                 this.CurrentConfirmedAuthority = null;
+                this.CurrentConfirmedOwner = null;
+                this.CurrentExecution = null;
+                this.CurrentExecutionPublication = null;
+                this.CurrentExecutionLifetime = null;
                 this.Stage = SessionStage.Disposed;
             }
         }
@@ -656,7 +835,6 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private sealed class ConfirmedInstallerSession : IConfirmedInstallerSession
     {
         private readonly VerifiedInstallerSession Owner;
-        private readonly InstallerConfirmedPlanAuthority Authority;
 
         public ProtocolReleaseIdentity Release { get; }
         public VerifiedGamePresentation Game { get; }
@@ -665,16 +843,17 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         public ConfirmedInstallerSession(
             VerifiedInstallerSession owner,
             ProtocolReleaseIdentity release,
-            VerifiedGamePresentation game,
-            InstallerConfirmedPlanAuthority authority
+            VerifiedGamePresentation game
         )
         {
             this.Owner = owner;
             this.Release = release;
             this.Game = game;
-            this.Authority = authority;
         }
 
-        public ValueTask DisposeAsync() => this.Owner.DisposeFromConfirmedSessionAsync(this.Authority);
+        public Task<InstallerExecutionOperation> ExecuteAsync(CancellationToken cancellationToken = default)
+            => this.Owner.ExecuteConfirmedPlanAsync(this, cancellationToken);
+
+        public ValueTask DisposeAsync() => this.Owner.DisposeFromConfirmedSessionAsync(this);
     }
 }
