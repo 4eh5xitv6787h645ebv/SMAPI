@@ -22,6 +22,10 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
 
     /// <summary>Inspect one non-rollback operation and return a path-free, authority-free plan projection.</summary>
     Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default);
+
+    /// <summary>Reinspect the retained exact plan after approving an additive set of its issued candidates.</summary>
+    Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("This restricted client doesn't support candidate approval.");
 }
 
 /// <summary>

@@ -1,5 +1,6 @@
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Engine;
+using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Backend;
 
@@ -477,6 +478,100 @@ internal sealed class VerifiedInstallerSessionTests
         );
     }
 
+    [Test]
+    public async Task BoundCandidateApprovalContainsExactReferencesReplacesTheIssuedSetAndClearsItOnRejection()
+    {
+        InstallerReadOnlyPlanCandidate first = CandidateCapability('4', "mods/first.dll", false);
+        InstallerReadOnlyPlanCandidate second = CandidateCapability('5', "mods/second.dll", true);
+        InstallerReadOnlyPlanCandidate replacement = CandidateCapability('6', "mods/second.dll", true);
+        int approval = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("valid", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = [first, second] }),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(++approval == 1
+                ? Plan(InstallerOperation.Update) with { Candidates = [replacement] }
+                : new InstallerReadOnlyPlanRejection(ProtocolPrePlanErrorCode.CandidateApprovalFailed, ProtocolNextAction.InspectAgain, false))
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Update);
+
+        InstallerReadOnlyPlanCandidate foreign = CandidateCapability('9', "mods/first.dll", false);
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([])).Should().ThrowAsync<ArgumentException>();
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([plan.Candidates[0], plan.Candidates[0]])).Should().ThrowAsync<ArgumentException>();
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([foreign])).Should().ThrowAsync<ArgumentException>();
+        client.ApprovedCandidates.Should().BeEmpty("invalid exact-reference sets must stay above the client boundary");
+
+        InstallerReadOnlyPlanSuccess revised = (InstallerReadOnlyPlanSuccess)await bound.ApprovePlanCandidatesAsync([plan.Candidates[1]]);
+        revised.Candidates.Should().Equal(replacement);
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([plan.Candidates[0]])).Should().ThrowAsync<ArgumentException>();
+        client.ApprovedCandidates.Should().ContainSingle();
+
+        (await bound.ApprovePlanCandidatesAsync([replacement])).Should().BeOfType<InstallerReadOnlyPlanRejection>();
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([replacement])).Should().ThrowAsync<ArgumentException>();
+        client.ApprovedCandidates.Should().HaveCount(2);
+
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task BoundCandidateApprovalFailureTerminatesAndDisposesExactlyOnce()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability('4', "mods/first.dll", false);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("valid", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = [candidate] }),
+            Approval = (_, _) => throw new InstallerProtocolClientException("sanitized failure")
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([plan.Candidates.Single()]))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+        await bound.DisposeAsync();
+        await session.DisposeAsync();
+
+        client.DisposeCalls.Should().Be(1);
+        await FluentActions.Awaiting(() => bound.InspectPlanAsync(InstallerOperation.Install)).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task BoundCandidateApprovalRejectsAClientWhichReusesAnOldCapabilityReference()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability('4', "mods/first.dll", false);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("valid", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = [candidate] }),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Install) with { Candidates = [candidate] })
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([plan.Candidates.Single()]))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    private static InstallerReadOnlyPlanCandidate CandidateCapability(char id, string path, bool selected) => new(new ProtocolPlanCandidate(
+        ProtocolCandidateId.Parse(new string(id, 32)),
+        FileReplacementCandidateReason.ModifiedReceiptOwned,
+        FileReplacementCandidateDisposition.Replace,
+        path,
+        new string('a', 64),
+        123,
+        420,
+        new string('b', 64),
+        selected,
+        "private evidence"
+    ));
+
     private static ProtocolGameCandidate Candidate(string suffix, LinuxGameFolderStatus status)
         => new($"/games/{suffix}", status, $"Stardew Valley {suffix}");
 
@@ -499,8 +594,11 @@ internal sealed class VerifiedInstallerSessionTests
             (path, _) => Task.FromResult(Candidate(path.GetHashCode(StringComparison.Ordinal).ToString(), LinuxGameFolderStatus.Valid));
         public Func<string, InstallerOperation, CancellationToken, Task<InstallerReadOnlyPlanResult>> Inspection { get; init; } =
             (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation));
+        public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; } =
+            (_, _) => throw new AssertionException("Candidate approval wasn't expected.");
         public List<string> InspectedPaths { get; } = [];
         public List<InstallerOperation> InspectedOperations { get; } = [];
+        public List<IReadOnlyList<InstallerReadOnlyPlanCandidate>> ApprovedCandidates { get; } = [];
         public int DiscoverCalls { get; private set; }
         public int ValidateCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -543,6 +641,15 @@ internal sealed class VerifiedInstallerSessionTests
             this.InspectedOperations.Add(operation);
             this.InspectionStarted.TrySetResult();
             return this.Inspection(canonicalGamePath, operation, cancellationToken);
+        }
+
+        public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(
+            IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.ApprovedCandidates.Add(candidates.ToArray());
+            return this.Approval(candidates, cancellationToken);
         }
 
         public ValueTask DisposeAsync()

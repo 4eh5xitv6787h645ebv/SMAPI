@@ -18,6 +18,10 @@ internal interface IPlanInspectionSession : IAsyncDisposable
 
     /// <summary>Inspect one supported operation for only the game fixed by this bound session.</summary>
     Task<InstallerReadOnlyPlanResult> InspectPlanAsync(InstallerOperation operation, CancellationToken cancellationToken = default);
+
+    /// <summary>Reinspect the current plan with an additive set of exact backend-issued file candidates.</summary>
+    Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("This restricted session doesn't support candidate approval.");
 }
 
 /// <summary>Bounded, non-authoritative display data for an exact valid game-folder selection.</summary>
@@ -32,8 +36,8 @@ internal sealed class VerifiedGamePresentation
     {
         AssertCanonicalLinuxPath(canonicalPath);
         AssertBoundedText(displayName, nameof(displayName));
-        this.DisplayPath = EscapeForDisplay(canonicalPath);
-        this.DisplayName = EscapeForDisplay(displayName);
+        this.DisplayPath = InstallerDisplayText.Escape(canonicalPath);
+        this.DisplayName = InstallerDisplayText.Escape(displayName);
     }
 
     private static void AssertCanonicalLinuxPath(string value)
@@ -56,8 +60,14 @@ internal sealed class VerifiedGamePresentation
             throw new ArgumentException("The selected game presentation is empty or too long.", parameterName);
     }
 
-    private static string EscapeForDisplay(string value)
+}
+
+/// <summary>Escapes untrusted-but-bounded backend presentation text without losing visible path identity.</summary>
+internal static class InstallerDisplayText
+{
+    public static string Escape(string value)
     {
+        ArgumentNullException.ThrowIfNull(value);
         StringBuilder? escaped = null;
         for (int index = 0; index < value.Length; index++)
         {
