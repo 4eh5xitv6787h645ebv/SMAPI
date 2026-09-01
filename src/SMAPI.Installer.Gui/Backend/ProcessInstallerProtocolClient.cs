@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Threading.Channels;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Security;
@@ -15,9 +16,17 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     internal const string GameValidationCapability = "linux-game-validation";
     internal const string PlanInspectionCapability = "install-update-repair-uninstall-backup-rollback";
     internal const string CandidateApprovalCapability = "candidate-approval";
+    internal const string ExactCoreProgressCapability = "exact-core-progress";
+    internal const string CancellationCapability = "cancellation";
+    internal const string InterruptedRecoveryCapability = "interrupted-operation-recovery";
     internal const int MaximumObservedStderrBytes = 64 * 1024;
     internal const int MaximumPlanPageCount = 512;
     internal const int MaximumPlanAggregateUtf8Bytes = 16 * 1024 * 1024;
+    // One million events exceeds the 640,000-unit legal maximum-capacity recovery envelope while still bounding a
+    // hostile packaged sibling. The aggregate byte gate is independent, includes newlines, and is tested at N/N+1.
+    internal const int MaximumExecutionProgressEvents = 1_000_000;
+    internal const int MaximumExecutionProgressUnits = 640_000;
+    internal const long MaximumExecutionProgressUtf8Bytes = 256L * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan DefaultReapTimeout = TimeSpan.FromSeconds(5);
@@ -47,6 +56,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private StrictJsonLineReader? Reader;
     private Task? ReaderPump;
     private PendingProtocolResponse? PendingResponse;
+    private ActiveExecutionRoute? ActiveExecution;
+    private ActiveExecutionRoute? SettlingExecution;
     private Task? StderrDrain;
     private ProtocolSessionId? SessionId;
     private ProtocolPackageId? VerifiedPackageId;
@@ -56,6 +67,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private readonly HashSet<ProtocolCandidateId> IssuedCandidateIds = [];
     private int CleanupStarted;
     private int DisposeStarted;
+    private int ExecutionAdmitted;
     private int ObservedStderrBytesValue;
     private int CleanupUnconfirmed;
     private Task? CleanupTask;
@@ -64,7 +76,18 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     internal Action? BeforePackageAuthorityCommitForTesting { get; set; }
     internal Action? BeforePlanBindingCommitForTesting { get; set; }
     internal Action? BeforeConfirmationAuthorityCommitForTesting { get; set; }
+    internal Action? BeforeExecutionWriteForTesting { get; set; }
+    internal Func<Task>? BeforeExecuteWrittenCommitForTesting { get; set; }
+    internal Action? ExecutionTerminalRoutedForTesting { get; set; }
+    internal Func<Task>? BeforeExecutionSettlementForTesting { get; set; }
+    internal Func<Task>? BeforePostCancellationDeadlineForTesting { get; set; }
     internal int IssuedCandidateCapacityForTesting { get; set; } = InstallerCandidateSelection.MaximumIssuedCandidatesPerSession;
+    internal int ExecutionProgressCapacityForTesting { get; set; } = MaximumExecutionProgressEvents;
+    internal long ExecutionProgressByteCapacityForTesting { get; set; } = MaximumExecutionProgressUtf8Bytes;
+    internal TimeSpan ExecutionHardTimeoutForTesting { get; set; } = TimeSpan.FromMinutes(30);
+    internal TimeSpan ExecutionIdleTimeoutForTesting { get; set; } = TimeSpan.FromMinutes(5);
+    internal TimeSpan ExecutionCancellationAcknowledgementTimeoutForTesting { get; set; } = TimeSpan.FromSeconds(30);
+    internal TimeSpan ExecutionPostCancellationTimeoutForTesting { get; set; } = TimeSpan.FromMinutes(30);
 
     internal int ObservedStderrBytes => Volatile.Read(ref this.ObservedStderrBytesValue);
     internal bool CleanupConfirmed => Volatile.Read(ref this.CleanupUnconfirmed) == 0;
@@ -167,6 +190,9 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 || !response.Capabilities.Contains(GameValidationCapability, StringComparer.Ordinal)
                 || !response.Capabilities.Contains(PlanInspectionCapability, StringComparer.Ordinal)
                 || !response.Capabilities.Contains(CandidateApprovalCapability, StringComparer.Ordinal)
+                || !response.Capabilities.Contains(ExactCoreProgressCapability, StringComparer.Ordinal)
+                || !response.Capabilities.Contains(CancellationCapability, StringComparer.Ordinal)
+                || !response.Capabilities.Contains(InterruptedRecoveryCapability, StringComparer.Ordinal)
             )
                 return await this.FailProtocolAsync<HandshakeEvent>().ConfigureAwait(false);
             this.SessionId = response.SessionId;
@@ -339,7 +365,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                if (!this.TryRetainPlanBinding(new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, candidates, projected.Confirmation)))
+                if (!this.TryRetainPlanBinding(new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, candidates, projected.Confirmation)))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
@@ -438,7 +464,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                if (!this.TryRetainPlanBinding(new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, replacementCandidates, projected.Confirmation)))
+                if (!this.TryRetainPlanBinding(new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, replacementCandidates, projected.Confirmation)))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
@@ -524,6 +550,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                             binding.GameRoot,
                             binding.PlanId,
                             binding.PlanDigest,
+                            binding.OperationCount,
                             authority
                         );
                 }
@@ -553,6 +580,298 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             this.CommandGate.Release();
         }
+    }
+
+    public async Task<InstallerExecutionOperation> ExecutePlanAsync(
+        InstallerConfirmedPlanAuthority authority,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            this.AssertUsable();
+            RetainedConfirmedPlanBinding binding;
+            ActiveExecutionRoute route;
+            ExecutePlanRequest request;
+            lock (this.ResponseLock)
+            {
+                binding = this.CurrentConfirmedPlanBinding
+                    ?? throw new InvalidOperationException("A current confirmed plan is required before execution.");
+                if (!ReferenceEquals(binding.Authority, authority))
+                    throw new ArgumentException("Execution requires the exact current confirmed-plan authority.", nameof(authority));
+                if (this.ActiveExecution is not null)
+                    throw new InvalidOperationException("The confirmed plan is already executing.");
+                if (
+                    this.ExecutionProgressCapacityForTesting is < 1 or > MaximumExecutionProgressEvents
+                    || this.ExecutionProgressByteCapacityForTesting is < ProtocolJsonSerializer.MaxLineBytes or > MaximumExecutionProgressUtf8Bytes
+                )
+                    throw new InvalidOperationException("The execution progress bounds are invalid.");
+
+                ProtocolSessionId session = this.SessionId
+                    ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+                request = new(session, binding.PlanId, binding.PlanDigest);
+                route = new(
+                    session,
+                    binding,
+                    request.CommandId,
+                    this.ExecutionProgressCapacityForTesting,
+                    this.ExecutionProgressByteCapacityForTesting
+                );
+
+                // The exact authority is consumed and the route is installed before the first execute byte can be
+                // written. Every post-admission failure is therefore reported conservatively.
+                this.CurrentConfirmedPlanBinding = null;
+                this.ActiveExecution = route;
+                Volatile.Write(ref this.ExecutionAdmitted, 1);
+            }
+
+            Task<InstallerExecutionResult> completion = this.CompleteExecutionAsync(route);
+            InstallerExecutionOperation operation = new(route.Progress.Reader, completion, () => this.RequestExecutionCancellationAsync(route));
+            route.AttachCallerCancellation(cancellationToken, () => ObserveAbandoned(this.RequestExecutionCancellationAsync(route)));
+            try
+            {
+                this.BeforeExecutionWriteForTesting?.Invoke();
+                await this.WriteExecutionRequestAsync(request).ConfigureAwait(false);
+                if (this.BeforeExecuteWrittenCommitForTesting is { } beforeCommit)
+                    await beforeCommit().ConfigureAwait(false);
+                route.MarkExecuteWritten();
+            }
+            catch
+            {
+                route.MarkExecuteWriteFailed();
+                await this.TryCleanupAfterExecutionAsync(route, allowCleanExit: false).ConfigureAwait(false);
+            }
+            return operation;
+        }
+        finally
+        {
+            this.CommandGate.Release();
+        }
+    }
+
+    private async Task WriteExecutionRequestAsync(ExecutePlanRequest request)
+    {
+        string line;
+        try { line = ProtocolJsonSerializer.SerializeLine(request); }
+        catch { throw new InstallerProtocolClientException("The installer backend execute request was rejected safely."); }
+        await this.EnsureStartedAsync().ConfigureAwait(false);
+        using CancellationTokenSource timeout = new(this.OperationTimeout);
+        using CancellationTokenSource write = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, this.Lifetime.Token);
+        byte[] bytes = StrictUtf8.GetBytes(line + "\n");
+        await this.AwaitTransportAsync(this.ProcessInput!.WriteAsync(bytes, write.Token).AsTask(), write.Token).ConfigureAwait(false);
+        await this.AwaitTransportAsync(this.ProcessInput.FlushAsync(write.Token), write.Token).ConfigureAwait(false);
+    }
+
+    private Task RequestExecutionCancellationAsync(ActiveExecutionRoute route)
+    {
+        TaskCompletionSource? publication = null;
+        Task result;
+        lock (this.ResponseLock)
+        {
+            if (route.CancellationTask is not null)
+                return route.CancellationTask;
+            if (!ReferenceEquals(this.ActiveExecution, route) || route.Terminal.Task.IsCompleted)
+                return Task.CompletedTask;
+            publication = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            result = route.CancellationTask = publication.Task;
+        }
+        _ = this.PublishExecutionCancellationAsync(route, publication);
+        return result;
+    }
+
+    private async Task PublishExecutionCancellationAsync(ActiveExecutionRoute route, TaskCompletionSource publication)
+    {
+        try
+        {
+            await this.SendExecutionCancellationAsync(route).ConfigureAwait(false);
+            publication.TrySetResult();
+        }
+        catch (Exception error)
+        {
+            publication.TrySetException(error);
+        }
+    }
+
+    private async Task SendExecutionCancellationAsync(ActiveExecutionRoute route)
+    {
+        if (!await route.ExecuteWritten.Task.ConfigureAwait(false))
+        {
+            route.MarkSettlementUnconfirmed();
+            throw new InstallerProtocolClientException("The installer backend could not confirm the cancellation request.");
+        }
+        using CancellationTokenSource timeout = new(this.ExecutionCancellationAcknowledgementTimeoutForTesting);
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, this.Lifetime.Token);
+        try
+        {
+            CancelPlanRequest request;
+            Task<CommandAcknowledgedEvent> acknowledgement;
+            lock (this.ResponseLock)
+            {
+                if (!ReferenceEquals(this.ActiveExecution, route) || route.Terminal.Task.IsCompleted)
+                    return;
+                request = new(route.SessionId, route.Binding.PlanId, route.Binding.PlanDigest);
+                acknowledgement = route.InstallCancellationLane(request.CommandId);
+                route.MarkCancellationRequested();
+            }
+            await this.WriteCancellationRequestAsync(request, cancellation.Token).ConfigureAwait(false);
+            await this.AwaitTransportAsync(acknowledgement, cancellation.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            route.MarkSettlementUnconfirmed();
+            await this.TryCleanupAfterExecutionAsync(route, allowCleanExit: false).ConfigureAwait(false);
+            throw new InstallerProtocolClientException(this.CleanupConfirmed
+                ? "The installer backend could not confirm the cancellation request and was stopped."
+                : "The installer backend could not confirm the cancellation request, and termination could not be confirmed.");
+        }
+    }
+
+    private async Task WriteCancellationRequestAsync(CancelPlanRequest request, CancellationToken cancellationToken)
+    {
+        string line;
+        try { line = ProtocolJsonSerializer.SerializeLine(request); }
+        catch { throw new InstallerProtocolClientException("The installer backend cancellation request was rejected safely."); }
+        byte[] bytes = StrictUtf8.GetBytes(line + "\n");
+        await this.AwaitTransportAsync(this.ProcessInput!.WriteAsync(bytes, cancellationToken).AsTask(), cancellationToken).ConfigureAwait(false);
+        await this.AwaitTransportAsync(this.ProcessInput.FlushAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<InstallerExecutionResult> CompleteExecutionAsync(ActiveExecutionRoute route)
+    {
+        using CancellationTokenSource hard = new(this.ExecutionHardTimeoutForTesting);
+        Task hardDeadline = Task.Delay(Timeout.InfiniteTimeSpan, hard.Token);
+        Task postCancellationDeadline = Task.Delay(Timeout.InfiniteTimeSpan);
+        Task cancellationRequested = route.CancellationRequested.Task;
+        try
+        {
+            while (true)
+            {
+                using CancellationTokenSource idle = new(this.ExecutionIdleTimeoutForTesting);
+                Task idleDeadline = Task.Delay(Timeout.InfiniteTimeSpan, idle.Token);
+                Task<bool> activity = route.Activity.Reader.WaitToReadAsync().AsTask();
+                Task completed = await Task.WhenAny(route.Terminal.Task, activity, cancellationRequested, hardDeadline, idleDeadline, postCancellationDeadline).ConfigureAwait(false);
+                if (ReferenceEquals(completed, route.Terminal.Task))
+                    break;
+                if (ReferenceEquals(completed, activity))
+                {
+                    while (route.Activity.Reader.TryRead(out _)) { }
+                    continue;
+                }
+                if (ReferenceEquals(completed, cancellationRequested))
+                {
+                    if (this.BeforePostCancellationDeadlineForTesting is { } beforeDeadline)
+                        await beforeDeadline().ConfigureAwait(false);
+                    postCancellationDeadline = Task.Delay(this.ExecutionPostCancellationTimeoutForTesting);
+                    cancellationRequested = Task.Delay(Timeout.InfiniteTimeSpan);
+                    continue;
+                }
+                return await this.CompleteExecutionUnknownAsync(route).ConfigureAwait(false);
+            }
+
+            ProtocolEvent terminal = await route.Terminal.Task.ConfigureAwait(false);
+            InstallerExecutionTerminalResult result = ProjectExecutionTerminal(route, terminal);
+            if (this.BeforeExecutionSettlementForTesting is { } beforeSettlement)
+                await beforeSettlement().ConfigureAwait(false);
+            bool acknowledgementConfirmed = true;
+            Task? cancellation = route.CancellationTask;
+            if (cancellation is not null)
+            {
+                try { await cancellation.ConfigureAwait(false); }
+                catch
+                {
+                    acknowledgementConfirmed = false;
+                    route.MarkSettlementUnconfirmed();
+                    // An exact terminal is stronger evidence than a missing or late cancellation acknowledgement.
+                }
+            }
+            route.CompleteProgress();
+            bool cleanupConfirmed = await this.TryCleanupAfterExecutionAsync(route, allowCleanExit: true).ConfigureAwait(false);
+            return result with
+            {
+                BackendSettlement = acknowledgementConfirmed && cleanupConfirmed && !route.SettlementUnconfirmed
+                    ? InstallerBackendSettlement.ConfirmedClosed
+                    : InstallerBackendSettlement.Unconfirmed
+            };
+        }
+        catch
+        {
+            return await this.CompleteExecutionUnknownAsync(route).ConfigureAwait(false);
+        }
+        finally
+        {
+            route.DisposeCallerCancellation();
+        }
+    }
+
+    private async Task<InstallerExecutionResult> CompleteExecutionUnknownAsync(ActiveExecutionRoute route)
+    {
+        route.CompleteProgress();
+        lock (this.ResponseLock)
+        {
+            if (ReferenceEquals(this.ActiveExecution, route))
+                this.ActiveExecution = null;
+        }
+        await this.TryCleanupAfterExecutionAsync(route, allowCleanExit: false).ConfigureAwait(false);
+        return new InstallerExecutionStateUnknownResult();
+    }
+
+    private async Task<bool> TryCleanupAfterExecutionAsync(ActiveExecutionRoute route, bool allowCleanExit)
+    {
+        try
+        {
+            await this.CleanupAsync(allowCleanExit).ConfigureAwait(false);
+            return this.CleanupConfirmed;
+        }
+        catch
+        {
+            route.MarkSettlementUnconfirmed();
+            Volatile.Write(ref this.CleanupUnconfirmed, 1);
+            return false;
+        }
+    }
+
+    private static InstallerExecutionTerminalResult ProjectExecutionTerminal(ActiveExecutionRoute route, ProtocolEvent terminal)
+    {
+        ProtocolExecutionOutcome outcome;
+        ProtocolTerminalState state;
+        ProtocolExecutionSummary summary;
+        switch (terminal)
+        {
+            case SuccessEvent value when value.Operation == route.Binding.Operation:
+                (outcome, state, summary) = (value.Outcome, value.TerminalState, value.ExecutionSummary);
+                break;
+            case RolledBackFailureEvent value:
+                (outcome, state, summary) = (value.Outcome, value.TerminalState, value.ExecutionSummary);
+                break;
+            case RecoverableInterruptionEvent value:
+                (outcome, state, summary) = (value.Outcome, value.TerminalState, value.ExecutionSummary);
+                break;
+            case CancelledEvent value when route.CancellationRequested.Task.IsCompletedSuccessfully:
+                (outcome, state, summary) = (value.Outcome, value.TerminalState, value.ExecutionSummary);
+                break;
+            default:
+                throw new InstallerProtocolClientException("The installer backend returned an invalid execution terminal and was stopped.");
+        }
+        if (summary.ManagedFileChangeCount is { } changed && changed > route.Binding.OperationCount)
+            throw new InstallerProtocolClientException("The installer backend returned impossible execution counters and was stopped.");
+        return new(
+            outcome,
+            state.DurableState,
+            state.ErrorCode,
+            state.RecoveryDisposition,
+            state.NextAction,
+            new(
+                summary.ManagedFileChangeCount,
+                summary.RolledBackManagedFileCount,
+                summary.InternalStateChangeCount,
+                summary.RolledBackInternalStateCount,
+                summary.RecoveredTransactionCount,
+                summary.RecoveredPathCount
+            ),
+            InstallerBackendSettlement.Unconfirmed
+        );
     }
 
     private async Task<PlanCollections> FetchAllPlanPagesAsync(PlanEvent plan, ProtocolSessionId session, CancellationToken cancellationToken)
@@ -952,6 +1271,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         public ProtocolGameRootIdentity GameRoot { get; }
         public ProtocolPlanId PlanId { get; }
         public ProtocolPlanDigest PlanDigest { get; }
+        public int OperationCount { get; }
         public Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> Candidates { get; }
         public InstallerPlanConfirmation? Confirmation { get; }
 
@@ -963,6 +1283,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             ProtocolGameRootIdentity gameRoot,
             ProtocolPlanId planId,
             ProtocolPlanDigest planDigest,
+            int operationCount,
             Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates,
             InstallerPlanConfirmation? confirmation
         )
@@ -974,6 +1295,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.GameRoot = gameRoot;
             this.PlanId = planId;
             this.PlanDigest = planDigest;
+            this.OperationCount = operationCount;
             this.Candidates = candidates;
             this.Confirmation = confirmation;
         }
@@ -984,8 +1306,180 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         ProtocolGameRootIdentity GameRoot,
         ProtocolPlanId PlanId,
         ProtocolPlanDigest PlanDigest,
+        int OperationCount,
         InstallerConfirmedPlanAuthority Authority
     );
+
+    private sealed class ActiveExecutionRoute
+    {
+        private long LastSequence = -1;
+        private int ProgressEventCount;
+        private long ProgressUtf8Bytes;
+        private CancellationTokenRegistration CallerCancellation;
+        private int SettlementUnconfirmedValue;
+        private ProtocolCommandId? CancellationCommandId;
+        private TaskCompletionSource<CommandAcknowledgedEvent>? CancellationAcknowledgement;
+
+        public ProtocolSessionId SessionId { get; }
+        public RetainedConfirmedPlanBinding Binding { get; }
+        public ProtocolCommandId CommandId { get; }
+        public int MaximumProgressEvents { get; }
+        public long MaximumProgressUtf8Bytes { get; }
+        public Channel<InstallerExecutionProgress> Progress { get; } = Channel.CreateBounded<InstallerExecutionProgress>(
+            new BoundedChannelOptions(1)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+                SingleWriter = true,
+                AllowSynchronousContinuations = false
+            }
+        );
+        public Channel<bool> Activity { get; } = Channel.CreateBounded<bool>(
+            new BoundedChannelOptions(1)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+                SingleWriter = true,
+                AllowSynchronousContinuations = false
+            }
+        );
+        public TaskCompletionSource<ProtocolEvent> Terminal { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ExecuteWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CancellationRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task? CancellationTask { get; set; }
+        public bool SettlementUnconfirmed => Volatile.Read(ref this.SettlementUnconfirmedValue) != 0;
+        public bool HasPendingCancellation => this.CancellationAcknowledgement is not null && !this.CancellationAcknowledgement.Task.IsCompleted;
+
+        public ActiveExecutionRoute(
+            ProtocolSessionId sessionId,
+            RetainedConfirmedPlanBinding binding,
+            ProtocolCommandId commandId,
+            int maximumProgressEvents,
+            long maximumProgressUtf8Bytes
+        )
+        {
+            this.SessionId = sessionId;
+            this.Binding = binding;
+            this.CommandId = commandId;
+            this.MaximumProgressEvents = maximumProgressEvents;
+            this.MaximumProgressUtf8Bytes = maximumProgressUtf8Bytes;
+        }
+
+        public void AttachCallerCancellation(CancellationToken token, Action request)
+        {
+            if (token.CanBeCanceled)
+                this.CallerCancellation = token.Register(request);
+        }
+
+        public void DisposeCallerCancellation() => this.CallerCancellation.Dispose();
+        public void MarkExecuteWritten() => this.ExecuteWritten.TrySetResult(true);
+        public void MarkExecuteWriteFailed() => this.ExecuteWritten.TrySetResult(false);
+        public void MarkCancellationRequested() => this.CancellationRequested.TrySetResult();
+        public void SignalActivity() => this.Activity.Writer.TryWrite(true);
+        public void MarkSettlementUnconfirmed() => Volatile.Write(ref this.SettlementUnconfirmedValue, 1);
+
+        public Task<CommandAcknowledgedEvent> InstallCancellationLane(ProtocolCommandId commandId)
+        {
+            if (this.CancellationCommandId is not null || this.CancellationAcknowledgement is not null)
+                throw new InstallerProtocolClientException("The execution already has a cancellation command.");
+            this.CancellationCommandId = commandId;
+            this.CancellationAcknowledgement = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            return this.CancellationAcknowledgement.Task;
+        }
+
+        public bool IsCancellationCommand(ProtocolCommandId commandId) => this.CancellationCommandId == commandId;
+
+        public bool TryAcceptCancellationAcknowledgement(CommandAcknowledgedEvent value, int utf8Bytes)
+        {
+            if (
+                this.CancellationAcknowledgement is null
+                || value.CommandId != this.CancellationCommandId
+                || value.SessionId != this.SessionId
+                || value.Acknowledgement != ProtocolAcknowledgementKind.PlanCancellationRequested
+                || value.PlanId != this.Binding.PlanId
+                || value.PrunePlanId is not null
+                || !this.TryCountFrameBytes(utf8Bytes)
+            )
+                return false;
+            this.SignalActivity();
+            return this.CancellationAcknowledgement.TrySetResult(value);
+        }
+
+        public bool TryAcceptProgress(ProgressEvent value, int utf8Bytes)
+        {
+            if (
+                value.SessionId != this.SessionId
+                || value.PlanId != this.Binding.PlanId
+                || value.PlanDigest != this.Binding.PlanDigest
+                || value.CommandId != this.CommandId
+                || value.Sequence <= this.LastSequence
+                || value.CompletedUnits is < 0 or > MaximumExecutionProgressUnits
+                || value.TotalUnits is < 0 or > MaximumExecutionProgressUnits
+                || value.TotalUnits is { } total && value.CompletedUnits > total
+                || utf8Bytes < 1
+            )
+                return false;
+            try
+            {
+                this.LastSequence = value.Sequence;
+                this.ProgressEventCount = checked(this.ProgressEventCount + 1);
+                if (!this.TryCountFrameBytes(utf8Bytes))
+                    return false;
+            }
+            catch
+            {
+                return false;
+            }
+            if (this.ProgressEventCount > this.MaximumProgressEvents)
+                return false;
+            this.Progress.Writer.TryWrite(new(value.Stage, checked((int)value.CompletedUnits), value.TotalUnits is { } bounded ? checked((int)bounded) : null));
+            this.SignalActivity();
+            return true;
+        }
+
+        public bool TryCountFrameBytes(int utf8Bytes)
+        {
+            if (utf8Bytes < 1)
+                return false;
+            try { this.ProgressUtf8Bytes = checked(this.ProgressUtf8Bytes + utf8Bytes); }
+            catch { return false; }
+            return this.ProgressUtf8Bytes <= this.MaximumProgressUtf8Bytes;
+        }
+
+        public bool IsExactTerminal(ProtocolEvent value) => value switch
+        {
+            SuccessEvent terminal => this.IsExact(terminal.SessionId, terminal.PlanId, terminal.PlanDigest, terminal.CommandId),
+            RolledBackFailureEvent terminal => this.IsExact(terminal.SessionId, terminal.PlanId, terminal.PlanDigest, terminal.CommandId),
+            RecoverableInterruptionEvent terminal => this.IsExact(terminal.SessionId, terminal.PlanId, terminal.PlanDigest, terminal.CommandId),
+            CancelledEvent terminal => this.IsExact(terminal.SessionId, terminal.PlanId, terminal.PlanDigest, terminal.CommandId),
+            _ => false
+        };
+
+        private bool IsExact(ProtocolSessionId session, ProtocolPlanId plan, ProtocolPlanDigest digest, ProtocolCommandId command) =>
+            session == this.SessionId && plan == this.Binding.PlanId && digest == this.Binding.PlanDigest && command == this.CommandId;
+
+        public void CompleteTerminal(ProtocolEvent terminal)
+        {
+            this.Progress.Writer.TryComplete();
+            this.Activity.Writer.TryComplete();
+            this.Terminal.TrySetResult(terminal);
+        }
+
+        public void Fail(Exception error)
+        {
+            this.MarkExecuteWriteFailed();
+            this.Progress.Writer.TryComplete();
+            this.Activity.Writer.TryComplete();
+            this.Terminal.TrySetException(error);
+            this.CancellationAcknowledgement?.TrySetException(error);
+        }
+
+        public void CompleteProgress()
+        {
+            this.Progress.Writer.TryComplete();
+            this.Activity.Writer.TryComplete();
+        }
+    }
 
     public ValueTask DisposeAsync()
     {
@@ -1190,15 +1684,77 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 }
 
                 ProtocolEvent response = ProtocolJsonSerializer.DeserializeEventLine(line);
-                PendingProtocolResponse? pending;
+                int frameUtf8Bytes;
+                try { frameUtf8Bytes = checked(StrictUtf8.GetByteCount(line) + 1); }
+                catch { frameUtf8Bytes = -1; }
+                PendingProtocolResponse? pending = null;
+                ActiveExecutionRoute? terminalRoute = null;
+                bool progressFrame = false;
+                bool cancellationAcknowledgement = false;
+                bool invalid = false;
                 lock (this.ResponseLock)
                 {
-                    pending = this.PendingResponse;
-                    this.PendingResponse = null;
+                    ActiveExecutionRoute? active = this.ActiveExecution;
+                    if (active is not null && response.CommandId == active.CommandId)
+                    {
+                        if (active.Terminal.Task.IsCompleted)
+                            invalid = true;
+                        else if (response is ProgressEvent progress)
+                        {
+                            progressFrame = active.TryAcceptProgress(progress, frameUtf8Bytes);
+                            invalid = !progressFrame;
+                        }
+                        else if (active.IsExactTerminal(response) && active.TryCountFrameBytes(frameUtf8Bytes))
+                        {
+                            terminalRoute = active;
+                            this.SettlingExecution = active;
+                            if (!active.HasPendingCancellation)
+                                this.ActiveExecution = null;
+                        }
+                        else
+                            invalid = true;
+                    }
+                    else if (active is not null && active.IsCancellationCommand(response.CommandId))
+                    {
+                        cancellationAcknowledgement = response is CommandAcknowledgedEvent acknowledged
+                            && active.TryAcceptCancellationAcknowledgement(acknowledged, frameUtf8Bytes);
+                        invalid = !cancellationAcknowledgement;
+                        if (cancellationAcknowledgement && active.Terminal.Task.IsCompleted)
+                            this.ActiveExecution = null;
+                    }
+                    else if (this.PendingResponse is { } current && response.CommandId == current.CommandId)
+                    {
+                        pending = current;
+                        this.PendingResponse = null;
+                    }
+                    else
+                        invalid = true;
                 }
-                if (pending is null || response.CommandId != pending.CommandId)
+                if (invalid)
                 {
                     this.FaultSession("The installer backend emitted an unsolicited or incorrectly correlated response.");
+                    return;
+                }
+                if (progressFrame || cancellationAcknowledgement)
+                    continue;
+                if (terminalRoute is not null)
+                {
+                    bool cancellationAckPending = terminalRoute.HasPendingCancellation;
+                    if (this.Reader.HasBufferedFrameData && !cancellationAckPending)
+                    {
+                        terminalRoute.MarkSettlementUnconfirmed();
+                        terminalRoute.CompleteTerminal(response);
+                        this.ExecutionTerminalRoutedForTesting?.Invoke();
+                        this.FaultSession("The installer backend emitted output after an execution terminal.");
+                        return;
+                    }
+                    terminalRoute.CompleteTerminal(response);
+                    this.ExecutionTerminalRoutedForTesting?.Invoke();
+                    continue;
+                }
+                if (pending is null)
+                {
+                    this.FaultSession("The installer backend response router entered an invalid state.");
                     return;
                 }
                 if (this.Reader.HasBufferedFrameData)
@@ -1226,6 +1782,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     {
         InstallerProtocolClientException fault = new(message);
         PendingProtocolResponse? pending;
+        ActiveExecutionRoute? execution;
         lock (this.ResponseLock)
         {
             if (this.SessionFaultRaised)
@@ -1238,8 +1795,13 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.IssuedCandidateIds.Clear();
             pending = this.PendingResponse;
             this.PendingResponse = null;
+            execution = this.ActiveExecution ?? this.SettlingExecution;
+            this.ActiveExecution = null;
+            this.SettlingExecution = null;
         }
         pending?.Completion.TrySetException(fault);
+        execution?.MarkSettlementUnconfirmed();
+        execution?.Fail(fault);
         this.SessionFault.TrySetResult(fault);
         _ = this.CleanupAsync(allowCleanExit: false);
     }
@@ -1337,7 +1899,13 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         bool leaseTransferred = false;
         try
         {
-            this.Lifetime.Cancel();
+            // For a clean terminal settlement, keep the response pump alive until stdin is closed and the backend
+            // reaches EOF/exit. This lets a late protocol frame mark settlement unconfirmed instead of racing past
+            // an eagerly cancelled reader. Fail-stop cleanup still cancels transport immediately.
+            if (!allowCleanExit)
+                this.CancelLifetimeWithoutThrowing();
+            ActiveExecutionRoute? execution;
+            ActiveExecutionRoute? settling;
             lock (this.ResponseLock)
             {
                 this.VerifiedPackageId = null;
@@ -1345,18 +1913,38 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 this.CurrentPlanBinding = null;
                 this.CurrentConfirmedPlanBinding = null;
                 this.IssuedCandidateIds.Clear();
+                execution = this.ActiveExecution;
+                this.ActiveExecution = null;
+                settling = this.SettlingExecution;
+                if (!allowCleanExit)
+                    this.SettlingExecution = null;
             }
+            execution?.Fail(new InstallerProtocolClientException("The installer backend execution transport stopped."));
+            if (!allowCleanExit)
+                settling?.CompleteProgress();
             IInstallerProtocolProcess? process = this.Process;
             if (process is null)
+            {
+                this.ClearSettlingExecution(settling);
                 return;
+            }
 
             try { (this.ProcessInput ?? process.Input).Dispose(); } catch { }
             if (allowCleanExit && await WaitBoundedAsync(GetWaitTask(process), this.ReapTimeout).ConfigureAwait(false))
             {
+                if (this.ReaderPump is { } reader && !await WaitBoundedAsync(reader, this.ReapTimeout).ConfigureAwait(false))
+                {
+                    settling?.MarkSettlementUnconfirmed();
+                    Volatile.Write(ref this.CleanupUnconfirmed, 1);
+                }
+                this.ClearSettlingExecution(settling);
+                this.CancelLifetimeWithoutThrowing();
                 await this.FinishCleanupAsync(process).ConfigureAwait(false);
                 return;
             }
 
+            this.ClearSettlingExecution(settling);
+            this.CancelLifetimeWithoutThrowing();
             try { process.Terminate(); } catch { }
             Task reap = GetWaitTask(process);
             if (!await WaitBoundedAsync(reap, this.ReapTimeout).ConfigureAwait(false))
@@ -1373,20 +1961,43 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             if (!leaseTransferred)
             {
-                this.ExecutableLease?.Dispose();
-                if (this.IsProduction)
+                try { this.ExecutableLease?.Dispose(); }
+                catch { Volatile.Write(ref this.CleanupUnconfirmed, 1); }
+                finally
                 {
-                    lock (ProductionQuarantineLock)
-                        ProductionClientActive = false;
+                    if (this.IsProduction)
+                    {
+                        lock (ProductionQuarantineLock)
+                            ProductionClientActive = false;
+                    }
                 }
             }
         }
     }
 
+    private void ClearSettlingExecution(ActiveExecutionRoute? route)
+    {
+        if (route is null)
+            return;
+        lock (this.ResponseLock)
+        {
+            if (ReferenceEquals(this.SettlingExecution, route))
+                this.SettlingExecution = null;
+        }
+        route.CompleteProgress();
+    }
+
+    private void CancelLifetimeWithoutThrowing()
+    {
+        try { this.Lifetime.Cancel(); }
+        catch { Volatile.Write(ref this.CleanupUnconfirmed, 1); }
+    }
+
     private async Task FinishCleanupAsync(IInstallerProtocolProcess process)
     {
         await this.FinishStreamCleanupAsync(process).ConfigureAwait(false);
-        process.Dispose();
+        try { process.Dispose(); }
+        catch { Volatile.Write(ref this.CleanupUnconfirmed, 1); }
     }
 
     private async Task FinishStreamCleanupAsync(IInstallerProtocolProcess process)
@@ -1416,12 +2027,17 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             {
                 if (completed.Status == TaskStatus.RanToCompletion)
                 {
-                    process.Dispose();
-                    executableLease?.Dispose();
-                    if (production)
+                    try { process.Dispose(); }
+                    catch { }
+                    try { executableLease?.Dispose(); }
+                    catch { }
+                    finally
                     {
-                        lock (ProductionQuarantineLock)
-                            ProductionQuarantine = null;
+                        if (production)
+                        {
+                            lock (ProductionQuarantineLock)
+                                ProductionQuarantine = null;
+                        }
                     }
                 }
                 else
@@ -1477,6 +2093,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     {
         if (Volatile.Read(ref this.DisposeStarted) != 0 || Volatile.Read(ref this.CleanupStarted) != 0)
             throw new ObjectDisposedException(nameof(ProcessInstallerProtocolClient));
+        if (Volatile.Read(ref this.ExecutionAdmitted) != 0)
+            throw new InvalidOperationException("No ordinary command can be admitted after plan execution begins.");
     }
 }
 
@@ -1527,7 +2145,10 @@ internal sealed class SystemInstallerProtocolProcess(Process process) : IInstall
     public void Dispose() => process.Dispose();
 }
 
-internal sealed record PendingProtocolResponse(ProtocolCommandId CommandId, TaskCompletionSource<ProtocolEvent> Completion);
+internal sealed record PendingProtocolResponse(
+    ProtocolCommandId CommandId,
+    TaskCompletionSource<ProtocolEvent> Completion
+);
 
 internal sealed class StrictJsonLineReader
 {

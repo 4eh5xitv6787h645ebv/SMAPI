@@ -1,6 +1,8 @@
+using System.Threading.Channels;
 using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
+using StardewModdingAPI.Installer.Core.Transactions;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
 
@@ -60,6 +62,86 @@ internal sealed class InstallerPlanConfirmation
 internal sealed class InstallerConfirmedPlanAuthority
 {
     internal InstallerConfirmedPlanAuthority() { }
+}
+
+/// <summary>A bounded typed execution update with no backend message, path, identifier, or digest.</summary>
+internal sealed record InstallerExecutionProgress(
+    TransactionStage Stage,
+    int CompletedUnits,
+    int? TotalUnits
+);
+
+/// <summary>A sanitized execution outcome which never exposes backend text or transport authority.</summary>
+internal abstract record InstallerExecutionResult;
+
+/// <summary>A fully validated terminal event from the exact admitted execution command.</summary>
+internal sealed record InstallerExecutionTerminalResult(
+    ProtocolExecutionOutcome Outcome,
+    ProtocolDurableState DurableState,
+    ProtocolTerminalErrorCode? ErrorCode,
+    ProtocolRecoveryDisposition RecoveryDisposition,
+    ProtocolNextAction NextAction,
+    InstallerExecutionSummary Summary,
+    InstallerBackendSettlement BackendSettlement
+) : InstallerExecutionResult;
+
+internal enum InstallerBackendSettlement
+{
+    ConfirmedClosed,
+    Unconfirmed
+}
+
+internal enum InstallerExecutionUncertaintyReason
+{
+    BackendStateCouldNotBeConfirmed
+}
+
+/// <summary>
+/// A conservative result used when transport was lost after execution may have started. The caller must recover the
+/// interrupted operation and must never infer that the installation is unchanged or retry the execution.
+/// </summary>
+internal sealed record InstallerExecutionStateUnknownResult : InstallerExecutionResult
+{
+    public InstallerExecutionUncertaintyReason Reason => InstallerExecutionUncertaintyReason.BackendStateCouldNotBeConfirmed;
+    public ProtocolDurableState DurableState => ProtocolDurableState.Unknown;
+    public ProtocolTerminalErrorCode? ErrorCode => null;
+    public ProtocolRecoveryDisposition RecoveryDisposition => ProtocolRecoveryDisposition.InterruptedRecoveryRequired;
+    public ProtocolNextAction NextAction => ProtocolNextAction.RecoverInterrupted;
+}
+
+/// <summary>Bounded typed execution counters copied from a validated terminal event.</summary>
+internal sealed record InstallerExecutionSummary(
+    int? ManagedFileChangeCount,
+    int? RolledBackManagedFileCount,
+    int? InternalStateChangeCount,
+    int? RolledBackInternalStateCount,
+    int? RecoveredTransactionCount,
+    int? RecoveredPathCount
+);
+
+/// <summary>
+/// One admitted execution. Progress is a bounded coalescing stream, cancellation is idempotent, and completion never
+/// reports an unchanged/retry result when transport was lost after execution may have started.
+/// </summary>
+internal sealed class InstallerExecutionOperation
+{
+    private readonly Func<Task> RequestCancellationCore;
+
+    public ChannelReader<InstallerExecutionProgress> Progress { get; }
+    public Task<InstallerExecutionResult> Completion { get; }
+
+    internal InstallerExecutionOperation(
+        ChannelReader<InstallerExecutionProgress> progress,
+        Task<InstallerExecutionResult> completion,
+        Func<Task> requestCancellation
+    )
+    {
+        this.Progress = progress;
+        this.Completion = completion;
+        this.RequestCancellationCore = requestCancellation;
+    }
+
+    public Task RequestCancellationAsync() => this.RequestCancellationCore();
 }
 
 /// <summary>A normal pre-plan domain rejection without backend text, private logs, paths, or opaque IDs.</summary>
