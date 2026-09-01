@@ -48,7 +48,7 @@ internal sealed class ProtocolJsonSerializerTests
             new RecoveryProgressEvent(session, 0, TransactionStage.Recovering, 0, null, "Recovering."),
             new RecoveryCompletedEvent(session, ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, new(ProtocolDurableState.RecoveryCompleted, null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain), new(recoveredRoot, 7, 8, true, [new("11111111111111111111111111111111", 2)]), "Recovered.", null),
             new RecoveryFailureEvent(session, ProtocolInterruptedRecoveryOutcome.PartialFailure, new(ProtocolDurableState.RecoveryRequired, ProtocolTerminalErrorCode.RecoveryFailed, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted), "Recovery failed.", null, new(new("/game", 1, 2, 3, 7), 7, null, null, [new("11111111111111111111111111111111", 2)])),
-            new PackageOpenedEvent(session, package, CreateRelease()), new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(retainedRecovery, "11111111111111111111111111111111", InstallerOperation.Backup, true, true), new(recovery, "22222222222222222222222222222222", InstallerOperation.Update, false, false)]),
+            new PackageOpenedEvent(session, package, CreateRelease()), new RecoveryCatalogEvent(session, catalog, GameRoot, HashA, [new(retainedRecovery, "11111111111111111111111111111111", InstallerOperation.Backup, true, true), new(recovery, "22222222222222222222222222222222", InstallerOperation.Update, false, false)]), new NoRecoveryHistoryEvent(session),
             new PlanEvent(session, plan, digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true),
             new CommandAcknowledgedEvent(session, ProtocolAcknowledgementKind.PlanConfirmed, plan, null),
             new PlanPageEvent(session, plan, digest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], candidates, []),
@@ -114,6 +114,21 @@ internal sealed class ProtocolJsonSerializerTests
         HandshakeRequest request = new("gui", "1") { CommandId = ProtocolCommandId.Parse("11111111111111111111111111111111") };
         string line = ProtocolJsonSerializer.SerializeLine(request);
         line.Should().Be("{\"protocolVersion\":1,\"messageType\":\"handshake.request\",\"payload\":{\"commandId\":\"11111111111111111111111111111111\",\"clientName\":\"gui\",\"clientVersion\":\"1\"}}");
+    }
+
+    [Test]
+    public void NoRecoveryHistory_UsesMinimalExactCorrelatedContract()
+    {
+        NoRecoveryHistoryEvent response = new(ProtocolSessionId.Parse("22222222222222222222222222222222"))
+        {
+            CommandId = ProtocolCommandId.Parse("11111111111111111111111111111111")
+        };
+        string line = ProtocolJsonSerializer.SerializeLine(response);
+
+        line.Should().Be("{\"protocolVersion\":1,\"messageType\":\"no-recovery-history.event\",\"payload\":{\"commandId\":\"11111111111111111111111111111111\",\"sessionId\":\"22222222222222222222222222222222\"}}");
+        ProtocolJsonSerializer.DeserializeEventLine(line).Should().BeEquivalentTo(response);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(line.Replace("\"sessionId\":", "\"catalogId\":\"33333333333333333333333333333333\",\"sessionId\":", StringComparison.Ordinal)))
+            .Should().Throw<ProtocolException>().WithMessage("*unknown 'catalogId'*");
     }
 
     [Test]

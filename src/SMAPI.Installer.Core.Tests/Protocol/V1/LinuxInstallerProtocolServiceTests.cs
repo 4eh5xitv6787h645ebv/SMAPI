@@ -246,6 +246,71 @@ internal sealed class LinuxInstallerProtocolServiceTests
     }
 
     [Test]
+    public async Task MissingRecoveryPointerReturnsMinimalCorrelatedNonterminalResultAndCanBeRetried()
+    {
+        FakeEngine engine = new();
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent staleCatalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        engine.ListRecoveriesFailure = new NoCommittedRecoveryHistoryException(Root);
+        ListRecoveriesRequest request = new(service.SessionId, "/game");
+
+        NoRecoveryHistoryEvent missing = (NoRecoveryHistoryEvent)await service.HandleAsync(request);
+
+        missing.CommandId.Should().Be(request.CommandId);
+        missing.SessionId.Should().Be(service.SessionId);
+        service.State.Should().Be(ProtocolSessionState.Ready);
+        engine.OpenedRecoveries.Should().HaveCount(2).And.OnlyContain(handle => handle.DisposeCount == 1);
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(missing)).Should().BeEquivalentTo(missing);
+        Func<Task> stale = async () => await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Rollback, null, staleCatalog.Generations[0].SelectionId));
+        await stale.Should().ThrowAsync<ProtocolException>().WithMessage("*unknown, stale, or missing*");
+
+        engine.ListRecoveriesFailure = null;
+        RecoveryCatalogEvent retry = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        retry.Generations.Should().HaveCount(2);
+        service.State.Should().Be(ProtocolSessionState.Ready);
+    }
+
+    [Test]
+    public async Task MissingRecoveryPointerForAliasPathIsRejectedWithoutRevokingTheCanonicalRootsCatalog()
+    {
+        FakeEngine engine = new();
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        engine.ListRecoveriesFailure = new NoCommittedRecoveryHistoryException(Root);
+
+        Func<Task> alias = async () => await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/alias"));
+
+        await alias.Should().ThrowAsync<ProtocolException>().WithMessage("*doesn't match the requested path*");
+        engine.OpenedRecoveries.Should().HaveCount(2).And.OnlyContain(handle => handle.DisposeCount == 0);
+        service.State.Should().Be(ProtocolSessionState.Ready);
+        engine.ListRecoveriesFailure = null;
+        PlanEvent rollback = (PlanEvent)await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Rollback, null, catalog.Generations[0].SelectionId));
+        rollback.RecoveryAuthority!.CatalogId.Should().Be(catalog.CatalogId);
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task CorruptOrUnreadableRecoveryHistoryIsNeverReportedAsAbsent(bool unreadable)
+    {
+        Exception failure = unreadable
+            ? new IOException("private unreadable history")
+            : new StardewModdingAPI.Installer.Core.Ownership.Persistence.OwnershipDocumentException("private corrupt history");
+        FakeEngine engine = new() { ListRecoveriesFailure = failure };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+
+        ProtocolEvent response = await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+
+        response.Should().BeOfType<PrePlanRejectedEvent>();
+        PrePlanRejectedEvent rejected = (PrePlanRejectedEvent)response;
+        rejected.ErrorCode.Should().Be(unreadable ? ProtocolPrePlanErrorCode.RecoveryUnavailable : ProtocolPrePlanErrorCode.UnexpectedFailure);
+        rejected.Message.Should().NotContain(unreadable ? "private unreadable history" : "private corrupt history");
+        service.State.Should().Be(unreadable ? ProtocolSessionState.Ready : ProtocolSessionState.Completed);
+    }
+
+    [Test]
     public async Task ManualValidationUsesOnlyExactCoreValidationAndReturnsOneCorrelatedCandidate()
     {
         FakeDiscovery discovery = new()
@@ -1211,6 +1276,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public bool BlockExecutionInitiation { get; set; }
         public bool OmitPendingPruneCleanup { get; set; }
         public bool SuppressPruneWork { get; set; }
+        public Exception? ListRecoveriesFailure { get; set; }
         public TaskCompletionSource RecoveryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ExecutionInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource PruneInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1295,7 +1361,9 @@ internal sealed class LinuxInstallerProtocolServiceTests
             TransactionPathChange[] changes = Enumerable.Range(0, this.ExecuteChangedCount).Select(index => new TransactionPathChange($"managed-{index}", TransactionOperationKind.WriteFile)).ToArray();
             return new(inspection.Action, InstallationExecutionStatus.Succeeded, new(Guid.NewGuid(), TransactionOutcomeStatus.Committed, TransactionStatus.Committed, changes, [], TransactionCancellationDisposition.None, null, "Committed."), [], null, "Committed.");
         }
-        public Task<RecoveryHistory> ListRecoveriesAsync(string gameRoot, CancellationToken cancellationToken) => Task.FromResult(new RecoveryHistory(Sha256Digest.Parse(HashA), [new(this.First, InstallationAction.Backup, true, true, this.RecoveryRelease), new(this.Second, InstallationAction.Update, false, false, this.RecoveryRelease)]));
+        public Task<RecoveryHistory> ListRecoveriesAsync(string gameRoot, CancellationToken cancellationToken) => this.ListRecoveriesFailure is { } failure
+            ? Task.FromException<RecoveryHistory>(failure)
+            : Task.FromResult(new RecoveryHistory(Sha256Digest.Parse(HashA), [new(this.First, InstallationAction.Backup, true, true, this.RecoveryRelease), new(this.Second, InstallationAction.Update, false, false, this.RecoveryRelease)]));
         public Task<ICommittedRecoveryContentAuthority> OpenRecoveryAsync(string gameRoot, Guid generationId, CancellationToken cancellationToken) { FakeRecoveryAuthority result = new(generationId, generationId == this.First ? InstallationAction.Backup : InstallationAction.Update, this.RecoveryRelease); this.OpenedRecoveries.Add(result); return Task.FromResult<ICommittedRecoveryContentAuthority>(result); }
         public Task<RecoveryPrunePlan> InspectRecoveryPruneAsync(string gameRoot, int retainNewest, CancellationToken cancellationToken) => Task.FromResult(this.CleanupOnlyPrune
             ? new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First, this.Second], [], [this.Pending], [], null)

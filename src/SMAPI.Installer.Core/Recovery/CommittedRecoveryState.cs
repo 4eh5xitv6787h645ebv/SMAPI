@@ -637,6 +637,21 @@ public sealed record RecoveryGenerationInfo(
     InstallationReleaseIdentity? RestoreRelease
 );
 
+/// <summary>
+/// Bounded anchored inspection observed no committed recovery pointer. This is a normal absence result, not
+/// evidence that an existing recovery history was malformed or unreadable.
+/// </summary>
+public sealed class NoCommittedRecoveryHistoryException : Exception
+{
+    internal GameRootIdentity GameRoot { get; }
+
+    internal NoCommittedRecoveryHistoryException(GameRootIdentity gameRoot)
+        : base("There is no committed recovery history.")
+    {
+        this.GameRoot = gameRoot ?? throw new ArgumentNullException(nameof(gameRoot));
+    }
+}
+
 /// <summary>A bounded recovery catalog tied to the exact current pointer the user reviewed.</summary>
 public sealed class RecoveryHistory
 {
@@ -950,7 +965,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
         ITransactionProgressSink safeProgress = new NonThrowingTransactionProgressSink(progress);
         currentState.AssertUsable(game, gameRoot);
         Sha256Digest headDigest = currentState.PointerSha256
-            ?? throw new OwnershipDocumentException("There is no committed recovery history to list.");
+            ?? throw new NoCommittedRecoveryHistoryException(gameRoot);
         IReadOnlyList<CommittedRecoveryPointer> chain = ReadHistoryState(game, currentState, cancellationToken).Chain;
         List<RecoveryGenerationInfo> items = new(chain.Count);
         safeProgress.Report(new(TransactionStage.VerifyingRecovery, 0, chain.Count));

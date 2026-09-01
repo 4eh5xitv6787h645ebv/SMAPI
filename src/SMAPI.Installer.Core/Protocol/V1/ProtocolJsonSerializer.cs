@@ -118,6 +118,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.RecoveryFailureEvent] = C("recovery-failure.event", typeof(RecoveryFailureEvent), false, "sessionId", "outcome", "terminalState", "message", "sanitizedLogPath", "attempt"),
         [ProtocolMessageKind.PackageOpenedEvent] = C("package-opened.event", typeof(PackageOpenedEvent), false, "sessionId", "packageId", "release"),
         [ProtocolMessageKind.RecoveryCatalogEvent] = C("recovery-catalog.event", typeof(RecoveryCatalogEvent), false, "sessionId", "catalogId", "gameRoot", "headSha256", "generations"),
+        [ProtocolMessageKind.NoRecoveryHistoryEvent] = C("no-recovery-history.event", typeof(NoRecoveryHistoryEvent), false, "sessionId"),
         [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operationCount", "conflictCount", "candidateCount", "warningCount", "canExecute", "risks", "recommendedDefault", "summary", "requiresConfirmation"),
         [ProtocolMessageKind.PlanPageEvent] = C("plan-page.event", typeof(PlanPageEvent), false, "sessionId", "planId", "planDigest", "pageKind", "offset", "totalCount", "nextOffset", "operations", "conflicts", "candidates", "warnings"),
         [ProtocolMessageKind.PrunePlanEvent] = C("prune-plan.event", typeof(PrunePlanEvent), false, "sessionId", "prunePlanId", "pruneDigest", "executionBindingDigest", "catalogId", "gameRoot", "headSha256", "retainNewest", "retainedSelectionIds", "removedSelectionIds", "cleanupGenerationIds", "summary", "warnings", "risks", "recommendedDefault", "requiresConfirmation"),
@@ -215,6 +216,7 @@ public static class ProtocolJsonSerializer
             case RecoveryFailureEvent v: ValidateRecoveryFailure(v); break;
             case PackageOpenedEvent v: Session(v.SessionId); ProtocolIdentifier.AssertCanonical(v.PackageId.Value, "package"); ValidateRelease(v.Release, "release"); break;
             case RecoveryCatalogEvent v: ValidateCatalog(v); break;
+            case NoRecoveryHistoryEvent v: Session(v.SessionId); break;
             case PlanEvent v: ValidatePlan(v); break;
             case PlanPageEvent v: ValidatePlanPage(v); break;
             case PrunePlanEvent v: ValidatePrune(v); break;

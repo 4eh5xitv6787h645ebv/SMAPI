@@ -340,10 +340,18 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
     }
 
-    private async Task<RecoveryCatalogEvent> ListRecoveriesAsync(ListRecoveriesRequest request, CancellationToken cancellationToken)
+    private async Task<ProtocolEvent> ListRecoveriesAsync(ListRecoveriesRequest request, CancellationToken cancellationToken)
     {
         this.WithSession(() => this.Session.ValidateReadyRequest(request.SessionId));
-        RecoveryHistory history = await this.Engine.ListRecoveriesAsync(request.GamePath, cancellationToken).ConfigureAwait(false);
+        RecoveryHistory history;
+        try
+        {
+            history = await this.Engine.ListRecoveriesAsync(request.GamePath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (NoCommittedRecoveryHistoryException exception)
+        {
+            return this.Emit(this.WithSession(() => this.Session.RecordNoRecoveryHistory(request, exception.GameRoot)));
+        }
         List<ICommittedRecoveryContentAuthority> handles = new(history.Generations.Count);
         try
         {
