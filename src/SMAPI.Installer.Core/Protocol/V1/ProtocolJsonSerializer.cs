@@ -392,7 +392,8 @@ public static class ProtocolJsonSerializer
     private static void ValidateReleaseSemantics(InstallerOperation operation, ProtocolReleaseIdentity? current, ProtocolReleaseIdentity? target)
     {
         if (operation is InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair) { if (target is null) throw new ProtocolException("This operation requires an exact target release."); }
-        else if (operation is InstallerOperation.Backup or InstallerOperation.Uninstall && target is not null) throw new ProtocolException("This operation must not invent a target release.");
+        else if (operation == InstallerOperation.Backup && ((current is null) != (target is null) || current is not null && current != target)) throw new ProtocolException("A backup operation's current and target releases must both be absent or exactly equal.");
+        else if (operation == InstallerOperation.Uninstall && target is not null) throw new ProtocolException("An uninstall operation must not invent a target release.");
         if (operation == InstallerOperation.Install && current is not null) throw new ProtocolException("A fresh install must not invent a current release.");
     }
 

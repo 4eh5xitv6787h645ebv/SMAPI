@@ -442,6 +442,19 @@ internal sealed class LinuxInstallerProtocolServiceTests
     }
 
     [Test]
+    public async Task BackupPlan_PreservesAndSerializesTheExactInstalledRelease()
+    {
+        using LinuxInstallerProtocolService service = Create(new FakeEngine(), new FakePackageOpener());
+        await Handshake(service);
+
+        PlanEvent plan = (PlanEvent)(await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Backup, null, null)))!;
+
+        plan.CurrentRelease.Should().NotBeNull();
+        plan.TargetRelease.Should().Be(plan.CurrentRelease);
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(plan)).Should().BeEquivalentTo(plan);
+    }
+
+    [Test]
     public async Task ConfirmedExecutionEmitsExactCoreProgressAndTerminalData()
     {
         List<ProtocolEvent> emitted = []; FakeEngine engine = new() { ExecuteChangedCount = 1 };
@@ -1061,7 +1074,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         InstallationPlan plan = new(action, [operation], conflicts ?? [], ObservedInstallationState.KnownUnmodified, new RecoveryCapacityState(2, 64));
         BoundInstallationPlan binding = new(action, Root, 7, plan.GetCanonicalDigest(), package?.ManifestSha256, null, null, recovery?.SnapshotSha256, null, recovery?.GenerationId, recovery?.AuthorizedHeadPointerSha256, package, recovery);
         InstallationReleaseIdentity? current = action == InstallationAction.Install ? null : CreateRelease();
-        InstallationReleaseIdentity? target = action switch { InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair => CreateRelease(), InstallationAction.Rollback => recovery?.RestoreRelease, _ => null };
+        InstallationReleaseIdentity? target = action switch { InstallationAction.Install or InstallationAction.Update or InstallationAction.Repair => CreateRelease(), InstallationAction.Backup => current, InstallationAction.Rollback => recovery?.RestoreRelease, _ => null };
         return new(plan, binding, package, recovery, candidateAuthority ?? new object(), current, target, ObservedInstallationState.KnownUnmodified, new RecoveryCapacityState(2, 64), candidates, approvals);
     }
 
