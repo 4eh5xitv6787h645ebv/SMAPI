@@ -20,6 +20,7 @@ internal enum GameDiscoveryFocusTarget
 internal sealed class GameCandidateItem
 {
     private const int MaximumAccessibleNameLength = 1024;
+    private const int MaximumAccessibleDisplayNameLength = 192;
 
     internal GameCandidateItem(ProtocolGameCandidate candidate)
     {
@@ -27,10 +28,9 @@ internal sealed class GameCandidateItem
         this.DisplayName = FormatCanonicalPathForDisplay(candidate.DisplayName);
         this.CanonicalPath = FormatCanonicalPathForDisplay(candidate.CanonicalPath);
         (this.StatusLabel, this.StatusDetail) = Describe(candidate.State);
-        string accessibleName = $"{this.DisplayName}. {this.StatusLabel}. {this.StatusDetail} Folder: {this.CanonicalPath}";
-        this.AccessibleName = accessibleName.Length <= MaximumAccessibleNameLength
-            ? accessibleName
-            : accessibleName[..(MaximumAccessibleNameLength - 1)] + "…";
+        string accessiblePrefix = $"{TruncateMiddle(this.DisplayName, MaximumAccessibleDisplayNameLength)}. {this.StatusLabel}. {this.StatusDetail} Folder: ";
+        int pathLength = MaximumAccessibleNameLength - accessiblePrefix.Length;
+        this.AccessibleName = accessiblePrefix + TruncateMiddle(this.CanonicalPath, pathLength);
     }
 
     internal ProtocolGameCandidate Candidate { get; }
@@ -63,6 +63,15 @@ internal sealed class GameCandidateItem
                 escaped?.Append(character);
         }
         return escaped?.ToString() ?? canonicalPath;
+    }
+
+    private static string TruncateMiddle(string value, int maximumLength)
+    {
+        if (value.Length <= maximumLength)
+            return value;
+        int prefixLength = (maximumLength - 1) / 2;
+        int suffixLength = maximumLength - prefixLength - 1;
+        return value[..prefixLength] + "…" + value[^suffixLength..];
     }
 
     private static (string Label, string Detail) Describe(LinuxGameFolderStatus status)

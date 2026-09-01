@@ -153,6 +153,152 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.CanRetry.Should().BeTrue();
     }
 
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task SessionFaultWinsTheFinalSuccessCommitRace(bool discovery)
+    {
+        ProtocolGameCandidate valid = Candidate("late-valid", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource reachedCommit = NewCompletion();
+        TaskCompletionSource releaseCommit = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Validation = (_, _) => Task.FromResult(valid)
+        };
+        await using GameDiscoveryController controller = new(session);
+        Action hook = () =>
+        {
+            reachedCommit.TrySetResult();
+            releaseCommit.Task.GetAwaiter().GetResult();
+        };
+        if (discovery)
+            controller.BeforeDiscoveryCommitForTesting = hook;
+        else
+            controller.BeforeManualValidationCommitForTesting = hook;
+
+        Task operation = discovery
+            ? controller.DiscoverAsync()
+            : controller.ValidateManualAsync("/games/late-valid");
+        await reachedCommit.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
+        await WaitUntilAsync(() => controller.Snapshot.State == GameDiscoveryState.SessionFaulted);
+        releaseCommit.TrySetResult();
+        await operation.WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.SessionFaulted);
+        controller.Snapshot.SelectedCandidate.Should().BeNull();
+        controller.Snapshot.CanContinue.Should().BeFalse();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task AcceptedCancellationWinsAfterSuccessCommitBeforeFinalization(bool discovery)
+    {
+        ProtocolGameCandidate valid = Candidate("late-valid", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource reachedFinalization = NewCompletion();
+        TaskCompletionSource releaseFinalization = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Validation = (_, _) => Task.FromResult(valid)
+        };
+        await using GameDiscoveryController controller = new(session)
+        {
+            BeforeOperationCompletionForTesting = () =>
+            {
+                reachedFinalization.TrySetResult();
+                releaseFinalization.Task.GetAwaiter().GetResult();
+            }
+        };
+
+        Task operation = discovery
+            ? controller.DiscoverAsync()
+            : controller.ValidateManualAsync("/games/late-valid");
+        await reachedFinalization.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Task cancellation = controller.CancelAsync();
+        await WaitUntilAsync(() => controller.Snapshot.State == GameDiscoveryState.Cancelling);
+        releaseFinalization.TrySetResult();
+        await Task.WhenAll(operation, cancellation).WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
+        controller.Snapshot.SelectedCandidate.Should().BeNull();
+        controller.Snapshot.CanContinue.Should().BeFalse();
+        controller.Snapshot.CanRetry.Should().BeTrue();
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task SessionFaultWinsAConcurrentFailureOutcome(bool discovery)
+    {
+        TaskCompletionSource reachedOutcome = NewCompletion();
+        TaskCompletionSource releaseOutcome = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => throw new InvalidOperationException("discovery failed"),
+            Validation = (_, _) => throw new InvalidOperationException("validation failed")
+        };
+        await using GameDiscoveryController controller = new(session)
+        {
+            BeforeOutcomeCommitForTesting = () =>
+            {
+                reachedOutcome.TrySetResult();
+                releaseOutcome.Task.GetAwaiter().GetResult();
+            }
+        };
+
+        Task operation = discovery
+            ? controller.DiscoverAsync()
+            : controller.ValidateManualAsync("/games/failure");
+        await reachedOutcome.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
+        await WaitUntilAsync(() => controller.Snapshot.State == GameDiscoveryState.SessionFaulted);
+        releaseOutcome.TrySetResult();
+        await operation.WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.SessionFaulted);
+        controller.Snapshot.SelectedCandidate.Should().BeNull();
+        controller.Snapshot.CanContinue.Should().BeFalse();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task DisposalWinsAfterSuccessCommitBeforeFinalization(bool discovery)
+    {
+        ProtocolGameCandidate valid = Candidate("late-valid", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource reachedFinalization = NewCompletion();
+        TaskCompletionSource releaseFinalization = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Validation = (_, _) => Task.FromResult(valid)
+        };
+        await using GameDiscoveryController controller = new(session)
+        {
+            BeforeOperationCompletionForTesting = () =>
+            {
+                reachedFinalization.TrySetResult();
+                releaseFinalization.Task.GetAwaiter().GetResult();
+            }
+        };
+
+        Task operation = discovery
+            ? controller.DiscoverAsync()
+            : controller.ValidateManualAsync("/games/late-valid");
+        await reachedFinalization.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        ValueTask disposal = controller.DisposeAsync();
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelling);
+        releaseFinalization.TrySetResult();
+        await operation.WaitAsync(TimeSpan.FromSeconds(2));
+        await disposal.AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Disposed);
+        controller.Snapshot.SelectedCandidate.Should().BeNull();
+        controller.Snapshot.CanContinue.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
+    }
+
     [Test]
     public async Task ManualValidationKeepsOneBoundedSlotAlongsideDiscoveredCandidates()
     {

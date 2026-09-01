@@ -31,6 +31,20 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         item.Candidate.CanonicalPath.Should().BeSameAs(candidate.CanonicalPath, "display escaping must not change backend path authority");
     }
 
+    [Test]
+    public void LongCommonPrefixPathsKeepDistinctAccessibleTails()
+    {
+        string commonPath = $"/games/{new string('a', 4000)}/";
+        GameCandidateItem first = new(new(commonPath + "folder-one", LinuxGameFolderStatus.Valid, "Stardew Valley"));
+        GameCandidateItem second = new(new(commonPath + "folder-two", LinuxGameFolderStatus.Valid, "Stardew Valley"));
+
+        first.AccessibleName.Should().HaveLength(1024).And.EndWith("folder-one");
+        second.AccessibleName.Should().HaveLength(1024).And.EndWith("folder-two");
+        first.AccessibleName.Should().NotBe(second.AccessibleName);
+        first.AccessibleName.Should().Contain("Ready");
+        second.AccessibleName.Should().Contain("Ready");
+    }
+
     [AvaloniaTest]
     public async Task OlderPostedSnapshotCannotRestoreSelectionAfterSessionFault()
     {

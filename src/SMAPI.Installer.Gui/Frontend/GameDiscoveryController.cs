@@ -51,6 +51,8 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private bool DisposeStarted;
     internal Action? BeforeDiscoveryCommitForTesting { get; set; }
     internal Action? BeforeManualValidationCommitForTesting { get; set; }
+    internal Action? BeforeOutcomeCommitForTesting { get; set; }
+    internal Action? BeforeOperationCompletionForTesting { get; set; }
 
     public GameDiscoveryController(IVerifiedInstallerSession session)
     {
@@ -168,6 +170,18 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             {
                 if (!this.IsCurrent(operation))
                     return;
+                if (this.DisposeStarted)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.Cancelling;
+                    return;
+                }
+                if (this.SessionHasFaulted)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.SessionFaulted;
+                    return;
+                }
                 if (operation.UserCancellation)
                 {
                     this.SelectedCandidateValue = null;
@@ -220,6 +234,18 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             {
                 if (!this.IsCurrent(operation))
                     return;
+                if (this.DisposeStarted)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.Cancelling;
+                    return;
+                }
+                if (this.SessionHasFaulted)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.SessionFaulted;
+                    return;
+                }
                 if (operation.UserCancellation)
                 {
                     this.SelectedCandidateValue = null;
@@ -336,10 +362,28 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
 
     private void CompleteOperation(ActiveOperation operation)
     {
+        this.BeforeOperationCompletionForTesting?.Invoke();
         lock (this.Sync)
         {
             if (this.IsCurrent(operation))
+            {
+                if (this.DisposeStarted)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.Cancelling;
+                }
+                else if (this.SessionHasFaulted)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.SessionFaulted;
+                }
+                else if (operation.UserCancellation)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.Cancelled;
+                }
                 this.Operation = null;
+            }
         }
         operation.Cancellation.Dispose();
         operation.Completion.TrySetResult();
@@ -348,12 +392,19 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
 
     private void SetOutcome(ActiveOperation operation, GameDiscoveryState state)
     {
+        this.BeforeOutcomeCommitForTesting?.Invoke();
         lock (this.Sync)
         {
             if (!this.IsCurrent(operation))
                 return;
             this.SelectedCandidateValue = null;
-            this.StateValue = state;
+            this.StateValue = this.DisposeStarted
+                ? GameDiscoveryState.Cancelling
+                : this.SessionHasFaulted
+                    ? GameDiscoveryState.SessionFaulted
+                    : operation.UserCancellation
+                        ? GameDiscoveryState.Cancelled
+                        : state;
         }
         this.PublishChanged();
     }
