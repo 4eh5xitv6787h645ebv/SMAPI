@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Threading.Channels;
@@ -131,6 +132,28 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    public void ConfirmationAuthoritiesAndConfirmedSessionExposeOnlyTheIntendedOpaqueSurface()
+    {
+        foreach (Type capability in new[] { typeof(InstallerPlanConfirmation), typeof(InstallerConfirmedPlanAuthority) })
+        {
+            capability.GetConstructors().Should().BeEmpty();
+            capability.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Should().BeEmpty();
+            capability.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Should().BeEmpty();
+            capability.GetMethod(nameof(object.Equals), [typeof(object)])!.DeclaringType.Should().Be(typeof(object));
+        }
+
+        typeof(IConfirmedInstallerSession).GetProperties().Select(property => property.Name).Should().BeEquivalentTo([
+            nameof(IConfirmedInstallerSession.Release),
+            nameof(IConfirmedInstallerSession.Game),
+            nameof(IConfirmedInstallerSession.SessionFaulted)
+        ]);
+        typeof(IConfirmedInstallerSession).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(method => !method.IsSpecialName)
+            .Should().BeEmpty("the confirmed owner deliberately has no execution, cancellation, recovery, rollback, or mutation method yet");
+        typeof(IConfirmedInstallerSession).GetInterfaces().Should().Equal(typeof(IAsyncDisposable));
+    }
+
+    [Test]
     public async Task CorrelatesDiscoveryAndManualValidationWithinTheAuthenticatedSession()
     {
         const string selectedPath = "/games/Stardew Valley";
@@ -242,9 +265,36 @@ public sealed class ProcessInstallerProtocolClientTests
         ConfirmPlanRequest request = process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle().Subject;
         request.SessionId.Should().Be(Session);
         request.PlanId.Should().Be(script.PlanId);
+        request.PlanDigest.Should().Be(script.PlanDigest);
         request.PlanDigest.Should().NotBe(script.ExecutionDigest, "the private execution binding is never public confirmation authority");
         await FluentActions.Awaiting(() => client.ConfirmPlanAsync(plan.Confirmation!)).Should().ThrowAsync<InvalidOperationException>();
         await FluentActions.Awaiting(() => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Uninstall)).Should().ThrowAsync<InvalidOperationException>();
+        process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task ConcurrentConfirmationConsumesAuthorityOnceAndSendsOneRequest()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Backup);
+        TaskCompletionSource start = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<(InstallerConfirmedPlanAuthority? Authority, Exception? Error)> AttemptAsync()
+        {
+            await start.Task;
+            try { return (await client.ConfirmPlanAsync(plan.Confirmation!), null); }
+            catch (Exception error) { return (null, error); }
+        }
+
+        Task<(InstallerConfirmedPlanAuthority? Authority, Exception? Error)>[] attempts = [AttemptAsync(), AttemptAsync()];
+        start.TrySetResult();
+        (InstallerConfirmedPlanAuthority? Authority, Exception? Error)[] results = await Task.WhenAll(attempts);
+
+        results.Should().ContainSingle(result => result.Authority != null && result.Error == null);
+        results.Should().ContainSingle(result => result.Authority == null && result.Error != null && result.Error.GetType() == typeof(InvalidOperationException));
         process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle();
     }
 
@@ -264,6 +314,30 @@ public sealed class ProcessInstallerProtocolClientTests
 
         (await client.ConfirmPlanAsync(current.Confirmation!)).Should().NotBeNull();
         process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task CandidateReplacementRevokesThePriorConfirmationAndConfirmsOnlyTheReplacementBinding()
+    {
+        ProtocolPlanCandidate candidate = CreateCandidate('4', "mods/reissue.dll", false);
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            Candidates = [candidate],
+            ReplacementCandidates = []
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess first = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+        InstallerReadOnlyPlanSuccess replacement = (InstallerReadOnlyPlanSuccess)await client.ApprovePlanCandidatesAsync([first.Candidates.Single()]);
+
+        await FluentActions.Awaiting(() => client.ConfirmPlanAsync(first.Confirmation!)).Should().ThrowAsync<ArgumentException>();
+        process.Requests.Should().NotContain(request => request is ConfirmPlanRequest);
+        await client.ConfirmPlanAsync(replacement.Confirmation!);
+
+        ConfirmPlanRequest confirmation = process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle().Subject;
+        confirmation.PlanId.Should().Be(script.PlanId);
+        confirmation.PlanDigest.Should().Be(script.PlanDigest);
     }
 
     [TestCase(ConfirmationAcknowledgementFault.WrongSession)]
@@ -299,6 +373,34 @@ public sealed class ProcessInstallerProtocolClientTests
 
         await FluentActions.Awaiting(() => client.ConfirmPlanAsync(plan.Confirmation!, cancellation.Token)).Should().ThrowAsync<OperationCanceledException>();
 
+        process.Terminated.Should().BeTrue();
+        process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle();
+        await FluentActions.Awaiting(() => client.ConfirmPlanAsync(plan.Confirmation!)).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task FaultOrObserverFailureAtConfirmationPrecommitNeverPublishesAuthority(bool sessionFault)
+    {
+        const string privateFailure = "/home/private-user/confirmation-hook";
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Backup);
+        client.BeforeConfirmationAuthorityCommitForTesting = () =>
+        {
+            if (!sessionFault)
+                throw new InvalidOperationException(privateFailure);
+            process.CompleteOutput();
+            if (!client.SessionFaulted.Wait(TimeSpan.FromSeconds(2)))
+                throw new TimeoutException("The scripted session fault did not arrive.");
+        };
+
+        InstallerProtocolClientException failure = (await FluentActions.Awaiting(() => client.ConfirmPlanAsync(plan.Confirmation!))
+            .Should().ThrowAsync<InstallerProtocolClientException>()).Which;
+
+        failure.Message.Should().NotContain(privateFailure);
         process.Terminated.Should().BeTrue();
         process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle();
         await FluentActions.Awaiting(() => client.ConfirmPlanAsync(plan.Confirmation!)).Should().ThrowAsync<ObjectDisposedException>();
@@ -1915,6 +2017,7 @@ public sealed class ProcessInstallerProtocolClientTests
 
         public InstallerOperation Operation { get; }
         public ProtocolPlanId PlanId { get; private set; } = ProtocolPlanId.Parse("33333333333333333333333333333333");
+        public ProtocolPlanDigest PlanDigest { get; private set; } = null!;
         public ProtocolPlanDigest ExecutionDigest { get; private set; } = ProtocolPlanDigest.Parse(new string('8', 64));
         public ProtocolReleaseIdentity? CurrentRelease { get; set; }
         public ObservedInstallState ObservedState { get; set; }
@@ -2122,6 +2225,7 @@ public sealed class ProcessInstallerProtocolClientTests
             );
             if (this.HeaderFault == PlanHeaderFault.WrongDigest)
                 digest = ProtocolPlanDigest.Parse(new string('9', 64));
+            this.PlanDigest = digest;
             return new(
                 session,
                 this.PlanId,
@@ -2318,7 +2422,7 @@ public sealed class ProcessInstallerProtocolClientTests
         private readonly ResponseStream Responses;
         private readonly RequestStream RequestsStream;
         public Func<ProtocolRequest, byte[]?> Responder { get => this.RequestsStream.Responder; set => this.RequestsStream.Responder = value; }
-        public List<ProtocolRequest> Requests => this.RequestsStream.Requests;
+        public IReadOnlyList<ProtocolRequest> Requests => this.RequestsStream.SnapshotRequests();
         public TaskCompletionSource RequestObserved => this.RequestsStream.RequestObserved;
         public Stream Input { get; }
         public Stream Output { get; }
@@ -2395,11 +2499,18 @@ public sealed class ProcessInstallerProtocolClientTests
 
     private sealed class RequestStream(ResponseStream responses, Func<ProtocolRequest, byte[]?> responder) : MemoryStream
     {
+        private readonly object RequestsLock = new();
+        private readonly List<ProtocolRequest> Requests = [];
         private long Consumed;
         public Func<ProtocolRequest, byte[]?> Responder { get; set; } = responder;
-        public List<ProtocolRequest> Requests { get; } = [];
         public TaskCompletionSource RequestObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool Disposed { get; private set; }
+
+        public IReadOnlyList<ProtocolRequest> SnapshotRequests()
+        {
+            lock (this.RequestsLock)
+                return this.Requests.ToArray();
+        }
 
         public override Task FlushAsync(CancellationToken cancellationToken)
         {
@@ -2408,7 +2519,8 @@ public sealed class ProcessInstallerProtocolClientTests
             string line = Encoding.UTF8.GetString(all, checked((int)this.Consumed), length).TrimEnd('\n');
             this.Consumed = all.Length;
             ProtocolRequest request = ProtocolJsonSerializer.DeserializeRequestLine(line);
-            this.Requests.Add(request);
+            lock (this.RequestsLock)
+                this.Requests.Add(request);
             this.RequestObserved.TrySetResult();
             byte[]? response = this.Responder(request);
             if (response is not null)

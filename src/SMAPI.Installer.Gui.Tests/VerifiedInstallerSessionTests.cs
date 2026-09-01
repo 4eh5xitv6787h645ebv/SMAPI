@@ -516,6 +516,40 @@ internal sealed class VerifiedInstallerSessionTests
     }
 
     [Test]
+    public async Task ConcurrentConfirmationTransfersExactlyOneOwnerAndCleansUpOnce()
+    {
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("concurrent-confirm", LinuxGameFolderStatus.Valid)])
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        TaskCompletionSource start = NewCompletion();
+
+        async Task<(IConfirmedInstallerSession? Owner, Exception? Error)> AttemptAsync()
+        {
+            await start.Task;
+            try { return (await bound.ConfirmPlanAsync(plan.Confirmation!), null); }
+            catch (Exception error) { return (null, error); }
+        }
+
+        Task<(IConfirmedInstallerSession? Owner, Exception? Error)>[] attempts = [AttemptAsync(), AttemptAsync()];
+        start.TrySetResult();
+        (IConfirmedInstallerSession? Owner, Exception? Error)[] results = await Task.WhenAll(attempts);
+
+        IConfirmedInstallerSession owner = results.Should().ContainSingle(result => result.Owner != null && result.Error == null).Subject.Owner!;
+        results.Should().ContainSingle(result => result.Owner == null && result.Error != null && result.Error.GetType() == typeof(ObjectDisposedException));
+        client.ConfirmedPlans.Should().ContainSingle();
+        await bound.DisposeAsync();
+        await session.DisposeAsync();
+        client.DisposeCalls.Should().Be(0);
+        await owner.DisposeAsync();
+        await owner.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
     public async Task ForeignAndStaleConfirmationReferencesFailBeforeTheClientAndPreserveTheCurrentCapability()
     {
         RecordingClient client = new()
@@ -586,6 +620,27 @@ internal sealed class VerifiedInstallerSessionTests
             client.ConfirmedPlans.Should().BeEmpty();
             await bound.DisposeAsync();
         }
+    }
+
+    [Test]
+    public async Task ExecutablePlanWithoutConfirmationAuthorityFailsClosedAndDisposesOnce()
+    {
+        InstallerReadOnlyPlanSuccess malformed = Plan(InstallerOperation.Backup) with { Confirmation = null };
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("missing-confirm", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, _, _) => Task.FromResult<InstallerReadOnlyPlanResult>(malformed)
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        await FluentActions.Awaiting(() => bound.InspectPlanAsync(InstallerOperation.Backup)).Should().ThrowAsync<InstallerProtocolClientException>();
+
+        client.ConfirmedPlans.Should().BeEmpty();
+        client.DisposeCalls.Should().Be(1);
+        await session.DisposeAsync();
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
     }
 
     [Test]
