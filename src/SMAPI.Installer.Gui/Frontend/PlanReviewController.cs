@@ -11,6 +11,7 @@ internal enum PlanReviewState
     Choosing,
     SelectionChanged,
     Inspecting,
+    Approving,
     Closing,
     Available,
     Rejected,
@@ -38,7 +39,10 @@ internal sealed record PlanReviewPlan(
     IReadOnlyList<PlanReviewConflictCount> ConflictCounts,
     IReadOnlyList<PlanReviewCandidateCount> CandidateCounts,
     int AdditionalNoticeCount
-) : PlanReviewResult;
+) : PlanReviewResult
+{
+    public IReadOnlyList<PlanReviewCandidate> Candidates { get; init; } = [];
+}
 
 internal sealed record PlanReviewRejection(
     ProtocolPrePlanErrorCode ErrorCode,
@@ -57,6 +61,31 @@ internal sealed record PlanReviewCandidateCount(
     int Count
 );
 
+/// <summary>
+/// One sanitized, reference-identity candidate choice. The corresponding backend capability remains private to
+/// <see cref="PlanReviewController"/> and reconstructed or stale choices have no authority.
+/// </summary>
+internal sealed class PlanReviewCandidate
+{
+    public string DisplayPath { get; }
+    public FileReplacementCandidateReason Reason { get; }
+    public FileReplacementCandidateDisposition Disposition { get; }
+    public bool BackendProvisionallyIncluded { get; }
+
+    internal PlanReviewCandidate(
+        string displayPath,
+        FileReplacementCandidateReason reason,
+        FileReplacementCandidateDisposition disposition,
+        bool backendProvisionallyIncluded
+    )
+    {
+        this.DisplayPath = displayPath;
+        this.Reason = reason;
+        this.Disposition = disposition;
+        this.BackendProvisionallyIncluded = backendProvisionallyIncluded;
+    }
+}
+
 internal sealed record PlanReviewSnapshot(
     long Generation,
     long Revision,
@@ -68,7 +97,17 @@ internal sealed record PlanReviewSnapshot(
     bool CanCancel,
     bool CanRetry,
     bool CanExit
-);
+)
+{
+    public IReadOnlyList<PlanReviewCandidate> Candidates { get; init; } = [];
+    public IReadOnlyList<PlanReviewCandidate> SelectedCandidates { get; init; } = [];
+    public int AppliedCandidateApprovalCount { get; init; }
+    public bool HasAppliedCandidateApprovals { get; init; }
+    public bool CanSelectCandidates { get; init; }
+    public bool CanApplyCandidates { get; init; }
+    public bool CanClearCandidates { get; init; }
+    public bool CanStartFreshInspection { get; init; }
+}
 
 /// <summary>Serializes bounded read-only plan inspection through one game-bound backend session.</summary>
 internal sealed class PlanReviewController : IAsyncDisposable
@@ -76,6 +115,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
     private const int MaximumConflictCount = 256;
     private const int MaximumNoticeCount = 256;
     private const int MaximumOperationCount = 20_000;
+    private const int MaximumEscapedCandidatePathLength = 4096 * 6;
 
     private static readonly InstallerOperation[] AllowedOperations =
     [
@@ -88,11 +128,15 @@ internal sealed class PlanReviewController : IAsyncDisposable
 
     private readonly object Sync = new();
     private readonly IPlanInspectionSession Session;
+    private readonly Task<InstallerProtocolClientException> SessionFaultNotification;
     private readonly TaskCompletionSource StopWatching = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task SessionWatcher;
     private PlanReviewState StateValue = PlanReviewState.Choosing;
     private InstallerOperation? SelectedOperationValue;
     private PlanReviewResult? ResultValue;
+    private Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> CurrentCandidateAuthorities = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<PlanReviewCandidate> SelectedCandidates = new(ReferenceEqualityComparer.Instance);
+    private int AppliedCandidateApprovalCountValue;
     private ActiveOperation? Operation;
     private Task? SessionCleanupTask;
     private Task? DisposalTask;
@@ -107,6 +151,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
     {
         this.Session = session ?? throw new ArgumentNullException(nameof(session));
         this.VerifiedRelease = ProjectVerifiedRelease(session.Release);
+        this.SessionFaultNotification = session.SessionFaulted
+            ?? throw new InvalidOperationException("The plan-review session had no fault notification.");
         this.SessionWatcher = this.WatchSessionAsync();
     }
 
@@ -136,6 +182,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
             bool hadResult = this.ResultValue is not null;
             this.SelectedOperationValue = operation;
             this.ResultValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = hadResult ? PlanReviewState.SelectionChanged : PlanReviewState.Choosing;
         }
         this.PublishChanged();
@@ -143,19 +190,105 @@ internal sealed class PlanReviewController : IAsyncDisposable
 
     public Task InspectAsync(CancellationToken cancellationToken = default)
     {
+        return this.StartFreshInspection(requireAppliedApprovals: false, cancellationToken);
+    }
+
+    /// <summary>
+    /// Revoke the current preview and request a new initial plan. This does not undo or deselect an existing
+    /// backend plan; Protocol V1 candidate approval is additive within each exact plan generation.
+    /// </summary>
+    public Task StartFreshInspectionAsync()
+        => this.StartFreshInspectionAsync(CancellationToken.None);
+
+    public Task StartFreshInspectionAsync(CancellationToken cancellationToken)
+    {
+        return this.StartFreshInspection(requireAppliedApprovals: true, cancellationToken);
+    }
+
+    public void SetCandidateSelection(IReadOnlyList<PlanReviewCandidate> candidates)
+    {
+        PlanReviewCandidate[] requested = SnapshotCandidateChoices(candidates, nameof(candidates));
+        bool changed;
+        lock (this.Sync)
+        {
+            this.AssertCanUseSession();
+            if (!this.CanSelectCandidatesUnderLock())
+                throw new InvalidOperationException("The current plan has no selectable candidate authority.");
+            HashSet<PlanReviewCandidate> unique = new(ReferenceEqualityComparer.Instance);
+            foreach (PlanReviewCandidate candidate in requested)
+            {
+                if (!unique.Add(candidate))
+                    throw new ArgumentException("The candidate selection contains a duplicate choice.", nameof(candidates));
+                if (!this.CurrentCandidateAuthorities.ContainsKey(candidate))
+                    throw new ArgumentException("Every candidate must be an exact current choice issued by this plan.", nameof(candidates));
+            }
+            changed = !this.SelectedCandidates.SetEquals(unique);
+            if (changed)
+            {
+                this.SelectedCandidates.Clear();
+                this.SelectedCandidates.UnionWith(unique);
+            }
+        }
+        if (changed)
+            this.PublishChanged();
+    }
+
+    public void ClearCandidateSelection()
+    {
+        bool changed;
+        lock (this.Sync)
+        {
+            this.AssertCanUseSession();
+            if (!this.CanSelectCandidatesUnderLock())
+                throw new InvalidOperationException("The current plan has no selectable candidate authority.");
+            changed = this.SelectedCandidates.Count > 0;
+            this.SelectedCandidates.Clear();
+        }
+        if (changed)
+            this.PublishChanged();
+    }
+
+    public Task ApplyCandidateSelectionAsync()
+        => this.ApplyCandidateSelectionAsync(CancellationToken.None);
+
+    public Task ApplyCandidateSelectionAsync(CancellationToken cancellationToken)
+    {
         ActiveOperation operation;
         lock (this.Sync)
         {
             this.AssertCanUseSession();
-            if (!this.CanSelectUnderLock() || this.SelectedOperationValue is not { } selected)
-                throw new InvalidOperationException("Select one supported operation before inspecting a plan.");
-            operation = new(++this.GenerationValue, selected, CancellationTokenSource.CreateLinkedTokenSource(cancellationToken));
+            if (!this.CanSelectCandidatesUnderLock() || this.SelectedOperationValue is not { } selected)
+                throw new InvalidOperationException("Inspect a supported candidate plan before applying a selection.");
+            if (selected == InstallerOperation.Backup)
+                throw new InvalidOperationException("Backup candidates cannot be approved.");
+            if (this.SelectedCandidates.Count == 0)
+                throw new InvalidOperationException("Select at least one exact current candidate before applying.");
+
+            PlanReviewCandidate[] selectedChoices = this.CurrentCandidateAuthorities.Keys
+                .Where(this.SelectedCandidates.Contains)
+                .ToArray();
+            if (selectedChoices.Length != this.SelectedCandidates.Count)
+                throw new InvalidOperationException("The candidate selection is stale and requires a fresh inspection.");
+            InstallerReadOnlyPlanCandidate[] backendCandidates = selectedChoices
+                .Select(candidate => this.CurrentCandidateAuthorities[candidate])
+                .ToArray();
+            if (backendCandidates.Length > ProtocolJsonSerializer.MaxPlanCandidates - this.AppliedCandidateApprovalCountValue)
+                throw new InvalidOperationException("The bounded candidate-approval history is full; start a fresh inspection.");
+            operation = new(
+                ++this.GenerationValue,
+                selected,
+                PlanRequestKind.CandidateApproval,
+                backendCandidates,
+                checked(this.AppliedCandidateApprovalCountValue + backendCandidates.Length),
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            );
             this.Operation = operation;
             this.ResultValue = null;
-            this.StateValue = PlanReviewState.Inspecting;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: false);
+            this.StateValue = PlanReviewState.Approving;
         }
         this.PublishChanged();
-        _ = this.RunInspectionAsync(operation);
+        _ = this.RunPlanRequestAsync(operation);
         return operation.Completion.Task;
     }
 
@@ -169,8 +302,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
             operation = this.Operation;
             if (operation is null)
                 return;
-            publish = !this.SessionHasFaulted && !this.Session.SessionFaulted.IsCompleted;
+            publish = !this.SessionHasFaulted && !this.SessionFaultNotification.IsCompleted;
             this.ResultValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             if (publish)
                 this.StateValue = PlanReviewState.Cancelling;
         }
@@ -189,26 +323,66 @@ internal sealed class PlanReviewController : IAsyncDisposable
             this.DisposeStarted = true;
             ActiveOperation? operation = this.Operation;
             this.ResultValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = operation is null ? PlanReviewState.Closing : PlanReviewState.Cancelling;
             this.DisposalTask = this.DisposeCoreAsync(operation);
             return new ValueTask(this.DisposalTask);
         }
     }
 
-    private async Task RunInspectionAsync(ActiveOperation operation)
+    private Task StartFreshInspection(bool requireAppliedApprovals, CancellationToken cancellationToken)
+    {
+        ActiveOperation operation;
+        lock (this.Sync)
+        {
+            this.AssertCanUseSession();
+            if (!this.CanSelectUnderLock() || this.SelectedOperationValue is not { } selected)
+                throw new InvalidOperationException("Select one supported operation before inspecting a plan.");
+            if (requireAppliedApprovals && this.AppliedCandidateApprovalCountValue == 0)
+                throw new InvalidOperationException("A fresh initial plan is only needed after candidate approvals were applied.");
+            operation = new(
+                ++this.GenerationValue,
+                selected,
+                PlanRequestKind.FreshInspection,
+                [],
+                0,
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            );
+            this.Operation = operation;
+            this.ResultValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            this.StateValue = PlanReviewState.Inspecting;
+        }
+        this.PublishChanged();
+        _ = this.RunPlanRequestAsync(operation);
+        return operation.Completion.Task;
+    }
+
+    private async Task RunPlanRequestAsync(ActiveOperation operation)
     {
         await Task.Yield();
         PlanReviewResult? projected = null;
+        Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate>? projectedAuthorities = null;
         Exception? failure = null;
         bool cancelled = false;
         try
         {
-            InstallerReadOnlyPlanResult result = await this.Session.InspectPlanAsync(
-                operation.SelectedOperation,
-                operation.Cancellation.Token
-            ).ConfigureAwait(false);
+            InstallerReadOnlyPlanResult result = operation.Kind switch
+            {
+                PlanRequestKind.FreshInspection => await this.Session.InspectPlanAsync(
+                    operation.SelectedOperation,
+                    operation.Cancellation.Token
+                ).ConfigureAwait(false),
+                PlanRequestKind.CandidateApproval => await this.Session.ApprovePlanCandidatesAsync(
+                    operation.BackendCandidates,
+                    operation.Cancellation.Token
+                ).ConfigureAwait(false),
+                _ => throw new InvalidOperationException("The plan request kind is unsupported.")
+            };
             operation.Cancellation.Token.ThrowIfCancellationRequested();
-            projected = this.ProjectResult(result, operation.SelectedOperation);
+            ProjectedPlanResult projection = this.ProjectResult(result, operation.SelectedOperation, operation.Kind);
+            projected = projection.Result;
+            projectedAuthorities = projection.CandidateAuthorities;
             this.BeforeResultCommitForTesting?.Invoke();
         }
         catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
@@ -218,6 +392,11 @@ internal sealed class PlanReviewController : IAsyncDisposable
         catch (Exception ex)
         {
             failure = ex;
+        }
+        if (projected is PlanReviewPlan && projectedAuthorities is null)
+        {
+            failure = new InvalidOperationException("The projected candidate authority was missing.");
+            projected = null;
         }
 
         PlanReviewState finalState;
@@ -234,7 +413,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 requiresCleanup = true;
                 publishClosing = false;
             }
-            else if (this.SessionHasFaulted || this.Session.SessionFaulted.IsCompleted)
+            else if (this.SessionHasFaulted || this.SessionFaultNotification.IsCompleted)
             {
                 finalState = PlanReviewState.SessionFaulted;
                 requiresCleanup = true;
@@ -270,27 +449,57 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 requiresCleanup = false;
                 publishClosing = false;
             }
-            this.ResultValue = null;
+
+            if (requiresCleanup)
+            {
+                this.ResultValue = null;
+                this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            }
+            else
+            {
+                this.Operation = null;
+                this.StateValue = finalState;
+                this.ResultValue = finalResult;
+                if (finalResult is PlanReviewPlan)
+                {
+                    this.CurrentCandidateAuthorities = projectedAuthorities!;
+                    this.SelectedCandidates.Clear();
+                    this.AppliedCandidateApprovalCountValue = operation.AppliedCandidateApprovalCountAfterSuccess;
+                }
+                else
+                    this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+                operation.Cancellation.Dispose();
+            }
         }
         if (publishClosing)
             this.PublishChanged();
-        if (requiresCleanup)
+        if (!requiresCleanup)
         {
-            Task cleanup;
-            lock (this.Sync)
-                cleanup = this.StartSessionCleanupUnderLock();
-            await cleanup.ConfigureAwait(false);
+            this.PublishChanged();
+            operation.Completion.TrySetResult();
+            return;
         }
+
+        Task cleanup;
+        lock (this.Sync)
+            cleanup = this.StartSessionCleanupUnderLock();
+        await cleanup.ConfigureAwait(false);
 
         lock (this.Sync)
         {
             if (ReferenceEquals(this.Operation, operation))
                 this.Operation = null;
-            if (!this.DisposeStarted)
-            {
-                this.StateValue = finalState;
+            this.ResultValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
+            this.StateValue = this.DisposeStarted
+                ? PlanReviewState.Disposed
+                : this.SessionHasFaulted || this.SessionFaultNotification.IsCompleted
+                    ? PlanReviewState.SessionFaulted
+                    : cancelled || operation.Cancellation.IsCancellationRequested
+                        ? PlanReviewState.Cancelled
+                        : finalState;
+            if (this.StateValue == PlanReviewState.Rejected)
                 this.ResultValue = finalResult;
-            }
             operation.Cancellation.Dispose();
         }
         this.PublishChanged();
@@ -299,12 +508,12 @@ internal sealed class PlanReviewController : IAsyncDisposable
 
     private async Task WatchSessionAsync()
     {
-        Task completed = await Task.WhenAny(this.Session.SessionFaulted, this.StopWatching.Task).ConfigureAwait(false);
+        Task completed = await Task.WhenAny(this.SessionFaultNotification, this.StopWatching.Task).ConfigureAwait(false);
         if (completed == this.StopWatching.Task)
             return;
         try
         {
-            _ = await this.Session.SessionFaulted.ConfigureAwait(false);
+            _ = await this.SessionFaultNotification.ConfigureAwait(false);
         }
         catch
         {
@@ -319,6 +528,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 return;
             this.SessionHasFaulted = true;
             this.ResultValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             operation = this.Operation;
             this.StateValue = PlanReviewState.Closing;
         }
@@ -359,6 +569,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         lock (this.Sync)
         {
             this.ResultValue = null;
+            this.RevokeCandidateAuthorityUnderLock(clearAppliedApprovals: true);
             this.StateValue = PlanReviewState.Disposed;
         }
         this.PublishChanged();
@@ -370,9 +581,16 @@ internal sealed class PlanReviewController : IAsyncDisposable
     private PlanReviewSnapshot CreateSnapshot()
     {
         bool canSelect = this.CanSelectUnderLock();
+        bool canSelectCandidates = this.CanSelectCandidatesUnderLock();
         bool canRetry = this.StateValue == PlanReviewState.Rejected
             && this.ResultValue is PlanReviewRejection rejection
             && !IsWorkflowTerminal(rejection);
+        PlanReviewCandidate[] candidates = this.ResultValue is PlanReviewPlan plan
+            ? plan.Candidates.ToArray()
+            : [];
+        PlanReviewCandidate[] selectedCandidates = candidates
+            .Where(this.SelectedCandidates.Contains)
+            .ToArray();
         return new(
             this.GenerationValue,
             this.RevisionValue,
@@ -381,11 +599,21 @@ internal sealed class PlanReviewController : IAsyncDisposable
             this.ResultValue,
             canSelect,
             canSelect && this.SelectedOperationValue is not null,
-            this.Operation is not null && this.StateValue == PlanReviewState.Inspecting,
+            this.Operation is not null && this.StateValue is PlanReviewState.Inspecting or PlanReviewState.Approving,
             canRetry,
             this.StateValue is PlanReviewState.Cancelled or PlanReviewState.Failed or PlanReviewState.SessionFaulted
                 || this.StateValue == PlanReviewState.Rejected && this.ResultValue is PlanReviewRejection terminal && IsWorkflowTerminal(terminal)
-        );
+        )
+        {
+            Candidates = Array.AsReadOnly(candidates),
+            SelectedCandidates = Array.AsReadOnly(selectedCandidates),
+            AppliedCandidateApprovalCount = this.AppliedCandidateApprovalCountValue,
+            HasAppliedCandidateApprovals = this.AppliedCandidateApprovalCountValue > 0,
+            CanSelectCandidates = canSelectCandidates,
+            CanApplyCandidates = canSelectCandidates && selectedCandidates.Length > 0,
+            CanClearCandidates = canSelectCandidates && selectedCandidates.Length > 0,
+            CanStartFreshInspection = canSelect && this.AppliedCandidateApprovalCountValue > 0
+        };
     }
 
     private bool CanSelectUnderLock()
@@ -398,10 +626,19 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 or PlanReviewState.Rejected
             && !(this.ResultValue is PlanReviewRejection rejection && IsWorkflowTerminal(rejection));
 
+    private bool CanSelectCandidatesUnderLock()
+        => this.CanSelectUnderLock()
+            && this.StateValue == PlanReviewState.Available
+            && this.SelectedOperationValue is InstallerOperation.Install
+                or InstallerOperation.Update
+                or InstallerOperation.Repair
+                or InstallerOperation.Uninstall
+            && this.ResultValue is PlanReviewPlan { Candidates.Count: > 0 };
+
     private void AssertCanUseSession()
     {
         this.AssertNotDisposed();
-        if (this.SessionHasFaulted || this.Session.SessionFaulted.IsCompleted)
+        if (this.SessionHasFaulted || this.SessionFaultNotification.IsCompleted)
             throw new InvalidOperationException("The plan-review session is no longer available.");
     }
 
@@ -434,18 +671,22 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }
     }
 
-    private PlanReviewResult ProjectResult(InstallerReadOnlyPlanResult result, InstallerOperation requested)
+    private ProjectedPlanResult ProjectResult(
+        InstallerReadOnlyPlanResult result,
+        InstallerOperation requested,
+        PlanRequestKind requestKind
+    )
     {
         ArgumentNullException.ThrowIfNull(result);
         return result switch
         {
             InstallerReadOnlyPlanSuccess success => this.ProjectPlan(success, requested),
-            InstallerReadOnlyPlanRejection rejection => ProjectRejection(rejection),
+            InstallerReadOnlyPlanRejection rejection => new(ProjectRejection(rejection, requestKind), []),
             _ => throw new InvalidOperationException("The plan service returned an unsupported result.")
         };
     }
 
-    private PlanReviewPlan ProjectPlan(InstallerReadOnlyPlanSuccess plan, InstallerOperation requested)
+    private ProjectedPlanResult ProjectPlan(InstallerReadOnlyPlanSuccess plan, InstallerOperation requested)
     {
         if (plan.Operation != requested)
             throw new InvalidOperationException("The plan operation did not match the request.");
@@ -518,7 +759,28 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }
         ValidateRisks(plan.Operation, current, target, candidateTotal, risks);
 
-        return new(
+        (PlanReviewCandidate[] detailedCandidates, Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> authorities) = ProjectCandidates(plan.Candidates);
+        PlanReviewCandidateCount[] detailedCounts = detailedCandidates
+            .GroupBy(candidate => (candidate.Reason, candidate.Disposition, candidate.BackendProvisionallyIncluded))
+            .OrderBy(group => group.Key.Reason)
+            .ThenBy(group => group.Key.Disposition)
+            .ThenBy(group => group.Key.BackendProvisionallyIncluded)
+            .Select(group => new PlanReviewCandidateCount(
+                group.Key.Reason,
+                group.Key.Disposition,
+                group.Key.BackendProvisionallyIncluded,
+                group.Count()
+            ))
+            .ToArray();
+        PlanReviewCandidateCount[] aggregateCounts = candidates
+            .OrderBy(item => item.Reason)
+            .ThenBy(item => item.Disposition)
+            .ThenBy(item => item.ProvisionallyIncluded)
+            .ToArray();
+        if (!detailedCounts.SequenceEqual(aggregateCounts))
+            throw new InvalidOperationException("The plan candidate detail did not match its aggregate summary.");
+
+        PlanReviewPlan result = new(
             plan.Operation,
             plan.ObservedState,
             current,
@@ -531,12 +793,110 @@ internal sealed class PlanReviewController : IAsyncDisposable
             Array.AsReadOnly(conflicts),
             Array.AsReadOnly(candidates),
             plan.AdditionalNoticeCount
-        );
+        )
+        {
+            Candidates = Array.AsReadOnly(detailedCandidates)
+        };
+        return new(result, authorities);
     }
 
-    private static PlanReviewRejection ProjectRejection(InstallerReadOnlyPlanRejection rejection)
+    private static (
+        PlanReviewCandidate[] Candidates,
+        Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> Authorities
+    ) ProjectCandidates(IReadOnlyList<InstallerReadOnlyPlanCandidate>? source)
     {
-        bool valid = rejection.ErrorCode switch
+        if (source is null)
+            throw new InvalidOperationException("The plan candidate detail was missing.");
+        int count;
+        try { count = source.Count; }
+        catch
+        {
+            throw new InvalidOperationException("The plan candidate detail could not be read safely.");
+        }
+        if (count is < 0 or > ProtocolJsonSerializer.MaxPlanCandidates)
+            throw new InvalidOperationException("The plan candidate detail exceeded its bound.");
+
+        PlanReviewCandidate[] candidates = new PlanReviewCandidate[count];
+        Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> authorities = new(ReferenceEqualityComparer.Instance);
+        HashSet<InstallerReadOnlyPlanCandidate> backendReferences = new(ReferenceEqualityComparer.Instance);
+        HashSet<string> displayPaths = new(StringComparer.Ordinal);
+        for (int index = 0; index < count; index++)
+        {
+            InstallerReadOnlyPlanCandidate backend;
+            try { backend = source[index]; }
+            catch
+            {
+                throw new InvalidOperationException("The plan candidate detail could not be read safely.");
+            }
+            if (backend is null
+                || !backendReferences.Add(backend)
+                || string.IsNullOrEmpty(backend.DisplayPath)
+                || backend.DisplayPath.Length > MaximumEscapedCandidatePathLength
+                || !string.Equals(backend.DisplayPath, InstallerDisplayText.Escape(backend.DisplayPath), StringComparison.Ordinal)
+                || !displayPaths.Add(backend.DisplayPath)
+                || !IsValidCandidatePair(backend.Reason, backend.Disposition))
+            {
+                throw new InvalidOperationException("The plan candidate detail was invalid.");
+            }
+            PlanReviewCandidate candidate = new(
+                backend.DisplayPath,
+                backend.Reason,
+                backend.Disposition,
+                backend.BackendProvisionallyIncluded
+            );
+            candidates[index] = candidate;
+            authorities.Add(candidate, backend);
+        }
+        return (candidates, authorities);
+    }
+
+    /// <remarks>The caller must hold <see cref="Sync"/>.</remarks>
+    private void RevokeCandidateAuthorityUnderLock(bool clearAppliedApprovals)
+    {
+        this.CurrentCandidateAuthorities.Clear();
+        this.SelectedCandidates.Clear();
+        if (clearAppliedApprovals)
+            this.AppliedCandidateApprovalCountValue = 0;
+    }
+
+    private static PlanReviewCandidate[] SnapshotCandidateChoices(
+        IReadOnlyList<PlanReviewCandidate> candidates,
+        string parameterName
+    )
+    {
+        ArgumentNullException.ThrowIfNull(candidates, parameterName);
+        int count;
+        try { count = candidates.Count; }
+        catch
+        {
+            throw new ArgumentException("The candidate selection could not be read safely.", parameterName);
+        }
+        if (count is < 0 or > ProtocolJsonSerializer.MaxPlanCandidates)
+            throw new ArgumentException("The candidate selection exceeded its bound.", parameterName);
+        PlanReviewCandidate[] result = new PlanReviewCandidate[count];
+        for (int index = 0; index < count; index++)
+        {
+            try { result[index] = candidates[index]; }
+            catch
+            {
+                throw new ArgumentException("The candidate selection could not be read safely.", parameterName);
+            }
+            if (result[index] is null)
+                throw new ArgumentException("The candidate selection contained an invalid choice.", parameterName);
+        }
+        return result;
+    }
+
+    private static PlanReviewRejection ProjectRejection(
+        InstallerReadOnlyPlanRejection rejection,
+        PlanRequestKind requestKind
+    )
+    {
+        bool valid = requestKind == PlanRequestKind.CandidateApproval
+            ? rejection.ErrorCode == ProtocolPrePlanErrorCode.CandidateApprovalFailed
+                && rejection.NextAction == ProtocolNextAction.InspectAgain
+                && !rejection.IsTerminal
+            : rejection.ErrorCode switch
         {
             ProtocolPrePlanErrorCode.RequestCancelled => rejection.NextAction == ProtocolNextAction.RetryRequest && !rejection.IsTerminal,
             ProtocolPrePlanErrorCode.InvalidGameFolder => rejection.NextAction == ProtocolNextAction.SelectGameFolder && !rejection.IsTerminal,
@@ -682,10 +1042,31 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }
     }
 
-    private sealed class ActiveOperation(long generation, InstallerOperation selectedOperation, CancellationTokenSource cancellation)
+    private enum PlanRequestKind
+    {
+        FreshInspection,
+        CandidateApproval
+    }
+
+    private sealed record ProjectedPlanResult(
+        PlanReviewResult Result,
+        Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> CandidateAuthorities
+    );
+
+    private sealed class ActiveOperation(
+        long generation,
+        InstallerOperation selectedOperation,
+        PlanRequestKind kind,
+        InstallerReadOnlyPlanCandidate[] backendCandidates,
+        int appliedCandidateApprovalCountAfterSuccess,
+        CancellationTokenSource cancellation
+    )
     {
         public long Generation { get; } = generation;
         public InstallerOperation SelectedOperation { get; } = selectedOperation;
+        public PlanRequestKind Kind { get; } = kind;
+        public IReadOnlyList<InstallerReadOnlyPlanCandidate> BackendCandidates { get; } = Array.AsReadOnly(backendCandidates);
+        public int AppliedCandidateApprovalCountAfterSuccess { get; } = appliedCandidateApprovalCountAfterSuccess;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
