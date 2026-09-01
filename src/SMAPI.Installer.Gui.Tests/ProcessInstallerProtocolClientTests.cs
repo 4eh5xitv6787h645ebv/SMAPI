@@ -8,6 +8,7 @@ using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Security;
+using StardewModdingAPI.Installer.Core.Transactions;
 using StardewModdingAPI.Installer.Gui.Backend;
 
 namespace StardewModdingAPI.Installer.Gui.Tests;
@@ -53,7 +54,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 IFS= read -r request || exit 43
                 command_id=$(printf '%s\n' "$request" | sed -n 's/.*"commandId":"\([0-9a-f]*\)".*/\1/p')
                 test "${#command_id}" -eq 32 || exit 44
-                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\",\"linux-game-discovery\",\"linux-game-validation\",\"install-update-repair-uninstall-backup-rollback\",\"candidate-approval\"]}}"
+                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\",\"linux-game-discovery\",\"linux-game-validation\",\"install-update-repair-uninstall-backup-rollback\",\"candidate-approval\",\"exact-core-progress\",\"cancellation\",\"interrupted-operation-recovery\"]}}"
                 while IFS= read -r ignored; do :; done
                 """);
             File.SetUnixFileMode(installer, UnixFileMode.UserRead | UnixFileMode.UserExecute);
@@ -127,7 +128,8 @@ public sealed class ProcessInstallerProtocolClientTests
                 nameof(IInstallerProtocolClient.ValidateGameAsync),
                 nameof(IInstallerProtocolClient.InspectPlanAsync),
                 nameof(IInstallerProtocolClient.ApprovePlanCandidatesAsync),
-                nameof(IInstallerProtocolClient.ConfirmPlanAsync)
+                nameof(IInstallerProtocolClient.ConfirmPlanAsync),
+                nameof(IInstallerProtocolClient.ExecutePlanAsync)
             ]);
     }
 
@@ -151,6 +153,29 @@ public sealed class ProcessInstallerProtocolClientTests
             .Where(method => !method.IsSpecialName)
             .Should().BeEmpty("the confirmed owner deliberately has no execution, cancellation, recovery, rollback, or mutation method yet");
         typeof(IConfirmedInstallerSession).GetInterfaces().Should().Equal(typeof(IAsyncDisposable));
+
+        typeof(InstallerExecutionOperation).GetProperties().Select(property => property.Name).Should().BeEquivalentTo([
+            nameof(InstallerExecutionOperation.Progress),
+            nameof(InstallerExecutionOperation.Completion)
+        ]);
+        typeof(InstallerExecutionOperation).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(method => !method.IsSpecialName)
+            .Select(method => method.Name)
+            .Should().Equal(nameof(InstallerExecutionOperation.RequestCancellationAsync));
+        foreach (Type projection in new[]
+        {
+            typeof(InstallerExecutionProgress),
+            typeof(InstallerExecutionTerminalResult),
+            typeof(InstallerExecutionStateUnknownResult),
+            typeof(InstallerExecutionSummary)
+        })
+        {
+            projection.GetProperties().Should().NotContain(property =>
+                property.PropertyType == typeof(string)
+                || property.Name.Contains("Digest", StringComparison.OrdinalIgnoreCase)
+                || property.Name.EndsWith("Id", StringComparison.OrdinalIgnoreCase)
+                || new[] { "Path", "LogPath", "SanitizedLogPath" }.Contains(property.Name));
+        }
     }
 
     [Test]
@@ -404,6 +429,698 @@ public sealed class ProcessInstallerProtocolClientTests
         process.Terminated.Should().BeTrue();
         process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle();
         await FluentActions.Awaiting(() => client.ConfirmPlanAsync(plan.Confirmation!)).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task ExecuteRoutesExactBoundedProgressAndPublishesOnlyTypedTerminalData()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request switch
+        {
+            ExecutePlanRequest => null,
+            _ => script.Respond(request)
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest request = process.Requests.OfType<ExecutePlanRequest>().Single();
+        ProgressEvent progress = new(Session, script.PlanId, script.PlanDigest, 0, TransactionStage.Staging, 0, null, "/home/private/progress") { CommandId = request.CommandId };
+        SuccessEvent terminal = Success(script, request.CommandId, "/home/private/summary", "/home/private/log");
+        process.Publish(SerializeMany(progress, terminal));
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        List<InstallerExecutionProgress> observed = [];
+        await foreach (InstallerExecutionProgress value in execution.Progress.ReadAllAsync())
+            observed.Add(value);
+
+        observed.Should().Equal(new InstallerExecutionProgress(TransactionStage.Staging, 0, null));
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        result.DurableState.Should().Be(ProtocolDurableState.Committed);
+        result.NextAction.Should().Be(ProtocolNextAction.InspectAgain);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed);
+        string[] publicNames = typeof(InstallerExecutionTerminalResult).GetProperties().Select(property => property.Name).ToArray();
+        publicNames.Should().NotContain(name => name.Contains("Message", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Path", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Digest", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Id", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Test]
+    public async Task CancellationUsesOneCorrelatedAckLaneAndLateSuccessRemainsAuthoritative()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request switch
+        {
+            ExecutePlanRequest => null,
+            CancelPlanRequest cancel => Serialize(new CommandAcknowledgedEvent(Session, ProtocolAcknowledgementKind.PlanCancellationRequested, script.PlanId, null) { CommandId = cancel.CommandId }),
+            _ => script.Respond(request)
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        Task first = execution.RequestCancellationAsync();
+        Task second = execution.RequestCancellationAsync();
+        await Task.WhenAll(first, second);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        process.Publish(Serialize(Success(script, execute.CommandId, "late success", null)));
+
+        (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>()
+            .Which.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        process.Requests.OfType<CancelPlanRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task DuplicateProgressSequenceFailStopsToConservativeRecoveryRequiredResult()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+
+        process.Publish(SerializeMany(
+            new ProgressEvent(Session, script.PlanId, script.PlanDigest, 1, TransactionStage.Staging, 0, null, "first") { CommandId = execute.CommandId },
+            new ProgressEvent(Session, script.PlanId, script.PlanDigest, 1, TransactionStage.Staging, 0, null, "duplicate") { CommandId = execute.CommandId }
+        ));
+
+        InstallerExecutionStateUnknownResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>().Subject;
+        result.DurableState.Should().Be(ProtocolDurableState.Unknown);
+        result.ErrorCode.Should().BeNull("local transport uncertainty isn't a backend-reported core failure");
+        result.RecoveryDisposition.Should().Be(ProtocolRecoveryDisposition.InterruptedRecoveryRequired);
+        result.NextAction.Should().Be(ProtocolNextAction.RecoverInterrupted);
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task ProgressSequenceUsesTheProtocolMonotonicContractAndAllowsGaps()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+
+        process.Publish(SerializeMany(
+            new ProgressEvent(Session, script.PlanId, script.PlanDigest, 4, TransactionStage.Staging, 0, null, "first") { CommandId = execute.CommandId },
+            new ProgressEvent(
+                Session,
+                script.PlanId,
+                script.PlanDigest,
+                10,
+                TransactionStage.Applying,
+                ProcessInstallerProtocolClient.MaximumExecutionProgressUnits,
+                ProcessInstallerProtocolClient.MaximumExecutionProgressUnits,
+                "gap at exact unit bound"
+            )
+            { CommandId = execute.CommandId },
+            Success(script, execute.CommandId, "complete", null)
+        ));
+
+        (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>()
+            .Which.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed);
+    }
+
+    [Test]
+    public async Task ConfirmedAuthorityExecutesOnlyOnceAndForeignReferenceNeverWrites()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+
+        await FluentActions.Awaiting(() => client.ExecutePlanAsync(new InstallerConfirmedPlanAuthority())).Should().ThrowAsync<ArgumentException>();
+        process.Requests.Should().NotContain(request => request is ExecutePlanRequest);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        await FluentActions.Awaiting(() => client.ExecutePlanAsync(authority)).Should().ThrowAsync<InvalidOperationException>();
+        process.Requests.OfType<ExecutePlanRequest>().Should().ContainSingle();
+        process.CompleteOutput();
+        (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>();
+    }
+
+    [Test]
+    public async Task TerminalBeforeCancellationAdmissionSendsNoLateCancelRequest()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        using CancellationTokenSource cancellation = new();
+        TaskCompletionSource terminalRouted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ExecutionTerminalRoutedForTesting = () => terminalRouted.TrySetResult();
+        client.BeforeExecuteWrittenCommitForTesting = async () =>
+        {
+            cancellation.Cancel();
+            ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+            process.Publish(Serialize(Success(script, execute.CommandId, "terminal won", null)));
+            await terminalRouted.Task;
+        };
+
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority, cancellation.Token);
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        process.Requests.Should().NotContain(request => request is CancelPlanRequest);
+    }
+
+    [Test]
+    public async Task TerminalMayPrecedeItsExactCancellationAcknowledgement()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest or CancelPlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        Task cancellation = execution.RequestCancellationAsync();
+        await SpinWaitUntilAsync(() => process.Requests.OfType<CancelPlanRequest>().Any());
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        CancelPlanRequest cancel = process.Requests.OfType<CancelPlanRequest>().Single();
+        TaskCompletionSource terminalRouted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ExecutionTerminalRoutedForTesting = () => terminalRouted.TrySetResult();
+        process.Publish(Serialize(Success(script, execute.CommandId, "terminal first", null)));
+        await terminalRouted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Task repeated = execution.RequestCancellationAsync();
+        ReferenceEquals(repeated, cancellation).Should().BeTrue("repeated cancellation must retain the original settlement task");
+        process.Publish(Serialize(
+            new CommandAcknowledgedEvent(Session, ProtocolAcknowledgementKind.PlanCancellationRequested, script.PlanId, null) { CommandId = cancel.CommandId }
+        ));
+
+        await Task.WhenAll(cancellation, repeated);
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed);
+    }
+
+    [Test]
+    public async Task ExactTerminalSurvivesWrongLateCancellationAckButMarksSettlementUnconfirmed()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest or CancelPlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        Task cancellation = execution.RequestCancellationAsync();
+        await SpinWaitUntilAsync(() => process.Requests.OfType<CancelPlanRequest>().Any());
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        CancelPlanRequest cancel = process.Requests.OfType<CancelPlanRequest>().Single();
+        process.Publish(SerializeMany(
+            Success(script, execute.CommandId, "terminal exact", null),
+            new CommandAcknowledgedEvent(Session, ProtocolAcknowledgementKind.PlanConfirmed, script.PlanId, null) { CommandId = cancel.CommandId }
+        ));
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        Exception cancellationError = (await FluentActions.Awaiting(() => cancellation).Should().ThrowAsync<Exception>()).Which;
+        (cancellationError is InstallerProtocolClientException or OperationCanceledException).Should().BeTrue();
+    }
+
+    [Test]
+    public async Task LateFrameAfterExactTerminalCannotEraseTruthAndMarksSettlementUnconfirmed()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request), completeWaitInitially: false);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        TaskCompletionSource routed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ExecutionTerminalRoutedForTesting = () => routed.TrySetResult();
+        process.Publish(Serialize(Success(script, execute.CommandId, "exact", null)));
+        await routed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        process.Publish(Serialize(new ProgressEvent(Session, script.PlanId, script.PlanDigest, 0, TransactionStage.Completed, 0, 0, "late") { CommandId = execute.CommandId }));
+        await client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2));
+        process.CompleteExit();
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+    }
+
+    [Test]
+    public async Task ConfirmedProcessExitStillDrainsPipeBufferedFramesBeforePublishingSettlement()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        TaskCompletionSource secondChunkRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseSecondChunk = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int gateNextChunk = 0;
+        ScriptedProcess process = new(
+            request => request is ExecutePlanRequest ? null : script.Respond(request),
+            completeWaitInitially: false,
+            beforeResponseChunk: async _ =>
+            {
+                if (Interlocked.Exchange(ref gateNextChunk, 0) != 0)
+                {
+                    secondChunkRead.TrySetResult();
+                    await releaseSecondChunk.Task;
+                }
+            }
+        );
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        TaskCompletionSource routed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ExecutionTerminalRoutedForTesting = () => routed.TrySetResult();
+        process.Publish(Serialize(Success(script, execute.CommandId, "exact", null)));
+        await routed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Volatile.Write(ref gateNextChunk, 1);
+        process.Publish(Serialize(new ProgressEvent(Session, script.PlanId, script.PlanDigest, 0, TransactionStage.Completed, 0, 0, "pipe buffered") { CommandId = execute.CommandId }));
+        await secondChunkRead.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        process.CompleteExit();
+
+        execution.Completion.IsCompleted.Should().BeFalse("stdout must reach EOF before settlement is published");
+        releaseSecondChunk.TrySetResult();
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+    }
+
+    [Test]
+    public async Task BufferedFrameAfterExactTerminalMarksSettlementBeforePublishingTerminal()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+
+        process.Publish(SerializeMany(
+            Success(script, execute.CommandId, "exact", null),
+            new ProgressEvent(Session, script.PlanId, script.PlanDigest, 0, TransactionStage.Completed, 0, 0, "buffered late") { CommandId = execute.CommandId }
+        ));
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task PostTerminalExecutionFramesAreRejectedWhileCancellationAcknowledgementIsPending(bool duplicateTerminal)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest or CancelPlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        Task cancellation = execution.RequestCancellationAsync();
+        await SpinWaitUntilAsync(() => process.Requests.OfType<CancelPlanRequest>().Any());
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        TaskCompletionSource routed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ExecutionTerminalRoutedForTesting = () => routed.TrySetResult();
+        process.Publish(Serialize(Success(script, execute.CommandId, "exact", null)));
+        await routed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        ProtocolEvent extra = duplicateTerminal
+            ? Success(script, execute.CommandId, "duplicate", null)
+            : new ProgressEvent(Session, script.PlanId, script.PlanDigest, 0, TransactionStage.Completed, 0, 0, "late") { CommandId = execute.CommandId };
+        process.Publish(Serialize(extra));
+        await client.SessionFaulted.WaitAsync(TimeSpan.FromSeconds(2));
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        await FluentActions.Awaiting(() => cancellation).Should().ThrowAsync<Exception>();
+    }
+
+    [Test]
+    public async Task ProgressFloodBoundFailsClosedAndOrdinaryCommandsNeverOverlapExecution()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.ExecutionProgressCapacityForTesting = 1;
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        int writes = process.Requests.Count;
+        await FluentActions.Awaiting(() => client.DiscoverGamesAsync()).Should().ThrowAsync<InvalidOperationException>();
+        process.Requests.Should().HaveCount(writes);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        process.Publish(SerializeMany(
+            new ProgressEvent(Session, script.PlanId, script.PlanDigest, 0, TransactionStage.Recovering, 0, 1, "first") { CommandId = execute.CommandId },
+            new ProgressEvent(Session, script.PlanId, script.PlanDigest, 1, TransactionStage.Recovering, 1, 1, "overflow") { CommandId = execute.CommandId }
+        ));
+
+        (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task ExecutionAggregateWireByteBoundAcceptsExactCapacityAndRejectsOneByteLess(bool oneByteLess)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ProtocolEvent[] Transcript(ProtocolCommandId commandId) =>
+        [
+            .. Enumerable.Range(0, 256).Select(index => (ProtocolEvent)new ProgressEvent(
+                Session,
+                script.PlanId,
+                script.PlanDigest,
+                index,
+                TransactionStage.Staging,
+                0,
+                null,
+                new string('x', 256)
+            ) { CommandId = commandId }),
+            Success(script, commandId, "complete", null)
+        ];
+
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        int exactBytes = Transcript(ProtocolCommandId.CreateRandom()).Sum(frame => Serialize(frame).Length);
+        exactBytes.Should().BeGreaterThan(ProtocolJsonSerializer.MaxLineBytes);
+        client.ExecutionProgressByteCapacityForTesting = exactBytes - (oneByteLess ? 1 : 0);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+
+        process.Publish(SerializeMany(Transcript(execute.CommandId)));
+
+        InstallerExecutionResult result = await execution.Completion;
+        if (oneByteLess)
+            result.Should().BeOfType<InstallerExecutionStateUnknownResult>();
+        else
+            result.Should().BeOfType<InstallerExecutionTerminalResult>()
+                .Which.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed);
+    }
+
+    [Test]
+    public async Task ExecutionHardDeadlineReturnsConservativeUnknown()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.ExecutionHardTimeoutForTesting = TimeSpan.Zero;
+        client.ExecutionIdleTimeoutForTesting = Timeout.InfiniteTimeSpan;
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task ExecutionIdleDeadlineReturnsConservativeUnknown()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.ExecutionHardTimeoutForTesting = Timeout.InfiniteTimeSpan;
+        client.ExecutionIdleTimeoutForTesting = TimeSpan.Zero;
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task CancellationAcknowledgementDeadlineIsBoundedAndSanitized()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest or CancelPlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.ExecutionCancellationAcknowledgementTimeoutForTesting = TimeSpan.Zero;
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        InstallerProtocolClientException failure = (await FluentActions.Awaiting(() => execution.RequestCancellationAsync())
+            .Should().ThrowAsync<InstallerProtocolClientException>()).Which;
+
+        failure.Message.Should().NotContain("/home/");
+        (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>();
+    }
+
+    [Test]
+    public async Task PostCancellationTerminalDeadlineReturnsConservativeUnknownAfterExactAck()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request switch
+        {
+            ExecutePlanRequest => null,
+            CancelPlanRequest cancel => Serialize(new CommandAcknowledgedEvent(Session, ProtocolAcknowledgementKind.PlanCancellationRequested, script.PlanId, null) { CommandId = cancel.CommandId }),
+            _ => script.Respond(request)
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        client.ExecutionHardTimeoutForTesting = Timeout.InfiniteTimeSpan;
+        client.ExecutionIdleTimeoutForTesting = Timeout.InfiniteTimeSpan;
+        client.ExecutionPostCancellationTimeoutForTesting = TimeSpan.Zero;
+        TaskCompletionSource cancellationObserved = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseDeadline = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.BeforePostCancellationDeadlineForTesting = async () =>
+        {
+            cancellationObserved.TrySetResult();
+            await releaseDeadline.Task;
+        };
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        await execution.RequestCancellationAsync();
+        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseDeadline.TrySetResult();
+
+        (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>();
+        process.Requests.OfType<CancelPlanRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task ExecuteWriteFailureReturnsConservativeUnknownAndNeverSuggestsRetry()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest
+            ? throw new IOException("/home/private/write-failure")
+            : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        InstallerExecutionStateUnknownResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>().Subject;
+
+        result.DurableState.Should().Be(ProtocolDurableState.Unknown);
+        result.ErrorCode.Should().BeNull();
+        result.NextAction.Should().Be(ProtocolNextAction.RecoverInterrupted);
+        result.NextAction.Should().NotBe(ProtocolNextAction.RetryRequest);
+        process.Terminated.Should().BeTrue();
+        process.Requests.OfType<ExecutePlanRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task CancellationRequestedBeforeExecuteWriteFailureCannotReportSuccessfulAcknowledgement()
+    {
+        const string privateFailure = "/home/private/execute-write";
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        using CancellationTokenSource cancellation = new();
+        client.BeforeExecutionWriteForTesting = () =>
+        {
+            cancellation.Cancel();
+            throw new IOException(privateFailure);
+        };
+
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority, cancellation.Token);
+        InstallerExecutionStateUnknownResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>().Subject;
+        InstallerProtocolClientException failure = (await FluentActions.Awaiting(() => execution.RequestCancellationAsync())
+            .Should().ThrowAsync<InstallerProtocolClientException>()).Which;
+
+        result.NextAction.Should().Be(ProtocolNextAction.RecoverInterrupted);
+        failure.Message.Should().NotContain(privateFailure);
+        process.Requests.Should().NotContain(request => request is ExecutePlanRequest);
+        process.Requests.Should().NotContain(request => request is CancelPlanRequest);
+    }
+
+    [Test]
+    public async Task CancellationTransportFailureIsSanitizedAndExecutionBecomesConservativelyUnknown()
+    {
+        const string privateFailure = "/home/private/cancel-write";
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request switch
+        {
+            ExecutePlanRequest => null,
+            CancelPlanRequest => throw new IOException(privateFailure),
+            _ => script.Respond(request)
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        InstallerProtocolClientException failure = (await FluentActions.Awaiting(() => execution.RequestCancellationAsync())
+            .Should().ThrowAsync<InstallerProtocolClientException>()).Which;
+        InstallerExecutionStateUnknownResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>().Subject;
+
+        failure.Message.Should().NotContain(privateFailure);
+        result.ErrorCode.Should().BeNull();
+        result.NextAction.Should().Be(ProtocolNextAction.RecoverInterrupted);
+        process.Requests.OfType<CancelPlanRequest>().Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task DisposeDuringAdmittedExecutionSettlesCompletionAsConservativeUnknown()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        await client.DisposeAsync();
+
+        InstallerExecutionStateUnknownResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>().Subject;
+        result.RecoveryDisposition.Should().Be(ProtocolRecoveryDisposition.InterruptedRecoveryRequired);
+        process.InputDisposed.Should().BeTrue();
+        process.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task CleanupDisposeFailureCannotEraseExactTerminalTruth()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(
+            request => request is ExecutePlanRequest ? null : script.Respond(request),
+            faultDispose: true
+        );
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        process.Publish(Serialize(Success(script, execute.CommandId, "exact", null)));
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        process.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task CleanupDisposeFailureCannotEraseConservativeUnknownAfterWriteFailure()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(
+            request => request is ExecutePlanRequest ? throw new IOException("/home/private/write") : script.Respond(request),
+            faultDispose: true
+        );
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        InstallerExecutionStateUnknownResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>().Subject;
+
+        result.ErrorCode.Should().BeNull();
+        result.NextAction.Should().Be(ProtocolNextAction.RecoverInterrupted);
+        process.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task ValidRolledBackFailureProjectsTypedCountsWithoutBackendTextOrLog()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        RolledBackFailureEvent terminal = new(
+            Session,
+            script.PlanId,
+            script.PlanDigest,
+            ProtocolExecutionOutcome.FailedAndRolledBack,
+            new(ProtocolDurableState.RolledBack, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain),
+            new(0, 0, 0, 0, 0, 0),
+            "/home/private/error",
+            "/home/private/summary",
+            "/home/private/log"
+        )
+        {
+            CommandId = execute.CommandId
+        };
+        process.Publish(Serialize(terminal));
+
+        InstallerExecutionTerminalResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+        result.Outcome.Should().Be(ProtocolExecutionOutcome.FailedAndRolledBack);
+        result.DurableState.Should().Be(ProtocolDurableState.RolledBack);
+        result.ErrorCode.Should().Be(ProtocolTerminalErrorCode.IoFailure);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed);
+    }
+
+    [TestCase(ExecutionProtocolFault.WrongProgressBinding)]
+    [TestCase(ExecutionProtocolFault.ProgressCounterOverBound)]
+    [TestCase(ExecutionProtocolFault.WrongSuccessOperation)]
+    [TestCase(ExecutionProtocolFault.ManagedCountOverPlan)]
+    [TestCase(ExecutionProtocolFault.UnrequestedCancellationTerminal)]
+    public async Task ClientSpecificExecutionProtocolFaultsFailClosed(ExecutionProtocolFault fault)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request is ExecutePlanRequest ? null : script.Respond(request));
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        ProtocolEvent response = fault switch
+        {
+            ExecutionProtocolFault.WrongProgressBinding => new ProgressEvent(
+                Session,
+                ProtocolPlanId.CreateRandom(),
+                script.PlanDigest,
+                0,
+                TransactionStage.Staging,
+                0,
+                null,
+                "wrong binding"
+            )
+            { CommandId = execute.CommandId },
+            ExecutionProtocolFault.ProgressCounterOverBound => new ProgressEvent(
+                Session,
+                script.PlanId,
+                script.PlanDigest,
+                0,
+                TransactionStage.Staging,
+                ProcessInstallerProtocolClient.MaximumExecutionProgressUnits + 1,
+                ProcessInstallerProtocolClient.MaximumExecutionProgressUnits + 1,
+                "over bound"
+            )
+            { CommandId = execute.CommandId },
+            ExecutionProtocolFault.WrongSuccessOperation => Success(script, execute.CommandId, "wrong operation", null) with
+            {
+                Operation = InstallerOperation.Install
+            },
+            ExecutionProtocolFault.ManagedCountOverPlan => new SuccessEvent(
+                Session,
+                script.PlanId,
+                script.PlanDigest,
+                script.Operation,
+                ProtocolExecutionOutcome.Succeeded,
+                new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain),
+                new(1, 0, 0, 0, 0, 0),
+                "over plan",
+                null
+            )
+            { CommandId = execute.CommandId },
+            ExecutionProtocolFault.UnrequestedCancellationTerminal => new CancelledEvent(
+                Session,
+                script.PlanId,
+                script.PlanDigest,
+                ProtocolExecutionOutcome.CancelledBeforeMutation,
+                new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain),
+                new(0, 0, 0, 0, 0, 0),
+                "not requested",
+                null
+            )
+            { CommandId = execute.CommandId },
+            _ => throw new ArgumentOutOfRangeException(nameof(fault))
+        };
+        process.Publish(Serialize(response));
+
+        InstallerExecutionStateUnknownResult result = (await execution.Completion).Should().BeOfType<InstallerExecutionStateUnknownResult>().Subject;
+
+        result.ErrorCode.Should().BeNull();
+        result.NextAction.Should().Be(ProtocolNextAction.RecoverInterrupted);
     }
 
     [Test]
@@ -2008,6 +2725,15 @@ public sealed class ProcessInstallerProtocolClientTests
         WrongCommand
     }
 
+    public enum ExecutionProtocolFault
+    {
+        WrongProgressBinding,
+        ProgressCounterOverBound,
+        WrongSuccessOperation,
+        ManagedCountOverPlan,
+        UnrequestedCancellationTerminal
+    }
+
     private sealed class ReadOnlyPlanScript
     {
         public const string GamePath = "/games/private Stardew Valley";
@@ -2377,10 +3103,49 @@ public sealed class ProcessInstallerProtocolClientTests
         ProcessInstallerProtocolClient.GameDiscoveryCapability,
         ProcessInstallerProtocolClient.GameValidationCapability,
         ProcessInstallerProtocolClient.PlanInspectionCapability,
-        ProcessInstallerProtocolClient.CandidateApprovalCapability
+        ProcessInstallerProtocolClient.CandidateApprovalCapability,
+        ProcessInstallerProtocolClient.ExactCoreProgressCapability,
+        ProcessInstallerProtocolClient.CancellationCapability,
+        ProcessInstallerProtocolClient.InterruptedRecoveryCapability
     ];
 
     private static byte[] Serialize(ProtocolEvent value) => Encoding.UTF8.GetBytes(ProtocolJsonSerializer.SerializeLine(value) + "\n");
+
+    private static byte[] SerializeMany(params ProtocolEvent[] values) => Encoding.UTF8.GetBytes(
+        string.Concat(values.Select(value => ProtocolJsonSerializer.SerializeLine(value) + "\n"))
+    );
+
+    private static async Task<InstallerConfirmedPlanAuthority> PrepareConfirmedPlanAsync(
+        ProcessInstallerProtocolClient client,
+        ReadOnlyPlanScript script
+    )
+    {
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        (await client.OpenPackageAsync(CreatePackage())).Should().BeOfType<InstallerPackageOpenSuccess>();
+        InstallerReadOnlyPlanSuccess plan = (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, script.Operation))
+            .Should().BeOfType<InstallerReadOnlyPlanSuccess>().Subject;
+        return await client.ConfirmPlanAsync(plan.Confirmation!);
+    }
+
+    private static SuccessEvent Success(
+        ReadOnlyPlanScript script,
+        ProtocolCommandId commandId,
+        string summary,
+        string? log
+    ) => new(
+        Session,
+        script.PlanId,
+        script.PlanDigest,
+        script.Operation,
+        ProtocolExecutionOutcome.Succeeded,
+        new(ProtocolDurableState.Committed, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain),
+        new(0, 0, 0, 0, 0, 0),
+        summary,
+        log
+    )
+    {
+        CommandId = commandId
+    };
 
     private static async Task SpinWaitUntilAsync(Func<bool> condition)
     {
@@ -2419,6 +3184,7 @@ public sealed class ProcessInstallerProtocolClientTests
         private readonly TaskCompletionSource Exit = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly bool CompleteExitOnTerminate;
         private readonly bool FaultWait;
+        private readonly bool FaultDispose;
         private readonly ResponseStream Responses;
         private readonly RequestStream RequestsStream;
         public Func<ProtocolRequest, byte[]?> Responder { get => this.RequestsStream.Responder; set => this.RequestsStream.Responder = value; }
@@ -2439,16 +3205,19 @@ public sealed class ProcessInstallerProtocolClientTests
             Stream? error = null,
             bool completeWaitInitially = true,
             bool completeExitOnTerminate = true,
-            bool faultWait = false
+            bool faultWait = false,
+            bool faultDispose = false,
+            Func<int, Task>? beforeResponseChunk = null
         )
         {
-            this.Responses = new ResponseStream();
+            this.Responses = new ResponseStream(beforeResponseChunk);
             this.RequestsStream = new RequestStream(this.Responses, responder);
             this.Input = input ?? this.RequestsStream;
             this.Output = output ?? this.Responses;
             this.Error = error ?? new MemoryStream();
             this.CompleteExitOnTerminate = completeExitOnTerminate;
             this.FaultWait = faultWait;
+            this.FaultDispose = faultDispose;
             if (completeWaitInitially)
                 this.Exit.TrySetResult();
         }
@@ -2458,6 +3227,8 @@ public sealed class ProcessInstallerProtocolClientTests
             this.WaitObserved = true;
             if (this.FaultWait)
                 return Task.FromException(new IOException("private wait failure"));
+            if (this.Exit.Task.IsCompletedSuccessfully)
+                this.Responses.Complete();
             return this.Exit.Task;
         }
 
@@ -2470,7 +3241,11 @@ public sealed class ProcessInstallerProtocolClientTests
             this.Responses.Complete();
         }
 
-        public void CompleteExit() => this.Exit.TrySetResult();
+        public void CompleteExit()
+        {
+            this.Exit.TrySetResult();
+            this.Responses.Complete();
+        }
 
         public void CompleteOutput() => this.Responses.Complete();
 
@@ -2480,6 +3255,8 @@ public sealed class ProcessInstallerProtocolClientTests
         {
             this.Disposed = true;
             this.Responses.Complete();
+            if (this.FaultDispose)
+                throw new IOException("/home/private/dispose-failure");
         }
     }
 
@@ -2540,7 +3317,7 @@ public sealed class ProcessInstallerProtocolClientTests
         }
     }
 
-    private sealed class ResponseStream : Stream
+    private sealed class ResponseStream(Func<int, Task>? beforeChunk = null) : Stream
     {
         private readonly Channel<byte[]> Responses = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions
         {
@@ -2550,6 +3327,7 @@ public sealed class ProcessInstallerProtocolClientTests
         });
         private byte[] Current = [];
         private int Offset;
+        private int ChunkCount;
         public void Set(byte[] bytes) => this.Responses.Writer.TryWrite(bytes);
         public void Complete() => this.Responses.Writer.TryComplete();
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
@@ -2559,6 +3337,9 @@ public sealed class ProcessInstallerProtocolClientTests
             {
                 try { this.Current = await this.Responses.Reader.ReadAsync(cancellationToken); }
                 catch (ChannelClosedException) { return 0; }
+                int chunk = Interlocked.Increment(ref this.ChunkCount);
+                if (beforeChunk is not null)
+                    await beforeChunk(chunk);
                 this.Offset = 0;
             }
             int copy = Math.Min(buffer.Length, this.Current.Length - this.Offset);

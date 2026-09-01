@@ -30,6 +30,16 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
     /// <summary>Consume the exact current executable-plan capability and confirm its retained protocol binding.</summary>
     Task<InstallerConfirmedPlanAuthority> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted client doesn't support plan confirmation.");
+
+    /// <summary>
+    /// Consume the exact confirmed-plan authority, execute it once, and report only bounded typed progress and a
+    /// sanitized terminal result. Cancellation after admission requests protocol cancellation and still awaits a
+    /// terminal result.
+    /// </summary>
+    Task<InstallerExecutionOperation> ExecutePlanAsync(
+        InstallerConfirmedPlanAuthority authority,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted client doesn't support plan execution.");
 }
 
 /// <summary>
