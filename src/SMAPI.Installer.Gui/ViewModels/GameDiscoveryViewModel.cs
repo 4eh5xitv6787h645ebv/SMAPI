@@ -14,7 +14,8 @@ internal enum GameDiscoveryFocusTarget
     CandidateList,
     Browse,
     Retry,
-    Continue
+    Continue,
+    Exit
 }
 
 internal sealed class GameCandidateItem
@@ -161,6 +162,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.BrowseCommand = new RelayCommand(this.RequestFolderPicker, this.CanBrowse);
         this.CancelCommand = new AsyncRelayCommand(controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
         this.ContinueCommand = new RelayCommand(this.Continue, this.CanContinue);
+        this.ExitCommand = new RelayCommand(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.IsExitVisible);
         this.Controller.Changed += this.OnControllerChanged;
         this.ApplySnapshot(this.snapshot, requestFocus: false);
     }
@@ -182,6 +184,8 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     }
 
     public event EventHandler<GameDiscoveryFocusTarget>? FocusRequested;
+
+    public event EventHandler? CloseRequested;
 
     public event EventHandler<GameCandidateSelectedEventArgs>? ContinueRequested
     {
@@ -274,6 +278,10 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
 
     public bool IsContinueVisible => this.snapshot.CanContinue && this.ContinueRequestedValue is not null;
 
+    public bool IsExitVisible => this.snapshot.State is GameDiscoveryState.Cancelled
+        or GameDiscoveryState.Failed
+        or GameDiscoveryState.SessionFaulted;
+
     public AsyncRelayCommand RetryCommand { get; }
 
     public RelayCommand BrowseCommand { get; }
@@ -281,6 +289,8 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public AsyncRelayCommand CancelCommand { get; }
 
     public RelayCommand ContinueCommand { get; }
+
+    public RelayCommand ExitCommand { get; }
 
     /// <summary>Publish a sanitized retryable presentation failure from the desktop folder picker.</summary>
     internal void ReportFolderPickerFailure()
@@ -339,7 +349,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     private void Continue()
     {
         ProtocolGameCandidate? candidate = this.snapshot.SelectedCandidate;
-        if (candidate?.State == LinuxGameFolderStatus.Valid)
+        if (candidate?.State == LinuxGameFolderStatus.Valid && this.Controller.IsCurrentValidSelection(candidate))
             this.ContinueRequestedValue?.Invoke(this, new(candidate));
     }
 
@@ -476,6 +486,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
             GameDiscoveryState.Ready => GameDiscoveryFocusTarget.CandidateList,
             GameDiscoveryState.NoCandidates or GameDiscoveryState.ManualInvalid when this.BrowseCommand.CanExecute(null) => GameDiscoveryFocusTarget.Browse,
             GameDiscoveryState.ManualValid when this.ContinueCommand.CanExecute(null) => GameDiscoveryFocusTarget.Continue,
+            GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted => GameDiscoveryFocusTarget.Exit,
             _ => GameDiscoveryFocusTarget.Status
         };
     }
@@ -492,10 +503,12 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.OnPropertyChanged(nameof(this.IsRetryVisible));
         this.OnPropertyChanged(nameof(this.IsCancelVisible));
         this.OnPropertyChanged(nameof(this.IsContinueVisible));
+        this.OnPropertyChanged(nameof(this.IsExitVisible));
         this.RetryCommand.NotifyCanExecuteChanged();
         this.BrowseCommand.NotifyCanExecuteChanged();
         this.CancelCommand.NotifyCanExecuteChanged();
         this.ContinueCommand.NotifyCanExecuteChanged();
+        this.ExitCommand.NotifyCanExecuteChanged();
     }
 
     private void HandlePresentationFailure(Exception exception)

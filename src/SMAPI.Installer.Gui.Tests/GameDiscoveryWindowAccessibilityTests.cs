@@ -69,13 +69,15 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         ListBox list = window.FindControl<ListBox>("CandidateList")!;
         Button browse = window.FindControl<Button>("BrowseButton")!;
         Button cancel = window.FindControl<Button>("CancelButton")!;
+        Button exit = window.FindControl<Button>("ExitButton")!;
         Control[] keyed =
         [
             list,
             browse,
             window.FindControl<Button>("RetryButton")!,
             window.FindControl<Button>("ContinueButton")!,
-            cancel
+            cancel,
+            exit
         ];
         keyed.Select(AutomationProperties.GetAccessKey).Should().NotContainNulls().And.OnlyHaveUniqueItems();
 
@@ -104,9 +106,16 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         await WaitUntilAsync(() => viewModel.Heading == "Game-folder check cancelled and session closed");
         viewModel.IsRetryVisible.Should().BeFalse();
         viewModel.IsBrowseVisible.Should().BeFalse();
+        viewModel.StatusLiveSetting.Should().Be(AutomationLiveSetting.Polite);
+        exit.IsVisible.Should().BeTrue();
+        exit.IsEffectivelyEnabled.Should().BeTrue();
+        AutomationProperties.GetName(exit).Should().Be("Exit installer");
+        AutomationProperties.GetAccessKey(exit).Should().Be("Alt+E");
+        await WaitUntilAsync(() => exit.IsFocused);
 
-        window.Close();
+        PressClosingAccessKey(window, PhysicalKey.E);
         await WaitUntilAsync(() => !window.IsVisible);
+        session.DisposeCalls.Should().Be(1);
     }
 
     [AvaloniaTest]
@@ -236,6 +245,12 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         window.KeyReleaseQwerty(physicalKey, RawInputModifiers.Alt);
         window.KeyReleaseQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
         Dispatcher.UIThread.RunJobs();
+    }
+
+    private static void PressClosingAccessKey(GameDiscoveryWindow window, PhysicalKey physicalKey)
+    {
+        window.KeyPressQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
+        window.KeyPressQwerty(physicalKey, RawInputModifiers.Alt);
     }
 
     private static ScrollViewer AssertRenderedLayout(GameDiscoveryWindow window, double width)

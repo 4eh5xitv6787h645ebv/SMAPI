@@ -77,6 +77,45 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
+    public async Task QueuedTerminalSnapshotCannotForwardAStaleContinueAction()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("ready", LinuxGameFolderStatus.Valid);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        await using GameDiscoveryController controller = new(session);
+        await using GameDiscoveryViewModel viewModel = new(controller);
+        int continued = 0;
+        viewModel.ContinueRequested += (_, _) => continued++;
+        await controller.DiscoverAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.IsContinueVisible.Should().BeTrue();
+
+        GameDiscoverySnapshot ready = controller.Snapshot;
+        Task.Run(async () =>
+        {
+            session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
+            DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+            while (controller.Snapshot is not { State: GameDiscoveryState.SessionFaulted } snapshot
+                || snapshot.Revision <= ready.Revision)
+            {
+                if (DateTime.UtcNow >= deadline)
+                    throw new TimeoutException("The terminal controller snapshot was not published.");
+                await Task.Delay(10);
+            }
+        }).GetAwaiter().GetResult();
+        viewModel.IsContinueVisible.Should().BeTrue("the terminal presentation update is deliberately still queued");
+
+        viewModel.ContinueCommand.Execute(null);
+
+        continued.Should().Be(0, "the controller must reauthorize the exact live selection before forwarding it");
+        Dispatcher.UIThread.RunJobs();
+        viewModel.IsContinueVisible.Should().BeFalse();
+        viewModel.IsExitVisible.Should().BeTrue();
+    }
+
+    [AvaloniaTest]
     public async Task EmptyDiscoveryIsTruthfulAndFolderPickerIsAnExplicitEventSeam()
     {
         GameDiscoveryControllerTests.FakeVerifiedSession session = new();
@@ -221,6 +260,7 @@ internal sealed partial class GameDiscoveryAccessibilityTests
             viewModel.IsRetryVisible.Should().BeFalse();
             viewModel.IsBrowseVisible.Should().BeFalse();
             viewModel.SelectedCandidate.Should().BeNull();
+            viewModel.IsExitVisible.Should().BeTrue();
         }
 
         GameDiscoveryControllerTests.FakeVerifiedSession faulted = new();
@@ -252,6 +292,7 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         viewModel.IsRetryVisible.Should().BeFalse();
         viewModel.IsBrowseVisible.Should().BeFalse();
         viewModel.IsContinueVisible.Should().BeFalse();
+        viewModel.IsExitVisible.Should().BeTrue();
     }
 
     private static GameDiscoveryViewModel CreateViewModel(GameDiscoveryControllerTests.FakeVerifiedSession session)

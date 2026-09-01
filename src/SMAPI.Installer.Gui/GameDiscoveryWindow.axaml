@@ -173,6 +173,17 @@
                 Command="{Binding CancelCommand}"
                 IsVisible="{Binding IsCancelVisible}"
                 Content="_Cancel" />
+            <Button
+                x:Name="ExitButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="6"
+                AutomationProperties.AccessKey="Alt+E"
+                AutomationProperties.Name="Exit installer"
+                AutomationProperties.HelpText="Closes this terminal installer session. Reopen the installer to start a new session."
+                Command="{Binding ExitCommand}"
+                IsVisible="{Binding IsExitVisible}"
+                Content="_Exit installer" />
           </WrapPanel>
         </StackPanel>
       </Border>

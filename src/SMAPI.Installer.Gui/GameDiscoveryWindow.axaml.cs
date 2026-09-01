@@ -26,6 +26,7 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
         this.KeyDown += this.OnKeyDown;
         this.SizeChanged += (_, eventArgs) => this.ApplyResponsiveLayout(eventArgs.NewSize.Width);
         this.ViewModel.FocusRequested += this.OnFocusRequested;
+        this.ViewModel.CloseRequested += this.OnCloseRequested;
         this.ApplyResponsiveLayout(this.Width);
     }
 
@@ -88,6 +89,16 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
             this.ViewModel.CancelCommand.Execute(null);
             e.Handled = true;
         }
+        else if (e.Key == Key.Escape && this.ViewModel.ExitCommand.CanExecute(null))
+        {
+            this.ViewModel.ExitCommand.Execute(null);
+            e.Handled = true;
+        }
+    }
+
+    private void OnCloseRequested(object? sender, EventArgs e)
+    {
+        this.Close();
     }
 
     private void OnFocusRequested(object? sender, GameDiscoveryFocusTarget target)
@@ -101,6 +112,7 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
                     GameDiscoveryFocusTarget.Browse => this.BrowseButton,
                     GameDiscoveryFocusTarget.Retry => this.RetryButton,
                     GameDiscoveryFocusTarget.Continue => this.ContinueButton,
+                    GameDiscoveryFocusTarget.Exit => this.ExitButton,
                     _ when this.ViewModel.IsProblemVisible => this.ProblemRegion,
                     _ => this.StatusRegion
                 };
@@ -114,6 +126,7 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
     private async Task DisposeCoreAsync()
     {
         this.ViewModel.FocusRequested -= this.OnFocusRequested;
+        this.ViewModel.CloseRequested -= this.OnCloseRequested;
         await this.ViewModel.DisposeAsync();
     }
 }

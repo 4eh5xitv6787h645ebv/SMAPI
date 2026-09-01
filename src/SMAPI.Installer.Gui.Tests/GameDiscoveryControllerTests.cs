@@ -114,6 +114,7 @@ internal sealed class GameDiscoveryControllerTests
         Func<Task> retry = () => controller.DiscoverAsync();
         await retry.Should().ThrowAsync<InvalidOperationException>().WithMessage("*session is closed*");
         session.DiscoverCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(1);
     }
 
     [TestCase(true)]
@@ -156,6 +157,7 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.CanBrowse.Should().BeFalse();
         Action select = () => controller.SelectCandidate(valid);
         select.Should().Throw<InvalidOperationException>().WithMessage("*session is closed*");
+        session.DisposeCalls.Should().Be(1);
     }
 
     [TestCase(true)]
@@ -198,6 +200,7 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.CanBrowse.Should().BeFalse();
         Action select = () => controller.SelectCandidate(valid);
         select.Should().Throw<InvalidOperationException>().WithMessage("*session is closed*");
+        session.DisposeCalls.Should().Be(1);
     }
 
     [TestCase(true)]
@@ -274,6 +277,7 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.CanContinue.Should().BeFalse();
         controller.Snapshot.CanRetry.Should().BeFalse();
         controller.Snapshot.CanBrowse.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
     }
 
     [TestCase(true)]
@@ -312,6 +316,92 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.CanContinue.Should().BeFalse();
         controller.Snapshot.CanRetry.Should().BeFalse();
         controller.Snapshot.CanBrowse.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
+
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task PublishedFailureCannotBeMaskedByLateCancellation(bool discovery)
+    {
+        TaskCompletionSource reachedFinalization = NewCompletion();
+        TaskCompletionSource releaseFinalization = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => throw new InvalidOperationException("failed"),
+            Validation = (_, _) => throw new InvalidOperationException("failed")
+        };
+        await using GameDiscoveryController controller = new(session)
+        {
+            BeforeOperationCompletionForTesting = () =>
+            {
+                reachedFinalization.TrySetResult();
+                releaseFinalization.Task.GetAwaiter().GetResult();
+            }
+        };
+
+        Task operation = discovery
+            ? controller.DiscoverAsync()
+            : controller.ValidateManualAsync("/games/failure");
+        await reachedFinalization.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Failed);
+        controller.Snapshot.CanCancel.Should().BeFalse();
+
+        Task lateCancellation = controller.CancelAsync();
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Failed);
+        releaseFinalization.TrySetResult();
+        await Task.WhenAll(operation, lateCancellation).WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Failed);
+        controller.Snapshot.Candidates.Should().BeEmpty();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
+        controller.Snapshot.CanCancel.Should().BeFalse();
+        controller.Snapshot.CanContinue.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task PublishedSessionFaultCannotBeMaskedByLateCancellation(bool discovery)
+    {
+        ProtocolGameCandidate valid = Candidate("late-valid", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource reachedFinalization = NewCompletion();
+        TaskCompletionSource releaseFinalization = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Validation = (_, _) => Task.FromResult(valid)
+        };
+        await using GameDiscoveryController controller = new(session)
+        {
+            BeforeOperationCompletionForTesting = () =>
+            {
+                reachedFinalization.TrySetResult();
+                releaseFinalization.Task.GetAwaiter().GetResult();
+            }
+        };
+
+        Task operation = discovery
+            ? controller.DiscoverAsync()
+            : controller.ValidateManualAsync("/games/late-valid");
+        await reachedFinalization.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
+        await WaitUntilAsync(() => controller.Snapshot.State == GameDiscoveryState.SessionFaulted);
+        controller.Snapshot.CanCancel.Should().BeFalse();
+
+        Task lateCancellation = controller.CancelAsync();
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.SessionFaulted);
+        releaseFinalization.TrySetResult();
+        await Task.WhenAll(operation, lateCancellation).WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.SessionFaulted);
+        controller.Snapshot.Candidates.Should().BeEmpty();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
+        controller.Snapshot.CanCancel.Should().BeFalse();
+        controller.Snapshot.CanContinue.Should().BeFalse();
+        session.DisposeCalls.Should().Be(1);
     }
 
     [TestCase(true)]
