@@ -136,9 +136,9 @@ internal sealed class InstallerExecutionOperation
         Func<Task> requestCancellation
     )
     {
-        this.Progress = progress;
-        this.Completion = completion;
-        this.RequestCancellationCore = requestCancellation;
+        this.Progress = progress ?? throw new ArgumentNullException(nameof(progress));
+        this.Completion = completion ?? throw new ArgumentNullException(nameof(completion));
+        this.RequestCancellationCore = requestCancellation ?? throw new ArgumentNullException(nameof(requestCancellation));
     }
 
     public Task RequestCancellationAsync() => this.RequestCancellationCore();

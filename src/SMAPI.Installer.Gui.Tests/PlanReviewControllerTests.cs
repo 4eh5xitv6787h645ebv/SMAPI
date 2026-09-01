@@ -111,6 +111,261 @@ internal sealed class PlanReviewControllerTests
         session.InspectedOperations.Should().Equal(InstallerOperation.Repair, InstallerOperation.Repair);
     }
 
+    [Test]
+    public async Task ExactExecutablePlanCanConfirmWithoutExecutingAndHandsOffExactlyOnce()
+    {
+        FakePlanSession session = new();
+        FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+        session.Confirmation = (_, _) => Task.FromResult<IConfirmedInstallerSession>(confirmed);
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Install);
+        await controller.InspectAsync();
+
+        controller.Snapshot.CanConfirm.Should().BeTrue();
+        controller.Snapshot.HandoffReady.Should().BeFalse();
+        await controller.ConfirmAsync();
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.HandoffReady);
+        controller.Snapshot.CanConfirm.Should().BeFalse();
+        controller.Snapshot.HandoffReady.Should().BeTrue();
+        session.ConfirmedPlans.Should().ContainSingle();
+        confirmed.ExecuteCalls.Should().Be(0, "confirmation alone must not mutate files");
+
+        controller.TakeConfirmedSession().Should().BeSameAs(confirmed);
+        Action secondTake = () => controller.TakeConfirmedSession();
+        secondTake.Should().Throw<ObjectDisposedException>();
+        await controller.DisposeAsync();
+        confirmed.DisposeCalls.Should().Be(0, "cleanup ownership was transferred to the caller");
+        await confirmed.DisposeAsync();
+        confirmed.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task UnappliedCandidateSelectionDisablesConfirmationUntilCleared()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability("mods/confirm.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [candidate]))
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Install);
+        await controller.InspectAsync();
+        PlanReviewCandidate choice = controller.Snapshot.Candidates.Single();
+
+        controller.SetCandidateSelection([choice]);
+        controller.Snapshot.CanConfirm.Should().BeFalse();
+        Func<Task> confirm = () => controller.ConfirmAsync();
+        await confirm.Should().ThrowAsync<InvalidOperationException>();
+        session.ConfirmedPlans.Should().BeEmpty();
+
+        controller.ClearCandidateSelection();
+        controller.Snapshot.CanConfirm.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task DisposeAtHandoffReadyDisposesTheConfirmedOwnerInsteadOfTheOldBoundOwner()
+    {
+        FakePlanSession session = new();
+        FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+        session.Confirmation = (_, _) => Task.FromResult<IConfirmedInstallerSession>(confirmed);
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Backup);
+        await controller.InspectAsync();
+        await controller.ConfirmAsync();
+
+        await controller.DisposeAsync();
+
+        confirmed.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(0, "the old bound owner became cleanup-inert after confirmation");
+    }
+
+    [Test]
+    public async Task ConcurrentConfirmationHasOneWinnerAndOneBackendCall()
+    {
+        TaskCompletionSource<IConfirmedInstallerSession> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakePlanSession session = new()
+        {
+            Confirmation = (_, _) => completion.Task
+        };
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Backup);
+        await controller.InspectAsync();
+
+        Task winner = controller.ConfirmAsync();
+        Func<Task> loser = () => controller.ConfirmAsync();
+        await loser.Should().ThrowAsync<InvalidOperationException>();
+        FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+        completion.TrySetResult(confirmed);
+        await winner;
+
+        session.ConfirmedPlans.Should().ContainSingle();
+        await controller.DisposeAsync();
+        confirmed.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task PreCancelledConfirmationPreservesTheCurrentPlanForRetry()
+    {
+        FakePlanSession session = new();
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Backup);
+        await controller.InspectAsync();
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        Func<Task> rejected = () => controller.ConfirmAsync(cancelled.Token);
+        await rejected.Should().ThrowAsync<OperationCanceledException>();
+        session.ConfirmedPlans.Should().BeEmpty();
+        controller.Snapshot.CanConfirm.Should().BeTrue();
+
+        await controller.ConfirmAsync();
+        session.ConfirmedPlans.Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task CancelPendingConfirmationDisposesALateOwnerAndNeverPublishesHandoff()
+    {
+        TaskCompletionSource<IConfirmedInstallerSession> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakePlanSession session = new() { Confirmation = (_, _) => completion.Task };
+        FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Backup);
+        await controller.InspectAsync();
+        Task confirming = controller.ConfirmAsync();
+        controller.Snapshot.CanCancel.Should().BeTrue();
+        Task cancelling = controller.CancelAsync();
+        completion.TrySetResult(confirmed);
+
+        await cancelling;
+        await confirming;
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.Cancelled);
+        controller.Snapshot.HandoffReady.Should().BeFalse();
+        confirmed.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(0);
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(0, "late exact confirmation cleanup must remain the cleanup owner");
+    }
+
+    [Test]
+    public async Task SessionFaultAtHandoffReadyDisposesConfirmedOwner()
+    {
+        FakePlanSession session = new();
+        FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+        session.Confirmation = (_, _) => Task.FromResult<IConfirmedInstallerSession>(confirmed);
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Backup);
+        await controller.InspectAsync();
+        await controller.ConfirmAsync();
+
+        session.Fail();
+        await WaitUntilAsync(() => controller.Snapshot.State == PlanReviewState.SessionFaulted);
+
+        confirmed.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(0);
+        await controller.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ForeignConfirmedOwnerFailsClosedAndDisposesBothPotentialOwners()
+    {
+        FakePlanSession session = new();
+        FakeConfirmedSession foreign = new(GameDiscoveryControllerTests.Release(), session.Game, session.SessionFaulted);
+        session.Confirmation = (_, _) => Task.FromResult<IConfirmedInstallerSession>(foreign);
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Backup);
+        await controller.InspectAsync();
+
+        await controller.ConfirmAsync();
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.Failed);
+        controller.Snapshot.HandoffReady.Should().BeFalse();
+        foreign.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
+        foreign.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task TakeAndDisposeRaceTransfersOrCleansTheConfirmedOwnerExactlyOnce()
+    {
+        for (int iteration = 0; iteration < 20; iteration++)
+        {
+            FakePlanSession session = new();
+            FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+            session.Confirmation = (_, _) => Task.FromResult<IConfirmedInstallerSession>(confirmed);
+            PlanReviewController controller = new(session);
+            controller.SelectOperation(InstallerOperation.Backup);
+            await controller.InspectAsync();
+            await controller.ConfirmAsync();
+            TaskCompletionSource start = NewCompletion();
+            IConfirmedInstallerSession? taken = null;
+
+            Task take = Task.Run(async () =>
+            {
+                await start.Task;
+                try { taken = controller.TakeConfirmedSession(); }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
+            });
+            Task dispose = Task.Run(async () =>
+            {
+                await start.Task;
+                await controller.DisposeAsync();
+            });
+            start.TrySetResult();
+            await Task.WhenAll(take, dispose);
+            if (taken is not null)
+                await taken.DisposeAsync();
+
+            confirmed.DisposeCalls.Should().Be(1);
+            session.DisposeCalls.Should().Be(0);
+        }
+    }
+
+    [Test]
+    public async Task TakeAndCommittedFaultRaceTransfersOrCleansTheConfirmedOwnerExactlyOnce()
+    {
+        for (int iteration = 0; iteration < 10; iteration++)
+        {
+            FakePlanSession session = new();
+            FakeConfirmedSession confirmed = new(session.Release, session.Game, session.SessionFaulted);
+            session.Confirmation = (_, _) => Task.FromResult<IConfirmedInstallerSession>(confirmed);
+            PlanReviewController controller = new(session);
+            controller.SelectOperation(InstallerOperation.Backup);
+            await controller.InspectAsync();
+            await controller.ConfirmAsync();
+            TaskCompletionSource atCommit = NewCompletion();
+            TaskCompletionSource releaseCommit = NewCompletion();
+            controller.BeforeSessionFaultCommitForTesting = () =>
+            {
+                atCommit.TrySetResult();
+                releaseCommit.Task.GetAwaiter().GetResult();
+            };
+            session.Fail();
+            await atCommit.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            IConfirmedInstallerSession? taken = null;
+            Task take = Task.Run(() =>
+            {
+                try { taken = controller.TakeConfirmedSession(); }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
+            });
+            releaseCommit.TrySetResult();
+            await take;
+            if (taken is not null)
+                await taken.DisposeAsync();
+            else
+                await WaitUntilAsync(() => controller.Snapshot.State == PlanReviewState.SessionFaulted);
+            await controller.DisposeAsync();
+
+            confirmed.DisposeCalls.Should().Be(1);
+            session.DisposeCalls.Should().Be(0);
+        }
+    }
+
     [TestCase(ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest)]
     [TestCase(ProtocolPrePlanErrorCode.InspectionFailed, ProtocolNextAction.InspectAgain)]
     [TestCase(ProtocolPrePlanErrorCode.PermissionDenied, ProtocolNextAction.ReviewFilesystem)]
@@ -986,7 +1241,10 @@ internal sealed class PlanReviewControllerTests
             [],
             [],
             0
-        );
+        )
+        {
+            Confirmation = new InstallerPlanConfirmation()
+        };
     }
 
     private static InstallerPlanCandidateCount CandidateCount(int count)
@@ -1083,7 +1341,9 @@ internal sealed class PlanReviewControllerTests
             = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(operation));
         public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; }
             = (_, _) => throw new AssertionException("Candidate approval was not expected.");
+        public Func<InstallerPlanConfirmation, CancellationToken, Task<IConfirmedInstallerSession>>? Confirmation { get; set; }
         public Func<Task> Disposal { get; init; } = () => Task.CompletedTask;
+        public List<InstallerPlanConfirmation> ConfirmedPlans { get; } = [];
 
         public void Fail()
         {
@@ -1111,10 +1371,46 @@ internal sealed class PlanReviewControllerTests
             return this.Approval(snapshot, cancellationToken);
         }
 
+        public Task<IConfirmedInstallerSession> ConfirmPlanAsync(
+            InstallerPlanConfirmation confirmation,
+            CancellationToken cancellationToken = default
+        )
+        {
+            lock (this.Sync)
+                this.ConfirmedPlans.Add(confirmation);
+            return this.Confirmation?.Invoke(confirmation, cancellationToken)
+                ?? Task.FromResult<IConfirmedInstallerSession>(new FakeConfirmedSession(this.Release, this.Game, this.SessionFaulted));
+        }
+
         public async ValueTask DisposeAsync()
         {
             Interlocked.Increment(ref this.DisposeCount);
             await this.Disposal();
+        }
+    }
+
+    private sealed class FakeConfirmedSession(
+        ProtocolReleaseIdentity release,
+        VerifiedGamePresentation game,
+        Task<InstallerProtocolClientException> sessionFaulted
+    ) : IConfirmedInstallerSession
+    {
+        private int DisposeCount;
+        private int ExecuteCount;
+        public ProtocolReleaseIdentity Release { get; } = release;
+        public VerifiedGamePresentation Game { get; } = game;
+        public Task<InstallerProtocolClientException> SessionFaulted { get; } = sessionFaulted;
+        public int DisposeCalls => Volatile.Read(ref this.DisposeCount);
+        public int ExecuteCalls => Volatile.Read(ref this.ExecuteCount);
+        public Task<InstallerExecutionOperation> ExecuteAsync(CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref this.ExecuteCount);
+            throw new AssertionException("Plan confirmation must not execute the plan.");
+        }
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Increment(ref this.DisposeCount);
+            return ValueTask.CompletedTask;
         }
     }
 

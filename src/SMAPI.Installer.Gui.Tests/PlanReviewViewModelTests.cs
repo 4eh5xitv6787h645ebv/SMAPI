@@ -68,6 +68,7 @@ internal sealed partial class PlanReviewPresentationTests
         ) with
         {
             HasBlockingConflicts = true,
+            Confirmation = null,
             Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
             OperationCounts =
             [
@@ -642,7 +643,10 @@ internal sealed partial class PlanReviewPresentationTests
             [],
             [],
             0
-        );
+        )
+        {
+            Confirmation = new InstallerPlanConfirmation()
+        };
     }
 
     private static InstallerReadOnlyPlanSuccess CandidatePlan(

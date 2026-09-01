@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Planning;
@@ -724,6 +725,327 @@ internal sealed class VerifiedInstallerSessionTests
     }
 
     [Test]
+    public async Task PreCancelledExecutionPreservesTheExactConfirmedOwnerForOneRetry()
+    {
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-precancel", LinuxGameFolderStatus.Valid)])
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        await FluentActions.Awaiting(() => confirmed.ExecuteAsync(cancelled.Token)).Should().ThrowAsync<OperationCanceledException>();
+        client.ExecutedAuthorities.Should().BeEmpty();
+
+        InstallerExecutionOperation execution = await confirmed.ExecuteAsync();
+        client.ExecutedAuthorities.Should().ContainSingle();
+        await FluentActions.Awaiting(() => confirmed.ExecuteAsync()).Should().ThrowAsync<ObjectDisposedException>();
+        await execution.Completion;
+        await confirmed.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task CallerCancellationRemainsLiveAfterExecutionOperationIsReturned()
+    {
+        TaskCompletionSource<InstallerExecutionResult> terminal = NewCompletion<InstallerExecutionResult>();
+        TaskCompletionSource cancellationObserved = NewCompletion();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-token", LinuxGameFolderStatus.Valid)]),
+            Execution = (_, token) =>
+            {
+                token.Register(() => cancellationObserved.TrySetResult());
+                return Task.FromResult(ExecutionOperation(terminal));
+            }
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        using CancellationTokenSource cancellation = new();
+
+        _ = await confirmed.ExecuteAsync(cancellation.Token);
+        cancellation.Cancel();
+        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        terminal.TrySetResult(new InstallerExecutionStateUnknownResult());
+        await confirmed.DisposeAsync();
+    }
+
+    [Test]
+    public async Task DisposeDuringExecutionRequestsCancellationAndAwaitsTerminalBeforeClientCleanup()
+    {
+        TaskCompletionSource<InstallerExecutionResult> terminal = NewCompletion<InstallerExecutionResult>();
+        int cancellationRequests = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-dispose", LinuxGameFolderStatus.Valid)]),
+            Execution = (_, _) => Task.FromResult(ExecutionOperation(terminal, () =>
+            {
+                Interlocked.Increment(ref cancellationRequests);
+                return Task.CompletedTask;
+            }))
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        _ = await confirmed.ExecuteAsync();
+        await bound.DisposeAsync();
+        await session.DisposeAsync();
+        client.DisposeCalls.Should().Be(0, "stale pre-handoff owners stay cleanup-inert during execution");
+
+        Task first = confirmed.DisposeAsync().AsTask();
+        Task second = confirmed.DisposeAsync().AsTask();
+        first.Should().BeSameAs(second);
+        await WaitUntilAsync(() => Volatile.Read(ref cancellationRequests) == 1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(0);
+        terminal.TrySetResult(new InstallerExecutionStateUnknownResult());
+        await first;
+
+        client.DisposeCalls.Should().Be(1);
+        cancellationRequests.Should().Be(1);
+        await bound.DisposeAsync();
+    }
+
+    [TestCase(HostileStartFailureKind.Unexpected)]
+    [TestCase(HostileStartFailureKind.ProtocolClient)]
+    [TestCase(HostileStartFailureKind.UnrequestedCancellation)]
+    [TestCase(HostileStartFailureKind.ObjectDisposed)]
+    public async Task HostileExecutionStartFailureIsSanitizedAndFailsStop(HostileStartFailureKind kind)
+    {
+        Exception failure = kind switch
+        {
+            HostileStartFailureKind.Unexpected => new InvalidOperationException("private /home/wife/Mods sentinel"),
+            HostileStartFailureKind.ProtocolClient => new InstallerProtocolClientException("private /home/wife/Mods sentinel"),
+            HostileStartFailureKind.UnrequestedCancellation => new OperationCanceledException("private /home/wife/Mods sentinel"),
+            HostileStartFailureKind.ObjectDisposed => new ObjectDisposedException("private /home/wife/Mods sentinel"),
+            _ => throw new AssertionException("Unsupported hostile start failure.")
+        };
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-hostile", LinuxGameFolderStatus.Valid)]),
+            Execution = (_, _) => throw failure
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+
+        InstallerProtocolClientException error = (await FluentActions.Awaiting(() => confirmed.ExecuteAsync())
+            .Should().ThrowAsync<InstallerProtocolClientException>()).Which;
+        error.Message.Should().NotContain("wife").And.NotContain("/home").And.NotContain("Mods");
+        client.DisposeCalls.Should().Be(1);
+        await FluentActions.Awaiting(() => confirmed.ExecuteAsync()).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task RequestedExecutionStartCancellationPreservesOnlySanitizedCancellationSemantics()
+    {
+        TaskCompletionSource started = NewCompletion();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-cancel-sanitize", LinuxGameFolderStatus.Valid)]),
+            Execution = async (_, token) =>
+            {
+                started.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException)
+                {
+                    throw new OperationCanceledException("private /home/wife/Mods sentinel", token);
+                }
+                throw new AssertionException("The cancelled execution start unexpectedly continued.");
+            }
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        using CancellationTokenSource cancellation = new();
+        Task<InstallerExecutionOperation> executing = confirmed.ExecuteAsync(cancellation.Token);
+        await started.Task;
+
+        cancellation.Cancel();
+
+        OperationCanceledException error = (await FluentActions.Awaiting(() => executing)
+            .Should().ThrowAsync<OperationCanceledException>()).Which;
+        error.Message.Should().NotContain("wife").And.NotContain("/home").And.NotContain("Mods");
+        error.CancellationToken.Should().Be(cancellation.Token);
+        client.DisposeCalls.Should().Be(1);
+        await FluentActions.Awaiting(() => confirmed.ExecuteAsync()).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task DisposalDrivenExecutionStartCancellationUsesASanitizedCancelledFallbackToken()
+    {
+        TaskCompletionSource started = NewCompletion();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-dispose-cancel-sanitize", LinuxGameFolderStatus.Valid)]),
+            Execution = async (_, token) =>
+            {
+                started.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException)
+                {
+                    throw new OperationCanceledException("private /home/wife/Mods fallback sentinel", token);
+                }
+                throw new AssertionException("The disposal-cancelled execution start unexpectedly continued.");
+            }
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        Task<InstallerExecutionOperation> executing = confirmed.ExecuteAsync(CancellationToken.None);
+        await started.Task;
+
+        Task disposal = confirmed.DisposeAsync().AsTask();
+
+        OperationCanceledException error = (await FluentActions.Awaiting(() => executing)
+            .Should().ThrowAsync<OperationCanceledException>()).Which;
+        error.Message.Should().NotContain("wife").And.NotContain("/home").And.NotContain("Mods").And.NotContain("fallback sentinel");
+        error.CancellationToken.IsCancellationRequested.Should().BeTrue();
+        error.CancellationToken.Should().NotBe(CancellationToken.None);
+        await disposal;
+        client.DisposeCalls.Should().Be(1);
+        await confirmed.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ConcurrentExecutionAdmissionHasExactlyOneWinnerAndOneClientCall()
+    {
+        TaskCompletionSource start = NewCompletion();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-concurrent", LinuxGameFolderStatus.Valid)])
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+
+        async Task<(InstallerExecutionOperation? Operation, Exception? Error)> AttemptAsync()
+        {
+            await start.Task;
+            try { return (await confirmed.ExecuteAsync(), null); }
+            catch (Exception error) { return (null, error); }
+        }
+
+        Task<(InstallerExecutionOperation? Operation, Exception? Error)>[] attempts = [AttemptAsync(), AttemptAsync()];
+        start.TrySetResult();
+        (InstallerExecutionOperation? Operation, Exception? Error)[] results = await Task.WhenAll(attempts);
+
+        results.Should().ContainSingle(result => result.Operation != null && result.Error == null);
+        results.Should().ContainSingle(result => result.Operation == null && result.Error != null && result.Error.GetType() == typeof(ObjectDisposedException));
+        client.ExecutedAuthorities.Should().ContainSingle();
+        await confirmed.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task DisposeWhileExecutionStartIsPendingCancelsAndSettlesLateOperationBeforeCleanup()
+    {
+        TaskCompletionSource<InstallerExecutionOperation> start = NewCompletion<InstallerExecutionOperation>();
+        TaskCompletionSource<InstallerExecutionResult> terminal = NewCompletion<InstallerExecutionResult>();
+        TaskCompletionSource tokenCancelled = NewCompletion();
+        int cancellationRequests = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-start-dispose", LinuxGameFolderStatus.Valid)]),
+            Execution = (_, token) =>
+            {
+                token.Register(() => tokenCancelled.TrySetResult());
+                return start.Task;
+            }
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+
+        Task<InstallerExecutionOperation> starting = confirmed.ExecuteAsync();
+        Task disposal = confirmed.DisposeAsync().AsTask();
+        await tokenCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        client.DisposeCalls.Should().Be(0);
+        start.TrySetResult(ExecutionOperation(terminal, () =>
+        {
+            Interlocked.Increment(ref cancellationRequests);
+            return Task.CompletedTask;
+        }));
+        _ = await starting;
+        await WaitUntilAsync(() => Volatile.Read(ref cancellationRequests) == 1);
+        client.DisposeCalls.Should().Be(0);
+        terminal.TrySetResult(new InstallerExecutionStateUnknownResult());
+        await disposal;
+
+        client.DisposeCalls.Should().Be(1);
+        cancellationRequests.Should().Be(1);
+    }
+
+    [Test]
+    public async Task CompletedExecutionNeverRestoresStaleRootOrBoundCleanupAuthority()
+    {
+        TaskCompletionSource<InstallerExecutionResult> terminal = NewCompletion<InstallerExecutionResult>();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("execute-terminal-owner", LinuxGameFolderStatus.Valid)]),
+            Execution = (_, _) => Task.FromResult(ExecutionOperation(terminal))
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        InstallerExecutionOperation execution = await confirmed.ExecuteAsync();
+        terminal.TrySetResult(new InstallerExecutionStateUnknownResult());
+        await execution.Completion;
+        await Task.Yield();
+
+        await session.DisposeAsync();
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(0);
+        await confirmed.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ExecutionStartFaultAndConfirmedDisposalShareOneCleanup()
+    {
+        for (int iteration = 0; iteration < 20; iteration++)
+        {
+            TaskCompletionSource<InstallerExecutionOperation> start = NewCompletion<InstallerExecutionOperation>();
+            RecordingClient client = new()
+            {
+                Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate($"execute-start-fault-{iteration}", LinuxGameFolderStatus.Valid)]),
+                Execution = (_, _) => start.Task
+            };
+            VerifiedInstallerSession session = new(CreateRelease(), client);
+            IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+            InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+            IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+            Task<InstallerExecutionOperation> starting = confirmed.ExecuteAsync();
+            Task disposal = confirmed.DisposeAsync().AsTask();
+            start.TrySetException(new InvalidOperationException("private start sentinel"));
+
+            await FluentActions.Awaiting(() => starting).Should().ThrowAsync<Exception>();
+            await disposal;
+            client.DisposeCalls.Should().Be(1);
+            await bound.DisposeAsync();
+            client.DisposeCalls.Should().Be(1);
+        }
+    }
+
+    [Test]
     public async Task BoundCandidateApprovalContainsExactReferencesReplacesTheIssuedSetAndClearsItOnRejection()
     {
         InstallerReadOnlyPlanCandidate first = CandidateCapability('4', "mods/first.dll", false);
@@ -1192,6 +1514,39 @@ internal sealed class VerifiedInstallerSessionTests
     private static TaskCompletionSource<T> NewCompletion<T>()
         => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    private static InstallerExecutionOperation ExecutionOperation(
+        TaskCompletionSource<InstallerExecutionResult>? completion = null,
+        Func<Task>? cancellation = null
+    )
+    {
+        Channel<InstallerExecutionProgress> progress = Channel.CreateUnbounded<InstallerExecutionProgress>();
+        progress.Writer.TryComplete();
+        return new(
+            progress.Reader,
+            completion?.Task ?? Task.FromResult<InstallerExecutionResult>(new InstallerExecutionStateUnknownResult()),
+            cancellation ?? (() => Task.CompletedTask)
+        );
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(2);
+        while (!condition())
+        {
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException("The expected execution state was not reached.");
+            await Task.Delay(10);
+        }
+    }
+
+    internal enum HostileStartFailureKind
+    {
+        Unexpected,
+        ProtocolClient,
+        UnrequestedCancellation,
+        ObjectDisposed
+    }
+
     private sealed class RecordingClient : IInstallerProtocolClient
     {
         public TaskCompletionSource<InstallerProtocolClientException> Fault { get; } =
@@ -1209,10 +1564,13 @@ internal sealed class VerifiedInstallerSessionTests
             (_, _) => throw new AssertionException("Candidate approval wasn't expected.");
         public Func<InstallerPlanConfirmation, CancellationToken, Task<InstallerConfirmedPlanAuthority>> Confirmation { get; init; } =
             (_, _) => Task.FromResult(new InstallerConfirmedPlanAuthority());
+        public Func<InstallerConfirmedPlanAuthority, CancellationToken, Task<InstallerExecutionOperation>> Execution { get; init; } =
+            (_, _) => Task.FromResult(ExecutionOperation());
         public List<string> InspectedPaths { get; } = [];
         public List<InstallerOperation> InspectedOperations { get; } = [];
         public List<IReadOnlyList<InstallerReadOnlyPlanCandidate>> ApprovedCandidates { get; } = [];
         public List<InstallerPlanConfirmation> ConfirmedPlans { get; } = [];
+        public List<InstallerConfirmedPlanAuthority> ExecutedAuthorities { get; } = [];
         public int DiscoverCalls { get; private set; }
         public int ValidateCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -1275,6 +1633,15 @@ internal sealed class VerifiedInstallerSessionTests
             this.ConfirmedPlans.Add(confirmation);
             this.ConfirmationStarted.TrySetResult();
             return this.Confirmation(confirmation, cancellationToken);
+        }
+
+        public Task<InstallerExecutionOperation> ExecutePlanAsync(
+            InstallerConfirmedPlanAuthority authority,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.ExecutedAuthorities.Add(authority);
+            return this.Execution(authority, cancellationToken);
         }
 
         public ValueTask DisposeAsync()
