@@ -273,7 +273,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 .Select(candidate => this.CurrentCandidateAuthorities[candidate])
                 .ToArray();
             if (backendCandidates.Length > ProtocolJsonSerializer.MaxPlanCandidates - this.AppliedCandidateApprovalCountValue)
-                throw new InvalidOperationException("The bounded candidate-approval history is full; start a fresh inspection.");
+                throw new InvalidOperationException("The selection exceeds the remaining bounded candidate-approval capacity; start a fresh inspection.");
             operation = new(
                 ++this.GenerationValue,
                 selected,
@@ -610,7 +610,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
             AppliedCandidateApprovalCount = this.AppliedCandidateApprovalCountValue,
             HasAppliedCandidateApprovals = this.AppliedCandidateApprovalCountValue > 0,
             CanSelectCandidates = canSelectCandidates,
-            CanApplyCandidates = canSelectCandidates && selectedCandidates.Length > 0,
+            CanApplyCandidates = canSelectCandidates
+                && selectedCandidates.Length > 0
+                && selectedCandidates.Length <= ProtocolJsonSerializer.MaxPlanCandidates - this.AppliedCandidateApprovalCountValue,
             CanClearCandidates = canSelectCandidates && selectedCandidates.Length > 0,
             CanStartFreshInspection = canSelect && this.AppliedCandidateApprovalCountValue > 0
         };

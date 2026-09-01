@@ -699,17 +699,68 @@ internal sealed class PlanReviewControllerTests
         await controller.ApplyCandidateSelectionAsync();
         controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(ProtocolJsonSerializer.MaxPlanCandidates);
         PlanReviewCandidate remainingChoice = controller.Snapshot.Candidates.Single();
+        controller.Snapshot.CanSelectCandidates.Should().BeTrue();
         controller.SetCandidateSelection([remainingChoice]);
+        controller.Snapshot.CanApplyCandidates.Should().BeFalse("no cumulative approval capacity remains");
+        controller.Snapshot.CanClearCandidates.Should().BeTrue("capacity must not trap a local selection");
 
         Func<Task> overCapacity = () => controller.ApplyCandidateSelectionAsync();
-        await overCapacity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*history is full*");
+        await overCapacity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*remaining*capacity*");
         controller.Snapshot.SelectedCandidates.Should().ContainSingle().Which.Should().BeSameAs(remainingChoice);
         session.ApprovedCandidates.Should().ContainSingle("the invalid request is rejected before a backend call");
+        controller.ClearCandidateSelection();
+        controller.Snapshot.SelectedCandidates.Should().BeEmpty();
+        controller.Snapshot.CanApplyCandidates.Should().BeFalse();
 
         controller.SelectOperation(InstallerOperation.Backup);
         controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(0);
         controller.Snapshot.Candidates.Should().BeEmpty();
         controller.Snapshot.SelectedCandidates.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task PartialCandidateApprovalCapacityAdvertisesOnlySelectionsThatAdmissionCanAccept()
+    {
+        InstallerReadOnlyPlanCandidate[] initial = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates - 1)
+            .Select(index => CandidateCapability($"mods/initial-{index:D3}.dll", provisional: false))
+            .ToArray();
+        InstallerReadOnlyPlanCandidate firstRemaining = CandidateCapability("mods/remaining-first.dll", provisional: false);
+        InstallerReadOnlyPlanCandidate secondRemaining = CandidateCapability("mods/remaining-second.dll", provisional: false);
+        int approvalCount = 0;
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, initial)),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(
+                InstallerOperation.Update,
+                Interlocked.Increment(ref approvalCount) == 1 ? [firstRemaining, secondRemaining] : []
+            ))
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+        await controller.InspectAsync();
+        controller.SetCandidateSelection(controller.Snapshot.Candidates);
+        controller.Snapshot.CanApplyCandidates.Should().BeTrue();
+        await controller.ApplyCandidateSelectionAsync();
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(ProtocolJsonSerializer.MaxPlanCandidates - 1);
+
+        PlanReviewCandidate[] remainingChoices = controller.Snapshot.Candidates.ToArray();
+        controller.SetCandidateSelection(remainingChoices);
+        PlanReviewSnapshot oversized = controller.Snapshot;
+        oversized.CanSelectCandidates.Should().BeTrue();
+        oversized.CanApplyCandidates.Should().BeFalse("two selected candidates exceed the one remaining approval slot");
+        oversized.CanClearCandidates.Should().BeTrue();
+        Func<Task> overCapacity = () => controller.ApplyCandidateSelectionAsync();
+        await overCapacity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*remaining*capacity*");
+        session.ApprovedCandidates.Should().ContainSingle("capability and admission use the same remaining-capacity bound");
+        controller.Snapshot.SelectedCandidates.Should().Equal(remainingChoices);
+
+        controller.ClearCandidateSelection();
+        controller.SetCandidateSelection([remainingChoices[0]]);
+        controller.Snapshot.CanApplyCandidates.Should().BeTrue("one selected candidate exactly fits the remaining approval slot");
+        await controller.ApplyCandidateSelectionAsync();
+        controller.Snapshot.AppliedCandidateApprovalCount.Should().Be(ProtocolJsonSerializer.MaxPlanCandidates);
+        session.ApprovedCandidates.Should().HaveCount(2);
+        session.ApprovedCandidates[1].Should().Equal(firstRemaining);
     }
 
     [Test]
