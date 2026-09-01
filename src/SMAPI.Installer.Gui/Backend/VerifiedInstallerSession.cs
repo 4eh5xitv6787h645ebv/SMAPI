@@ -10,6 +10,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     {
         Discovery,
         Bound,
+        Confirming,
+        Confirmed,
         Terminal,
         Disposing,
         Disposed
@@ -22,6 +24,9 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private readonly HashSet<ProtocolGameCandidate> DiscoveredCandidates = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<InstallerReadOnlyPlanCandidate> CurrentPlanCandidates = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<InstallerReadOnlyPlanCandidate> IssuedPlanCandidates = new(ReferenceEqualityComparer.Instance);
+    private InstallerPlanConfirmation? CurrentPlanConfirmation;
+    private InstallerPlanConfirmation? CurrentClientConfirmation;
+    private InstallerConfirmedPlanAuthority? CurrentConfirmedAuthority;
     private ProtocolGameCandidate? LatestManualCandidate;
     private Task? DisposalTask;
     private SessionStage Stage = SessionStage.Discovery;
@@ -92,7 +97,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         {
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
-            if (this.Stage is SessionStage.Bound or SessionStage.Terminal)
+            if (this.Stage is SessionStage.Bound or SessionStage.Confirming or SessionStage.Confirmed or SessionStage.Terminal)
                 return ValueTask.CompletedTask;
             this.Stage = SessionStage.Disposing;
             return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
@@ -160,10 +165,28 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         {
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
-            if (this.Stage is not (SessionStage.Bound or SessionStage.Terminal))
+            if (this.Stage == SessionStage.Confirmed)
+                return ValueTask.CompletedTask;
+            if (this.Stage is not (SessionStage.Bound or SessionStage.Confirming or SessionStage.Terminal))
                 return this.Stage == SessionStage.Disposed
                     ? ValueTask.CompletedTask
                     : throw new InvalidOperationException("The bound installer session no longer owns backend cleanup.");
+            this.Stage = SessionStage.Disposing;
+            return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
+        }
+    }
+
+    private ValueTask DisposeFromConfirmedSessionAsync(InstallerConfirmedPlanAuthority authority)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        lock (this.DisposeLock)
+        {
+            if (this.DisposalTask is not null)
+                return new ValueTask(this.DisposalTask);
+            if (this.Stage != SessionStage.Confirmed || !ReferenceEquals(this.CurrentConfirmedAuthority, authority))
+                return this.Stage == SessionStage.Disposed
+                    ? ValueTask.CompletedTask
+                    : throw new InvalidOperationException("The confirmed installer session no longer owns backend cleanup.");
             this.Stage = SessionStage.Disposing;
             return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
         }
@@ -186,6 +209,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
         InstallerReadOnlyPlanResult? result = null;
         InstallerReadOnlyPlanCandidate[]? stableResultCandidates = null;
+        InstallerPlanConfirmation? clientConfirmation = null;
+        InstallerPlanConfirmation? sessionConfirmation = null;
         Exception? failure = null;
         try
         {
@@ -208,6 +233,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 if (this.Stage != SessionStage.Bound)
                     throw new ObjectDisposedException(nameof(IPlanInspectionSession));
                 this.CurrentPlanCandidates.Clear();
+                this.ClearCurrentPlanConfirmation();
             }
             result = await this.Client.InspectPlanAsync(
                 exactCanonicalPath,
@@ -217,7 +243,12 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             if (result is InstallerReadOnlyPlanSuccess success)
             {
                 stableResultCandidates = SnapshotBackendResultCandidates(success.Candidates);
-                result = success with { Candidates = Array.AsReadOnly(stableResultCandidates) };
+                (clientConfirmation, sessionConfirmation) = RemintConfirmation(success);
+                result = success with
+                {
+                    Candidates = Array.AsReadOnly(stableResultCandidates),
+                    Confirmation = sessionConfirmation
+                };
             }
             lock (this.DisposeLock)
             {
@@ -232,6 +263,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 {
                     if (!this.TryRetainIssuedPlanCandidates(stableResultCandidates!))
                         throw new InstallerProtocolClientException("The installer backend returned invalid candidate capabilities.");
+                    this.CurrentClientConfirmation = clientConfirmation;
+                    this.CurrentPlanConfirmation = sessionConfirmation;
                 }
             }
         }
@@ -271,6 +304,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
         InstallerReadOnlyPlanResult? result = null;
         InstallerReadOnlyPlanCandidate[]? stableResultCandidates = null;
+        InstallerPlanConfirmation? clientConfirmation = null;
+        InstallerPlanConfirmation? sessionConfirmation = null;
         Exception? failure = null;
         try
         {
@@ -301,6 +336,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                         throw new ArgumentException("Every candidate must be an exact current capability issued by this bound session.", nameof(candidates));
                 }
                 this.CurrentPlanCandidates.Clear();
+                this.ClearCurrentPlanConfirmation();
             }
 
             try
@@ -309,7 +345,12 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 if (result is InstallerReadOnlyPlanSuccess success)
                 {
                     stableResultCandidates = SnapshotBackendResultCandidates(success.Candidates);
-                    result = success with { Candidates = Array.AsReadOnly(stableResultCandidates) };
+                    (clientConfirmation, sessionConfirmation) = RemintConfirmation(success);
+                    result = success with
+                    {
+                        Candidates = Array.AsReadOnly(stableResultCandidates),
+                        Confirmation = sessionConfirmation
+                    };
                 }
                 lock (this.DisposeLock)
                 {
@@ -324,6 +365,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                     {
                         if (!this.TryRetainIssuedPlanCandidates(stableResultCandidates!))
                             throw new InstallerProtocolClientException("The installer backend returned invalid replacement candidate capabilities.");
+                        this.CurrentClientConfirmation = clientConfirmation;
+                        this.CurrentPlanConfirmation = sessionConfirmation;
                     }
                 }
             }
@@ -345,6 +388,97 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         if (result is InstallerReadOnlyPlanRejection { IsTerminal: true })
             await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
         return result!;
+    }
+
+    private async Task<IConfirmedInstallerSession> ConfirmBoundPlanAsync(
+        VerifiedGamePresentation game,
+        InstallerPlanConfirmation confirmation,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(confirmation);
+        CancellationToken lifetime;
+        InstallerPlanConfirmation clientConfirmation;
+        lock (this.DisposeLock)
+        {
+            if (this.Stage != SessionStage.Bound)
+                throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+            if (!ReferenceEquals(this.CurrentPlanConfirmation, confirmation) || this.CurrentClientConfirmation is null)
+                throw new ArgumentException("The confirmation must be the exact current capability issued by this bound session.", nameof(confirmation));
+            clientConfirmation = this.CurrentClientConfirmation;
+
+            // Admission is synchronous and exclusive. Cancellation, fault, or disposal after this point revokes the
+            // plan and settles the backend session instead of restoring a consumed confirmation capability.
+            this.ClearCurrentPlanConfirmation();
+            this.CurrentPlanCandidates.Clear();
+            this.Stage = SessionStage.Confirming;
+            lifetime = this.Lifetime.Token;
+        }
+        using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
+        bool gateEntered = false;
+        InstallerConfirmedPlanAuthority? authority = null;
+        Exception? failure = null;
+        try
+        {
+            await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
+            gateEntered = true;
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Confirming)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+            }
+
+            authority = await this.Client.ConfirmPlanAsync(clientConfirmation, request.Token).ConfigureAwait(false);
+            if (authority is null)
+                throw new InstallerProtocolClientException("The installer backend returned an invalid confirmed-plan authority.");
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Confirming)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                if (this.Client.SessionFaulted.IsCompleted)
+                    throw new InstallerProtocolClientException("The verified installer session faulted before confirmation ownership could be accepted.");
+                request.Token.ThrowIfCancellationRequested();
+                this.CurrentConfirmedAuthority = authority;
+                this.Stage = SessionStage.Confirmed;
+                return new ConfirmedInstallerSession(this, this.Release, game, authority);
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        finally
+        {
+            if (gateEntered)
+                this.CommandGate.Release();
+        }
+
+        await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+        ExceptionDispatchInfo.Capture(failure!).Throw();
+        throw new InvalidOperationException("The confirmation failure did not propagate.");
+    }
+
+    private static (InstallerPlanConfirmation? Client, InstallerPlanConfirmation? Session) RemintConfirmation(
+        InstallerReadOnlyPlanSuccess success
+    )
+    {
+        InstallerPlanConfirmation? client = success.Confirmation;
+        if (success.HasBlockingConflicts)
+        {
+            if (client is not null)
+                throw new InstallerProtocolClientException("The installer backend issued confirmation authority for a blocked plan.");
+            return (null, null);
+        }
+        if (client is null)
+            throw new InstallerProtocolClientException("The installer backend omitted confirmation authority for an executable plan.");
+        return (client, new InstallerPlanConfirmation());
+    }
+
+    /// <remarks>The caller must hold <see cref="DisposeLock"/>.</remarks>
+    private void ClearCurrentPlanConfirmation()
+    {
+        this.CurrentPlanConfirmation = null;
+        this.CurrentClientConfirmation = null;
     }
 
     private static InstallerReadOnlyPlanCandidate[] SnapshotBackendResultCandidates(IReadOnlyList<InstallerReadOnlyPlanCandidate>? candidates)
@@ -407,7 +541,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 return new ObjectDisposedException(nameof(IPlanInspectionSession));
             if (this.Client.SessionFaulted.IsCompleted)
                 return new InstallerProtocolClientException("The verified installer session faulted before the plan result could be accepted.");
-            if (this.Stage == SessionStage.Bound)
+            if (this.Stage is SessionStage.Bound or SessionStage.Confirming)
                 this.Stage = SessionStage.Terminal;
             return failure;
         }
@@ -466,6 +600,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 this.ClearIssuedCandidates();
                 this.CurrentPlanCandidates.Clear();
                 this.IssuedPlanCandidates.Clear();
+                this.ClearCurrentPlanConfirmation();
+                this.CurrentConfirmedAuthority = null;
                 this.Stage = SessionStage.Disposed;
             }
         }
@@ -512,5 +648,33 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
 
         public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
             => this.Owner.ApproveBoundPlanCandidatesAsync(candidates, cancellationToken);
+
+        public Task<IConfirmedInstallerSession> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
+            => this.Owner.ConfirmBoundPlanAsync(this.Game, confirmation, cancellationToken);
+    }
+
+    private sealed class ConfirmedInstallerSession : IConfirmedInstallerSession
+    {
+        private readonly VerifiedInstallerSession Owner;
+        private readonly InstallerConfirmedPlanAuthority Authority;
+
+        public ProtocolReleaseIdentity Release { get; }
+        public VerifiedGamePresentation Game { get; }
+        public Task<InstallerProtocolClientException> SessionFaulted => this.Owner.SessionFaulted;
+
+        public ConfirmedInstallerSession(
+            VerifiedInstallerSession owner,
+            ProtocolReleaseIdentity release,
+            VerifiedGamePresentation game,
+            InstallerConfirmedPlanAuthority authority
+        )
+        {
+            this.Owner = owner;
+            this.Release = release;
+            this.Game = game;
+            this.Authority = authority;
+        }
+
+        public ValueTask DisposeAsync() => this.Owner.DisposeFromConfirmedSessionAsync(this.Authority);
     }
 }

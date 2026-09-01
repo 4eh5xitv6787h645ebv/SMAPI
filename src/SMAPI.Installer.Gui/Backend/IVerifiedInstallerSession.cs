@@ -22,6 +22,24 @@ internal interface IPlanInspectionSession : IAsyncDisposable
     /// <summary>Reinspect the current plan with an additive set of exact backend-issued file candidates.</summary>
     Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted session doesn't support candidate approval.");
+
+    /// <summary>
+    /// Consume this layer's exact current confirmation capability and transfer backend cleanup ownership to a sealed
+    /// confirmed-plan session. Confirmation alone performs no filesystem mutation.
+    /// </summary>
+    Task<IConfirmedInstallerSession> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("This restricted session doesn't support plan confirmation.");
+}
+
+/// <summary>
+/// The sealed capability-reduced owner produced after exact plan confirmation. This slice deliberately exposes no
+/// execution, progress, cancellation, recovery, rollback, or mutation command.
+/// </summary>
+internal interface IConfirmedInstallerSession : IAsyncDisposable
+{
+    ProtocolReleaseIdentity Release { get; }
+    VerifiedGamePresentation Game { get; }
+    Task<InstallerProtocolClientException> SessionFaulted { get; }
 }
 
 /// <summary>Bounded, non-authoritative display data for an exact valid game-folder selection.</summary>

@@ -26,6 +26,10 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
     /// <summary>Reinspect the retained exact plan after approving an additive set of its issued candidates.</summary>
     Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted client doesn't support candidate approval.");
+
+    /// <summary>Consume the exact current executable-plan capability and confirm its retained protocol binding.</summary>
+    Task<InstallerConfirmedPlanAuthority> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("This restricted client doesn't support plan confirmation.");
 }
 
 /// <summary>

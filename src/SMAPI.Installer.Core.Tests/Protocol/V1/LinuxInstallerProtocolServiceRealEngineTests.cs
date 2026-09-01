@@ -63,7 +63,10 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
             PlanEvent backup = (PlanEvent)await backupService.HandleAsync(new InspectPlanRequest(backupService.SessionId, game, InstallerOperation.Backup, null, null));
             backup.CanExecute.Should().BeTrue();
             backup.PlanDigest.Should().NotBe(backup.ExecutionBindingDigest);
-            await backupService.HandleAsync(new ConfirmPlanRequest(backupService.SessionId, backup.PlanId, backup.PlanDigest));
+            string[] beforeConfirmation = SnapshotTree(game);
+            CommandAcknowledgedEvent confirmed = (CommandAcknowledgedEvent)await backupService.HandleAsync(new ConfirmPlanRequest(backupService.SessionId, backup.PlanId, backup.PlanDigest));
+            confirmed.Acknowledgement.Should().Be(ProtocolAcknowledgementKind.PlanConfirmed);
+            SnapshotTree(game).Should().Equal(beforeConfirmation, "confirmation transfers protocol authority but performs no filesystem mutation");
             SuccessEvent result = (SuccessEvent)await backupService.HandleAsync(new ExecutePlanRequest(backupService.SessionId, backup.PlanId, backup.PlanDigest));
             result.Outcome.Should().Be(ProtocolExecutionOutcome.Succeeded);
             result.TerminalState.DurableState.Should().Be(ProtocolDurableState.Committed);
@@ -119,6 +122,32 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         => new(NormalizedRelativePath.Parse(path), Hash(contents), Encoding.UTF8.GetByteCount(contents), mode, kind);
 
     private static Sha256Digest Hash(string contents) => Sha256Digest.Hash(Encoding.UTF8.GetBytes(contents));
+
+    private static string[] SnapshotTree(string root)
+    {
+        List<string> result = [];
+        AddDirectory(root, ".");
+        return result.ToArray();
+
+        void AddDirectory(string path, string relativePath)
+        {
+            DirectoryInfo directory = new(path);
+            result.Add($"directory\0{relativePath}\0{(int)File.GetUnixFileMode(path)}\0{directory.LastWriteTimeUtc.Ticks}");
+            foreach (FileSystemInfo entry in directory.EnumerateFileSystemInfos().OrderBy(entry => entry.Name, StringComparer.Ordinal))
+            {
+                string relative = Path.GetRelativePath(root, entry.FullName);
+                if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                    result.Add($"link\0{relative}\0{entry.LinkTarget}");
+                else if (entry is DirectoryInfo)
+                    AddDirectory(entry.FullName, relative);
+                else
+                {
+                    FileInfo file = (FileInfo)entry;
+                    result.Add($"file\0{relative}\0{(int)File.GetUnixFileMode(entry.FullName)}\0{file.Length}\0{file.LastWriteTimeUtc.Ticks}\0{Sha256Digest.Hash(File.ReadAllBytes(entry.FullName)).Value}");
+                }
+            }
+        }
+    }
 
     private static void Write(string root, string relativePath, string contents, int mode)
     {
