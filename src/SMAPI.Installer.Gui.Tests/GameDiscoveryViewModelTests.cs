@@ -55,11 +55,10 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         };
         await using GameDiscoveryController controller = new(session);
         await using GameDiscoveryViewModel viewModel = new(controller);
-        viewModel.ContinueRequested += (_, _) => { };
         await controller.DiscoverAsync();
         Dispatcher.UIThread.RunJobs();
         GameDiscoverySnapshot ready = controller.Snapshot;
-        viewModel.IsContinueVisible.Should().BeTrue();
+        ready.CanContinue.Should().BeTrue("the controller retains inert readiness for the future ownership handoff");
 
         session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
         await WaitUntilAsync(() => controller.Snapshot is { State: GameDiscoveryState.SessionFaulted } snapshot
@@ -67,52 +66,11 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         GameDiscoverySnapshot faulted = controller.Snapshot;
         faulted.Revision.Should().BeGreaterThan(ready.Revision);
         viewModel.ApplySnapshotForTesting(faulted);
-        viewModel.IsContinueVisible.Should().BeFalse();
 
         viewModel.ApplySnapshotForTesting(ready);
 
         viewModel.Heading.Should().Be("The verified installer session closed");
-        viewModel.IsContinueVisible.Should().BeFalse();
         viewModel.SelectedCandidate.Should().BeNull();
-    }
-
-    [AvaloniaTest]
-    public async Task QueuedTerminalSnapshotCannotForwardAStaleContinueAction()
-    {
-        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("ready", LinuxGameFolderStatus.Valid);
-        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
-        {
-            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
-        };
-        await using GameDiscoveryController controller = new(session);
-        await using GameDiscoveryViewModel viewModel = new(controller);
-        int continued = 0;
-        viewModel.ContinueRequested += (_, _) => continued++;
-        await controller.DiscoverAsync();
-        Dispatcher.UIThread.RunJobs();
-        viewModel.IsContinueVisible.Should().BeTrue();
-
-        GameDiscoverySnapshot ready = controller.Snapshot;
-        Task.Run(async () =>
-        {
-            session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
-            DateTime deadline = DateTime.UtcNow.AddSeconds(3);
-            while (controller.Snapshot is not { State: GameDiscoveryState.SessionFaulted } snapshot
-                || snapshot.Revision <= ready.Revision)
-            {
-                if (DateTime.UtcNow >= deadline)
-                    throw new TimeoutException("The terminal controller snapshot was not published.");
-                await Task.Delay(10);
-            }
-        }).GetAwaiter().GetResult();
-        viewModel.IsContinueVisible.Should().BeTrue("the terminal presentation update is deliberately still queued");
-
-        viewModel.ContinueCommand.Execute(null);
-
-        continued.Should().Be(0, "the controller must reauthorize the exact live selection before forwarding it");
-        Dispatcher.UIThread.RunJobs();
-        viewModel.IsContinueVisible.Should().BeFalse();
-        viewModel.IsExitVisible.Should().BeTrue();
     }
 
     [AvaloniaTest]
@@ -175,13 +133,12 @@ internal sealed partial class GameDiscoveryAccessibilityTests
             }
             else
                 viewModel.SelectedCandidate.Should().BeNull();
-            viewModel.IsContinueVisible.Should().BeFalse();
             viewModel.Candidates.Should().HaveCount(candidates.Length);
         }
     }
 
     [AvaloniaTest]
-    public async Task ManualInvalidReasonIsTypedAndManualValidContinueNeedsARealHandler()
+    public async Task ManualInvalidReasonIsTypedAndManualValidSelectionRemainsReadOnly()
     {
         ProtocolGameCandidate invalid = GameDiscoveryControllerTests.Candidate("manual", LinuxGameFolderStatus.UnsupportedGameVersion);
         ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("manual", LinuxGameFolderStatus.Valid);
@@ -199,24 +156,12 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         viewModel.IsProblemVisible.Should().BeTrue();
         viewModel.ProblemLiveSetting.Should().Be(AutomationLiveSetting.Polite);
         viewModel.LiveAnnouncement.Should().Be($"{viewModel.Heading}. {viewModel.Message}");
-        viewModel.IsContinueVisible.Should().BeFalse();
 
         await viewModel.ApplyManualFolderAsync("/games/manual");
         Dispatcher.UIThread.RunJobs();
         viewModel.Heading.Should().Be("Selected game folder is valid");
         viewModel.Message.Should().Contain("Nothing has been changed");
-        viewModel.ContinueCommand.CanExecute(null).Should().BeFalse();
-        viewModel.IsContinueVisible.Should().BeFalse();
-
-        ProtocolGameCandidate? continued = null;
-        EventHandler<GameCandidateSelectedEventArgs> handler = (_, args) => continued = args.Candidate;
-        viewModel.ContinueRequested += handler;
-        viewModel.ContinueCommand.CanExecute(null).Should().BeTrue();
-        viewModel.IsContinueVisible.Should().BeTrue();
-        viewModel.ContinueCommand.Execute(null);
-        continued.Should().BeSameAs(valid);
-        viewModel.ContinueRequested -= handler;
-        viewModel.IsContinueVisible.Should().BeFalse();
+        viewModel.SelectedCandidate!.Candidate.Should().BeSameAs(valid);
     }
 
     [AvaloniaTest]
@@ -291,7 +236,6 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         viewModel.LiveAnnouncement.Should().NotContain("SECRET").And.NotContain("/home/name");
         viewModel.IsRetryVisible.Should().BeFalse();
         viewModel.IsBrowseVisible.Should().BeFalse();
-        viewModel.IsContinueVisible.Should().BeFalse();
         viewModel.IsExitVisible.Should().BeTrue();
     }
 

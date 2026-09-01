@@ -241,6 +241,64 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.CanRetry.Should().BeFalse();
     }
 
+    [Test]
+    public async Task OperationSideSessionFaultClosesAuthorityBeforeTheWatcherCommits()
+    {
+        ProtocolGameCandidate valid = Candidate("ready-before-fault", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource validationStarted = NewCompletion();
+        TaskCompletionSource watcherReachedCommit = NewCompletion();
+        TaskCompletionSource releaseWatcher = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Validation = async (_, cancellationToken) =>
+            {
+                validationStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return valid;
+            }
+        };
+        await using GameDiscoveryController controller = new(session)
+        {
+            BeforeSessionFaultCommitForTesting = () =>
+            {
+                watcherReachedCommit.TrySetResult();
+                releaseWatcher.Task.GetAwaiter().GetResult();
+            }
+        };
+        await controller.DiscoverAsync();
+        controller.Snapshot.Candidates.Should().ContainSingle().Which.Should().BeSameAs(valid);
+        Task operation = controller.ValidateManualAsync("/games/check-while-session-faults");
+        await validationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
+        await watcherReachedCommit.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            await WaitUntilAsync(() => controller.Snapshot.State == GameDiscoveryState.SessionFaulted);
+
+            GameDiscoverySnapshot faulted = controller.Snapshot;
+            faulted.Candidates.Should().BeEmpty();
+            faulted.SelectedCandidate.Should().BeNull();
+            faulted.CanRetry.Should().BeFalse();
+            faulted.CanBrowse.Should().BeFalse();
+            faulted.CanCancel.Should().BeFalse();
+            faulted.CanContinue.Should().BeFalse();
+            Action select = () => controller.SelectCandidate(valid);
+            select.Should().Throw<InvalidOperationException>();
+            Func<Task> restartDiscovery = () => controller.DiscoverAsync();
+            await restartDiscovery.Should().ThrowAsync<InvalidOperationException>();
+            Func<Task> restartValidation = () => controller.ValidateManualAsync("/games/retry");
+            await restartValidation.Should().ThrowAsync<InvalidOperationException>();
+        }
+        finally
+        {
+            releaseWatcher.TrySetResult();
+        }
+        await operation.WaitAsync(TimeSpan.FromSeconds(2));
+        session.DisposeCalls.Should().Be(1);
+    }
+
     [TestCase(true)]
     [TestCase(false)]
     public async Task AcceptedCancellationWinsAfterSuccessCommitBeforeFinalization(bool discovery)

@@ -54,6 +54,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     internal Action? BeforeManualValidationCommitForTesting { get; set; }
     internal Action? BeforeOutcomeCommitForTesting { get; set; }
     internal Action? BeforeOperationCompletionForTesting { get; set; }
+    internal Action? BeforeSessionFaultCommitForTesting { get; set; }
 
     public GameDiscoveryController(IVerifiedInstallerSession session)
     {
@@ -115,7 +116,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             this.AssertNotDisposed();
             if (this.SessionHasFaulted)
                 throw new InvalidOperationException("The verified installer session is no longer available.");
-            if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed)
+            if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted)
                 throw new InvalidOperationException("The verified installer session is closed.");
             if (this.Operation is not null)
                 throw new InvalidOperationException("A game-folder operation is still active.");
@@ -125,21 +126,6 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             this.StateValue = GameDiscoveryState.Ready;
         }
         this.PublishChanged();
-    }
-
-    /// <summary>Revalidate a presentation-held candidate against the controller's current live authority.</summary>
-    internal bool IsCurrentValidSelection(ProtocolGameCandidate candidate)
-    {
-        ArgumentNullException.ThrowIfNull(candidate);
-        lock (this.Sync)
-        {
-            return !this.DisposeStarted
-                && !this.SessionHasFaulted
-                && this.Operation is null
-                && this.StateValue is GameDiscoveryState.Ready or GameDiscoveryState.ManualValid
-                && ReferenceEquals(this.SelectedCandidateValue, candidate)
-                && candidate.State == LinuxGameFolderStatus.Valid;
-        }
     }
 
     public async Task CancelAsync()
@@ -334,6 +320,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             // A broken implementation is still a terminal session fault; raw details are never exposed.
         }
 
+        this.BeforeSessionFaultCommitForTesting?.Invoke();
         ActiveOperation? operation;
         lock (this.Sync)
         {
@@ -417,8 +404,11 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             this.SelectedCandidateValue = null;
             if (this.DisposeStarted)
                 this.StateValue = GameDiscoveryState.Cancelling;
-            else if (this.SessionHasFaulted)
+            else if (state == GameDiscoveryState.SessionFaulted || this.SessionHasFaulted)
+            {
+                this.SessionHasFaulted = true;
                 this.CloseSession(GameDiscoveryState.SessionFaulted);
+            }
             else if (IsCancellationRequested(operation))
                 this.CloseSession(GameDiscoveryState.Cancelled);
             else if (state == GameDiscoveryState.Failed)
@@ -432,7 +422,10 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private GameDiscoverySnapshot CreateSnapshot()
     {
         bool idle = this.Operation is null && !this.DisposeStarted && !this.SessionHasFaulted;
-        bool sessionUsable = idle && this.StateValue is not GameDiscoveryState.Cancelled and not GameDiscoveryState.Failed;
+        bool sessionUsable = idle
+            && this.StateValue is not GameDiscoveryState.Cancelled
+                and not GameDiscoveryState.Failed
+                and not GameDiscoveryState.SessionFaulted;
         return new(
             this.GenerationValue,
             this.RevisionValue,
@@ -467,7 +460,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
         this.AssertNotDisposed();
         if (this.SessionHasFaulted)
             throw new InvalidOperationException("The verified installer session is no longer available.");
-        if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed)
+        if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted)
             throw new InvalidOperationException("The verified installer session is closed.");
         if (this.Operation is not null)
             throw new InvalidOperationException("A game-folder operation is already active.");
@@ -481,6 +474,8 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
         this.CandidatesValue = [];
         this.SelectedCandidateValue = null;
         this.StateValue = state;
+        if (state == GameDiscoveryState.SessionFaulted)
+            this.SessionHasFaulted = true;
     }
 
     private Task StartSessionCleanup()

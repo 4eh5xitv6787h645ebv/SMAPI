@@ -49,7 +49,7 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
-    public async Task RealAccessKeysDriveListBrowseContinueAndBusyCancellation()
+    public async Task RealAccessKeysDriveListBrowseAndBusyCancellation()
     {
         ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("valid", LinuxGameFolderStatus.Valid);
         TaskCompletionSource? blockedStarted = null;
@@ -61,8 +61,6 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         GameDiscoveryViewModel viewModel = (GameDiscoveryViewModel)window.DataContext!;
         int pickerRequests = 0;
         window.FolderPickerRequested += (_, _) => pickerRequests++;
-        ProtocolGameCandidate? continued = null;
-        viewModel.ContinueRequested += (_, args) => continued = args.Candidate;
         window.Show();
         await WaitUntilAsync(() => viewModel.Candidates.Count == 1);
 
@@ -75,7 +73,6 @@ internal sealed partial class GameDiscoveryAccessibilityTests
             list,
             browse,
             window.FindControl<Button>("RetryButton")!,
-            window.FindControl<Button>("ContinueButton")!,
             cancel,
             exit
         ];
@@ -85,10 +82,6 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         list.IsKeyboardFocusWithin.Should().BeTrue("Alt+G moves focus into the detected-game list");
         list.SelectedItem = viewModel.Candidates[0];
         Dispatcher.UIThread.RunJobs();
-        await WaitUntilAsync(() => viewModel.IsContinueVisible);
-        PressAccessKey(window, PhysicalKey.N);
-        continued.Should().BeSameAs(valid);
-
         PressAccessKey(window, PhysicalKey.B);
         pickerRequests.Should().Be(1);
         blockedStarted = GameDiscoveryControllerTests.NewCompletion();
@@ -142,7 +135,6 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         problemPeer.GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
         problemPeer.GetName().Should().Be($"{viewModel.Heading}. {viewModel.Message}");
         problemPeer.GetName().Should().Contain("game assembly").And.Contain("not found");
-        viewModel.IsContinueVisible.Should().BeFalse();
         window.FindControl<Button>("BrowseButton")!.IsFocused.Should().BeTrue();
 
         window.Close();

@@ -14,7 +14,6 @@ internal enum GameDiscoveryFocusTarget
     CandidateList,
     Browse,
     Retry,
-    Continue,
     Exit
 }
 
@@ -132,11 +131,6 @@ internal sealed class GameCandidateItem
     }
 }
 
-internal sealed class GameCandidateSelectedEventArgs(ProtocolGameCandidate candidate) : EventArgs
-{
-    public ProtocolGameCandidate Candidate { get; } = candidate;
-}
-
 /// <summary>Presentation adapter for bounded, read-only game discovery through a verified backend session.</summary>
 internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposable
 {
@@ -148,7 +142,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     private string message = "The installer can inspect common Linux game locations or validate a folder you choose.";
     private string liveAnnouncement = "Ready to find Stardew Valley.";
     private EventHandler? FolderPickerRequestedValue;
-    private EventHandler<GameCandidateSelectedEventArgs>? ContinueRequestedValue;
     private bool folderPickerPending;
     private bool folderPickerFailed;
     private bool started;
@@ -161,7 +154,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.RetryCommand = new AsyncRelayCommand(() => controller.DiscoverAsync(), () => this.snapshot.CanRetry, this.HandlePresentationFailure);
         this.BrowseCommand = new RelayCommand(this.RequestFolderPicker, this.CanBrowse);
         this.CancelCommand = new AsyncRelayCommand(controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
-        this.ContinueCommand = new RelayCommand(this.Continue, this.CanContinue);
         this.ExitCommand = new RelayCommand(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.IsExitVisible);
         this.Controller.Changed += this.OnControllerChanged;
         this.ApplySnapshot(this.snapshot, requestFocus: false);
@@ -186,22 +178,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public event EventHandler<GameDiscoveryFocusTarget>? FocusRequested;
 
     public event EventHandler? CloseRequested;
-
-    public event EventHandler<GameCandidateSelectedEventArgs>? ContinueRequested
-    {
-        add
-        {
-            this.ContinueRequestedValue += value;
-            this.OnPropertyChanged(nameof(this.IsContinueVisible));
-            this.ContinueCommand.NotifyCanExecuteChanged();
-        }
-        remove
-        {
-            this.ContinueRequestedValue -= value;
-            this.OnPropertyChanged(nameof(this.IsContinueVisible));
-            this.ContinueCommand.NotifyCanExecuteChanged();
-        }
-    }
 
     public IReadOnlyList<GameCandidateItem> Candidates
     {
@@ -276,8 +252,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
 
     public bool IsCancelVisible => this.snapshot.CanCancel;
 
-    public bool IsContinueVisible => this.snapshot.CanContinue && this.ContinueRequestedValue is not null;
-
     public bool IsExitVisible => this.snapshot.State is GameDiscoveryState.Cancelled
         or GameDiscoveryState.Failed
         or GameDiscoveryState.SessionFaulted;
@@ -287,8 +261,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public RelayCommand BrowseCommand { get; }
 
     public AsyncRelayCommand CancelCommand { get; }
-
-    public RelayCommand ContinueCommand { get; }
 
     public RelayCommand ExitCommand { get; }
 
@@ -344,18 +316,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.disposed = true;
         await this.Controller.DisposeAsync().ConfigureAwait(true);
         this.Controller.Changed -= this.OnControllerChanged;
-    }
-
-    private void Continue()
-    {
-        ProtocolGameCandidate? candidate = this.snapshot.SelectedCandidate;
-        if (candidate?.State == LinuxGameFolderStatus.Valid && this.Controller.IsCurrentValidSelection(candidate))
-            this.ContinueRequestedValue?.Invoke(this, new(candidate));
-    }
-
-    private bool CanContinue()
-    {
-        return !this.disposed && this.snapshot.CanContinue && this.ContinueRequestedValue is not null;
     }
 
     private bool CanBrowse()
@@ -485,7 +445,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         {
             GameDiscoveryState.Ready => GameDiscoveryFocusTarget.CandidateList,
             GameDiscoveryState.NoCandidates or GameDiscoveryState.ManualInvalid when this.BrowseCommand.CanExecute(null) => GameDiscoveryFocusTarget.Browse,
-            GameDiscoveryState.ManualValid when this.ContinueCommand.CanExecute(null) => GameDiscoveryFocusTarget.Continue,
             GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted => GameDiscoveryFocusTarget.Exit,
             _ => GameDiscoveryFocusTarget.Status
         };
@@ -502,12 +461,10 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.OnPropertyChanged(nameof(this.IsBrowseVisible));
         this.OnPropertyChanged(nameof(this.IsRetryVisible));
         this.OnPropertyChanged(nameof(this.IsCancelVisible));
-        this.OnPropertyChanged(nameof(this.IsContinueVisible));
         this.OnPropertyChanged(nameof(this.IsExitVisible));
         this.RetryCommand.NotifyCanExecuteChanged();
         this.BrowseCommand.NotifyCanExecuteChanged();
         this.CancelCommand.NotifyCanExecuteChanged();
-        this.ContinueCommand.NotifyCanExecuteChanged();
         this.ExitCommand.NotifyCanExecuteChanged();
     }
 
