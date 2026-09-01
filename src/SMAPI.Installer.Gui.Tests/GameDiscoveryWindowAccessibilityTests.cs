@@ -49,6 +49,40 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
+    public async Task TransferredStateFocusesAStatusRegionWhichAnnouncesTheReadOnlyNoChangeGuarantee()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("transfer", LinuxGameFolderStatus.Valid);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        GameDiscoveryController controller = new(session);
+        GameDiscoveryViewModel viewModel = new(controller);
+        GameDiscoveryWindow window = new(viewModel);
+        window.FolderPickerRequested += (_, _) => { };
+        window.Show();
+        await WaitUntilAsync(() => viewModel.Candidates.Count == 1);
+
+        var handoff = controller.TakeSelectedGameSession();
+        Border status = window.FindControl<Border>("StatusRegion")!;
+        await WaitUntilAsync(() => status.IsFocused);
+
+        AutomationPeer statusPeer = ControlAutomationPeer.CreatePeerForElement(status);
+        statusPeer.GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
+        statusPeer.GetName().Should().Be($"{viewModel.Heading}. {viewModel.Message}");
+        statusPeer.GetName().Should().Contain("read-only").And.Contain("Nothing has been changed");
+        window.FindControl<Button>("BrowseButton")!.IsVisible.Should().BeFalse();
+        window.FindControl<Button>("RetryButton")!.IsVisible.Should().BeFalse();
+        window.FindControl<Button>("CancelButton")!.IsVisible.Should().BeFalse();
+        window.FindControl<Button>("ExitButton")!.IsVisible.Should().BeFalse();
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+        await handoff.DisposeAsync();
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
     public async Task RealAccessKeysDriveListBrowseAndBusyCancellation()
     {
         ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("valid", LinuxGameFolderStatus.Valid);

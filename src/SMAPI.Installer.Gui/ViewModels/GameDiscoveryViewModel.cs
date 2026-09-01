@@ -361,7 +361,7 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
             : items.SingleOrDefault(item => ReferenceEquals(item.Candidate, next.SelectedCandidate));
         this.SetProperty(ref this.selectedCandidate, selected, nameof(this.SelectedCandidate));
         (this.Heading, this.Message) = this.GetCopy(next, selected);
-        this.LiveAnnouncement = this.IsProblemVisible
+        this.LiveAnnouncement = this.IsProblemVisible || next.State == GameDiscoveryState.Transferred
             ? $"{this.Heading}. {this.Message}"
             : this.Heading;
         this.OnPropertyChanged(nameof(this.SelectionDetail));

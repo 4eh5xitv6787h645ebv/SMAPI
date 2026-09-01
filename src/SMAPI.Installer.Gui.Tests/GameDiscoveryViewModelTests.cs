@@ -190,7 +190,8 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         viewModel.Heading.Should().Be("Opening plan review…");
         viewModel.Message.Should().Contain("read-only plan screen").And.Contain("Nothing has been changed");
         viewModel.Message.Should().NotContain("installing").And.NotContain("approved").And.NotContain("executed");
-        viewModel.LiveAnnouncement.Should().Be(viewModel.Heading);
+        viewModel.LiveAnnouncement.Should().Be($"{viewModel.Heading}. {viewModel.Message}");
+        viewModel.LiveAnnouncement.Should().Contain("read-only").And.Contain("Nothing has been changed");
         focus.Should().Be(GameDiscoveryFocusTarget.Status);
         viewModel.Candidates.Should().BeEmpty();
         viewModel.SelectedCandidate.Should().BeNull();
