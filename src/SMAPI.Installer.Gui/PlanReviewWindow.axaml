@@ -21,7 +21,7 @@
       x:Name="PageScrollViewer"
       HorizontalScrollBarVisibility="Disabled"
       VerticalScrollBarVisibility="Auto">
-    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
       <StackPanel Grid.Row="0" Spacing="4">
         <TextBlock
             AutomationProperties.HeadingLevel="1"
@@ -36,14 +36,14 @@
           x:Name="InspectionBoundary"
           Grid.Row="1"
           Padding="14"
-          AutomationProperties.Name="Inspection only. This screen cannot approve, confirm, or run a plan. No files change here."
+          AutomationProperties.Name="Preview only. Candidate choices can refresh this read-only plan. This screen cannot confirm or run it. No files change here."
           Background="#192C43"
           BorderBrush="#5AA7E8"
           BorderThickness="1"
           CornerRadius="8">
         <TextBlock
             FontWeight="SemiBold"
-            Text="Inspection only. This screen cannot approve, confirm, or run a plan. No files change here."
+            Text="Preview only. Candidate choices can refresh this read-only plan. This screen cannot confirm or run it. No files change here."
             TextWrapping="Wrap" />
       </Border>
 
@@ -304,6 +304,120 @@
             <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Additional notices" />
             <TextBlock Text="{Binding AdditionalNoticeDetail}" TextWrapping="Wrap" />
           </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <Border
+          x:Name="CandidateReviewRegion"
+          Grid.Row="5"
+          Classes="card"
+          IsVisible="{Binding IsCandidateReviewVisible}"
+          AutomationProperties.Name="Candidate review. Choices only refresh the read-only preview; no files change.">
+        <StackPanel Spacing="12">
+          <StackPanel Spacing="5">
+            <TextBlock
+                AutomationProperties.HeadingLevel="2"
+                Classes="section-title"
+                Text="Review modified or unknown files" />
+            <TextBlock
+                Text="{Binding CandidateReviewDetail}"
+                TextWrapping="Wrap" />
+            <TextBlock
+                Classes="muted"
+                Text="A backend-provisional label explains the inspected plan only. It is not your approval. There is intentionally no Select all control."
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border
+              x:Name="CandidateSelectionStatusRegion"
+              Classes="keyboard-focus"
+              Focusable="True"
+              TabIndex="6"
+              AutomationProperties.LiveSetting="Polite"
+              AutomationProperties.Name="{Binding CandidateSelectionAnnouncement}">
+            <TextBlock
+                FontWeight="SemiBold"
+                Text="{Binding CandidateSelectionAnnouncement}"
+                TextWrapping="Wrap" />
+          </Border>
+
+          <StackPanel IsVisible="{Binding HasCandidateChoices}" Spacing="6">
+            <Label Content="_Files to include in the next preview" Target="{Binding #CandidateList}" />
+            <ListBox
+                x:Name="CandidateList"
+                Classes="focus-ring"
+                Focusable="True"
+                MaxHeight="360"
+                MinHeight="120"
+                TabIndex="7"
+                AutomationProperties.AccessKey="Alt+F"
+                AutomationProperties.Name="Modified or unknown file candidates"
+                AutomationProperties.HelpText="Use Up and Down Arrow to move through files and Space to toggle one choice. All choices start unchecked."
+                IsEnabled="{Binding IsCandidateSelectionEnabled}"
+                ItemsSource="{Binding CandidateChoices}"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                SelectionMode="Single">
+              <ListBox.ItemsPanel>
+                <ItemsPanelTemplate>
+                  <VirtualizingStackPanel />
+                </ItemsPanelTemplate>
+              </ListBox.ItemsPanel>
+              <ListBox.Styles>
+                <Style Selector="ListBoxItem">
+                  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                </Style>
+              </ListBox.Styles>
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewCandidateChoice">
+                  <CheckBox
+                      Margin="3"
+                      Padding="8"
+                      AutomationProperties.Name="{Binding AccessibleName}"
+                      IsChecked="{Binding IsSelected, Mode=TwoWay}">
+                    <StackPanel MaxWidth="760" Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="{Binding DisplayPath}" TextWrapping="Wrap" />
+                      <TextBlock Classes="muted" Text="{Binding ReasonDetail}" TextWrapping="Wrap" />
+                      <TextBlock Classes="muted" Text="{Binding DispositionDetail}" TextWrapping="Wrap" />
+                      <TextBlock Classes="muted" Text="{Binding ProvisionalDetail}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </CheckBox>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </StackPanel>
+
+          <WrapPanel Orientation="Horizontal">
+            <Button
+                x:Name="ApplyCandidatesButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="8"
+                AutomationProperties.AccessKey="Alt+A"
+                AutomationProperties.Name="Add selected file approvals to a new read-only preview"
+                AutomationProperties.HelpText="Sends only the checked files as additive approvals and requests a newly validated preview. It does not change files, confirm, or execute the plan."
+                Command="{Binding ApplyCandidatesCommand}"
+                Content="_Apply additive approvals" />
+            <Button
+                x:Name="ClearCandidatesButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="9"
+                AutomationProperties.AccessKey="Alt+L"
+                AutomationProperties.Name="Clear local candidate choices"
+                AutomationProperties.HelpText="Unchecks the current local choices without contacting the backend."
+                Command="{Binding ClearCandidatesCommand}"
+                Content="C_lear local choices" />
+            <Button
+                x:Name="StartFreshInspectionButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="10"
+                AutomationProperties.AccessKey="Alt+R"
+                AutomationProperties.Name="Start a fresh candidate inspection"
+                AutomationProperties.HelpText="Revokes the current preview and requests a new initial read-only inspection. It does not undo prior backend decisions, change files, confirm, or execute the plan."
+                Command="{Binding StartFreshInspectionCommand}"
+                Content="Start f_resh inspection" />
+          </WrapPanel>
         </StackPanel>
       </Border>
     </Grid>

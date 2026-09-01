@@ -62,7 +62,10 @@ internal sealed partial class PlanReviewPresentationTests
     [AvaloniaTest]
     public async Task AvailablePlanUsesTypedAggregateCopyWithoutClaimingApprovalOrMutation()
     {
-        InstallerReadOnlyPlanSuccess plan = CreatePlan(InstallerOperation.Install) with
+        InstallerReadOnlyPlanSuccess plan = CandidatePlan(
+            InstallerOperation.Install,
+            [CandidateCapability("mods/private.dll", true)]
+        ) with
         {
             HasBlockingConflicts = true,
             Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
@@ -72,15 +75,6 @@ internal sealed partial class PlanReviewPresentationTests
                 new(PlanOperationKind.Replace, 1)
             ],
             ConflictCounts = [new(PlanConflictCode.UnknownCollision, 2)],
-            CandidateCounts =
-            [
-                new(
-                    FileReplacementCandidateReason.UnknownCollision,
-                    FileReplacementCandidateDisposition.Replace,
-                    true,
-                    1
-                )
-            ],
             AdditionalNoticeCount = 3
         };
         FakePlanSession session = new() { Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(plan) };
@@ -91,14 +85,14 @@ internal sealed partial class PlanReviewPresentationTests
         Dispatcher.UIThread.RunJobs();
 
         viewModel.Heading.Should().Contain("preview").And.Contain("blocking conflicts");
-        viewModel.Message.Should().Contain("cannot approve or run");
-        viewModel.LiveAnnouncement.Should().Contain("preview").And.Contain("cannot approve or run");
+        viewModel.Message.Should().Contain("cannot confirm or execute");
+        viewModel.LiveAnnouncement.Should().Contain("preview").And.Contain("cannot confirm or execute");
         viewModel.OperationSummary.Should().Contain("3 planned file action").And.Contain("None have run");
         viewModel.ConflictSummary.Should().Contain("2 blocking conflict");
         viewModel.CandidateSummary.Should().Contain("not approval");
         viewModel.CandidateRows.Single().Detail.Should().Contain("Provisionally included").And.Contain("not approved by you");
         viewModel.AdditionalNoticeDetail.Should().Contain("3").And.Contain("does not expose their text");
-        viewModel.SafetyDetail.Should().Contain("Cancel").And.Contain("no confirmation control");
+        viewModel.SafetyDetail.Should().Contain("Cancel").And.Contain("no confirmation or execution control");
         viewModel.DurableState.Should().Contain("no installer action has run");
     }
 
@@ -113,7 +107,7 @@ internal sealed partial class PlanReviewPresentationTests
         Dispatcher.UIThread.RunJobs();
 
         viewModel.Heading.Should().Contain("preview only");
-        viewModel.Message.Should().Contain("not approval").And.Contain("no action ran");
+        viewModel.Message.Should().Contain("not confirmation").And.Contain("no file action ran");
         viewModel.OperationSummary.Should().StartWith("0 planned file actions were reported");
         viewModel.OperationSummary.Should().NotContain("nothing to do").And.NotContain("safe");
         viewModel.ConflictSummary.Should().Contain("not approval");
@@ -222,7 +216,7 @@ internal sealed partial class PlanReviewPresentationTests
     }
 
     [Test]
-    public void ViewModelExposesNoApprovalConfirmationOrExecutionCommand()
+    public void ViewModelExposesOnlyBoundedPreviewApprovalAndNoConfirmationOrExecutionCommand()
     {
         string[] commandNames = typeof(PlanReviewViewModel).GetProperties()
             .Where(property => property.Name.EndsWith("Command", StringComparison.Ordinal))
@@ -233,13 +227,233 @@ internal sealed partial class PlanReviewPresentationTests
             nameof(PlanReviewViewModel.InspectCommand),
             nameof(PlanReviewViewModel.CancelCommand),
             nameof(PlanReviewViewModel.RetryCommand),
+            nameof(PlanReviewViewModel.ApplyCandidatesCommand),
+            nameof(PlanReviewViewModel.ClearCandidatesCommand),
+            nameof(PlanReviewViewModel.StartFreshInspectionCommand),
             nameof(PlanReviewViewModel.ExitCommand)
         );
         commandNames.Should().NotContain(name =>
-            name.Contains("Approve", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Confirm", StringComparison.OrdinalIgnoreCase)
+            name.Contains("Confirm", StringComparison.OrdinalIgnoreCase)
             || name.Contains("Execute", StringComparison.OrdinalIgnoreCase)
         );
+    }
+
+    [AvaloniaTest]
+    public async Task CandidateChoicesStartUncheckedAndExposeOnlyFixedEvidenceBoundedCopy()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability("mods/bi\u202Edi.dll", true);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [candidate]))
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        PlanReviewCandidateChoice row = viewModel.CandidateChoices.Should().ContainSingle().Which;
+        row.IsSelected.Should().BeFalse("backend-provisional inclusion is never a user default");
+        row.BackendProvisionallyIncluded.Should().BeTrue();
+        row.DisplayPath.Should().Be("mods/bi\\u202Edi.dll").And.NotContain("\u202E");
+        row.ReasonDetail.Should().Contain("differs from its recorded identity").And.Contain("cause was not observed");
+        row.DispositionDetail.Should().Contain("later confirmed plan may replace");
+        row.ProvisionalDetail.Should().Contain("not your approval");
+        row.AccessibleName.Should().Contain(row.DisplayPath).And.NotContain(new string('a', 64)).And.NotContain("private evidence");
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse();
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeFalse();
+        viewModel.CandidateSelectionAnnouncement.Should().Be("0 of 1 files selected.").And.NotContain(row.DisplayPath);
+        session.ApprovedCandidates.Should().BeEmpty();
+    }
+
+    [AvaloniaTest]
+    public async Task CandidateSelectionIsExplicitClearIsLocalAndLiveCopyIsCountOnly()
+    {
+        InstallerReadOnlyPlanCandidate first = CandidateCapability("mods/first.dll", false);
+        InstallerReadOnlyPlanCandidate second = CandidateCapability("mods/second.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [first, second]))
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Update);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.CandidateChoices[1].IsSelected = true;
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.CandidateChoices.Select(choice => choice.IsSelected).Should().Equal(false, true);
+        viewModel.CandidateSelectionAnnouncement.Should().Be("1 of 2 files selected.");
+        viewModel.CandidateSelectionAnnouncement.Should().NotContain("first.dll").And.NotContain("second.dll");
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeTrue();
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeTrue();
+        session.ApprovedCandidates.Should().BeEmpty("local selection and clearing must not contact the backend");
+
+        viewModel.ClearCandidatesCommand.Execute(null);
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.CandidateChoices.Should().OnlyContain(choice => !choice.IsSelected);
+        viewModel.CandidateSelectionAnnouncement.Should().Be("0 of 2 files selected.");
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse();
+        session.ApprovedCandidates.Should().BeEmpty();
+    }
+
+    [AvaloniaTest]
+    public async Task ApplyIsAdditiveBusyCopyIsNonMutatingAndFreshInspectionRemainsReachableAtZeroCandidates()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability("mods/only.dll", false);
+        TaskCompletionSource releaseApproval = NewCompletion();
+        int inspections = 0;
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) =>
+            {
+                inspections++;
+                return Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [candidate]));
+            },
+            Approval = async (_, _) =>
+            {
+                await releaseApproval.Task;
+                return CandidatePlan(InstallerOperation.Install, []);
+            }
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.CandidateChoices.Single().IsSelected = true;
+
+        Task apply = viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        await WaitUntilAsync(() => viewModel.IsBusy);
+
+        viewModel.Heading.Should().Contain("additive candidate approvals");
+        viewModel.Message.Should().Contain("No files are being changed").And.Contain("confirmed").And.Contain("executed");
+        viewModel.IsCandidateReviewVisible.Should().BeFalse("candidate authority is revoked while approval is active");
+        releaseApproval.TrySetResult();
+        await apply;
+        Dispatcher.UIThread.RunJobs();
+
+        session.ApprovedCandidates.Should().ContainSingle().Which.Should().ContainSingle().Which.Should().BeSameAs(candidate);
+        viewModel.CandidateChoices.Should().BeEmpty("accepted candidates disappear from the refreshed preview");
+        viewModel.IsCandidateReviewVisible.Should().BeTrue("fresh inspection must remain reachable after the final candidate disappears");
+        viewModel.CandidateSelectionAnnouncement.Should().Be("0 candidates remain; approvals applied to this preview.");
+        viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeTrue();
+
+        await viewModel.StartFreshInspectionCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        inspections.Should().Be(2);
+        viewModel.CandidateChoices.Should().ContainSingle().Which.IsSelected.Should().BeFalse();
+        viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeFalse();
+    }
+
+    [AvaloniaTest]
+    public async Task StaleCandidateRowResynchronizesWithoutReplacingTheValidCurrentPreview()
+    {
+        InstallerReadOnlyPlanCandidate oldCandidate = CandidateCapability("mods/old.dll", false);
+        InstallerReadOnlyPlanCandidate currentCandidate = CandidateCapability("mods/current.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [oldCandidate])),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(InstallerOperation.Install, [currentCandidate]))
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        PlanReviewCandidateChoice stale = viewModel.CandidateChoices.Single();
+        stale.IsSelected = true;
+        await viewModel.ApplyCandidatesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        string heading = viewModel.Heading;
+
+        stale.IsSelected = true;
+        Dispatcher.UIThread.RunJobs();
+
+        stale.IsSelected.Should().BeFalse();
+        viewModel.CandidateChoices.Should().ContainSingle().Which.DisplayPath.Should().Be("mods/current.dll");
+        viewModel.CandidateChoices.Single().IsSelected.Should().BeFalse();
+        viewModel.Heading.Should().Be(heading);
+        viewModel.Message.Should().NotContain("close and reopen");
+        session.ApprovedCandidates.Should().ContainSingle();
+    }
+
+    [AvaloniaTest]
+    public async Task StaleQueuedClearResynchronizesAfterControllerRevokesCandidateAuthorityWithoutBackendCall()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability("mods/stale-clear.dll", false);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [candidate]))
+        };
+        PlanReviewController controller = new(session);
+        await using PlanReviewViewModel viewModel = new(controller);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.CandidateChoices.Single().IsSelected = true;
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeTrue();
+
+        await Task.Run(() => controller.SelectOperation(InstallerOperation.Update));
+        Action staleClear = () => viewModel.ClearCandidatesCommand.Execute(null);
+
+        staleClear.Should().NotThrow();
+        viewModel.SelectedOperation!.Operation.Should().Be(InstallerOperation.Update);
+        viewModel.CandidateChoices.Should().BeEmpty();
+        viewModel.Heading.Should().Contain("Operation changed");
+        session.ApprovedCandidates.Should().BeEmpty("stale local clearing must never cross the backend boundary");
+        session.InspectedOperations.Should().Equal(InstallerOperation.Install);
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    [AvaloniaTest]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, "cause was not observed", "may replace")]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove, "cause was not observed", "may remove")]
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore, "cause was not observed", "may restore")]
+    [TestCase(FileReplacementCandidateReason.LegacyInstaller, FileReplacementCandidateDisposition.Replace, "exact file was classified", "may replace")]
+    [TestCase(FileReplacementCandidateReason.UnknownCollision, FileReplacementCandidateDisposition.Replace, "owner and creator are unknown", "may replace")]
+    [TestCase(FileReplacementCandidateReason.OfficialOrLegacyLauncher, FileReplacementCandidateDisposition.Replace, "ownership is unconfirmed", "may replace")]
+    [TestCase(FileReplacementCandidateReason.OfficialLauncherBackup, FileReplacementCandidateDisposition.TrustRetained, "exact backup meets", "may retain")]
+    public async Task CandidateReasonAndDispositionCopyIsTypedAndDoesNotAttributeUnobservedCause(
+        FileReplacementCandidateReason reason,
+        FileReplacementCandidateDisposition disposition,
+        string expectedReason,
+        string expectedDisposition
+    )
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability("mods/typed.dll", false, reason, disposition);
+        FakePlanSession session = new()
+        {
+            Inspection = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CandidatePlan(operation, [candidate]))
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        PlanReviewCandidateChoice row = viewModel.CandidateChoices.Single();
+        row.ReasonDetail.Should().Contain(expectedReason);
+        row.DispositionDetail.Should().Contain(expectedDisposition).And.Contain("later confirmed plan");
+        row.AccessibleName.Should().Contain(row.DisplayPath).And.Contain(row.ReasonDetail).And.Contain(row.DispositionDetail);
+    }
+
+    [AvaloniaTest]
+    public async Task BackupNeverExposesCandidateApprovalControls()
+    {
+        FakePlanSession session = new();
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Backup);
+
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.IsCandidateReviewVisible.Should().BeFalse();
+        viewModel.CandidateChoices.Should().BeEmpty();
+        viewModel.ApplyCandidatesCommand.CanExecute(null).Should().BeFalse();
+        viewModel.ClearCandidatesCommand.CanExecute(null).Should().BeFalse();
+        viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeFalse();
     }
 
     private static PlanReviewViewModel CreateViewModel(FakePlanSession session)
@@ -273,6 +487,43 @@ internal sealed partial class PlanReviewPresentationTests
             [],
             0
         );
+    }
+
+    private static InstallerReadOnlyPlanSuccess CandidatePlan(
+        InstallerOperation operation,
+        IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates
+    )
+    {
+        return CreatePlan(operation) with
+        {
+            Risks = candidates.Count == 0 ? [] : [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
+            CandidateCounts = candidates
+                .GroupBy(candidate => new { candidate.Reason, candidate.Disposition, candidate.BackendProvisionallyIncluded })
+                .Select(group => new InstallerPlanCandidateCount(group.Key.Reason, group.Key.Disposition, group.Key.BackendProvisionallyIncluded, group.Count()))
+                .ToArray(),
+            Candidates = candidates
+        };
+    }
+
+    private static InstallerReadOnlyPlanCandidate CandidateCapability(
+        string path,
+        bool provisional,
+        FileReplacementCandidateReason reason = FileReplacementCandidateReason.ModifiedReceiptOwned,
+        FileReplacementCandidateDisposition disposition = FileReplacementCandidateDisposition.Replace
+    )
+    {
+        return new(new ProtocolPlanCandidate(
+            ProtocolCandidateId.Parse(Guid.NewGuid().ToString("N")),
+            reason,
+            disposition,
+            path,
+            new string('a', 64),
+            123,
+            420,
+            new string('b', 64),
+            provisional,
+            "private evidence"
+        ));
     }
 
     private static TaskCompletionSource NewCompletion()
@@ -313,7 +564,10 @@ internal sealed partial class PlanReviewPresentationTests
 
         public Func<InstallerOperation, CancellationToken, Task<InstallerReadOnlyPlanResult>> Inspection { get; init; }
             = (operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(operation));
+        public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; }
+            = (_, _) => throw new AssertionException("Candidate approval wasn't expected.");
         public Func<Task> Disposal { get; init; } = () => Task.CompletedTask;
+        public List<IReadOnlyList<InstallerReadOnlyPlanCandidate>> ApprovedCandidates { get; } = [];
 
         public FakePlanSession(string path = "/games/Stardew Valley")
         {
@@ -334,6 +588,16 @@ internal sealed partial class PlanReviewPresentationTests
         {
             Interlocked.Increment(ref this.DisposeCount);
             await this.Disposal();
+        }
+
+        public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(
+            IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates,
+            CancellationToken cancellationToken = default
+        )
+        {
+            InstallerReadOnlyPlanCandidate[] snapshot = candidates.ToArray();
+            this.ApprovedCandidates.Add(snapshot);
+            return this.Approval(snapshot, cancellationToken);
         }
     }
 }
