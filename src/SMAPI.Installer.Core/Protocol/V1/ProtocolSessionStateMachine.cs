@@ -128,7 +128,7 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         {
             if (!byId.TryGetValue(info.GenerationId, out ICommittedRecoveryContentAuthority? handle)) throw new ProtocolException("The recovery catalog is missing its exact generation authority.");
             ICommittedRecoveryContentAuthority authority = handle; authority.AssertUsable();
-            if (authority.GameRoot != root || authority.AuthorizedHeadPointerSha256 != history.HeadConfirmationDigest || authority.OriginAction != info.Action || handle.RestoreRelease != info.RestoreRelease)
+            if (authority.GameRoot != root || authority.AuthorizedHeadPointerSha256 != history.HeadConfirmationDigest || authority.OriginAction != info.Action || !Equals(handle.RestoreRelease, info.RestoreRelease))
                 throw new ProtocolException("A recovery handle doesn't match the exact authenticated catalog root, head, generation, or release.");
         }
         foreach (ProtocolRecoveryCatalogId old in this.Catalogs.Where(pair => pair.Value.GameRoot == root).Select(pair => pair.Key).ToArray()) this.RemoveCatalog(old);

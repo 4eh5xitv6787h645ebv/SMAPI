@@ -165,6 +165,44 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void RecoveryCatalogAcceptsDistinctValueEqualRestoreReleaseInstances()
+    {
+        ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority recovery = Recovery(Guid.NewGuid(), HashA, Root);
+        InstallationReleaseIdentity reopenedRelease = CreateRelease();
+        reopenedRelease.Should().Be(recovery.RestoreRelease).And.NotBeSameAs(recovery.RestoreRelease);
+        RecoveryHistory history = new(Sha256Digest.Parse(HashA), [new(recovery.GenerationId, recovery.OriginAction, true, true, reopenedRelease)]);
+
+        RecoveryCatalogEvent catalog = machine.RecordRecoveryCatalogAuthorities(new(machine.SessionId, "/game"), history, [recovery]);
+
+        ProtocolReleaseIdentity? projected = catalog.Generations.Should().ContainSingle().Which.RestoreRelease;
+        projected.Should().NotBeNull();
+        projected!.Tag.Should().Be(reopenedRelease.Tag);
+        projected.PackageSha256.Should().Be(reopenedRelease.PackageSha256.Value);
+    }
+
+    [Test]
+    public void RecoveryCatalogStillRejectsAValueDifferentRestoreRelease()
+    {
+        ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority recovery = Recovery(Guid.NewGuid(), HashA, Root);
+        InstallationReleaseIdentity differentRelease = CreateReleaseWithPackage(Sha256Digest.Parse(HashB), 124);
+        differentRelease.Should().NotBe(recovery.RestoreRelease);
+        RecoveryHistory history = new(Sha256Digest.Parse(HashA), [new(recovery.GenerationId, recovery.OriginAction, true, true, differentRelease)]);
+
+        FluentActions.Invoking(() => machine.RecordRecoveryCatalogAuthorities(new(machine.SessionId, "/game"), history, [recovery]))
+            .Should().Throw<ProtocolException>().WithMessage("*generation, or release*");
+    }
+
+    [Test]
+    public void RecoveryCatalogStillRejectsNullAgainstANonNullRestoreRelease()
+    {
+        ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority recovery = Recovery(Guid.NewGuid(), HashA, Root);
+        RecoveryHistory history = new(Sha256Digest.Parse(HashA), [new(recovery.GenerationId, recovery.OriginAction, true, true, null)]);
+
+        FluentActions.Invoking(() => machine.RecordRecoveryCatalogAuthorities(new(machine.SessionId, "/game"), history, [recovery]))
+            .Should().Throw<ProtocolException>().WithMessage("*generation, or release*");
+    }
+
+    [Test]
     public void GeneralizedCandidatePlan_PreservesUninstallAndAllowsRemovalResult()
     {
         ProtocolSessionStateMachine machine = Ready(); object authority = new();
@@ -431,7 +469,8 @@ internal sealed class ProtocolSessionStateMachineTests
 
     private static RecoveryPrunePlan Prune(Guid[] catalog, int retain, Guid[] retained, Guid[] removed, Guid[]? cleanup = null) => new(Root, 7, Sha256Digest.Parse(HashA), retain, catalog, retained, removed, cleanup ?? removed, [], null);
     private static FakeRecoveryAuthority Recovery(Guid id, string head, GameRootIdentity root) => new(id, InstallationAction.Backup, root, Sha256Digest.Parse(head), CreateRelease());
-    private static InstallationReleaseIdentity CreateRelease() => new("https://github.com/4eh5xitv6787h645ebv/SMAPI", "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2", "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", Sha256Digest.Parse(HashA), 123, "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "Release", "linux-x64");
+    private static InstallationReleaseIdentity CreateRelease() => CreateReleaseWithPackage(Sha256Digest.Parse(HashA), 123);
+    private static InstallationReleaseIdentity CreateReleaseWithPackage(Sha256Digest packageSha256, long packageSize) => new("https://github.com/4eh5xitv6787h645ebv/SMAPI", "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2", "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", packageSha256, packageSize, "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "Release", "linux-x64");
 
     private sealed class FakePackageAuthority : IVerifiedPackageContentAuthority, IDisposable
     {
