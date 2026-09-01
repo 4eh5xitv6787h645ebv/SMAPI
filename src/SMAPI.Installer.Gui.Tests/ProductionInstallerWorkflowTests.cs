@@ -96,6 +96,38 @@ internal sealed class ProductionInstallerWorkflowTests
         client.DisposeCalls.Should().Be(1);
     }
 
+    [AvaloniaTest]
+    public async Task SessionFaultWhilePickerIsOpenIsNotMisreportedAsPickerFailure()
+    {
+        TrackingClient client = new();
+        TaskCompletionSource<string?> picker = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        GameDiscoveryWindow? activated = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next => activated = (GameDiscoveryWindow)next,
+            pickFolder: _ => picker.Task
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => activated is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)activated!.DataContext!;
+
+        discovery.BrowseCommand.Execute(null);
+        client.Fail();
+        await WaitUntilAsync(() => discovery.Heading == "The verified installer session closed");
+        picker.TrySetResult("/games/selected-after-fault");
+        await WaitUntilAsync(() => discovery.Heading == "The selected folder could not be checked");
+
+        discovery.Message.Should().Contain("verified installer session").And.NotContain("folder picker");
+        discovery.BrowseCommand.CanExecute(null).Should().BeFalse();
+        client.ValidatedPath.Should().BeNull();
+        await releaseWindow.DisposeAsync();
+        await activated.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
     private static ProductionInstallerWorkflow CreateWorkflow(
         TrackingClient client,
         Action<Window> activate,
@@ -141,6 +173,11 @@ internal sealed class ProductionInstallerWorkflowTests
         public string? ValidatedPath { get; private set; }
         public bool ThrowOnDispose { get; init; }
         public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
+
+        public void Fail()
+        {
+            this.Fault.TrySetResult(new InstallerProtocolClientException("synthetic private session fault"));
+        }
 
         public Task<HandshakeEvent> HandshakeAsync(string clientName, string clientVersion, CancellationToken cancellationToken = default)
         {

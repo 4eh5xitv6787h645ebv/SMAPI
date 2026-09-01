@@ -1,5 +1,7 @@
 using Avalonia.Automation;
 using Avalonia.Threading;
+using System.Globalization;
+using System.Text;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Frontend;
@@ -17,12 +19,18 @@ internal enum GameDiscoveryFocusTarget
 
 internal sealed class GameCandidateItem
 {
+    private const int MaximumAccessibleNameLength = 1024;
+
     internal GameCandidateItem(ProtocolGameCandidate candidate)
     {
         this.Candidate = candidate ?? throw new ArgumentNullException(nameof(candidate));
-        this.DisplayName = candidate.DisplayName;
-        this.CanonicalPath = candidate.CanonicalPath;
+        this.DisplayName = FormatCanonicalPathForDisplay(candidate.DisplayName);
+        this.CanonicalPath = FormatCanonicalPathForDisplay(candidate.CanonicalPath);
         (this.StatusLabel, this.StatusDetail) = Describe(candidate.State);
+        string accessibleName = $"{this.DisplayName}. {this.StatusLabel}. {this.StatusDetail} Folder: {this.CanonicalPath}";
+        this.AccessibleName = accessibleName.Length <= MaximumAccessibleNameLength
+            ? accessibleName
+            : accessibleName[..(MaximumAccessibleNameLength - 1)] + "…";
     }
 
     internal ProtocolGameCandidate Candidate { get; }
@@ -35,7 +43,27 @@ internal sealed class GameCandidateItem
 
     public string StatusDetail { get; }
 
+    public string AccessibleName { get; }
+
     public bool IsValid => this.Candidate.State == LinuxGameFolderStatus.Valid;
+
+    internal static string FormatCanonicalPathForDisplay(string canonicalPath)
+    {
+        ArgumentNullException.ThrowIfNull(canonicalPath);
+        StringBuilder? escaped = null;
+        for (int index = 0; index < canonicalPath.Length; index++)
+        {
+            char character = canonicalPath[index];
+            if (char.IsSurrogate(character) || char.GetUnicodeCategory(character) == UnicodeCategory.Format)
+            {
+                escaped ??= new StringBuilder(canonicalPath.Length + 8).Append(canonicalPath, 0, index);
+                escaped.Append("\\u").Append(((int)character).ToString("X4", CultureInfo.InvariantCulture));
+            }
+            else
+                escaped?.Append(character);
+        }
+        return escaped?.ToString() ?? canonicalPath;
+    }
 
     private static (string Label, string Detail) Describe(LinuxGameFolderStatus status)
     {
@@ -259,6 +287,20 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.FocusRequested?.Invoke(this, GameDiscoveryFocusTarget.Browse);
     }
 
+    /// <summary>Publish a sanitized terminal failure if a selected folder couldn't enter backend validation.</summary>
+    internal void ReportFolderValidationFailure()
+    {
+        if (this.disposed)
+            return;
+        this.folderPickerPending = false;
+        this.folderPickerFailed = true;
+        this.Heading = "The selected folder could not be checked";
+        this.Message = "The verified installer session is not available. Close and reopen the installer; no game files were changed.";
+        this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
+        this.NotifyDerivedProperties();
+        this.FocusRequested?.Invoke(this, GameDiscoveryFocusTarget.Status);
+    }
+
     public async Task StartAsync()
     {
         if (this.started || this.disposed)
@@ -327,6 +369,8 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     {
         if (this.disposed && next.State != GameDiscoveryState.Disposed)
             return;
+        if (next.Revision < this.snapshot.Revision)
+            return;
         GameDiscoveryState priorState = this.snapshot.State;
         long priorGeneration = this.snapshot.Generation;
         this.snapshot = next;
@@ -346,6 +390,11 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
 
         if (requestFocus && (priorState != next.State || priorGeneration != next.Generation))
             this.FocusRequested?.Invoke(this, this.GetFocusTarget(next));
+    }
+
+    internal void ApplySnapshotForTesting(GameDiscoverySnapshot next)
+    {
+        this.ApplySnapshot(next, requestFocus: false);
     }
 
     private (string Heading, string Message) GetCopy(

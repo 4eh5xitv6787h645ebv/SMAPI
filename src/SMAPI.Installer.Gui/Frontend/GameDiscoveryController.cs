@@ -22,6 +22,7 @@ internal enum GameDiscoveryState
 
 internal sealed record GameDiscoverySnapshot(
     long Generation,
+    long Revision,
     GameDiscoveryState State,
     IReadOnlyList<ProtocolGameCandidate> Candidates,
     ProtocolGameCandidate? SelectedCandidate,
@@ -38,14 +39,18 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private readonly IVerifiedInstallerSession Session;
     private readonly TaskCompletionSource StopWatching = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task SessionWatcher;
+    private ProtocolGameCandidate[] DiscoveredCandidatesValue = [];
     private ProtocolGameCandidate[] CandidatesValue = [];
     private ProtocolGameCandidate? SelectedCandidateValue;
     private GameDiscoveryState StateValue = GameDiscoveryState.Idle;
     private ActiveOperation? Operation;
     private Task? DisposalTask;
     private long GenerationValue;
+    private long RevisionValue;
     private bool SessionHasFaulted;
     private bool DisposeStarted;
+    internal Action? BeforeDiscoveryCommitForTesting { get; set; }
+    internal Action? BeforeManualValidationCommitForTesting { get; set; }
 
     public GameDiscoveryController(IVerifiedInstallerSession session)
     {
@@ -73,6 +78,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
         {
             this.AssertCanStart();
             operation = this.BeginOperation(cancellationToken);
+            this.DiscoveredCandidatesValue = [];
             this.CandidatesValue = [];
             this.SelectedCandidateValue = null;
             this.StateValue = GameDiscoveryState.Discovering;
@@ -157,10 +163,18 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             ).ConfigureAwait(false);
             operation.Cancellation.Token.ThrowIfCancellationRequested();
             ProtocolGameCandidate[] candidates = ValidateCandidates(discovered);
+            this.BeforeDiscoveryCommitForTesting?.Invoke();
             lock (this.Sync)
             {
                 if (!this.IsCurrent(operation))
                     return;
+                if (operation.UserCancellation)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.Cancelled;
+                    return;
+                }
+                this.DiscoveredCandidatesValue = candidates;
                 this.CandidatesValue = candidates;
                 this.SelectedCandidateValue = candidates is [{ State: LinuxGameFolderStatus.Valid }]
                     ? candidates[0]
@@ -201,11 +215,18 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             ).ConfigureAwait(false);
             operation.Cancellation.Token.ThrowIfCancellationRequested();
             ValidateCandidate(candidate);
+            this.BeforeManualValidationCommitForTesting?.Invoke();
             lock (this.Sync)
             {
                 if (!this.IsCurrent(operation))
                     return;
-                this.CandidatesValue = ReplaceCandidate(this.CandidatesValue, candidate);
+                if (operation.UserCancellation)
+                {
+                    this.SelectedCandidateValue = null;
+                    this.StateValue = GameDiscoveryState.Cancelled;
+                    return;
+                }
+                this.CandidatesValue = ReplaceManualCandidate(this.DiscoveredCandidatesValue, candidate);
                 this.SelectedCandidateValue = candidate;
                 this.StateValue = candidate.State == LinuxGameFolderStatus.Valid
                     ? GameDiscoveryState.ManualValid
@@ -297,6 +318,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
         }
         lock (this.Sync)
         {
+            this.DiscoveredCandidatesValue = [];
             this.CandidatesValue = [];
             this.SelectedCandidateValue = null;
             this.StateValue = GameDiscoveryState.Disposed;
@@ -341,6 +363,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
         bool idle = this.Operation is null && !this.DisposeStarted && !this.SessionHasFaulted;
         return new(
             this.GenerationValue,
+            this.RevisionValue,
             this.StateValue,
             Array.AsReadOnly(this.CandidatesValue.ToArray()),
             this.SelectedCandidateValue,
@@ -372,6 +395,8 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
 
     private void PublishChanged()
     {
+        lock (this.Sync)
+            this.RevisionValue++;
         Delegate[] handlers = this.Changed?.GetInvocationList() ?? [];
         foreach (EventHandler handler in handlers.Cast<EventHandler>())
         {
@@ -411,13 +436,14 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             throw new InvalidOperationException("The verified session returned an invalid game candidate.");
     }
 
-    private static ProtocolGameCandidate[] ReplaceCandidate(
-        IReadOnlyList<ProtocolGameCandidate> current,
+    private static ProtocolGameCandidate[] ReplaceManualCandidate(
+        IReadOnlyList<ProtocolGameCandidate> discovered,
         ProtocolGameCandidate candidate
     )
     {
-        return current
+        return discovered
             .Where(value => !string.Equals(value.CanonicalPath, candidate.CanonicalPath, StringComparison.Ordinal))
+            .Take(ProtocolJsonSerializer.MaxGameCandidates - 1)
             .Append(candidate)
             .ToArray();
     }

@@ -115,6 +115,76 @@ internal sealed class GameDiscoveryControllerTests
         session.DiscoverCalls.Should().Be(2);
     }
 
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task AcceptedCancellationWinsTheFinalSuccessCommitRace(bool discovery)
+    {
+        ProtocolGameCandidate valid = Candidate("late-valid", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource reachedCommit = NewCompletion();
+        TaskCompletionSource releaseCommit = NewCompletion();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Validation = (_, _) => Task.FromResult(valid)
+        };
+        await using GameDiscoveryController controller = new(session);
+        Action hook = () =>
+        {
+            reachedCommit.TrySetResult();
+            releaseCommit.Task.GetAwaiter().GetResult();
+        };
+        if (discovery)
+            controller.BeforeDiscoveryCommitForTesting = hook;
+        else
+            controller.BeforeManualValidationCommitForTesting = hook;
+
+        Task operation = discovery
+            ? controller.DiscoverAsync()
+            : controller.ValidateManualAsync("/games/late-valid");
+        await reachedCommit.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Task cancellation = controller.CancelAsync();
+        await WaitUntilAsync(() => controller.Snapshot.State == GameDiscoveryState.Cancelling);
+        releaseCommit.TrySetResult();
+        await Task.WhenAll(operation, cancellation).WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
+        controller.Snapshot.SelectedCandidate.Should().BeNull();
+        controller.Snapshot.CanContinue.Should().BeFalse();
+        controller.Snapshot.CanRetry.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task ManualValidationKeepsOneBoundedSlotAlongsideDiscoveredCandidates()
+    {
+        ProtocolGameCandidate[] discovered = Enumerable.Range(0, ProtocolJsonSerializer.MaxGameCandidates)
+            .Select(index => Candidate($"detected-{index:D2}", LinuxGameFolderStatus.Valid))
+            .ToArray();
+        FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>(discovered),
+            Validation = (path, _) => Task.FromResult(new ProtocolGameCandidate(
+                path,
+                LinuxGameFolderStatus.Valid,
+                "Manually selected Stardew Valley"
+            ))
+        };
+        await using GameDiscoveryController controller = new(session);
+        await controller.DiscoverAsync();
+
+        for (int index = 0; index < ProtocolJsonSerializer.MaxGameCandidates + 16; index++)
+        {
+            string path = $"/games/manual-{index:D2}";
+            await controller.ValidateManualAsync(path);
+            GameDiscoverySnapshot snapshot = controller.Snapshot;
+            snapshot.Candidates.Should().HaveCount(ProtocolJsonSerializer.MaxGameCandidates);
+            snapshot.Candidates.Should().ContainSingle(candidate => candidate.CanonicalPath == path);
+            snapshot.SelectedCandidate.Should().BeSameAs(snapshot.Candidates[^1]);
+            snapshot.CanContinue.Should().BeTrue();
+            if (index > 0)
+                snapshot.Candidates.Should().NotContain(candidate => candidate.CanonicalPath == $"/games/manual-{index - 1:D2}");
+        }
+    }
+
     [Test]
     public async Task SessionFaultWinsActiveValidationAndLaterFaultRevokesSelection()
     {

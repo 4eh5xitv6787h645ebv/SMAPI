@@ -102,13 +102,27 @@ internal sealed class ProductionInstallerWorkflow
             return;
         try
         {
-            string? selected = await this.PickFolder(window).ConfigureAwait(true);
-            await window.ApplyManualFolderAsync(selected).ConfigureAwait(true);
-        }
-        catch
-        {
-            if (window.DataContext is GameDiscoveryViewModel viewModel)
-                viewModel.ReportFolderPickerFailure();
+            string? selected;
+            try
+            {
+                selected = await this.PickFolder(window).ConfigureAwait(true);
+            }
+            catch
+            {
+                if (window.DataContext is GameDiscoveryViewModel pickerViewModel)
+                    pickerViewModel.ReportFolderPickerFailure();
+                return;
+            }
+
+            try
+            {
+                await window.ApplyManualFolderAsync(selected).ConfigureAwait(true);
+            }
+            catch
+            {
+                if (window.DataContext is GameDiscoveryViewModel validationViewModel)
+                    validationViewModel.ReportFolderValidationFailure();
+            }
         }
         finally
         {

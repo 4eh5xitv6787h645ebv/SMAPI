@@ -139,22 +139,62 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
+    public async Task CandidateRowsExposeDistinctBoundedFolderAndStatusNames()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("valid", LinuxGameFolderStatus.Valid);
+        ProtocolGameCandidate invalid = GameDiscoveryControllerTests.Candidate("missing-launcher", LinuxGameFolderStatus.MissingLauncher);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid, invalid])
+        };
+        GameDiscoveryWindow window = CreateWindow(session);
+        window.FolderPickerRequested += (_, _) => { };
+        window.Show();
+        GameDiscoveryViewModel viewModel = (GameDiscoveryViewModel)window.DataContext!;
+        await WaitUntilAsync(() => viewModel.Candidates.Count == 2);
+        ListBox list = window.FindControl<ListBox>("CandidateList")!;
+
+        string[] names = Enumerable.Range(0, 2)
+            .Select(index =>
+            {
+                Control container = list.ContainerFromIndex(index)!;
+                string name = ControlAutomationPeer.CreatePeerForElement(container).GetName();
+                name.Should().Be(viewModel.Candidates[index].AccessibleName);
+                name.Should().NotContain(nameof(GameCandidateItem));
+                name.Length.Should().BeLessThanOrEqualTo(1024);
+                return name;
+            })
+            .ToArray();
+        names.Should().OnlyHaveUniqueItems();
+        names[0].Should().Contain("Ready").And.Contain("/games/valid");
+        names[1].Should().Contain("Game launcher is missing").And.Contain("/games/missing-launcher");
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
     [TestCase(1.00)]
     [TestCase(1.25)]
     [TestCase(1.50)]
     [TestCase(2.00)]
-    public void DesktopScaleVariantsRenderWithoutHorizontalPageScroll(double scale)
+    public async Task DesktopScaleVariantsRenderWithoutHorizontalPageScroll(double scale)
     {
         const double PhysicalViewportWidth = 1400;
-        GameDiscoveryWindow window = CreateWindow(new());
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new();
+        GameDiscoveryWindow window = CreateWindow(session);
         AssertRenderedLayout(window, PhysicalViewportWidth / scale);
         window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+        session.DisposeCalls.Should().Be(1);
     }
 
     [AvaloniaTest]
-    public void Narrow420DipLayoutAndPrimaryContrastRemainAccessible()
+    public async Task Narrow420DipLayoutAndPrimaryContrastRemainAccessible()
     {
-        GameDiscoveryWindow window = CreateWindow(new());
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new();
+        GameDiscoveryWindow window = CreateWindow(session);
         ScrollViewer scroll = AssertRenderedLayout(window, 420);
         Button browse = window.FindControl<Button>("BrowseButton")!;
         ISolidColorBrush background = browse.Background.Should().BeAssignableTo<ISolidColorBrush>().Subject;
@@ -165,6 +205,8 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         Contrast(background.Color, Colors.White).Should().BeGreaterThanOrEqualTo(4.5);
         AutomationProperties.GetHeadingLevel(window.FindControl<TextBlock>("StatusHeading")!).Should().Be(2);
         window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+        session.DisposeCalls.Should().Be(1);
     }
 
     private static GameDiscoveryWindow CreateWindow(GameDiscoveryControllerTests.FakeVerifiedSession session)

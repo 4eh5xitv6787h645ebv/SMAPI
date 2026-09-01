@@ -95,6 +95,11 @@
                 AutomationProperties.HelpText="Select a folder to review why it is or is not usable."
                 ItemsSource="{Binding Candidates}"
                 SelectedItem="{Binding SelectedCandidate}">
+              <ListBox.Styles>
+                <Style Selector="ListBoxItem" x:CompileBindings="False">
+                  <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                </Style>
+              </ListBox.Styles>
               <ListBox.ItemTemplate>
                 <DataTemplate x:DataType="vm:GameCandidateItem">
                   <StackPanel Margin="4" Spacing="3">

@@ -4,6 +4,7 @@ using Avalonia.Threading;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
+using StardewModdingAPI.Installer.Gui.Backend;
 using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
@@ -11,6 +12,56 @@ namespace StardewModdingAPI.Installer.Gui.Tests;
 
 internal sealed partial class GameDiscoveryAccessibilityTests
 {
+    [Test]
+    public void DisplayedCanonicalPathEscapesBidirectionalFormattingAndSurrogates()
+    {
+        ProtocolGameCandidate candidate = new(
+            "/games/normal-\u202Espoof-\U0001F3AE",
+            LinuxGameFolderStatus.Valid,
+            "Stardew Valley"
+        );
+
+        GameCandidateItem item = new(candidate);
+
+        item.CanonicalPath.Should().Be("/games/normal-\\u202Espoof-\\uD83C\\uDFAE");
+        item.CanonicalPath.Any(character =>
+            char.IsSurrogate(character)
+            || char.GetUnicodeCategory(character) == System.Globalization.UnicodeCategory.Format
+        ).Should().BeFalse();
+        item.Candidate.CanonicalPath.Should().BeSameAs(candidate.CanonicalPath, "display escaping must not change backend path authority");
+    }
+
+    [AvaloniaTest]
+    public async Task OlderPostedSnapshotCannotRestoreSelectionAfterSessionFault()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("ready", LinuxGameFolderStatus.Valid);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        await using GameDiscoveryController controller = new(session);
+        await using GameDiscoveryViewModel viewModel = new(controller);
+        viewModel.ContinueRequested += (_, _) => { };
+        await controller.DiscoverAsync();
+        Dispatcher.UIThread.RunJobs();
+        GameDiscoverySnapshot ready = controller.Snapshot;
+        viewModel.IsContinueVisible.Should().BeTrue();
+
+        session.Fault.TrySetResult(new InstallerProtocolClientException("late fault"));
+        await WaitUntilAsync(() => controller.Snapshot is { State: GameDiscoveryState.SessionFaulted } snapshot
+            && snapshot.Revision > ready.Revision);
+        GameDiscoverySnapshot faulted = controller.Snapshot;
+        faulted.Revision.Should().BeGreaterThan(ready.Revision);
+        viewModel.ApplySnapshotForTesting(faulted);
+        viewModel.IsContinueVisible.Should().BeFalse();
+
+        viewModel.ApplySnapshotForTesting(ready);
+
+        viewModel.Heading.Should().Be("The verified installer session closed");
+        viewModel.IsContinueVisible.Should().BeFalse();
+        viewModel.SelectedCandidate.Should().BeNull();
+    }
+
     [AvaloniaTest]
     public async Task EmptyDiscoveryIsTruthfulAndFolderPickerIsAnExplicitEventSeam()
     {
