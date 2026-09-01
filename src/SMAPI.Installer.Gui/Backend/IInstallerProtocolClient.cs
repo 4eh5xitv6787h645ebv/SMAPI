@@ -19,6 +19,9 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
 
     /// <summary>Ask the authenticated backend session to validate one exact canonical Linux game-folder path.</summary>
     Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default);
+
+    /// <summary>Inspect one non-rollback operation and return a path-free, authority-free plan projection.</summary>
+    Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

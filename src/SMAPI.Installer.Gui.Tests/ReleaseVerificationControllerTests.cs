@@ -952,6 +952,12 @@ internal sealed class ReleaseVerificationControllerTests
         public Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default)
             => this.Validate(canonicalPath, cancellationToken);
 
+        public Task<InstallerReadOnlyPlanResult> InspectPlanAsync(
+            string canonicalGamePath,
+            InstallerOperation operation,
+            CancellationToken cancellationToken = default
+        ) => throw new AssertionException("Release verification must not inspect a plan.");
+
         public ValueTask DisposeAsync()
         {
             this.DisposeCalls++;

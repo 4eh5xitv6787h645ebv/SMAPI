@@ -343,6 +343,12 @@ internal sealed class ReleaseVerificationViewModelTests
         public Task<ProtocolGameCandidate> ValidateGameAsync(string canonicalPath, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
+        public Task<InstallerReadOnlyPlanResult> InspectPlanAsync(
+            string canonicalGamePath,
+            InstallerOperation operation,
+            CancellationToken cancellationToken = default
+        ) => throw new AssertionException("Release verification must not inspect a plan.");
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

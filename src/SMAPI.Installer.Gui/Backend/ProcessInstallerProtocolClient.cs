@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Security;
 
@@ -12,7 +13,10 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     internal const string PackageVerificationCapability = "verified-local-package";
     internal const string GameDiscoveryCapability = "linux-game-discovery";
     internal const string GameValidationCapability = "linux-game-validation";
+    internal const string PlanInspectionCapability = "install-update-repair-uninstall-backup-rollback";
     internal const int MaximumObservedStderrBytes = 64 * 1024;
+    internal const int MaximumPlanPageCount = 512;
+    internal const int MaximumPlanAggregateUtf8Bytes = 16 * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan DefaultReapTimeout = TimeSpan.FromSeconds(5);
@@ -46,6 +50,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private ProtocolSessionId? SessionId;
     private ProtocolPackageId? VerifiedPackageId;
     private ProtocolReleaseIdentity? VerifiedRelease;
+    private bool PlanInspectionSupported;
     private int CleanupStarted;
     private int DisposeStarted;
     private int ObservedStderrBytesValue;
@@ -157,6 +162,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             )
                 return await this.FailProtocolAsync<HandshakeEvent>().ConfigureAwait(false);
             this.SessionId = response.SessionId;
+            this.PlanInspectionSupported = response.Capabilities.Contains(PlanInspectionCapability, StringComparer.Ordinal);
             return response;
         }
         finally
@@ -258,6 +264,373 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         finally
         {
             this.CommandGate.Release();
+        }
+    }
+
+    public async Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(canonicalGamePath);
+        if (operation is not (InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair or InstallerOperation.Uninstall or InstallerOperation.Backup))
+            throw new ArgumentOutOfRangeException(nameof(operation), operation, "Only non-rollback read-only plan inspection is available.");
+
+        await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            this.AssertUsable();
+            ProtocolSessionId session;
+            ProtocolPackageId? packageId;
+            ProtocolReleaseIdentity? verifiedRelease;
+            bool planInspectionSupported;
+            lock (this.ResponseLock)
+            {
+                session = this.SessionId
+                    ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+                packageId = this.VerifiedPackageId;
+                verifiedRelease = this.VerifiedRelease;
+                planInspectionSupported = this.PlanInspectionSupported;
+            }
+
+            if (!planInspectionSupported)
+                return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+
+            if (packageId is null || verifiedRelease is null)
+                throw new InstallerProtocolClientException("A verified package session is required before inspecting an operation.");
+            bool requiresPackage = operation is InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair;
+            ProtocolPackageId? requestPackageId = requiresPackage ? packageId : null;
+
+            using CancellationTokenSource aggregateTimeout = new(this.OperationTimeout);
+            using CancellationTokenSource aggregate = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, aggregateTimeout.Token);
+            try
+            {
+                ProtocolEvent response = await this.ExchangeAsync<ProtocolEvent>(
+                    new InspectPlanRequest(session, canonicalGamePath, operation, requestPackageId, null),
+                    aggregate.Token
+                ).ConfigureAwait(false);
+
+                if (response is PrePlanRejectedEvent rejected && rejected.SessionId == session)
+                {
+                    InstallerReadOnlyPlanRejection result = new(rejected.ErrorCode, rejected.NextAction, rejected.IsTerminal);
+                    if (rejected.IsTerminal)
+                        await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                    return result;
+                }
+                if (response is not PlanEvent plan || !ValidatePlanHeader(plan, session, canonicalGamePath, operation, requestPackageId, verifiedRelease))
+                    return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+
+                PlanCollections collections = await this.FetchAllPlanPagesAsync(plan, session, aggregate.Token).ConfigureAwait(false);
+                if (!ValidateCompletePlan(plan, collections))
+                    return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+
+                InstallerReadOnlyPlanSuccess projected = ProjectPlan(plan, collections);
+                aggregate.Token.ThrowIfCancellationRequested();
+                if (this.SessionFault.Task.IsCompletedSuccessfully)
+                    throw await this.SessionFault.Task.ConfigureAwait(false);
+                return projected;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && aggregateTimeout.IsCancellationRequested)
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw new InstallerProtocolClientException(this.CleanupConfirmed
+                    ? "The installer backend plan inspection exceeded its bounded deadline and was stopped."
+                    : "The installer backend plan inspection exceeded its bounded deadline, and termination could not be confirmed.");
+            }
+        }
+        finally
+        {
+            this.CommandGate.Release();
+        }
+    }
+
+    private async Task<PlanCollections> FetchAllPlanPagesAsync(PlanEvent plan, ProtocolSessionId session, CancellationToken cancellationToken)
+    {
+        PlanCollections result = new(plan.OperationCount, plan.ConflictCount, plan.CandidateCount, plan.WarningCount);
+        int pageCount = 0;
+        long aggregateBytes;
+        try
+        {
+            aggregateBytes = StrictUtf8.GetByteCount(ProtocolJsonSerializer.SerializeLine(plan));
+        }
+        catch
+        {
+            return await this.FailProtocolAsync<PlanCollections>().ConfigureAwait(false);
+        }
+
+        foreach ((ProtocolPlanPageKind kind, int totalCount) in new[]
+        {
+            (ProtocolPlanPageKind.Operations, plan.OperationCount),
+            (ProtocolPlanPageKind.Conflicts, plan.ConflictCount),
+            (ProtocolPlanPageKind.Candidates, plan.CandidateCount),
+            (ProtocolPlanPageKind.Warnings, plan.WarningCount)
+        })
+        {
+            int offset = 0;
+            while (offset < totalCount)
+            {
+                if (++pageCount > MaximumPlanPageCount)
+                    return await this.FailProtocolAsync<PlanCollections>().ConfigureAwait(false);
+
+                PlanPageEvent page = await this.ExchangeAsync<PlanPageEvent>(
+                    new GetPlanPageRequest(session, plan.PlanId, plan.PlanDigest, kind, offset),
+                    cancellationToken
+                ).ConfigureAwait(false);
+                if (
+                    page.SessionId != session
+                    || page.PlanId != plan.PlanId
+                    || page.PlanDigest != plan.PlanDigest
+                    || page.PageKind != kind
+                    || page.Offset != offset
+                    || page.TotalCount != totalCount
+                )
+                    return await this.FailProtocolAsync<PlanCollections>().ConfigureAwait(false);
+
+                int populated = page.Operations.Length + page.Conflicts.Length + page.Candidates.Length + page.Warnings.Length;
+                int expectedNext = checked(offset + populated);
+                if (populated <= 0 || page.NextOffset != (expectedNext < totalCount ? expectedNext : null))
+                    return await this.FailProtocolAsync<PlanCollections>().ConfigureAwait(false);
+
+                try
+                {
+                    aggregateBytes = checked(aggregateBytes + StrictUtf8.GetByteCount(ProtocolJsonSerializer.SerializeLine(page)));
+                }
+                catch
+                {
+                    return await this.FailProtocolAsync<PlanCollections>().ConfigureAwait(false);
+                }
+                if (aggregateBytes > MaximumPlanAggregateUtf8Bytes)
+                    return await this.FailProtocolAsync<PlanCollections>().ConfigureAwait(false);
+
+                switch (kind)
+                {
+                    case ProtocolPlanPageKind.Operations:
+                        result.Operations.AddRange(page.Operations);
+                        break;
+                    case ProtocolPlanPageKind.Conflicts:
+                        result.Conflicts.AddRange(page.Conflicts);
+                        break;
+                    case ProtocolPlanPageKind.Candidates:
+                        result.Candidates.AddRange(page.Candidates);
+                        break;
+                    case ProtocolPlanPageKind.Warnings:
+                        result.Warnings.AddRange(page.Warnings);
+                        break;
+                    default:
+                        return await this.FailProtocolAsync<PlanCollections>().ConfigureAwait(false);
+                }
+                offset = expectedNext;
+            }
+        }
+        return result;
+    }
+
+    private static bool ValidatePlanHeader(PlanEvent plan, ProtocolSessionId session, string canonicalGamePath, InstallerOperation operation, ProtocolPackageId? packageId, ProtocolReleaseIdentity verifiedRelease)
+    {
+        if (
+            plan.SessionId != session
+            || plan.Operation != operation
+            || plan.PackageId != packageId
+            || plan.RecoveryAuthority is not null
+            || !string.Equals(plan.GameRoot.CanonicalPath, canonicalGamePath, StringComparison.Ordinal)
+            || plan.RecommendedDefault != ProtocolRecommendedDefault.Cancel
+            || !plan.RequiresConfirmation
+            || plan.CanExecute != (plan.ConflictCount == 0)
+        )
+            return false;
+
+        if (plan.ObservedState == ObservedInstallState.NotInstalled && plan.CurrentRelease is not null)
+            return false;
+        if (plan.ObservedState is ObservedInstallState.KnownUnmodified or ObservedInstallState.KnownModified && plan.CurrentRelease is null)
+            return false;
+
+        if (operation is InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair)
+        {
+            if (plan.TargetRelease != verifiedRelease)
+                return false;
+        }
+        else if (operation == InstallerOperation.Backup)
+        {
+            if ((plan.CurrentRelease is null) != (plan.TargetRelease is null) || plan.CurrentRelease is not null && plan.CurrentRelease != plan.TargetRelease)
+                return false;
+        }
+        else if (plan.TargetRelease is not null)
+            return false;
+
+        return operation != InstallerOperation.Install || plan.CurrentRelease is null;
+    }
+
+    private static bool ValidateCompletePlan(PlanEvent plan, PlanCollections collections)
+    {
+        if (
+            collections.Operations.Count != plan.OperationCount
+            || collections.Conflicts.Count != plan.ConflictCount
+            || collections.Candidates.Count != plan.CandidateCount
+            || collections.Warnings.Count != plan.WarningCount
+            || !IsCanonicalOperationSequence(collections.Operations)
+            || !IsCanonicalConflictSequence(collections.Conflicts)
+            || collections.Candidates.Select(item => item.CandidateId).Distinct().Count() != collections.Candidates.Count
+            || collections.Candidates.Select(item => item.Path).Distinct(StringComparer.Ordinal).Count() != collections.Candidates.Count
+            || collections.Warnings.Distinct(StringComparer.Ordinal).Count() != collections.Warnings.Count
+        )
+            return false;
+
+        ProtocolPlanDigest recomputed;
+        try
+        {
+            recomputed = ProtocolPlanDigest.Compute(
+                plan.ExecutionBindingDigest,
+                plan.Operation,
+                plan.PackageId,
+                plan.RecoveryAuthority,
+                plan.GameRoot,
+                plan.CurrentRelease,
+                plan.TargetRelease,
+                plan.ObservedState,
+                collections.Operations,
+                collections.Conflicts,
+                collections.Candidates,
+                plan.Summary,
+                collections.Warnings,
+                plan.RequiresConfirmation
+            );
+        }
+        catch
+        {
+            return false;
+        }
+        if (recomputed != plan.PlanDigest)
+            return false;
+
+        ProtocolPlanRisk[] expectedRisks;
+        try
+        {
+            expectedRisks = GetExpectedRisks(plan.Operation, plan.CurrentRelease, plan.TargetRelease, collections.Candidates.Count);
+        }
+        catch
+        {
+            return false;
+        }
+        return plan.Risks.SequenceEqual(expectedRisks);
+    }
+
+    private static bool IsCanonicalOperationSequence(IReadOnlyList<ProtocolPlanOperation> operations)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        string? previous = null;
+        foreach (ProtocolPlanOperation operation in operations)
+        {
+            string key = $"{operation.Path}\0{(int)operation.Kind:D3}\0{operation.ResultSha256}";
+            if (!seen.Add(key) || previous is not null && StringComparer.Ordinal.Compare(previous, key) > 0)
+                return false;
+            previous = key;
+        }
+        return true;
+    }
+
+    private static bool IsCanonicalConflictSequence(IReadOnlyList<ProtocolPlanConflict> conflicts)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        string? previous = null;
+        foreach (ProtocolPlanConflict conflict in conflicts)
+        {
+            string key = $"{conflict.Path}\0{(int)conflict.Code:D3}";
+            if (!seen.Add(key) || previous is not null && StringComparer.Ordinal.Compare(previous, key) > 0)
+                return false;
+            previous = key;
+        }
+        return true;
+    }
+
+    private static ProtocolPlanRisk[] GetExpectedRisks(InstallerOperation operation, ProtocolReleaseIdentity? currentRelease, ProtocolReleaseIdentity? targetRelease, int candidateCount)
+    {
+        List<ProtocolPlanRisk> risks = [];
+        if (operation == InstallerOperation.Uninstall)
+            risks.Add(ProtocolPlanRisk.Uninstall);
+        if (currentRelease is not null && targetRelease is not null && IsEarlierRelease(targetRelease.Tag, currentRelease.Tag))
+            risks.Add(ProtocolPlanRisk.Downgrade);
+        if (candidateCount > 0)
+            risks.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
+        return risks.ToArray();
+    }
+
+    private static bool IsEarlierRelease(string targetTag, string currentTag)
+    {
+        static (Version Version, int Alpha) Parse(string tag)
+        {
+            const string prefix = "fork-4eh5xitv6787h645ebv-linux-v";
+            int separator = tag.LastIndexOf("-alpha.", StringComparison.Ordinal);
+            if (
+                !tag.StartsWith(prefix, StringComparison.Ordinal)
+                || separator <= prefix.Length
+                || !Version.TryParse(tag[prefix.Length..separator], out Version? version)
+                || !int.TryParse(tag[(separator + "-alpha.".Length)..], out int alpha)
+                || alpha < 1
+            )
+                throw new InstallerProtocolClientException("A release tag couldn't be compared safely.");
+            return (version, alpha);
+        }
+
+        (Version targetVersion, int targetAlpha) = Parse(targetTag);
+        (Version currentVersion, int currentAlpha) = Parse(currentTag);
+        int comparison = targetVersion.CompareTo(currentVersion);
+        return comparison < 0 || comparison == 0 && targetAlpha < currentAlpha;
+    }
+
+    private static InstallerReadOnlyPlanSuccess ProjectPlan(PlanEvent plan, PlanCollections collections)
+    {
+        InstallerPlanOperationCount[] operations = collections.Operations
+            .GroupBy(item => item.Kind)
+            .OrderBy(group => group.Key)
+            .Select(group => new InstallerPlanOperationCount(group.Key, group.Count()))
+            .ToArray();
+        InstallerPlanConflictCount[] conflicts = collections.Conflicts
+            .GroupBy(item => item.Code)
+            .OrderBy(group => group.Key)
+            .Select(group => new InstallerPlanConflictCount(group.Key, group.Count()))
+            .ToArray();
+        InstallerPlanCandidateCount[] candidates = collections.Candidates
+            .GroupBy(item => (item.Reason, item.Disposition, item.Selected))
+            .OrderBy(group => group.Key.Reason)
+            .ThenBy(group => group.Key.Disposition)
+            .ThenBy(group => group.Key.Selected)
+            .Select(group => new InstallerPlanCandidateCount(group.Key.Reason, group.Key.Disposition, group.Key.Selected, group.Count()))
+            .ToArray();
+
+        return new(
+            plan.Operation,
+            plan.ObservedState,
+            ProjectRelease(plan.CurrentRelease),
+            ProjectRelease(plan.TargetRelease),
+            plan.CanExecute,
+            Array.AsReadOnly(plan.Risks),
+            plan.RecommendedDefault,
+            plan.RequiresConfirmation,
+            Array.AsReadOnly(operations),
+            Array.AsReadOnly(conflicts),
+            Array.AsReadOnly(candidates),
+            collections.Warnings.Count
+        );
+    }
+
+    private static InstallerPlanRelease? ProjectRelease(ProtocolReleaseIdentity? release) =>
+        release is null ? null : new(release.Tag, release.EmbeddedVersion);
+
+    private sealed class PlanCollections
+    {
+        public List<ProtocolPlanOperation> Operations { get; }
+        public List<ProtocolPlanConflict> Conflicts { get; }
+        public List<ProtocolPlanCandidate> Candidates { get; }
+        public List<string> Warnings { get; }
+
+        public PlanCollections(int operationCount, int conflictCount, int candidateCount, int warningCount)
+        {
+            this.Operations = new(operationCount);
+            this.Conflicts = new(conflictCount);
+            this.Candidates = new(candidateCount);
+            this.Warnings = new(warningCount);
         }
     }
 

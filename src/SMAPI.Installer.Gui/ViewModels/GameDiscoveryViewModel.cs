@@ -1,7 +1,7 @@
-using Avalonia.Automation;
-using Avalonia.Threading;
 using System.Globalization;
 using System.Text;
+using Avalonia.Automation;
+using Avalonia.Threading;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Frontend;
@@ -430,6 +430,10 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
             GameDiscoveryState.SessionFaulted => (
                 "The verified installer session closed",
                 "No game files were changed. Close and reopen the installer before trying again."
+            ),
+            GameDiscoveryState.Transferred => (
+                "Opening plan review…",
+                "The validated game folder and verified release are moving to the read-only plan screen. Nothing has been changed."
             ),
             GameDiscoveryState.Disposed => (
                 "Closing safely…",

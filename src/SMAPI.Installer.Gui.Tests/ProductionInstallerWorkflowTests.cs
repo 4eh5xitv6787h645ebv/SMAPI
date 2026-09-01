@@ -219,6 +219,12 @@ internal sealed class ProductionInstallerWorkflowTests
             ));
         }
 
+        public Task<InstallerReadOnlyPlanResult> InspectPlanAsync(
+            string canonicalGamePath,
+            InstallerOperation operation,
+            CancellationToken cancellationToken = default
+        ) => throw new AssertionException("The release-to-discovery workflow must not inspect a plan.");
+
         public ValueTask DisposeAsync()
         {
             this.DisposeCalls++;
