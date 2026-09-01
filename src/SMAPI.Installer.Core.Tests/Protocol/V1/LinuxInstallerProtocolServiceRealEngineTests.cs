@@ -32,7 +32,7 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
     }
 
     [Test]
-    public async Task BackupExecutesDurablyThroughTheRealProtocolEngine()
+    public async Task BackupCatalogAndPruneExecuteDurablyThroughTheRealProtocolEngine()
     {
         string game = this.CreateDirectory();
         string payload = this.CreateDirectory();
@@ -72,6 +72,28 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         RecoveryHistory afterBackup = await new LinuxInstallerEngine().ListRecoveriesAsync(game);
         afterBackup.Generations.Should().HaveCount(2);
         afterBackup.Generations[0].Action.Should().Be(InstallationAction.Backup);
+
+        using (CommittedRecoveryHandle reopened = await new LinuxInstallerEngine().OpenRecoveryAsync(game, afterBackup.Generations[0].GenerationId))
+        {
+            reopened.RestoreRelease.Should().Be(afterBackup.Generations[0].RestoreRelease);
+            reopened.RestoreRelease.Should().NotBeSameAs(afterBackup.Generations[0].RestoreRelease);
+        }
+
+        using (LinuxInstallerProtocolService pruneService = CreateRealService())
+        {
+            await Handshake(pruneService);
+            RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await pruneService.HandleAsync(new ListRecoveriesRequest(pruneService.SessionId, game));
+            catalog.Generations.Should().HaveCount(2);
+            PrunePlanEvent prune = (PrunePlanEvent)await pruneService.HandleAsync(new InspectPruneRequest(pruneService.SessionId, catalog.CatalogId, 1));
+            await pruneService.HandleAsync(new ConfirmPruneRequest(pruneService.SessionId, prune.PrunePlanId, prune.PruneDigest));
+            PruneSuccessEvent result = (PruneSuccessEvent)await pruneService.HandleAsync(new ExecutePruneRequest(pruneService.SessionId, prune.PrunePlanId, prune.PruneDigest));
+            result.Outcome.Should().Be(ProtocolPruneOutcome.Succeeded);
+            result.TerminalState.DurableState.Should().Be(ProtocolDurableState.PruneApplied);
+            result.PruneSummary.LogicallyRemovedGenerationCount.Should().Be(1);
+            result.PruneSummary.PhysicallyCleanedGenerationCount.Should().Be(1);
+        }
+
+        (await new LinuxInstallerEngine().ListRecoveriesAsync(game)).Generations.Should().ContainSingle();
     }
 
     private static LinuxInstallerProtocolService CreateRealService()

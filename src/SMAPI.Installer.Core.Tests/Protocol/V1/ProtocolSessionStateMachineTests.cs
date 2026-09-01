@@ -165,6 +165,29 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void RecoveryCatalogAcceptsDistinctValueEqualRestoreReleaseInstances()
+    {
+        ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority recovery = Recovery(Guid.NewGuid(), HashA, Root);
+        InstallationReleaseIdentity reopenedRelease = CreateRelease();
+        reopenedRelease.Should().Be(recovery.RestoreRelease).And.NotBeSameAs(recovery.RestoreRelease);
+        RecoveryHistory history = new(Sha256Digest.Parse(HashA), [new(recovery.GenerationId, recovery.OriginAction, true, true, reopenedRelease)]);
+
+        RecoveryCatalogEvent catalog = machine.RecordRecoveryCatalogAuthorities(new(machine.SessionId, "/game"), history, [recovery]);
+
+        catalog.Generations.Should().ContainSingle().Which.RestoreRelease.Should().NotBeNull();
+    }
+
+    [Test]
+    public void RecoveryCatalogStillRejectsAValueDifferentRestoreRelease()
+    {
+        ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority recovery = Recovery(Guid.NewGuid(), HashA, Root);
+        RecoveryHistory history = new(Sha256Digest.Parse(HashA), [new(recovery.GenerationId, recovery.OriginAction, true, true, null)]);
+
+        FluentActions.Invoking(() => machine.RecordRecoveryCatalogAuthorities(new(machine.SessionId, "/game"), history, [recovery]))
+            .Should().Throw<ProtocolException>().WithMessage("*generation, or release*");
+    }
+
+    [Test]
     public void GeneralizedCandidatePlan_PreservesUninstallAndAllowsRemovalResult()
     {
         ProtocolSessionStateMachine machine = Ready(); object authority = new();
