@@ -404,7 +404,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         try
         {
             using CancellationTokenRegistration outerRegistration = outerCancellation.Register(() => this.RequestOuterCancellation(request));
-            InstallationExecutionOutcome outcome = await this.Engine.ExecuteAsync(inspection, Sha256Digest.Parse(request.PlanDigest.Value), this.SanitizedLogPath, active.Token).ConfigureAwait(false);
+            InstallationExecutionOutcome outcome = await this.Engine.ExecuteAsync(inspection, inspection.ConfirmationDigest, this.SanitizedLogPath, active.Token).ConfigureAwait(false);
             ProtocolEvent terminal = this.CreateExecutionTerminal(request, outcome);
             this.CompleteExecutionTerminal(terminal); return this.Emit(terminal);
         }
@@ -426,7 +426,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         try
         {
             using CancellationTokenRegistration outerRegistration = outerCancellation.Register(() => this.RequestOuterPruneCancellation(request));
-            RecoveryPruneOutcome outcome = await this.Engine.ExecuteRecoveryPruneAsync(plan, Sha256Digest.Parse(request.PruneDigest.Value), active.Token).ConfigureAwait(false);
+            RecoveryPruneOutcome outcome = await this.Engine.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest, active.Token).ConfigureAwait(false);
             ProtocolEvent terminal = this.CreatePruneTerminal(request, outcome);
             this.CompletePruneTerminal(terminal); return this.Emit(terminal);
         }
