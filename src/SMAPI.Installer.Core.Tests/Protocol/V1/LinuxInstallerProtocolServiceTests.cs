@@ -464,6 +464,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
         SuccessEvent success = (SuccessEvent)(await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest)))!;
 
+        plan.PlanDigest.Should().NotBe(plan.ExecutionBindingDigest);
+        engine.ObservedExecutionDigests.Should().Equal(Sha256Digest.Parse(plan.ExecutionBindingDigest.Value));
         emitted.OfType<ProgressEvent>().Select(value => value.Stage).Should().Equal(TransactionStage.Revalidating, TransactionStage.Applying, TransactionStage.Completed);
         emitted.OfType<ProgressEvent>().Select(value => value.Sequence).Should().Equal(0, 1, 2);
         success.ExecutionSummary.ManagedFileChangeCount.Should().Be(1); success.Operation.Should().Be(InstallerOperation.Uninstall);
@@ -1004,6 +1006,58 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await stale.Should().ThrowAsync<ProtocolException>().WithMessage("*stale*");
     }
 
+    [Test]
+    public async Task CandidateReissuedExecutionUsesTheReplacementCoreDigestInsteadOfItsPresentationDigest()
+    {
+        FakeEngine engine = new() { CandidateApprovalMode = true }; FakePackageOpener opener = new();
+        using LinuxInstallerProtocolService service = Create(engine, opener);
+        await Handshake(service); PackageOpenedEvent package = await Open(service);
+        PlanEvent initial = (PlanEvent)await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Repair, package.PackageId, null));
+        PlanEvent partial = (PlanEvent)await service.HandleAsync(new SelectPlanCandidatesRequest(service.SessionId, initial.PlanId, initial.PlanDigest, [initial.Candidates[0].CandidateId]));
+        PlanEvent executable = (PlanEvent)await service.HandleAsync(new SelectPlanCandidatesRequest(service.SessionId, partial.PlanId, partial.PlanDigest, [partial.Candidates.Single().CandidateId]));
+
+        executable.CanExecute.Should().BeTrue();
+        executable.Candidates.Should().BeEmpty();
+        executable.ExecutionBindingDigest.Should().NotBe(initial.ExecutionBindingDigest);
+        executable.PlanDigest.Should().NotBe(executable.ExecutionBindingDigest);
+        await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, executable.PlanId, executable.PlanDigest));
+        (await service.HandleAsync(new ExecutePlanRequest(service.SessionId, executable.PlanId, executable.PlanDigest))).Should().BeOfType<SuccessEvent>();
+
+        engine.ObservedExecutionDigests.Should().Equal(Sha256Digest.Parse(executable.ExecutionBindingDigest.Value));
+    }
+
+    [Test]
+    public async Task RollbackExecutionUsesTheSelectedRecoveryPlansCoreDigestInsteadOfItsPresentationDigest()
+    {
+        FakeEngine engine = new();
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        PlanEvent plan = (PlanEvent)await service.HandleAsync(new InspectPlanRequest(service.SessionId, "/game", InstallerOperation.Rollback, null, catalog.Generations[0].SelectionId));
+
+        plan.PlanDigest.Should().NotBe(plan.ExecutionBindingDigest);
+        await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        (await service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest))).Should().BeOfType<SuccessEvent>();
+
+        engine.ObservedExecutionDigests.Should().Equal(Sha256Digest.Parse(plan.ExecutionBindingDigest.Value));
+    }
+
+    [Test]
+    public async Task RecoveryPruneExecutionUsesTheCoreDigestInsteadOfItsPresentationDigest()
+    {
+        FakeEngine engine = new();
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1));
+
+        plan.PruneDigest.Should().NotBe(plan.ExecutionBindingDigest);
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        (await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest))).Should().BeOfType<PruneSuccessEvent>();
+
+        engine.ObservedPruneDigests.Should().Equal(Sha256Digest.Parse(plan.ExecutionBindingDigest.Value));
+    }
+
     private static LinuxInstallerProtocolService Create(FakeEngine engine, FakePackageOpener opener, Action<ProtocolEvent>? sink = null, Action? terminalCompletionStarting = null, Action? disposalPublished = null, string? sanitizedLogPath = null, FakeDiscovery? discovery = null) =>
         new("test", progress => { engine.Progress = progress; return engine; }, discovery ?? new FakeDiscovery(), opener, sink, sanitizedLogPath, terminalCompletionStarting, disposalPublished);
     private static Task<ProtocolEvent> Handshake(LinuxInstallerProtocolService service) => service.HandleAsync(new HandshakeRequest("gui", "1"));
@@ -1119,6 +1173,8 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public int InspectCalls { get; private set; }
         public List<(InstallationAction Action, IVerifiedPackageContentAuthority? Package, ICommittedRecoveryContentAuthority? Recovery)> Observed { get; } = [];
         public List<FakeRecoveryAuthority> OpenedRecoveries { get; } = [];
+        public List<Sha256Digest> ObservedExecutionDigests { get; } = [];
+        public List<Sha256Digest> ObservedPruneDigests { get; } = [];
         public int ExecuteChangedCount { get; set; } = 1;
         public InstallationExecutionOutcome? NextExecutionOutcome { get; set; }
         public bool BlockExecutionUntilCancellation { get; set; }
@@ -1204,6 +1260,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         }
         public async Task<InstallationExecutionOutcome> ExecuteAsync(InspectedInstallationState inspection, Sha256Digest confirmedDigest, string? sanitizedLogPath, CancellationToken cancellationToken)
         {
+            this.ObservedExecutionDigests.Add(confirmedDigest);
             if (this.BlockExecutionInitiation) { this.ExecutionInitiationStarted.TrySetResult(); this.ReleaseExecutionInitiation.Task.GetAwaiter().GetResult(); }
             if (this.ThrowExecutionBeforeProgress) throw new InvalidOperationException("private-secret-before");
             this.Progress.Report(new(TransactionStage.Revalidating, 0, null)); this.ExecutionStarted.TrySetResult();
@@ -1245,6 +1302,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
             : new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First], [this.Second], [this.Second], [], null));
         public async Task<RecoveryPruneOutcome> ExecuteRecoveryPruneAsync(RecoveryPrunePlan plan, Sha256Digest confirmedDigest, CancellationToken cancellationToken)
         {
+            this.ObservedPruneDigests.Add(confirmedDigest);
             if (this.BlockPruneInitiation) { this.PruneInitiationStarted.TrySetResult(); this.ReleasePruneInitiation.Task.GetAwaiter().GetResult(); }
             if (this.ThrowPruneBeforeProgress) throw new InvalidOperationException("private-prune-secret-before");
             this.Progress.Report(new(TransactionStage.VerifyingRecovery, 1, 1)); this.PruneStarted.TrySetResult();

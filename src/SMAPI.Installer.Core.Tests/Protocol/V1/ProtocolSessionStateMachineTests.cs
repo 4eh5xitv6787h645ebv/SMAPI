@@ -231,7 +231,8 @@ internal sealed class ProtocolSessionStateMachineTests
         ProtocolSessionStateMachine machine = Ready(); PlanEvent plan = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall));
         FluentActions.Invoking(() => machine.RecordProgress(new(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 0, null, "Wait."))).Should().Throw<ProtocolException>().WithMessage("*Progress can't be recorded*");
         FluentActions.Invoking(() => machine.BeginExecution(new(machine.SessionId, plan.PlanId, plan.PlanDigest))).Should().Throw<ProtocolException>().WithMessage("*confirmed*");
-        machine.ConfirmPlan(new(machine.SessionId, plan.PlanId, plan.PlanDigest)); ExecutePlanRequest execute = new(machine.SessionId, plan.PlanId, plan.PlanDigest); machine.BeginExecution(execute);
+        machine.ConfirmPlan(new(machine.SessionId, plan.PlanId, plan.PlanDigest)); ExecutePlanRequest execute = new(machine.SessionId, plan.PlanId, plan.PlanDigest); InspectedInstallationState retained = machine.BeginExecution(execute);
+        retained.ConfirmationDigest.Value.Should().Be(plan.ExecutionBindingDigest.Value);
         FluentActions.Invoking(() => machine.RecordProgress(new ProgressEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 2, 1, "Invalid.") { CommandId = execute.CommandId })).Should().Throw<ProtocolException>().WithMessage("*inconsistent*");
         machine.LastProgressSequence.Should().Be(-1);
         machine.RecordProgress(new ProgressEvent(machine.SessionId, plan.PlanId, plan.PlanDigest, 0, TransactionStage.PreparingRecovery, 0, null, "Wait.") { CommandId = execute.CommandId });
@@ -268,9 +269,10 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
-    public void WrongDigest_IsRejectedAcrossRequestsProgressAndEveryPlanTerminal()
+    public void InnerExecutionBindingDigest_IsRejectedAcrossRequestsProgressAndEveryPlanTerminal()
     {
-        ProtocolSessionStateMachine machine = Ready(); PlanEvent plan = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall)); ProtocolPlanDigest wrong = ProtocolPlanDigest.Parse(HashA);
+        ProtocolSessionStateMachine machine = Ready(); PlanEvent plan = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall)); ProtocolPlanDigest wrong = plan.ExecutionBindingDigest;
+        wrong.Should().NotBe(plan.PlanDigest);
         FluentActions.Invoking(() => machine.ConfirmPlan(new(machine.SessionId, plan.PlanId, wrong))).Should().Throw<ProtocolException>().WithMessage("*stale or altered*");
         FluentActions.Invoking(() => machine.RequestCancellation(new(machine.SessionId, plan.PlanId, wrong))).Should().Throw<ProtocolException>().WithMessage("*stale or altered*");
         machine.ConfirmPlan(new(machine.SessionId, plan.PlanId, plan.PlanDigest));
@@ -314,7 +316,8 @@ internal sealed class ProtocolSessionStateMachineTests
         RecoveryPrunePlan core = Prune([first.GenerationId, second.GenerationId], 2, [first.GenerationId, second.GenerationId], [], [pending]);
         PrunePlanEvent plan = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 2), core);
         plan.RemovedSelectionIds.Should().BeEmpty(); plan.CleanupGenerationIds.Should().Equal(pending.ToString("N")); plan.Summary.Should().Contain("Logically remove 0").And.Contain("clean up 1");
-        machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest)); ExecutePruneRequest execute = new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest); machine.BeginPrune(execute);
+        machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest)); ExecutePruneRequest execute = new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest); RecoveryPrunePlan retained = machine.BeginPrune(execute);
+        retained.ConfirmationDigest.Value.Should().Be(plan.ExecutionBindingDigest.Value);
         FluentActions.Invoking(() => machine.Complete(PruneSuccess(machine, plan.PrunePlanId, plan.PruneDigest, execute.CommandId, 0, 0))).Should().Throw<ProtocolException>().WithMessage("*physical-cleanup count*");
         machine.Complete(PruneSuccess(machine, plan.PrunePlanId, plan.PruneDigest, execute.CommandId, 0, 1));
     }
@@ -335,10 +338,11 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
-    public void WrongPruneDigest_IsRejectedAcrossRequestsProgressAndEveryTerminal()
+    public void InnerPruneExecutionBindingDigest_IsRejectedAcrossRequestsProgressAndEveryTerminal()
     {
         ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority first = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root); FakeRecoveryAuthority second = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, Root); RecoveryCatalogEvent catalog = Catalog(machine, [first, second]);
-        PrunePlanEvent plan = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 1), Prune([first.GenerationId, second.GenerationId], 1, [first.GenerationId], [second.GenerationId])); ProtocolPlanDigest wrong = ProtocolPlanDigest.Parse(HashA);
+        PrunePlanEvent plan = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 1), Prune([first.GenerationId, second.GenerationId], 1, [first.GenerationId], [second.GenerationId])); ProtocolPlanDigest wrong = plan.ExecutionBindingDigest;
+        wrong.Should().NotBe(plan.PruneDigest);
         FluentActions.Invoking(() => machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, wrong))).Should().Throw<ProtocolException>().WithMessage("*stale or altered*");
         FluentActions.Invoking(() => machine.RequestPruneCancellation(new(machine.SessionId, plan.PrunePlanId, wrong))).Should().Throw<ProtocolException>().WithMessage("*stale or altered*");
         machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest));
