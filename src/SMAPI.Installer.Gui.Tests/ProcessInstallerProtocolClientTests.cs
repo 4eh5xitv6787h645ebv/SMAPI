@@ -128,6 +128,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 nameof(IInstallerProtocolClient.DiscoverGamesAsync),
                 nameof(IInstallerProtocolClient.ValidateGameAsync),
                 nameof(IInstallerProtocolClient.ListRecoveriesAsync),
+                nameof(IInstallerProtocolClient.InspectRollbackAsync),
                 nameof(IInstallerProtocolClient.InspectPlanAsync),
                 nameof(IInstallerProtocolClient.ApprovePlanCandidatesAsync),
                 nameof(IInstallerProtocolClient.ConfirmPlanAsync),
@@ -640,6 +641,268 @@ public sealed class ProcessInstallerProtocolClientTests
 
         FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(point)).Should().Throw<ArgumentException>();
         client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [TestCase(0)]
+    [TestCase(1)]
+    public async Task InspectsExactRollbackPointWithoutSendingPackageAuthority(int selectedIndex)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            SelectedRecoveryIndex = selectedIndex,
+            Operations = [CreateOperation(PlanOperationKind.Restore, "smapi-internal/restore", 'a', 'b')]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryCatalogSuccess catalog = (InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath);
+        InstallerRecoveryPoint selected = catalog.RecoveryPoints[selectedIndex];
+
+        InstallerReadOnlyPlanSuccess result = (await client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, selected))
+            .Should().BeOfType<InstallerReadOnlyPlanSuccess>().Subject;
+
+        result.Operation.Should().Be(InstallerOperation.Rollback);
+        result.Risks.Should().Equal(ProtocolPlanRisk.Rollback);
+        result.RecommendedDefault.Should().Be(ProtocolRecommendedDefault.Cancel);
+        result.SeparateConfirmationRequired.Should().BeTrue();
+        result.Confirmation.Should().NotBeNull();
+        if (selected.RestoreTarget is InstallerRecoveryReleaseTarget release)
+            result.TargetRelease.Should().Be(new InstallerPlanRelease(release.Tag, release.EmbeddedVersion));
+        else
+            result.TargetRelease.Should().BeNull();
+
+        InspectPlanRequest sent = process.Requests.OfType<InspectPlanRequest>().Should().ContainSingle().Subject;
+        sent.GamePath.Should().Be(ReadOnlyPlanScript.GamePath);
+        sent.Operation.Should().Be(InstallerOperation.Rollback);
+        sent.PackageId.Should().BeNull();
+        sent.RecoverySelectionId.Should().Be(script.SelectedRecoverySelectionId);
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        (await client.ConfirmPlanAsync(result.Confirmation!)).Should().NotBeNull();
+        process.Requests.OfType<ConfirmPlanRequest>().Should().ContainSingle();
+    }
+
+    [TestCase(RollbackAuthorityFault.WrongCatalog)]
+    [TestCase(RollbackAuthorityFault.WrongSelection)]
+    [TestCase(RollbackAuthorityFault.WrongHead)]
+    [TestCase(RollbackAuthorityFault.WrongGeneration)]
+    [TestCase(RollbackAuthorityFault.WrongRootPath)]
+    [TestCase(RollbackAuthorityFault.WrongRootDevice)]
+    [TestCase(RollbackAuthorityFault.WrongTarget)]
+    public async Task RollbackInspectionRejectsMismatchedRecoveryAuthority(RollbackAuthorityFault fault)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            RollbackFault = fault
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath)).RecoveryPoints[0];
+
+        Func<Task> action = () => client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, point);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+    }
+
+    [TestCase(PlanHeaderFault.WrongSession)]
+    [TestCase(PlanHeaderFault.WrongOperation)]
+    [TestCase(PlanHeaderFault.WrongRisk)]
+    [TestCase(PlanHeaderFault.WrongDigest)]
+    [TestCase(PlanHeaderFault.WrongDefault)]
+    [TestCase(PlanHeaderFault.NoConfirmation)]
+    public async Task RollbackInspectionRejectsInvalidPlanHeaders(PlanHeaderFault fault)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            HeaderFault = fault
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath)).RecoveryPoints[0];
+
+        Func<Task> action = () => client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, point);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [TestCase(ObservedInstallState.NotInstalled, true)]
+    [TestCase(ObservedInstallState.KnownUnmodified, false)]
+    public async Task RollbackInspectionRejectsInconsistentObservedStateAndCurrentReceipt(
+        ObservedInstallState observedState,
+        bool hasCurrentRelease
+    )
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            ObservedState = observedState,
+            CurrentRelease = hasCurrentRelease ? CreateRelease(1) : null
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath)).RecoveryPoints[0];
+
+        Func<Task> action = () => client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, point);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task RollbackInspectionRejectsStaleForeignReconstructedAndWrongPathLocallyWithoutPlanRequest()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback) { EnableRecoveryCatalog = true };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryCatalogSuccess first = (InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath);
+        InstallerRecoveryPoint stale = first.RecoveryPoints[0];
+        InstallerRecoveryCatalogSuccess current = (InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath);
+        InstallerRecoveryPoint exact = current.RecoveryPoints[0];
+        InstallerRecoveryPoint reconstructed = new(exact.Ordinal, exact.IsCurrent, exact.IsUserCheckpoint, exact.OriginOperation, exact.RestoreTarget);
+
+        await FluentActions.Awaiting(() => client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, stale)).Should().ThrowAsync<ArgumentException>();
+        await FluentActions.Awaiting(() => client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, reconstructed)).Should().ThrowAsync<ArgumentException>();
+        await FluentActions.Awaiting(() => client.InspectRollbackAsync("/games/wrong", exact)).Should().ThrowAsync<ArgumentException>();
+        process.Requests.OfType<InspectPlanRequest>().Should().BeEmpty();
+
+        ScriptedProcess foreignProcess = new(script.Respond);
+        await using ProcessInstallerProtocolClient foreign = Create(foreignProcess);
+        await OpenVerifiedSessionAsync(foreign);
+        _ = await foreign.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath);
+        await FluentActions.Awaiting(() => foreign.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, exact)).Should().ThrowAsync<ArgumentException>();
+        foreignProcess.Requests.OfType<InspectPlanRequest>().Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task RollbackInspectionReportsRollbackThenDowngradeForAnOlderRestoreRelease()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            CurrentRelease = CreateRelease(3)
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath)).RecoveryPoints[0];
+
+        InstallerReadOnlyPlanSuccess result = (InstallerReadOnlyPlanSuccess)await client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, point);
+
+        result.Risks.Should().Equal(ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade);
+        result.CurrentRelease.Should().Be(new InstallerPlanRelease(CreateRelease(3).Tag, CreateRelease(3).EmbeddedVersion));
+        result.TargetRelease.Should().Be(new InstallerPlanRelease(CreateRelease(2).Tag, CreateRelease(2).EmbeddedVersion));
+    }
+
+    [Test]
+    public async Task RollbackInspectionRejectsCandidateAuthorityAtTheProcessBoundary()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            Candidates = [CreateCandidate('9', "mods/rollback.dll", false)]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath)).RecoveryPoints[0];
+
+        Func<Task> action = () => client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, point);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ConcurrentRollbackSelectionsConsumeTheCatalogOnceAndInvalidateEverySibling()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback) { EnableRecoveryCatalog = true };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryCatalogSuccess catalog = (InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath);
+
+        Task<InstallerReadOnlyPlanResult> first = client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, catalog.RecoveryPoints[0]);
+        Task<InstallerReadOnlyPlanResult> second = client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, catalog.RecoveryPoints[1]);
+
+        await FluentActions.Awaiting(async () => await Task.WhenAll(first, second)).Should().ThrowAsync<InvalidOperationException>();
+        new[] { first, second }.Should().ContainSingle(task => task.IsCompletedSuccessfully);
+        new[] { first, second }.Should().ContainSingle(task => task.IsFaulted);
+        process.Requests.OfType<InspectPlanRequest>().Should().ContainSingle();
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(catalog.RecoveryPoints[0])).Should().Throw<ArgumentException>();
+        FluentActions.Invoking(() => client.AssertCurrentRecoveryPointForTesting(catalog.RecoveryPoints[1])).Should().Throw<ArgumentException>();
+    }
+
+    [TestCase(ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest, false)]
+    [TestCase(ProtocolPrePlanErrorCode.InvalidGameFolder, ProtocolNextAction.SelectGameFolder, false)]
+    [TestCase(ProtocolPrePlanErrorCode.InspectionFailed, ProtocolNextAction.InspectAgain, false)]
+    [TestCase(ProtocolPrePlanErrorCode.PermissionDenied, ProtocolNextAction.ReviewFilesystem, false)]
+    [TestCase(ProtocolPrePlanErrorCode.UnexpectedFailure, ProtocolNextAction.StartNewSession, true)]
+    [TestCase(ProtocolPrePlanErrorCode.UnexpectedFailure, ProtocolNextAction.ViewPrivateLog, true)]
+    public async Task RollbackInspectionAcceptsOnlyExactReachableRejections(
+        ProtocolPrePlanErrorCode errorCode,
+        ProtocolNextAction nextAction,
+        bool terminal
+    )
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            Rejection = new(
+                Session,
+                errorCode,
+                "private rollback detail",
+                nextAction,
+                terminal,
+                nextAction == ProtocolNextAction.ViewPrivateLog ? "/private/rollback.log" : null
+            )
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath)).RecoveryPoints[0];
+
+        InstallerReadOnlyPlanRejection result = (await client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, point))
+            .Should().BeOfType<InstallerReadOnlyPlanRejection>().Subject;
+
+        result.Should().Be(new InstallerReadOnlyPlanRejection(errorCode, nextAction, terminal));
+        result.ToString().Should().NotContain("private rollback detail").And.NotContain("rollback.log");
+        client.HasRetainedRecoveryCatalogForTesting.Should().BeFalse();
+        process.Terminated.Should().Be(terminal);
+    }
+
+    [TestCase(ProtocolPrePlanErrorCode.PackageRejected, ProtocolNextAction.ReopenVerifiedPackage)]
+    [TestCase(ProtocolPrePlanErrorCode.RecoveryUnavailable, ProtocolNextAction.ListRecoveries)]
+    [TestCase(ProtocolPrePlanErrorCode.InputOutputFailure, ProtocolNextAction.RetryRequest)]
+    public async Task RollbackInspectionFailStopsRequestUnreachableRejections(
+        ProtocolPrePlanErrorCode errorCode,
+        ProtocolNextAction nextAction
+    )
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Rollback)
+        {
+            EnableRecoveryCatalog = true,
+            Rejection = new(Session, errorCode, "private", nextAction, false, null)
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerRecoveryPoint point = ((InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(ReadOnlyPlanScript.GamePath)).RecoveryPoints[0];
+
+        Func<Task> action = () => client.InspectRollbackAsync(ReadOnlyPlanScript.GamePath, point);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
         process.Terminated.Should().BeTrue();
     }
 
@@ -4043,6 +4306,18 @@ public sealed class ProcessInstallerProtocolClientTests
         DuplicateReplacementId
     }
 
+    public enum RollbackAuthorityFault
+    {
+        None,
+        WrongCatalog,
+        WrongSelection,
+        WrongHead,
+        WrongGeneration,
+        WrongRootPath,
+        WrongRootDevice,
+        WrongTarget
+    }
+
     public enum ConfirmationAcknowledgementFault
     {
         None,
@@ -4095,6 +4370,12 @@ public sealed class ProcessInstallerProtocolClientTests
         private int InspectionGeneration { get; set; }
         public bool SuppressPageResponse { get; init; }
         public ConfirmationAcknowledgementFault ConfirmationFault { get; init; }
+        public bool EnableRecoveryCatalog { get; init; }
+        public int SelectedRecoveryIndex { get; init; }
+        public RollbackAuthorityFault RollbackFault { get; init; }
+        private RecoveryCatalogEvent? RecoveryCatalog { get; set; }
+        public ProtocolRecoverySelectionId SelectedRecoverySelectionId
+            => this.RecoveryCatalog!.Generations[this.SelectedRecoveryIndex].SelectionId;
 
         public ReadOnlyPlanScript(InstallerOperation operation)
         {
@@ -4109,6 +4390,7 @@ public sealed class ProcessInstallerProtocolClientTests
             {
                 HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
                 OpenPackageRequest => Serialize(CreateOpened(Session, request.CommandId)),
+                ListRecoveriesRequest list when this.EnableRecoveryCatalog => this.CreateRecoveryCatalogResponse(list),
                 InspectPlanRequest inspect when this.Rejection is not null => Serialize(this.Rejection with { CommandId = inspect.CommandId }),
                 InspectPlanRequest inspect when this.InspectionCandidatesFactory is not null => this.CreateGeneratedInspectionResponse(inspect),
                 InspectPlanRequest inspect => this.CreatePlanResponse(inspect),
@@ -4119,6 +4401,12 @@ public sealed class ProcessInstallerProtocolClientTests
                 ConfirmPlanRequest confirm => this.CreateConfirmationResponse(confirm),
                 _ => throw new AssertionException("Unexpected protocol request in read-only plan script.")
             };
+        }
+
+        private byte[] CreateRecoveryCatalogResponse(ListRecoveriesRequest request)
+        {
+            this.RecoveryCatalog = CreateRecoveryCatalog(request, gamePath: GamePath);
+            return Serialize(this.RecoveryCatalog);
         }
 
         private byte[] CreateConfirmationResponse(ConfirmPlanRequest request)
@@ -4247,6 +4535,36 @@ public sealed class ProcessInstallerProtocolClientTests
                 3,
                 this.OperationGeneration
             );
+            ProtocolRecoveryAuthority? recovery = null;
+            if (responseOperation == InstallerOperation.Rollback)
+            {
+                RecoveryCatalogEvent catalog = this.RecoveryCatalog
+                    ?? throw new AssertionException("Rollback inspection was requested before the recovery catalog.");
+                root = catalog.GameRoot with { OperationGeneration = this.OperationGeneration };
+                ProtocolRecoveryGeneration selected = catalog.Generations[this.SelectedRecoveryIndex];
+                ProtocolRecoverySelectionId authoritySelection = this.RollbackFault == RollbackAuthorityFault.WrongSelection
+                    ? ProtocolRecoverySelectionId.CreateRandom()
+                    : selected.SelectionId;
+                ProtocolRecoveryGeneration authorityGeneration = this.RollbackFault == RollbackAuthorityFault.WrongGeneration
+                    ? selected with { GenerationId = new string('f', 32) }
+                    : this.RollbackFault == RollbackAuthorityFault.WrongSelection
+                        ? selected with { SelectionId = authoritySelection }
+                        : selected;
+                ProtocolGameRootIdentity authorityRoot = this.RollbackFault switch
+                {
+                    RollbackAuthorityFault.WrongRootPath => root with { CanonicalPath = "/games/a-different-private-root" },
+                    RollbackAuthorityFault.WrongRootDevice => root with { DeviceMajor = root.DeviceMajor + 1 },
+                    _ => root
+                };
+                root = authorityRoot;
+                recovery = new(
+                    this.RollbackFault == RollbackAuthorityFault.WrongCatalog ? ProtocolRecoveryCatalogId.CreateRandom() : catalog.CatalogId,
+                    authoritySelection,
+                    authorityRoot,
+                    this.RollbackFault == RollbackAuthorityFault.WrongHead ? new string('c', 64) : catalog.HeadSha256,
+                    authorityGeneration
+                );
+            }
             ProtocolReleaseIdentity? current = this.HeaderFault == PlanHeaderFault.InconsistentCurrentRelease
                 ? CreateRelease(1)
                 : this.CurrentRelease;
@@ -4254,6 +4572,9 @@ public sealed class ProcessInstallerProtocolClientTests
             {
                 InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair => this.HeaderFault == PlanHeaderFault.WrongTargetRelease ? CreateRelease(3) : CreateRelease(2),
                 InstallerOperation.Backup => current,
+                InstallerOperation.Rollback => this.RollbackFault == RollbackAuthorityFault.WrongTarget
+                    ? CreateRelease(3)
+                    : recovery!.Generation.RestoreRelease,
                 _ => null
             };
             ObservedInstallState observed = this.ObservedState;
@@ -4265,7 +4586,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 this.ExecutionDigest,
                 responseOperation,
                 package,
-                null,
+                recovery,
                 root,
                 current,
                 target,
@@ -4287,7 +4608,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 this.ExecutionDigest,
                 responseOperation,
                 package,
-                null,
+                recovery,
                 root,
                 current,
                 target,
@@ -4355,6 +4676,8 @@ public sealed class ProcessInstallerProtocolClientTests
             List<ProtocolPlanRisk> risks = [];
             if (this.Operation == InstallerOperation.Uninstall)
                 risks.Add(ProtocolPlanRisk.Uninstall);
+            if (this.Operation == InstallerOperation.Rollback)
+                risks.Add(ProtocolPlanRisk.Rollback);
             if (current is not null && target is not null && current.Tag != target.Tag && current.Tag.EndsWith("alpha.3", StringComparison.Ordinal))
                 risks.Add(ProtocolPlanRisk.Downgrade);
             if (this.Candidates.Length > 0)
