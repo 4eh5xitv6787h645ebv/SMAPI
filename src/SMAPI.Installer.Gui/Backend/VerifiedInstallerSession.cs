@@ -21,10 +21,12 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private readonly object DisposeLock = new();
     private readonly HashSet<ProtocolGameCandidate> DiscoveredCandidates = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<InstallerReadOnlyPlanCandidate> CurrentPlanCandidates = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<InstallerReadOnlyPlanCandidate> IssuedPlanCandidates = new(ReferenceEqualityComparer.Instance);
     private ProtocolGameCandidate? LatestManualCandidate;
     private Task? DisposalTask;
     private SessionStage Stage = SessionStage.Discovery;
     private int AdmittedDiscoveryCommands;
+    internal int IssuedPlanCandidateCapacityForTesting { get; set; } = InstallerCandidateSelection.MaximumIssuedCandidatesPerSession;
 
     public ProtocolReleaseIdentity Release { get; }
     public Task<InstallerProtocolClientException> SessionFaulted => this.Client.SessionFaulted;
@@ -184,11 +186,22 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
         InstallerReadOnlyPlanResult? result = null;
         Exception? failure = null;
-        bool gateEntered = false;
         try
         {
             await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
-            gateEntered = true;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        if (failure is not null)
+        {
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        try
+        {
             lock (this.DisposeLock)
             {
                 if (this.Stage != SessionStage.Bound)
@@ -211,13 +224,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                     this.Stage = SessionStage.Terminal;
                 if (result is InstallerReadOnlyPlanSuccess success)
                 {
-                    if (success.Candidates is null || success.Candidates.Count > ProtocolJsonSerializer.MaxPlanCandidates)
-                        throw new InstallerProtocolClientException("The installer backend returned an invalid candidate-capability count.");
-                    foreach (InstallerReadOnlyPlanCandidate candidate in success.Candidates)
-                    {
-                        if (candidate is null || !this.CurrentPlanCandidates.Add(candidate))
-                            throw new InstallerProtocolClientException("The installer backend returned invalid candidate capabilities.");
-                    }
+                    if (!this.TryRetainIssuedPlanCandidates(success.Candidates))
+                        throw new InstallerProtocolClientException("The installer backend returned invalid candidate capabilities.");
                 }
             }
         }
@@ -227,8 +235,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         }
         finally
         {
-            if (gateEntered)
-                this.CommandGate.Release();
+            this.CommandGate.Release();
         }
 
         if (failure is not null)
@@ -246,10 +253,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         CancellationToken cancellationToken
     )
     {
-        ArgumentNullException.ThrowIfNull(candidates);
-        InstallerReadOnlyPlanCandidate[] requested = candidates.ToArray();
-        if (requested.Length is < 1 or > ProtocolJsonSerializer.MaxPlanCandidates || requested.Any(candidate => candidate is null))
-            throw new ArgumentException("Candidate approval requires a bounded nonempty set of exact issued candidates.", nameof(candidates));
+        InstallerReadOnlyPlanCandidate[] requested = InstallerCandidateSelection.Snapshot(candidates, nameof(candidates));
 
         CancellationToken lifetime;
         lock (this.DisposeLock)
@@ -261,12 +265,22 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
         InstallerReadOnlyPlanResult? result = null;
         Exception? failure = null;
-        HashSet<InstallerReadOnlyPlanCandidate>? priorCandidates = null;
-        bool gateEntered = false;
         try
         {
             await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
-            gateEntered = true;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        if (failure is not null)
+        {
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        try
+        {
             lock (this.DisposeLock)
             {
                 if (this.Stage != SessionStage.Bound)
@@ -279,7 +293,6 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                     if (!this.CurrentPlanCandidates.Contains(candidate))
                         throw new ArgumentException("Every candidate must be an exact current capability issued by this bound session.", nameof(candidates));
                 }
-                priorCandidates = new(this.CurrentPlanCandidates, ReferenceEqualityComparer.Instance);
                 this.CurrentPlanCandidates.Clear();
             }
 
@@ -297,13 +310,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                         this.Stage = SessionStage.Terminal;
                     if (result is InstallerReadOnlyPlanSuccess success)
                     {
-                        if (success.Candidates is null || success.Candidates.Count > ProtocolJsonSerializer.MaxPlanCandidates)
-                            throw new InstallerProtocolClientException("The installer backend returned an invalid replacement candidate-capability count.");
-                        foreach (InstallerReadOnlyPlanCandidate candidate in success.Candidates)
-                        {
-                            if (candidate is null || priorCandidates.Contains(candidate) || !this.CurrentPlanCandidates.Add(candidate))
-                                throw new InstallerProtocolClientException("The installer backend returned invalid replacement candidate capabilities.");
-                        }
+                        if (!this.TryRetainIssuedPlanCandidates(success.Candidates))
+                            throw new InstallerProtocolClientException("The installer backend returned invalid replacement candidate capabilities.");
                     }
                 }
             }
@@ -314,8 +322,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         }
         finally
         {
-            if (gateEntered)
-                this.CommandGate.Release();
+            this.CommandGate.Release();
         }
 
         if (failure is not null)
@@ -326,6 +333,32 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         if (result is InstallerReadOnlyPlanRejection { IsTerminal: true })
             await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
         return result!;
+    }
+
+    /// <remarks>The caller must hold <see cref="DisposeLock"/>.</remarks>
+    private bool TryRetainIssuedPlanCandidates(IReadOnlyList<InstallerReadOnlyPlanCandidate>? candidates)
+    {
+        int capacity = this.IssuedPlanCandidateCapacityForTesting;
+        if (
+            candidates is null
+            || candidates.Count > ProtocolJsonSerializer.MaxPlanCandidates
+            || capacity is < ProtocolJsonSerializer.MaxPlanCandidates or > InstallerCandidateSelection.MaximumIssuedCandidatesPerSession
+            || this.IssuedPlanCandidates.Count > capacity - candidates.Count
+        )
+            return false;
+        HashSet<InstallerReadOnlyPlanCandidate> current = new(ReferenceEqualityComparer.Instance);
+        for (int index = 0; index < candidates.Count; index++)
+        {
+            InstallerReadOnlyPlanCandidate candidate = candidates[index];
+            if (candidate is null || this.IssuedPlanCandidates.Contains(candidate) || !current.Add(candidate))
+                return false;
+        }
+        foreach (InstallerReadOnlyPlanCandidate candidate in current)
+        {
+            this.IssuedPlanCandidates.Add(candidate);
+            this.CurrentPlanCandidates.Add(candidate);
+        }
+        return true;
     }
 
     private Exception GetPlanFailure(Exception failure)
@@ -394,6 +427,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             {
                 this.ClearIssuedCandidates();
                 this.CurrentPlanCandidates.Clear();
+                this.IssuedPlanCandidates.Clear();
                 this.Stage = SessionStage.Disposed;
             }
         }

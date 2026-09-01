@@ -52,6 +52,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private ProtocolPackageId? VerifiedPackageId;
     private ProtocolReleaseIdentity? VerifiedRelease;
     private RetainedPlanBinding? CurrentPlanBinding;
+    private readonly HashSet<ProtocolCandidateId> IssuedCandidateIds = [];
     private int CleanupStarted;
     private int DisposeStarted;
     private int ObservedStderrBytesValue;
@@ -61,6 +62,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private bool SessionFaultRaised;
     internal Action? BeforePackageAuthorityCommitForTesting { get; set; }
     internal Action? BeforePlanBindingCommitForTesting { get; set; }
+    internal int IssuedCandidateCapacityForTesting { get; set; } = InstallerCandidateSelection.MaximumIssuedCandidatesPerSession;
 
     internal int ObservedStderrBytes => Volatile.Read(ref this.ObservedStderrBytesValue);
     internal bool CleanupConfirmed => Volatile.Read(ref this.CleanupUnconfirmed) == 0;
@@ -333,12 +335,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                lock (this.ResponseLock)
-                {
-                    if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
-                        throw new InstallerProtocolClientException("The installer backend session closed before the plan could be retained.");
-                    this.CurrentPlanBinding = new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, candidates);
-                }
+                if (!this.TryRetainPlanBinding(new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, candidates)))
+                    return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -362,10 +360,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
 
     public async Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(candidates);
-        InstallerReadOnlyPlanCandidate[] requested = candidates.ToArray();
-        if (requested.Length is < 1 or > ProtocolJsonSerializer.MaxPlanCandidates || requested.Any(candidate => candidate is null))
-            throw new ArgumentException("Candidate approval requires a bounded nonempty set of exact issued candidates.", nameof(candidates));
+        InstallerReadOnlyPlanCandidate[] requested = InstallerCandidateSelection.Snapshot(candidates, nameof(candidates));
 
         await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -439,12 +434,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                lock (this.ResponseLock)
-                {
-                    if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
-                        throw new InstallerProtocolClientException("The installer backend session closed before the replacement plan could be retained.");
-                    this.CurrentPlanBinding = new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, replacementCandidates);
-                }
+                if (!this.TryRetainPlanBinding(new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, replacementCandidates)))
+                    return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -712,6 +703,27 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         rejection.ErrorCode == ProtocolPrePlanErrorCode.CandidateApprovalFailed
         && rejection.NextAction == ProtocolNextAction.InspectAgain
         && !rejection.IsTerminal;
+
+    private bool TryRetainPlanBinding(RetainedPlanBinding binding)
+    {
+        lock (this.ResponseLock)
+        {
+            if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
+                return false;
+            int capacity = this.IssuedCandidateCapacityForTesting;
+            ProtocolCandidateId[] issued = binding.Candidates.Values.Select(candidate => candidate.CandidateId).ToArray();
+            if (
+                capacity is < ProtocolJsonSerializer.MaxPlanCandidates or > InstallerCandidateSelection.MaximumIssuedCandidatesPerSession
+                || this.IssuedCandidateIds.Count > capacity - issued.Length
+                || issued.Any(this.IssuedCandidateIds.Contains)
+            )
+                return false;
+            foreach (ProtocolCandidateId candidateId in issued)
+                this.IssuedCandidateIds.Add(candidateId);
+            this.CurrentPlanBinding = binding;
+            return true;
+        }
+    }
 
     private static bool IsEarlierRelease(string targetTag, string currentTag)
     {
@@ -1112,6 +1124,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.VerifiedPackageId = null;
             this.VerifiedRelease = null;
             this.CurrentPlanBinding = null;
+            this.IssuedCandidateIds.Clear();
             pending = this.PendingResponse;
             this.PendingResponse = null;
         }
@@ -1219,6 +1232,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 this.VerifiedPackageId = null;
                 this.VerifiedRelease = null;
                 this.CurrentPlanBinding = null;
+                this.IssuedCandidateIds.Clear();
             }
             IInstallerProtocolProcess? process = this.Process;
             if (process is null)

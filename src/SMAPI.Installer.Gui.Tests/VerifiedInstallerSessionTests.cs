@@ -512,6 +512,9 @@ internal sealed class VerifiedInstallerSessionTests
         await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([replacement])).Should().ThrowAsync<ArgumentException>();
         client.ApprovedCandidates.Should().HaveCount(2);
 
+        await FluentActions.Awaiting(() => bound.InspectPlanAsync(InstallerOperation.Update))
+            .Should().ThrowAsync<InstallerProtocolClientException>("a nonterminal rejection must not erase session-lifetime reference tombstones");
+
         await bound.DisposeAsync();
         client.DisposeCalls.Should().Be(1);
     }
@@ -559,8 +562,185 @@ internal sealed class VerifiedInstallerSessionTests
         client.DisposeCalls.Should().Be(1);
     }
 
+    [Test]
+    public async Task BoundCandidateApprovalRejectsAReferenceResurrectedAfterAnIntermediateGeneration()
+    {
+        InstallerReadOnlyPlanCandidate first = CandidateCapability('4', "mods/first.dll", false);
+        InstallerReadOnlyPlanCandidate second = CandidateCapability('5', "mods/second.dll", false);
+        int generation = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("valid", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = [first] }),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Install) with
+            {
+                Candidates = ++generation == 1 ? [second] : [first]
+            })
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess initial = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+        InstallerReadOnlyPlanSuccess intermediate = (InstallerReadOnlyPlanSuccess)await bound.ApprovePlanCandidatesAsync([initial.Candidates.Single()]);
+
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([intermediate.Candidates.Single()]))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task BoundCandidateLifetimeCapacityIsBoundedAndFailsClosed()
+    {
+        int generation = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("capacity", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with
+            {
+                Candidates = Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates)
+                    .Select(index => CandidateCapability((generation * ProtocolJsonSerializer.MaxPlanCandidates + index + 1).ToString("x32"), $"mods/{generation:D2}-{index:D3}.dll", false))
+                    .ToArray()
+            })
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client)
+        {
+            IssuedPlanCandidateCapacityForTesting = ProtocolJsonSerializer.MaxPlanCandidates * 2
+        };
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerCandidateSelection.MaximumIssuedCandidatesPerSession.Should().Be(
+            ProtocolJsonSerializer.MaxPlanCandidates * ProtocolJsonSerializer.MaxPlanCandidates
+        );
+        int acceptedGenerations = session.IssuedPlanCandidateCapacityForTesting / ProtocolJsonSerializer.MaxPlanCandidates;
+        for (; generation < acceptedGenerations; generation++)
+            (await bound.InspectPlanAsync(InstallerOperation.Install)).Should().BeOfType<InstallerReadOnlyPlanSuccess>();
+
+        await FluentActions.Awaiting(() => bound.InspectPlanAsync(InstallerOperation.Install))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        client.InspectedOperations.Should().HaveCount(acceptedGenerations + 1);
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task BoundApprovalCallerCancellationRejectsLateSuccessAndDisposesOnce()
+    {
+        (IPlanInspectionSession bound, RecordingClient client, InstallerReadOnlyPlanCandidate candidate, TaskCompletionSource<InstallerReadOnlyPlanResult> completion) =
+            await CreateBlockedApprovalSessionAsync("approval-cancel");
+        using CancellationTokenSource cancellation = new();
+        Task<InstallerReadOnlyPlanResult> approval = bound.ApprovePlanCandidatesAsync([candidate], cancellation.Token);
+        await client.ApprovalStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancellation.Cancel();
+        completion.SetResult(Plan(InstallerOperation.Install) with { Candidates = [CandidateCapability('6', "mods/replacement.dll", false)] });
+
+        await FluentActions.Awaiting(() => approval).Should().ThrowAsync<OperationCanceledException>();
+        client.DisposeCalls.Should().Be(1);
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([candidate])).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task BoundApprovalSessionFaultTakesPrecedenceOverCallerCancellationAndLateSuccess()
+    {
+        (IPlanInspectionSession bound, RecordingClient client, InstallerReadOnlyPlanCandidate candidate, TaskCompletionSource<InstallerReadOnlyPlanResult> completion) =
+            await CreateBlockedApprovalSessionAsync("approval-fault-cancel");
+        using CancellationTokenSource cancellation = new();
+        Task<InstallerReadOnlyPlanResult> approval = bound.ApprovePlanCandidatesAsync([candidate], cancellation.Token);
+        await client.ApprovalStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancellation.Cancel();
+        client.Fault.SetResult(new InstallerProtocolClientException("synthetic approval fault"));
+        completion.SetResult(Plan(InstallerOperation.Install));
+
+        await FluentActions.Awaiting(() => approval)
+            .Should().ThrowAsync<InstallerProtocolClientException>()
+            .WithMessage("*faulted before the plan result*");
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task BoundApprovalDisposalTakesPrecedenceOverLateSuccessOrFault(bool lateFault)
+    {
+        (IPlanInspectionSession bound, RecordingClient client, InstallerReadOnlyPlanCandidate candidate, TaskCompletionSource<InstallerReadOnlyPlanResult> completion) =
+            await CreateBlockedApprovalSessionAsync($"approval-dispose-{lateFault}");
+        Task<InstallerReadOnlyPlanResult> approval = bound.ApprovePlanCandidatesAsync([candidate]);
+        await client.ApprovalStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Task disposal = bound.DisposeAsync().AsTask();
+        if (lateFault)
+            completion.SetException(new InstallerProtocolClientException("late synthetic failure"));
+        else
+            completion.SetResult(Plan(InstallerOperation.Install) with { Candidates = [CandidateCapability('6', "mods/replacement.dll", false)] });
+
+        await FluentActions.Awaiting(() => approval).Should().ThrowAsync<ObjectDisposedException>();
+        await disposal.WaitAsync(TimeSpan.FromSeconds(2));
+        client.DisposeCalls.Should().Be(1);
+        await FluentActions.Awaiting(() => bound.ApprovePlanCandidatesAsync([candidate])).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Test]
+    public async Task QueuedBoundApprovalCancellationTerminatesTheActiveApprovalAndNeverCallsTheClientTwice()
+    {
+        InstallerReadOnlyPlanCandidate first = CandidateCapability('4', "mods/first.dll", false);
+        InstallerReadOnlyPlanCandidate second = CandidateCapability('5', "mods/second.dll", false);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("approval-queue", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = [first, second] }),
+            Approval = async (_, cancellationToken) =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return Plan(InstallerOperation.Install);
+            }
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+        Task<InstallerReadOnlyPlanResult> active = bound.ApprovePlanCandidatesAsync([plan.Candidates[0]]);
+        await client.ApprovalStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using CancellationTokenSource queuedCancellation = new();
+        Task<InstallerReadOnlyPlanResult> queued = bound.ApprovePlanCandidatesAsync([plan.Candidates[1]], queuedCancellation.Token);
+        queuedCancellation.Cancel();
+
+        await FluentActions.Awaiting(() => queued).Should().ThrowAsync<OperationCanceledException>();
+        await FluentActions.Awaiting(() => active).Should().ThrowAsync<ObjectDisposedException>();
+        client.ApprovedCandidates.Should().ContainSingle();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    private static async Task<(
+        IPlanInspectionSession Bound,
+        RecordingClient Client,
+        InstallerReadOnlyPlanCandidate Candidate,
+        TaskCompletionSource<InstallerReadOnlyPlanResult> Completion
+    )> CreateBlockedApprovalSessionAsync(string suffix)
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability('4', $"mods/{suffix}.dll", false);
+        TaskCompletionSource<InstallerReadOnlyPlanResult> completion = NewCompletion<InstallerReadOnlyPlanResult>();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate(suffix, LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = [candidate] }),
+            Approval = async (_, _) => await completion.Task
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        await bound.InspectPlanAsync(InstallerOperation.Install);
+        return (bound, client, candidate, completion);
+    }
+
     private static InstallerReadOnlyPlanCandidate CandidateCapability(char id, string path, bool selected) => new(new ProtocolPlanCandidate(
         ProtocolCandidateId.Parse(new string(id, 32)),
+        FileReplacementCandidateReason.ModifiedReceiptOwned,
+        FileReplacementCandidateDisposition.Replace,
+        path,
+        new string('a', 64),
+        123,
+        420,
+        new string('b', 64),
+        selected,
+        "private evidence"
+    ));
+
+    private static InstallerReadOnlyPlanCandidate CandidateCapability(string id, string path, bool selected) => new(new ProtocolPlanCandidate(
+        ProtocolCandidateId.Parse(id),
         FileReplacementCandidateReason.ModifiedReceiptOwned,
         FileReplacementCandidateDisposition.Replace,
         path,
@@ -588,6 +768,7 @@ internal sealed class VerifiedInstallerSessionTests
         public TaskCompletionSource<InstallerProtocolClientException> Fault { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InspectionStarted { get; } = NewCompletion();
+        public TaskCompletionSource ApprovalStarted { get; } = NewCompletion();
         public Func<CancellationToken, Task<IReadOnlyList<ProtocolGameCandidate>>> Discovery { get; init; } =
             _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([]);
         public Func<string, CancellationToken, Task<ProtocolGameCandidate>> Validation { get; init; } =
@@ -649,6 +830,7 @@ internal sealed class VerifiedInstallerSessionTests
         )
         {
             this.ApprovedCandidates.Add(candidates.ToArray());
+            this.ApprovalStarted.TrySetResult();
             return this.Approval(candidates, cancellationToken);
         }
 

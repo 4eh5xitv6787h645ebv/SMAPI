@@ -4,7 +4,11 @@ using StardewModdingAPI.Installer.Core.Ownership;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
 
-/// <summary>A sanitized read-only result which never exposes transport authority, file identities, or raw/canonical paths.</summary>
+/// <summary>
+/// A sanitized result with no opaque transport authority, raw backend strings or file identities, or canonical
+/// absolute game path. Candidate objects expose only normalized and escaped relative display paths and exact-reference
+/// scoped approval capability.
+/// </summary>
 internal abstract record InstallerReadOnlyPlanResult;
 
 /// <summary>
@@ -72,5 +76,41 @@ internal sealed class InstallerReadOnlyPlanCandidate
         this.Reason = source.Reason;
         this.Disposition = source.Disposition;
         this.BackendProvisionallyIncluded = source.Selected;
+    }
+}
+
+/// <summary>Creates a bounded stable snapshot before any candidate-selection authority is inspected.</summary>
+internal static class InstallerCandidateSelection
+{
+    /// <summary>A conservative lifetime bound across repeated plan generations in one authenticated session.</summary>
+    public const int MaximumIssuedCandidatesPerSession = ProtocolJsonSerializer.MaxPlanCandidates * ProtocolJsonSerializer.MaxPlanCandidates;
+
+    public static InstallerReadOnlyPlanCandidate[] Snapshot(
+        IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates,
+        string parameterName
+    )
+    {
+        ArgumentNullException.ThrowIfNull(candidates, parameterName);
+        int count;
+        try { count = candidates.Count; }
+        catch
+        {
+            throw new ArgumentException("The candidate selection couldn't be read safely.", parameterName);
+        }
+        if (count is < 1 or > ProtocolJsonSerializer.MaxPlanCandidates)
+            throw new ArgumentException("Candidate approval requires a bounded nonempty set of exact issued candidates.", parameterName);
+
+        InstallerReadOnlyPlanCandidate[] result = new InstallerReadOnlyPlanCandidate[count];
+        for (int index = 0; index < count; index++)
+        {
+            try { result[index] = candidates[index]; }
+            catch
+            {
+                throw new ArgumentException("The candidate selection couldn't be read safely.", parameterName);
+            }
+            if (result[index] is null)
+                throw new ArgumentException("The candidate selection contains an invalid capability.", parameterName);
+        }
+        return result;
     }
 }

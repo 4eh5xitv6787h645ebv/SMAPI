@@ -492,6 +492,32 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    public async Task CandidateApprovalSnapshotsCountAndIndexesWithoutEnumeratingAnUnboundedCallerCollection()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            Candidates = [CreateCandidate('4', "mods/private.dll", false)],
+            ReplacementCandidates = []
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+        IndexedCandidateList oversized = new(ProtocolJsonSerializer.MaxPlanCandidates + 1, _ => throw new AssertionException("an oversized selection must not be indexed"));
+
+        await FluentActions.Awaiting(() => client.ApprovePlanCandidatesAsync(oversized)).Should().ThrowAsync<ArgumentException>();
+        (await FluentActions.Awaiting(() => client.ApprovePlanCandidatesAsync(
+            new IndexedCandidateList(1, _ => throw new InvalidOperationException("private indexer detail"))
+        )).Should().ThrowAsync<ArgumentException>()).Which.Message.Should().NotContain("private indexer detail");
+        InstallerReadOnlyPlanSuccess replacement = (InstallerReadOnlyPlanSuccess)await client.ApprovePlanCandidatesAsync(
+            new IndexedCandidateList(1, _ => plan.Candidates.Single())
+        );
+
+        replacement.Candidates.Should().BeEmpty();
+        process.Requests.OfType<SelectPlanCandidatesRequest>().Should().ContainSingle();
+    }
+
+    [Test]
     public async Task CandidateApprovalAllowsExplicitSelectionOfBackendProvisionalCandidate()
     {
         ProtocolPlanCandidate provisional = CreateCandidate('4', "mods/provisional.dll", true);
@@ -535,6 +561,10 @@ public sealed class ProcessInstallerProtocolClientTests
             .Should().ThrowAsync<InvalidOperationException>();
         process.Requests.Should().HaveCount(writes);
         process.Terminated.Should().BeFalse();
+        script.ApprovalRejection = null;
+        await FluentActions.Awaiting(() => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install))
+            .Should().ThrowAsync<InstallerProtocolClientException>("a nonterminal rejection must not erase session-lifetime ID tombstones");
+        process.Terminated.Should().BeTrue();
     }
 
     [TestCase(ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest, false)]
@@ -626,6 +656,125 @@ public sealed class ProcessInstallerProtocolClientTests
         InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Update);
 
         Func<Task> action = () => client.ApprovePlanCandidatesAsync([plan.Candidates[0]]);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task FreshInspectionFailStopsAProtocolCandidateIdReissuedByAnEarlierPlan()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            Candidates = [CreateCandidate('4', "mods/private.dll", false)]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install)).Should().BeOfType<InstallerReadOnlyPlanSuccess>();
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task CandidateIdLifetimeTombstonesAreBoundedAndFailStopAtCapacity()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            InspectionCandidatesFactory = generation => Enumerable.Range(0, ProtocolJsonSerializer.MaxPlanCandidates)
+                .Select(index => new ProtocolPlanCandidate(
+                    ProtocolCandidateId.Parse((generation * ProtocolJsonSerializer.MaxPlanCandidates + index + 1).ToString("x32")),
+                    FileReplacementCandidateReason.ModifiedReceiptOwned,
+                    FileReplacementCandidateDisposition.Replace,
+                    $"mods/{generation:D2}-{index:D3}.dll",
+                    new string('6', 64),
+                    123,
+                    420,
+                    new string('7', 64),
+                    false,
+                    "private evidence"
+                ))
+                .ToArray()
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process, operation: TimeSpan.FromSeconds(10));
+        client.IssuedCandidateCapacityForTesting = ProtocolJsonSerializer.MaxPlanCandidates * 2;
+        await OpenVerifiedSessionAsync(client);
+        InstallerCandidateSelection.MaximumIssuedCandidatesPerSession.Should().Be(
+            ProtocolJsonSerializer.MaxPlanCandidates * ProtocolJsonSerializer.MaxPlanCandidates
+        );
+        int acceptedGenerations = client.IssuedCandidateCapacityForTesting / ProtocolJsonSerializer.MaxPlanCandidates;
+        for (int generation = 0; generation < acceptedGenerations; generation++)
+            (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install)).Should().BeOfType<InstallerReadOnlyPlanSuccess>();
+
+        await FluentActions.Awaiting(() => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install))
+            .Should().ThrowAsync<InstallerProtocolClientException>();
+
+        process.Terminated.Should().BeTrue();
+        process.Requests.OfType<InspectPlanRequest>().Should().HaveCount(acceptedGenerations + 1);
+    }
+
+    [TestCase(CandidateIdReuseFault.SelectedIdReassignedToRemaining)]
+    [TestCase(CandidateIdReuseFault.RemainingIdsCrossSwapped)]
+    [TestCase(CandidateIdReuseFault.DuplicateReplacementId)]
+    public async Task CandidateApprovalFailStopsAnyPriorOrDuplicateIdInAReplacement(CandidateIdReuseFault fault)
+    {
+        ProtocolPlanCandidate selected = CreateCandidate('4', "mods/selected.dll", false);
+        ProtocolPlanCandidate remainingOne = CreateCandidate('5', "mods/remaining-one.dll", false);
+        ProtocolPlanCandidate remainingTwo = CreateCandidate('6', "mods/remaining-two.dll", false);
+        ProtocolPlanCandidate[] replacement = fault switch
+        {
+            CandidateIdReuseFault.SelectedIdReassignedToRemaining =>
+            [remainingOne with { CandidateId = selected.CandidateId }, remainingTwo with { CandidateId = ProtocolCandidateId.Parse(new string('7', 32)) }],
+            CandidateIdReuseFault.RemainingIdsCrossSwapped =>
+            [remainingOne with { CandidateId = remainingTwo.CandidateId }, remainingTwo with { CandidateId = remainingOne.CandidateId }],
+            CandidateIdReuseFault.DuplicateReplacementId =>
+            [remainingOne with { CandidateId = ProtocolCandidateId.Parse(new string('7', 32)) }, remainingTwo with { CandidateId = ProtocolCandidateId.Parse(new string('7', 32)) }],
+            _ => throw new ArgumentOutOfRangeException(nameof(fault))
+        };
+        ReadOnlyPlanScript script = new(InstallerOperation.Update)
+        {
+            Candidates = [selected, remainingOne, remainingTwo],
+            ReplacementCandidates = replacement
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Update);
+
+        Func<Task> action = () => client.ApprovePlanCandidatesAsync([plan.Candidates[0]]);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task CandidateApprovalFailStopsAnIdResurrectedFromTwoPlanGenerationsEarlier()
+    {
+        ProtocolPlanCandidate selected = CreateCandidate('4', "mods/selected.dll", false);
+        ProtocolPlanCandidate remainingOne = CreateCandidate('5', "mods/remaining-one.dll", false);
+        ProtocolPlanCandidate remainingTwo = CreateCandidate('6', "mods/remaining-two.dll", false);
+        ProtocolPlanCandidate refreshedOne = remainingOne with { CandidateId = ProtocolCandidateId.Parse(new string('7', 32)) };
+        ProtocolPlanCandidate refreshedTwo = remainingTwo with { CandidateId = ProtocolCandidateId.Parse(new string('8', 32)) };
+        ReadOnlyPlanScript script = new(InstallerOperation.Update)
+        {
+            Candidates = [selected, remainingOne, remainingTwo],
+            ReplacementGenerations =
+            [
+                [refreshedOne, refreshedTwo],
+                [remainingTwo with { CandidateId = selected.CandidateId }]
+            ]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess first = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Update);
+        InstallerReadOnlyPlanSuccess second = (InstallerReadOnlyPlanSuccess)await client.ApprovePlanCandidatesAsync([first.Candidates[0]]);
+
+        Func<Task> action = () => client.ApprovePlanCandidatesAsync([second.Candidates[0]]);
 
         await action.Should().ThrowAsync<InstallerProtocolClientException>();
         process.Terminated.Should().BeTrue();
@@ -1656,6 +1805,13 @@ public sealed class ProcessInstallerProtocolClientTests
         RemainingCandidateIdReused
     }
 
+    public enum CandidateIdReuseFault
+    {
+        SelectedIdReassignedToRemaining,
+        RemainingIdsCrossSwapped,
+        DuplicateReplacementId
+    }
+
     private sealed class ReadOnlyPlanScript
     {
         public const string GamePath = "/games/private Stardew Valley";
@@ -1678,10 +1834,14 @@ public sealed class ProcessInstallerProtocolClientTests
         public PrePlanRejectedEvent? Rejection { get; set; }
         public PrePlanRejectedEvent? ApprovalRejection { get; set; }
         public ProtocolPlanCandidate[]? ReplacementCandidates { get; set; }
+        public ProtocolPlanCandidate[][]? ReplacementGenerations { get; set; }
+        public Func<int, ProtocolPlanCandidate[]>? InspectionCandidatesFactory { get; set; }
         public bool ReusePlanIdOnApproval { get; set; }
         public bool ReusePlanDigestOnApproval { get; set; }
         public ulong? ReplacementOperationGeneration { get; set; }
         private ulong OperationGeneration { get; set; } = 4;
+        private int ApprovalGeneration { get; set; }
+        private int InspectionGeneration { get; set; }
         public bool SuppressPageResponse { get; init; }
 
         public ReadOnlyPlanScript(InstallerOperation operation)
@@ -1698,6 +1858,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
                 OpenPackageRequest => Serialize(CreateOpened(Session, request.CommandId)),
                 InspectPlanRequest inspect when this.Rejection is not null => Serialize(this.Rejection with { CommandId = inspect.CommandId }),
+                InspectPlanRequest inspect when this.InspectionCandidatesFactory is not null => this.CreateGeneratedInspectionResponse(inspect),
                 InspectPlanRequest inspect => this.CreatePlanResponse(inspect),
                 SelectPlanCandidatesRequest approval when this.ApprovalRejection is not null => Serialize(this.ApprovalRejection with { CommandId = approval.CommandId }),
                 SelectPlanCandidatesRequest approval => this.CreateApprovalResponse(approval),
@@ -1707,14 +1868,26 @@ public sealed class ProcessInstallerProtocolClientTests
             };
         }
 
+        private byte[] CreateGeneratedInspectionResponse(InspectPlanRequest request)
+        {
+            this.Candidates = this.InspectionCandidatesFactory!(this.InspectionGeneration);
+            this.PlanId = ProtocolPlanId.Parse((this.InspectionGeneration + 1).ToString("x32"));
+            this.ExecutionDigest = ProtocolPlanDigest.Parse((this.InspectionGeneration + 1).ToString("x64"));
+            this.InspectionGeneration++;
+            return this.CreatePlanResponse(request);
+        }
+
         private byte[] CreateApprovalResponse(SelectPlanCandidatesRequest request)
         {
+            this.ApprovalGeneration++;
             if (!this.ReusePlanIdOnApproval)
-                this.PlanId = ProtocolPlanId.Parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-            if (this.ReplacementCandidates is not null)
+                this.PlanId = ProtocolPlanId.Parse(new string((char)('a' + (this.ApprovalGeneration - 1) * 2), 32));
+            if (this.ReplacementGenerations is not null)
+                this.Candidates = this.ReplacementGenerations[this.ApprovalGeneration - 1];
+            else if (this.ReplacementCandidates is not null)
                 this.Candidates = this.ReplacementCandidates;
             if (!this.ReusePlanDigestOnApproval)
-                this.ExecutionDigest = ProtocolPlanDigest.Parse(new string('b', 64));
+                this.ExecutionDigest = ProtocolPlanDigest.Parse(new string((char)('b' + (this.ApprovalGeneration - 1) * 2), 64));
             if (this.ReplacementOperationGeneration is { } generation)
                 this.OperationGeneration = generation;
             PlanEvent plan = this.CreatePlan(request.CommandId);
@@ -1909,6 +2082,14 @@ public sealed class ProcessInstallerProtocolClientTests
                 risks.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
             return risks.ToArray();
         }
+    }
+
+    private sealed class IndexedCandidateList(int count, Func<int, InstallerReadOnlyPlanCandidate> indexer) : IReadOnlyList<InstallerReadOnlyPlanCandidate>
+    {
+        public int Count => count;
+        public InstallerReadOnlyPlanCandidate this[int index] => indexer(index);
+        public IEnumerator<InstallerReadOnlyPlanCandidate> GetEnumerator() => throw new AssertionException("candidate selection enumeration isn't bounded");
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
     }
 
     private static ProcessInstallerProtocolClient Create(ScriptedProcess process, TimeSpan? reap = null, TimeSpan? operation = null, TimeSpan? partialFrame = null) =>
