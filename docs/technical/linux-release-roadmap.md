@@ -486,6 +486,17 @@ This screen remains deliberately preview-only. Approval, confirmation, execution
 
 This correction proves only the retained Core execution binding and one real protocol-to-engine Backup regression. The production GUI still has no approval, confirmation, execution, progress, cancellation, interrupted-recovery, rollback, or recovery-prune surface. A publicly downloadable GUI package, clean-isolated GUI lifecycle qualification, and every production screenshot remain unchecked; no broader Phase 4 checkbox is completed by this subsection.
 
+### Durable recovery-catalog equality and real prune regression
+
+- [x] Compare reopened recovery release identities by immutable value at the exact authenticated catalog boundary, accepting distinct value-equal instances while continuing to reject distinct non-null unequal releases and null/non-null mismatches ([merged PR #212](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/212); exact reviewed feature head [`646506fe`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/646506fe1818c6be13b78b91c0b5264638eff993)).
+- [x] Execute a real Linux install, Backup, persisted-history reload, reopened recovery catalog, and authenticated retain-one prune through the production protocol service and real installer engine; verify committed Backup durability, two catalog generations, value-equal reopened release identity, typed prune success, one logical removal, one physical cleanup, and one durable retained generation ([real-engine regression test](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/646506fe1818c6be13b78b91c0b5264638eff993/src/SMAPI.Installer.Core.Tests/Protocol/V1/LinuxInstallerProtocolServiceRealEngineTests.cs)).
+- [x] Preserve deterministic Linux-only execution gating, isolated GUID-scoped fixture directories, bounded fixture cleanup, and explicit authority, inspection, recovery-handle, and protocol-service disposal ([testing/platform review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/212)).
+- [x] Pass 158/158 Protocol V1 tests, 28/28 focused state-machine/real-engine tests, and 1014/1014 Core Release tests; pass fresh required CI runs [`33508802614`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33508802614) and [`33508802774`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33508802774).
+- [x] Address the actionable assertion-completeness finding by adding a valid non-null unequal release-identity rejection case, retaining a separate null mismatch case, and asserting the accepted value-equal release projection; obtain clean exact-head testing/platform/final-gate review and clean post-base-update re-review ([finding-resolution and review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/212); updated reviewed merge head [`617d1f7f`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/617d1f7f6868f3ced6f0983dc82e427696a08a4a)).
+- [x] Merge and close PR #212 at exact merge commit [`065af992`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/065af99290707f920fa707899e8d42e5e3ae6f95).
+
+This subsection proves only Core/protocol recovery-catalog equality and real install-to-Backup-to-catalog-to-prune durability. The production GUI recovery, rollback, and destructive-prune surfaces remain unchecked, as do GUI packaging, public-artifact qualification, and every required production screenshot; no broader Phase 4 checkbox is completed here.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
