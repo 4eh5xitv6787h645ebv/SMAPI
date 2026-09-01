@@ -292,9 +292,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 this.ResultValue = finalResult;
             }
             operation.Cancellation.Dispose();
-            operation.Completion.TrySetResult();
         }
         this.PublishChanged();
+        operation.Completion.TrySetResult();
     }
 
     private async Task WatchSessionAsync()
