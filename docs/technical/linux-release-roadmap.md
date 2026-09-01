@@ -475,6 +475,17 @@ This foundation deliberately adds no visible plan screen, approval, confirmation
 
 This screen remains deliberately preview-only. Approval, confirmation, execution, mutation, progress, recovery, rollback, packaging, public-artifact qualification, and production screenshots remain unchecked until their own exact reviewed and clean-isolated evidence exists.
 
+### Retained protocol execution-binding digest correction
+
+- [x] Keep the public plan/prune presentation digest distinct from the retained Core confirmation digest, continue authenticating every public confirm, execute, cancel, progress, and terminal message against the public digest, and pass only the exact retained plan object's `ConfirmationDigest` into Core execution ([merged PR #210](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/210); exact reviewed head [`d702a532`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/d702a532dce3e08e6ce7d541ac21995955a99667)).
+- [x] Cover ordinary execution, candidate-reissued plans, authenticated rollback plans, and recovery-prune plans; prove the inner execution-binding digest is rejected at every public confirmation, execution, cancellation, progress, and terminal boundary while the exact retained plan supplied to Core carries that binding ([focused protocol and state-machine tests](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/210)).
+- [x] Execute a real Backup through the production protocol service and real Linux installer engine with deliberately distinct public and execution-binding digests; verify a committed typed terminal outcome and the new authenticated Backup recovery generation ([real-engine regression test](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/d702a532dce3e08e6ce7d541ac21995955a99667/src/SMAPI.Installer.Core.Tests/Protocol/V1/LinuxInstallerProtocolServiceRealEngineTests.cs)).
+- [x] Pass 1011/1011 Core Release tests and 115/115 focused protocol/state-machine/real-engine tests, with clean formatting and diff checks and required CI runs [`33506935328`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33506935328) and [`33506935336`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33506935336).
+- [x] Address the actionable testing/platform finding by combining NUnit's Linux execution gate with analyzer platform metadata; obtain clean testing/final-gate and exact-head finding-resolution reviews without changing GUI, documentation-claim, release, or screenshot behavior ([review and finding-resolution record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/210)).
+- [x] Merge and close PR #210 at exact merge commit [`fffc7b25`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/fffc7b251ae73e8119023fc7a62a3859d2d0c2ab).
+
+This correction proves only the retained Core execution binding and one real protocol-to-engine Backup regression. The production GUI still has no approval, confirmation, execution, progress, cancellation, interrupted-recovery, rollback, or recovery-prune surface. A publicly downloadable GUI package, clean-isolated GUI lifecycle qualification, and every production screenshot remain unchecked; no broader Phase 4 checkbox is completed by this subsection.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
