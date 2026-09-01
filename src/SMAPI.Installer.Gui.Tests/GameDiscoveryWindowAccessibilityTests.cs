@@ -101,7 +101,9 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         await WaitUntilAsync(() => cancel.IsVisible && cancel.IsEffectivelyEnabled);
         PressAccessKey(window, PhysicalKey.C);
         await validation;
-        await WaitUntilAsync(() => viewModel.Heading == "Game-folder check cancelled");
+        await WaitUntilAsync(() => viewModel.Heading == "Game-folder check cancelled and session closed");
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.IsBrowseVisible.Should().BeFalse();
 
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);

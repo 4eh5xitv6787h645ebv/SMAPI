@@ -450,12 +450,12 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
                 "Waiting for the current read-only check to settle. No game files are being changed."
             ),
             GameDiscoveryState.Cancelled => (
-                "Game-folder check cancelled",
-                "No game folder was selected and no game files were changed. Try again when ready."
+                "Game-folder check cancelled and session closed",
+                "No game files were changed. Close and reopen the installer before trying again."
             ),
             GameDiscoveryState.Failed => (
-                "The game-folder check stopped safely",
-                "No game files were changed. Try automatic detection again or choose a folder manually."
+                "The verified installer session stopped safely",
+                "No game files were changed. Close and reopen the installer before trying again."
             ),
             GameDiscoveryState.SessionFaulted => (
                 "The verified installer session closed",
@@ -476,7 +476,6 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
             GameDiscoveryState.Ready => GameDiscoveryFocusTarget.CandidateList,
             GameDiscoveryState.NoCandidates or GameDiscoveryState.ManualInvalid when this.BrowseCommand.CanExecute(null) => GameDiscoveryFocusTarget.Browse,
             GameDiscoveryState.ManualValid when this.ContinueCommand.CanExecute(null) => GameDiscoveryFocusTarget.Continue,
-            GameDiscoveryState.Cancelled or GameDiscoveryState.Failed => GameDiscoveryFocusTarget.Retry,
             _ => GameDiscoveryFocusTarget.Status
         };
     }

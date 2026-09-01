@@ -216,8 +216,11 @@ internal sealed partial class GameDiscoveryAccessibilityTests
             await viewModel.CancelCommand.ExecuteAsync();
             await load;
             Dispatcher.UIThread.RunJobs();
-            viewModel.Heading.Should().Be("Game-folder check cancelled");
-            viewModel.IsRetryVisible.Should().BeTrue();
+            viewModel.Heading.Should().Be("Game-folder check cancelled and session closed");
+            viewModel.Message.Should().Contain("Close and reopen");
+            viewModel.IsRetryVisible.Should().BeFalse();
+            viewModel.IsBrowseVisible.Should().BeFalse();
+            viewModel.SelectedCandidate.Should().BeNull();
         }
 
         GameDiscoveryControllerTests.FakeVerifiedSession faulted = new();
@@ -229,6 +232,26 @@ internal sealed partial class GameDiscoveryAccessibilityTests
         faultViewModel.LiveAnnouncement.Should().NotContain("SECRET").And.NotContain("/home/name");
         faultViewModel.ProblemLiveSetting.Should().Be(AutomationLiveSetting.Assertive);
         faultViewModel.IsRetryVisible.Should().BeFalse();
+    }
+
+    [AvaloniaTest]
+    public async Task BackendFailureTruthfullyRequiresAClosedSessionRestart()
+    {
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => throw new InstallerProtocolClientException("private SECRET /home/name")
+        };
+        await using GameDiscoveryViewModel viewModel = CreateViewModel(session);
+
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.Heading.Should().Be("The verified installer session stopped safely");
+        viewModel.Message.Should().Contain("Close and reopen");
+        viewModel.LiveAnnouncement.Should().NotContain("SECRET").And.NotContain("/home/name");
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.IsBrowseVisible.Should().BeFalse();
+        viewModel.IsContinueVisible.Should().BeFalse();
     }
 
     private static GameDiscoveryViewModel CreateViewModel(GameDiscoveryControllerTests.FakeVerifiedSession session)

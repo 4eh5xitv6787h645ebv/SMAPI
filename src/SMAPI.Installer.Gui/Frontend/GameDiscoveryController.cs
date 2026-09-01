@@ -114,6 +114,8 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             this.AssertNotDisposed();
             if (this.SessionHasFaulted)
                 throw new InvalidOperationException("The verified installer session is no longer available.");
+            if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed)
+                throw new InvalidOperationException("The verified installer session is closed.");
             if (this.Operation is not null)
                 throw new InvalidOperationException("A game-folder operation is still active.");
             ProtocolGameCandidate selected = this.CandidatesValue.SingleOrDefault(value => ReferenceEquals(value, candidate))
@@ -135,6 +137,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                 return;
             operation.UserCancellation = true;
             this.StateValue = GameDiscoveryState.Cancelling;
+            this.SelectedCandidateValue = null;
         }
         this.PublishChanged();
         await CancelSafelyAsync(operation.Cancellation).ConfigureAwait(false);
@@ -178,14 +181,12 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                 }
                 if (this.SessionHasFaulted)
                 {
-                    this.SelectedCandidateValue = null;
-                    this.StateValue = GameDiscoveryState.SessionFaulted;
+                    this.CloseSession(GameDiscoveryState.SessionFaulted);
                     return;
                 }
                 if (IsCancellationRequested(operation))
                 {
-                    this.SelectedCandidateValue = null;
-                    this.StateValue = GameDiscoveryState.Cancelled;
+                    this.CloseSession(GameDiscoveryState.Cancelled);
                     return;
                 }
                 this.DiscoveredCandidatesValue = candidates;
@@ -242,14 +243,12 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                 }
                 if (this.SessionHasFaulted)
                 {
-                    this.SelectedCandidateValue = null;
-                    this.StateValue = GameDiscoveryState.SessionFaulted;
+                    this.CloseSession(GameDiscoveryState.SessionFaulted);
                     return;
                 }
                 if (IsCancellationRequested(operation))
                 {
-                    this.SelectedCandidateValue = null;
-                    this.StateValue = GameDiscoveryState.Cancelled;
+                    this.CloseSession(GameDiscoveryState.Cancelled);
                     return;
                 }
                 this.CandidatesValue = ReplaceManualCandidate(this.DiscoveredCandidatesValue, candidate);
@@ -315,8 +314,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                 return;
             this.SessionHasFaulted = true;
             operation = this.Operation;
-            this.SelectedCandidateValue = null;
-            this.StateValue = GameDiscoveryState.SessionFaulted;
+            this.CloseSession(GameDiscoveryState.SessionFaulted);
         }
         this.PublishChanged();
         if (operation is not null)
@@ -373,15 +371,9 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                     this.StateValue = GameDiscoveryState.Cancelling;
                 }
                 else if (this.SessionHasFaulted)
-                {
-                    this.SelectedCandidateValue = null;
-                    this.StateValue = GameDiscoveryState.SessionFaulted;
-                }
+                    this.CloseSession(GameDiscoveryState.SessionFaulted);
                 else if (IsCancellationRequested(operation))
-                {
-                    this.SelectedCandidateValue = null;
-                    this.StateValue = GameDiscoveryState.Cancelled;
-                }
+                    this.CloseSession(GameDiscoveryState.Cancelled);
                 this.Operation = null;
             }
         }
@@ -398,13 +390,16 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
             if (!this.IsCurrent(operation))
                 return;
             this.SelectedCandidateValue = null;
-            this.StateValue = this.DisposeStarted
-                ? GameDiscoveryState.Cancelling
-                : this.SessionHasFaulted
-                    ? GameDiscoveryState.SessionFaulted
-                    : IsCancellationRequested(operation)
-                        ? GameDiscoveryState.Cancelled
-                        : state;
+            if (this.DisposeStarted)
+                this.StateValue = GameDiscoveryState.Cancelling;
+            else if (this.SessionHasFaulted)
+                this.CloseSession(GameDiscoveryState.SessionFaulted);
+            else if (IsCancellationRequested(operation))
+                this.CloseSession(GameDiscoveryState.Cancelled);
+            else if (state == GameDiscoveryState.Failed)
+                this.CloseSession(GameDiscoveryState.Failed);
+            else
+                this.StateValue = state;
         }
         this.PublishChanged();
     }
@@ -412,16 +407,17 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private GameDiscoverySnapshot CreateSnapshot()
     {
         bool idle = this.Operation is null && !this.DisposeStarted && !this.SessionHasFaulted;
+        bool sessionUsable = idle && this.StateValue is not GameDiscoveryState.Cancelled and not GameDiscoveryState.Failed;
         return new(
             this.GenerationValue,
             this.RevisionValue,
             this.StateValue,
             Array.AsReadOnly(this.CandidatesValue.ToArray()),
             this.SelectedCandidateValue,
-            idle && this.StateValue is GameDiscoveryState.NoCandidates or GameDiscoveryState.Cancelled or GameDiscoveryState.Failed,
-            idle,
+            sessionUsable && this.StateValue == GameDiscoveryState.NoCandidates,
+            sessionUsable,
             this.Operation is not null && this.StateValue != GameDiscoveryState.Cancelling,
-            idle && this.SelectedCandidateValue?.State == LinuxGameFolderStatus.Valid
+            sessionUsable && this.SelectedCandidateValue?.State == LinuxGameFolderStatus.Valid
         );
     }
 
@@ -440,8 +436,20 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
         this.AssertNotDisposed();
         if (this.SessionHasFaulted)
             throw new InvalidOperationException("The verified installer session is no longer available.");
+        if (this.StateValue is GameDiscoveryState.Cancelled or GameDiscoveryState.Failed)
+            throw new InvalidOperationException("The verified installer session is closed.");
         if (this.Operation is not null)
             throw new InvalidOperationException("A game-folder operation is already active.");
+    }
+
+    private void CloseSession(GameDiscoveryState state)
+    {
+        if (state is not GameDiscoveryState.Cancelled and not GameDiscoveryState.Failed and not GameDiscoveryState.SessionFaulted)
+            throw new ArgumentOutOfRangeException(nameof(state));
+        this.DiscoveredCandidatesValue = [];
+        this.CandidatesValue = [];
+        this.SelectedCandidateValue = null;
+        this.StateValue = state;
     }
 
     private void AssertNotDisposed()

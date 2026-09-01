@@ -87,7 +87,7 @@ internal sealed class GameDiscoveryControllerTests
     }
 
     [Test]
-    public async Task CancellationSettlesBeforeRetryAndLateDiscoveryCannotPublish()
+    public async Task CancellationClosesTheBackendSessionAndLateDiscoveryCannotPublish()
     {
         TaskCompletionSource started = NewCompletion();
         FakeVerifiedSession session = new()
@@ -107,12 +107,13 @@ internal sealed class GameDiscoveryControllerTests
         await discovery;
 
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
-        controller.Snapshot.CanRetry.Should().BeTrue();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
         controller.Snapshot.Candidates.Should().BeEmpty();
         session.Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("retry", LinuxGameFolderStatus.Valid)]);
-        await controller.DiscoverAsync();
-        controller.Snapshot.State.Should().Be(GameDiscoveryState.Ready);
-        session.DiscoverCalls.Should().Be(2);
+        Func<Task> retry = () => controller.DiscoverAsync();
+        await retry.Should().ThrowAsync<InvalidOperationException>().WithMessage("*session is closed*");
+        session.DiscoverCalls.Should().Be(1);
     }
 
     [TestCase(true)]
@@ -148,9 +149,13 @@ internal sealed class GameDiscoveryControllerTests
         await Task.WhenAll(operation, cancellation).WaitAsync(TimeSpan.FromSeconds(2));
 
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
+        controller.Snapshot.Candidates.Should().BeEmpty();
         controller.Snapshot.SelectedCandidate.Should().BeNull();
         controller.Snapshot.CanContinue.Should().BeFalse();
-        controller.Snapshot.CanRetry.Should().BeTrue();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
+        Action select = () => controller.SelectCandidate(valid);
+        select.Should().Throw<InvalidOperationException>().WithMessage("*session is closed*");
     }
 
     [TestCase(true)]
@@ -186,9 +191,13 @@ internal sealed class GameDiscoveryControllerTests
         await operation.WaitAsync(TimeSpan.FromSeconds(2));
 
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
+        controller.Snapshot.Candidates.Should().BeEmpty();
         controller.Snapshot.SelectedCandidate.Should().BeNull();
         controller.Snapshot.CanContinue.Should().BeFalse();
-        controller.Snapshot.CanRetry.Should().BeTrue();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
+        Action select = () => controller.SelectCandidate(valid);
+        select.Should().Throw<InvalidOperationException>().WithMessage("*session is closed*");
     }
 
     [TestCase(true)]
@@ -260,9 +269,11 @@ internal sealed class GameDiscoveryControllerTests
         await Task.WhenAll(operation, cancellation).WaitAsync(TimeSpan.FromSeconds(2));
 
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
+        controller.Snapshot.Candidates.Should().BeEmpty();
         controller.Snapshot.SelectedCandidate.Should().BeNull();
         controller.Snapshot.CanContinue.Should().BeFalse();
-        controller.Snapshot.CanRetry.Should().BeTrue();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
     }
 
     [TestCase(true)]
@@ -296,9 +307,11 @@ internal sealed class GameDiscoveryControllerTests
         await operation.WaitAsync(TimeSpan.FromSeconds(2));
 
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
+        controller.Snapshot.Candidates.Should().BeEmpty();
         controller.Snapshot.SelectedCandidate.Should().BeNull();
         controller.Snapshot.CanContinue.Should().BeFalse();
-        controller.Snapshot.CanRetry.Should().BeTrue();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
     }
 
     [TestCase(true)]
@@ -368,7 +381,8 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Cancelled);
         controller.Snapshot.SelectedCandidate.Should().BeNull();
         controller.Snapshot.CanContinue.Should().BeFalse();
-        controller.Snapshot.CanRetry.Should().BeTrue();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
     }
 
     [TestCase(true)]
@@ -486,6 +500,8 @@ internal sealed class GameDiscoveryControllerTests
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Failed);
         controller.Snapshot.Candidates.Should().BeEmpty();
         controller.Snapshot.CanContinue.Should().BeFalse();
+        controller.Snapshot.CanRetry.Should().BeFalse();
+        controller.Snapshot.CanBrowse.Should().BeFalse();
     }
 
     internal static ProtocolGameCandidate Candidate(string suffix, LinuxGameFolderStatus status)
