@@ -61,6 +61,10 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
     public event EventHandler? CloseRequested;
 
     public string OperationLabel => GetOperationLabel(this.snapshot.Plan.Operation);
+    public string RunLabel => this.snapshot.Plan.Operation == InstallerOperation.Rollback ? "_Run rollback" : "_Run operation";
+    public string RunAccessibleName => this.snapshot.Plan.Operation == InstallerOperation.Rollback
+        ? "Run the exact confirmed rollback"
+        : "Run the exact confirmed operation";
     public string Heading { get => this.heading; private set => this.SetProperty(ref this.heading, value); }
     public string Message { get => this.message; private set => this.SetProperty(ref this.message, value); }
     public string LiveAnnouncement { get => this.liveAnnouncement; private set => this.SetProperty(ref this.liveAnnouncement, value); }
@@ -282,11 +286,14 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         string operation = GetOperationLabel(value.Plan.Operation);
         return value.State switch
         {
+            ExecutionState.Ready when value.Plan.Operation == InstallerOperation.Rollback => ("Ready to run rollback", "The rollback plan is confirmed. No files have changed. Choose Run operation to restore the selected previous managed state, or Cancel."),
             ExecutionState.Ready => ($"Ready to run {operation}", "The plan is confirmed. No files have changed. Choose Run operation to begin, or Cancel."),
+            ExecutionState.Starting when value.Plan.Operation == InstallerOperation.Rollback => ("Starting rollback…", "Submitting the exact confirmed rollback plan. Cancellation can still be requested safely."),
             ExecutionState.Starting => ($"Starting {operation}…", "Submitting the exact confirmed plan. Cancellation can still be requested safely."),
+            ExecutionState.Running when value.Plan.Operation == InstallerOperation.Rollback => ("Rollback is running", "Restoring the selected previous managed state. Keep this window open; progress may coalesce intermediate updates."),
             ExecutionState.Running => ($"{operation} is running", "Keep this window open. Progress may coalesce intermediate updates."),
             ExecutionState.CancellationRequested => ("Cancellation requested — finishing safely", "The installer may be rolling back; keep this window open."),
-            ExecutionState.Terminal => GetExecutionTerminalCopy(operation, value.ExecutionResult),
+            ExecutionState.Terminal => GetExecutionTerminalCopy(value.Plan.Operation, value.ExecutionResult),
             ExecutionState.RecoveryRequired when value.RecoveryResult is not null => GetRecoveryCopy(value.RecoveryResult),
             ExecutionState.RecoveryRequired when value.ExecutionResult is InstallerExecutionStateUnknownResult && !value.CanRecover => ("Installer state could not be confirmed; recovery is required", "A recovery session could not be prepared here. Close this screen and start a fresh installer session; do not retry the original operation."),
             ExecutionState.RecoveryRequired when value.ExecutionResult is InstallerExecutionStateUnknownResult => ("Installer state could not be confirmed; recovery is required", "Do not run another installer action. Explicit recovery uses a fresh authenticated session, revalidates the exact selected target, and cannot be stopped after admission."),
@@ -304,19 +311,21 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         };
     }
 
-    private static (string Heading, string Message) GetExecutionTerminalCopy(string operation, InstallerExecutionResult? result)
+    private static (string Heading, string Message) GetExecutionTerminalCopy(InstallerOperation operation, InstallerExecutionResult? result)
     {
         if (result is InstallerExecutionStateUnknownResult or null)
             return ("Installer state could not be confirmed; recovery is required", "Do not retry the operation. Use interrupted recovery in a fresh authenticated session.");
         InstallerExecutionTerminalResult terminal = (InstallerExecutionTerminalResult)result;
+        string operationLabel = GetOperationLabel(operation);
         return terminal.Outcome switch
         {
-            ProtocolExecutionOutcome.Succeeded => ($"{operation} completed", "The exact terminal reports that the planned changes committed."),
-            ProtocolExecutionOutcome.SucceededWithCleanupWarning => ($"{operation} completed; cleanup is pending", "The planned changes committed, but bounded cleanup remains for a fresh session."),
-            ProtocolExecutionOutcome.FailedBeforeMutation => ($"{operation} failed before changing files", $"No mutation was reported. {GetErrorAction(terminal.ErrorCode)}"),
-            ProtocolExecutionOutcome.CancelledBeforeMutation => ($"{operation} cancelled before changing files", "The exact terminal reports an unchanged durable state."),
+            ProtocolExecutionOutcome.Succeeded when operation == InstallerOperation.Rollback => ("Rollback completed", "The exact terminal reports that the selected previous managed state was restored and committed."),
+            ProtocolExecutionOutcome.Succeeded => ($"{operationLabel} completed", "The exact terminal reports that the planned changes committed."),
+            ProtocolExecutionOutcome.SucceededWithCleanupWarning => ($"{operationLabel} completed; cleanup is pending", "The planned changes committed, but bounded cleanup remains for a fresh session."),
+            ProtocolExecutionOutcome.FailedBeforeMutation => ($"{operationLabel} failed before changing files", $"No mutation was reported. {GetErrorAction(terminal.ErrorCode)}"),
+            ProtocolExecutionOutcome.CancelledBeforeMutation => ($"{operationLabel} cancelled before changing files", "The exact terminal reports an unchanged durable state."),
             ProtocolExecutionOutcome.CancelledAndRolledBack => ("Cancellation completed and changes were rolled back", "The exact terminal reports a rolled-back durable state."),
-            ProtocolExecutionOutcome.FailedAndRolledBack => ($"{operation} failed and changes were rolled back", $"The exact terminal reports rollback completed. {GetErrorAction(terminal.ErrorCode)}"),
+            ProtocolExecutionOutcome.FailedAndRolledBack => ($"{operationLabel} failed and changes were rolled back", $"The exact terminal reports rollback completed. {GetErrorAction(terminal.ErrorCode)}"),
             ProtocolExecutionOutcome.InterruptedRecoveryRequired => ("Recovery is required before another installer action", "The operation did not reach a safe final state. Run interrupted recovery explicitly."),
             ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired => ("Recovery completed; inspect again", "The prior interrupted state was recovered. Start a fresh verified session and inspect the operation again."),
             ProtocolExecutionOutcome.UnexpectedCoreFailure => ("Installer state could not be confirmed; recovery is required", "Do not retry the operation. Run interrupted recovery explicitly."),
@@ -459,6 +468,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         InstallerOperation.Repair => "Repair",
         InstallerOperation.Uninstall => "Uninstall",
         InstallerOperation.Backup => "Backup",
+        InstallerOperation.Rollback => "Rollback",
         _ => throw new ArgumentOutOfRangeException(nameof(operation))
     };
 

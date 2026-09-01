@@ -382,6 +382,58 @@ internal sealed class ExecutionControllerTests
         await controller.DisposeAsync();
     }
 
+    [AvaloniaTest]
+    public async Task RollbackViewModelKeepsExplicitRunBoundaryAndUsesExactActionCopyThroughoutExecution()
+    {
+        TaskCompletionSource<InstallerExecutionResult> completion = NewSource<InstallerExecutionResult>();
+        Channel<InstallerExecutionProgress> progress = Channel.CreateBounded<InstallerExecutionProgress>(1);
+        FakeConfirmedSession session = new()
+        {
+            Execute = _ => Task.FromResult(new InstallerExecutionOperation(
+                progress.Reader,
+                completion.Task,
+                () => Task.CompletedTask
+            ))
+        };
+        ExecutionController controller = new(session, RollbackPlan());
+        await using ExecutionViewModel viewModel = new(controller, () => true, action => action());
+        await using ExecutionWindow window = new(viewModel);
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        Button runButton = window.FindControl<Button>("RunButton")!;
+
+        viewModel.OperationLabel.Should().Be("Rollback");
+        viewModel.Heading.Should().Be("Ready to run rollback");
+        viewModel.Message.Should().Contain("No files have changed");
+        viewModel.Message.Should().Contain("restore the selected previous managed state");
+        viewModel.PlanDetail.Should().Contain("Confirmed operation: Rollback");
+        viewModel.BoundaryDetail.Should().Contain("Nothing runs until you choose Run operation");
+        runButton.Content.Should().Be("_Run rollback");
+        AutomationProperties.GetName(runButton).Should().Be("Run the exact confirmed rollback");
+        viewModel.RunCommand.CanExecute(null).Should().BeTrue();
+        session.ExecuteCalls.Should().Be(0);
+
+        Task run = viewModel.RunCommand.ExecuteAsync();
+        await WaitUntilAsync(() => controller.Snapshot.State == ExecutionState.Running);
+
+        session.ExecuteCalls.Should().Be(1);
+        viewModel.Heading.Should().Be("Rollback is running");
+        viewModel.Message.Should().Contain("Restoring the selected previous managed state");
+
+        progress.Writer.TryWrite(new InstallerExecutionProgress(Core.Transactions.TransactionStage.Applying, 1, 2)).Should().BeTrue();
+        await WaitUntilAsync(() => viewModel.ProgressDetail.Contains("Applying planned changes", StringComparison.Ordinal));
+        viewModel.ProgressDetail.Should().Contain("1 of 2 units reported");
+
+        progress.Writer.TryComplete().Should().BeTrue();
+        completion.SetResult(ExactSuccess());
+        await run.WaitAsync(TimeSpan.FromSeconds(2));
+
+        viewModel.Heading.Should().Be("Rollback completed");
+        viewModel.Message.Should().Contain("selected previous managed state was restored and committed");
+        controller.Snapshot.State.Should().Be(ExecutionState.Terminal);
+        session.ExecuteCalls.Should().Be(1);
+    }
+
     private static IEnumerable<TestCaseData> InvalidRollbackRiskCases()
     {
         yield return new TestCaseData(Array.Empty<ProtocolPlanRisk>()).SetName("RollbackRisksRejectMissingRollback");
@@ -793,6 +845,13 @@ internal sealed class ExecutionControllerTests
         InstallerOperation.Install,
         [new(PlanOperationKind.Create, 2)],
         [],
+        0
+    );
+
+    private static ExecutionPlanPresentation RollbackPlan() => new(
+        InstallerOperation.Rollback,
+        [new(PlanOperationKind.Restore, 2)],
+        [ProtocolPlanRisk.Rollback],
         0
     );
 

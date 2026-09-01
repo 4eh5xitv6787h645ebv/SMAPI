@@ -10,6 +10,9 @@ namespace StardewModdingAPI.Installer.Gui.ViewModels;
 internal enum PlanReviewFocusTarget
 {
     OperationList,
+    RecoveryList,
+    RecoveryStatus,
+    InspectRollback,
     CandidateList,
     CandidateStatus,
     Status,
@@ -18,6 +21,29 @@ internal enum PlanReviewFocusTarget
     Confirm,
     Retry,
     Exit
+}
+
+/// <summary>
+/// Sanitized display-only recovery choice. The controller-minted point remains internal and is never exposed to
+/// XAML, automation peers, or public presentation properties.
+/// </summary>
+internal sealed class PlanReviewRecoveryChoice
+{
+    public PlanReviewRecoveryChoice(PlanReviewRecoveryPoint point, string title, string detail)
+    {
+        this.Point = point ?? throw new ArgumentNullException(nameof(point));
+        this.Title = title ?? throw new ArgumentNullException(nameof(title));
+        this.Detail = detail ?? throw new ArgumentNullException(nameof(detail));
+        this.AccessibleName = $"{this.Title}. {this.Detail.Replace('\n', ' ')}";
+    }
+
+    internal PlanReviewRecoveryPoint Point { get; }
+
+    public string Title { get; }
+
+    public string Detail { get; }
+
+    public string AccessibleName { get; }
 }
 
 internal sealed class PlanReviewCandidateChoice : ObservableObject
@@ -152,6 +178,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     private IReadOnlyList<PlanReviewSummaryRow> conflictRows = Array.Empty<PlanReviewSummaryRow>();
     private IReadOnlyList<PlanReviewSummaryRow> candidateRows = Array.Empty<PlanReviewSummaryRow>();
     private IReadOnlyList<PlanReviewCandidateChoice> candidateChoices = Array.Empty<PlanReviewCandidateChoice>();
+    private IReadOnlyList<PlanReviewRecoveryChoice> recoveryChoices = Array.Empty<PlanReviewRecoveryChoice>();
+    private PlanReviewRecoveryChoice? selectedRecoveryChoice;
     private string candidateSelectionAnnouncement = "0 of 0 files selected.";
     private bool disposed;
     private bool confirmationReadyRaised;
@@ -162,6 +190,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.Controller = controller ?? throw new ArgumentNullException(nameof(controller));
         this.snapshot = controller.Snapshot;
         this.InspectCommand = new(() => controller.InspectAsync(), () => this.snapshot.CanInspect, this.HandlePresentationFailure);
+        this.LoadRecoveriesCommand = new(() => controller.ListRecoveriesAsync(), () => this.snapshot.CanListRecoveries, this.HandleRecoveryActionFailure);
+        this.InspectRollbackCommand = new(() => controller.InspectRollbackAsync(), () => this.snapshot.CanInspectRollback, this.HandleRecoveryActionFailure);
         this.CancelCommand = new(controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
         this.RetryCommand = new(() => controller.InspectAsync(), () => this.snapshot.CanRetry, this.HandlePresentationFailure);
         this.ApplyCandidatesCommand = new(() => controller.ApplyCandidateSelectionAsync(), () => this.snapshot.CanApplyCandidates, this.HandleCandidateActionFailure);
@@ -192,6 +222,25 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             if (!FixedOperationChoices.Any(choice => ReferenceEquals(choice, value)))
                 throw new ArgumentException("The operation must be one of this screen's exact read-only choices.", nameof(value));
             this.Controller.SelectOperation(value.Operation);
+        }
+    }
+
+    public IReadOnlyList<PlanReviewRecoveryChoice> RecoveryChoices
+    {
+        get => this.recoveryChoices;
+        private set => this.SetProperty(ref this.recoveryChoices, value);
+    }
+
+    public PlanReviewRecoveryChoice? SelectedRecoveryChoice
+    {
+        get => this.selectedRecoveryChoice;
+        set
+        {
+            if (ReferenceEquals(value, this.selectedRecoveryChoice))
+                return;
+            if (value is not null && !this.RecoveryChoices.Any(choice => ReferenceEquals(choice, value)))
+                throw new ArgumentException("The recovery point must be one of this screen's exact current choices.", nameof(value));
+            this.Controller.SelectRecoveryPoint(value?.Point);
         }
     }
 
@@ -355,6 +404,49 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
 
     public bool IsOperationSelectionEnabled => this.snapshot.CanSelect;
 
+    public string RecoveryStatusDetail
+    {
+        get
+        {
+            return this.snapshot.RecoveryState switch
+            {
+                PlanReviewRecoveryState.NotLoaded => "Recovery history has not been loaded. Loading reads bounded local history only; it does not select, inspect, confirm, or run a rollback.",
+                PlanReviewRecoveryState.Listing => "Loading bounded local recovery history. No recovery point is selected and no files are changing.",
+                PlanReviewRecoveryState.Available when this.SelectedRecoveryChoice is { } selected => $"{selected.Title} is selected. Inspect rollback requests a read-only preview only; it does not confirm, run, or change files.",
+                PlanReviewRecoveryState.Available => $"{this.RecoveryChoices.Count} {GetCountLabel(this.RecoveryChoices.Count, "recovery point is", "recovery points are")} available. Nothing is selected and no rollback has been inspected.",
+                PlanReviewRecoveryState.NoHistory => "No committed recovery history was reported for this validated game folder. You can refresh this bounded local lookup.",
+                PlanReviewRecoveryState.RelistRequired => "The previous recovery authority is no longer usable. Refresh history, then explicitly select a newly listed point before inspecting rollback again.",
+                PlanReviewRecoveryState.Closed when this.snapshot.Result is PlanReviewPlan { Operation: InstallerOperation.Rollback } => "The exact selected rollback has been inspected. This is still a read-only preview; confirmation and a separate explicit Run are required before files can change.",
+                PlanReviewRecoveryState.Closed when this.snapshot.State == PlanReviewState.Inspecting && this.snapshot.SelectedOperation is null => "Inspecting the exact selected recovery point as a read-only rollback plan. No files are changing.",
+                PlanReviewRecoveryState.Closed => "Recovery history is closed for this read-only session. No recovery authority remains on this screen.",
+                _ => throw new ArgumentOutOfRangeException(nameof(this.snapshot.RecoveryState))
+            };
+        }
+    }
+
+    public bool IsRecoverySectionVisible
+        => this.snapshot.RecoveryState != PlanReviewRecoveryState.Closed
+            || this.snapshot.Result is PlanReviewPlan { Operation: InstallerOperation.Rollback }
+            || this.snapshot.State == PlanReviewState.Inspecting && this.snapshot.SelectedOperation is null;
+
+    public bool IsRecoveryListVisible
+        => this.snapshot.RecoveryState == PlanReviewRecoveryState.Available
+            && this.RecoveryChoices.Count > 0;
+
+    public bool IsRecoveryEmptyVisible => this.snapshot.RecoveryState == PlanReviewRecoveryState.NoHistory;
+
+    public bool IsRecoveryBusy
+        => this.snapshot.RecoveryState == PlanReviewRecoveryState.Listing
+            || this.snapshot.State == PlanReviewState.Inspecting
+                && this.snapshot.SelectedOperation is null
+                && this.snapshot.RecoveryState == PlanReviewRecoveryState.Closed;
+
+    public bool IsLoadRecoveriesVisible => this.snapshot.CanListRecoveries;
+
+    public bool IsInspectRollbackVisible
+        => this.snapshot.RecoveryState == PlanReviewRecoveryState.Available
+            && this.RecoveryChoices.Count > 0;
+
     public bool IsInspectVisible => this.snapshot.State is PlanReviewState.Choosing
         or PlanReviewState.SelectionChanged;
 
@@ -406,6 +498,10 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         : AutomationLiveSetting.Polite;
 
     public AsyncRelayCommand InspectCommand { get; }
+
+    public AsyncRelayCommand LoadRecoveriesCommand { get; }
+
+    public AsyncRelayCommand InspectRollbackCommand { get; }
 
     public AsyncRelayCommand CancelCommand { get; }
 
@@ -478,6 +574,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.SetProperty(ref this.selectedOperation, selected, nameof(this.SelectedOperation));
         this.ApplyResult(next.Result as PlanReviewPlan);
         this.ApplyCandidateChoices(next);
+        this.ApplyRecoveryChoices(next);
         (this.Heading, this.Message) = this.GetCopy(next);
         this.LiveAnnouncement = next.State is PlanReviewState.Available
                 or PlanReviewState.Rejected
@@ -510,6 +607,26 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         string operation = value.SelectedOperation is { } selected ? GetOperationLabel(selected) : "selected";
         return value.State switch
         {
+            PlanReviewState.Choosing when value.SelectedOperation is null
+                && value.RecoveryState == PlanReviewRecoveryState.Available
+                && value.SelectedRecoveryPoint is not null => (
+                "Recovery point selected — inspect rollback",
+                "The selection is local to this screen. Inspect rollback requests a read-only preview; it does not confirm, run, or change files."
+            ),
+            PlanReviewState.Choosing when value.SelectedOperation is null
+                && value.RecoveryState == PlanReviewRecoveryState.Available => (
+                "Choose a recovery point",
+                "Recovery history is loaded with no default selection. Select one exact point before inspecting a rollback preview."
+            ),
+            PlanReviewState.Choosing when value.SelectedOperation is null
+                && value.RecoveryState == PlanReviewRecoveryState.NoHistory => (
+                "No recovery history reported",
+                "No committed recovery point was reported. Refresh performs another bounded local lookup and does not change files."
+            ),
+            PlanReviewState.Choosing when value.SelectedOperation is { } ordinaryOperation => (
+                $"{GetOperationLabel(ordinaryOperation)} selected — inspect plan",
+                "The selection is local to this screen. Inspect plan requests a read-only preview; it does not confirm, run, or change files."
+            ),
             PlanReviewState.Choosing => (
                 "Choose a plan to inspect",
                 "Select one operation. Nothing is inspected until you choose Inspect plan."
@@ -517,6 +634,14 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             PlanReviewState.SelectionChanged => (
                 "Operation changed — inspect the new selection",
                 "The previous preview was cleared. No installer action has run."
+            ),
+            PlanReviewState.Inspecting when value.RecoveryState == PlanReviewRecoveryState.Listing => (
+                "Loading local recovery history…",
+                "Reading a bounded list from the local installer service. Nothing is selected, confirmed, run, or changed."
+            ),
+            PlanReviewState.Inspecting when value.SelectedOperation is null => (
+                "Inspecting the rollback plan…",
+                "The exact recovery selection has been consumed for one read-only inspection. No files are being changed."
             ),
             PlanReviewState.Inspecting => (
                 $"Inspecting the {operation.ToLowerInvariant()} plan…",
@@ -542,14 +667,25 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
                 "Closing the read-only plan session safely…",
                 "Waiting for backend cleanup to settle. Retry and exit remain unavailable until the session is closed; no installer action ran."
             ),
+            PlanReviewState.Available when value.Result is PlanReviewPlan
+            { Operation: InstallerOperation.Rollback, HasBlockingConflicts: true } rollback => (
+                "Rollback preview has blocking conflicts",
+                $"The inspection observed {Sum(rollback.ConflictCounts)} blocking conflict(s). This preview cannot be confirmed or run, and no file action ran."
+            ),
             PlanReviewState.Available when value.Result is PlanReviewPlan { HasBlockingConflicts: true } plan => (
                 $"{GetOperationLabel(plan.Operation)} preview has blocking conflicts",
                 $"The inspection observed {Sum(plan.ConflictCounts)} blocking conflict(s). Additive candidate approval may refresh this preview, but this screen cannot confirm or execute the plan."
+            ),
+            PlanReviewState.Available when value.Result is PlanReviewPlan { Operation: InstallerOperation.Rollback } => (
+                "Rollback plan inspected — preview only",
+                "The exact selected recovery point produced this bounded preview. It is not confirmation, no file action ran, and a separate explicit Run is still required."
             ),
             PlanReviewState.Available when value.Result is PlanReviewPlan plan => (
                 $"{GetOperationLabel(plan.Operation)} plan inspected — preview only",
                 "No blocking conflicts were observed in this bounded inspection. That is not confirmation or a safety guarantee, and no file action ran."
             ),
+            PlanReviewState.Rejected when value.Result is PlanReviewRejection rejection
+                && value.RecoveryState == PlanReviewRecoveryState.RelistRequired => GetRecoveryRejectionCopy(rejection),
             PlanReviewState.Rejected when value.Result is PlanReviewRejection rejection => GetRejectionCopy(rejection),
             PlanReviewState.Cancelling => (
                 "Stopping plan inspection safely…",
@@ -623,6 +759,30 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         };
     }
 
+    private static (string Heading, string Message) GetRecoveryRejectionCopy(PlanReviewRejection rejection)
+    {
+        return rejection.ErrorCode switch
+        {
+            ProtocolPrePlanErrorCode.RequestCancelled => (
+                "The recovery request did not finish",
+                "No installer action ran. Refresh recovery history before making a new explicit selection."
+            ),
+            ProtocolPrePlanErrorCode.RecoveryUnavailable => (
+                "Recovery history changed or became unavailable",
+                "The previous choices were revoked. Refresh recovery history before making a new explicit selection; no installer action ran."
+            ),
+            ProtocolPrePlanErrorCode.InspectionFailed => (
+                "The rollback plan could not be inspected",
+                "The selected authority was revoked. Refresh recovery history and select a newly listed point before trying again. No installer action ran."
+            ),
+            ProtocolPrePlanErrorCode.PermissionDenied => (
+                "Recovery information could not be read with your permissions",
+                "Review this game folder’s user permissions, then refresh recovery history. Do not run the installer as root; no installer action ran."
+            ),
+            _ => GetRejectionCopy(rejection)
+        };
+    }
+
     private void ApplyResult(PlanReviewPlan? plan)
     {
         if (plan is null)
@@ -646,7 +806,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.ObservedStateDetail = GetObservedStateDetail(plan.ObservedState);
         this.CurrentReleaseDetail = FormatRelease(plan.CurrentRelease, "No receipt-authenticated current fork release was observed.");
         this.TargetReleaseDetail = FormatTargetRelease(plan);
-        this.SafetyDetail = "Recommended default: Cancel. Candidate approval only requests a refreshed read-only preview. Confirm plan seals the exact current preview but does not change files; a separate explicit Run action is still required.";
+        this.SafetyDetail = plan.Operation == InstallerOperation.Rollback
+            ? "Recommended default: Cancel. This preview is bound to the exact selected recovery point. Confirm plan seals it but does not change files; a separate explicit Run action is still required."
+            : "Recommended default: Cancel. Candidate approval only requests a refreshed read-only preview. Confirm plan seals the exact current preview but does not change files; a separate explicit Run action is still required.";
         this.RiskRows = Array.AsReadOnly(plan.Risks
             .Select(risk => GetRiskRow(risk))
             .ToArray());
@@ -705,6 +867,58 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.CandidateSelectionAnnouncement = value.AppliedCandidateApprovalCount > 0
             ? $"{value.AppliedCandidateApprovalCount} {GetCountLabel(value.AppliedCandidateApprovalCount, "approval", "approvals")} already applied and fixed in this preview; {selected.Count} of {candidates.Count} remaining files selected."
             : $"{selected.Count} of {candidates.Count} files selected.";
+    }
+
+    private void ApplyRecoveryChoices(PlanReviewSnapshot value)
+    {
+        IReadOnlyList<PlanReviewRecoveryPoint> points = value.RecoveryPoints;
+        bool samePoints = points.Count == this.RecoveryChoices.Count
+            && points.Select((point, index) => ReferenceEquals(point, this.RecoveryChoices[index].Point)).All(match => match);
+        if (!samePoints)
+        {
+            // Clear the two-way selection before replacing ItemsSource. Avalonia may otherwise write a stale null
+            // selection back while the controller has already revoked the catalog for refresh or inspection.
+            this.SetProperty(ref this.selectedRecoveryChoice, null, nameof(this.SelectedRecoveryChoice));
+            PlanReviewRecoveryChoice[] choices = points
+                .Select(CreateRecoveryChoice)
+                .ToArray();
+            this.RecoveryChoices = Array.AsReadOnly(choices);
+        }
+
+        PlanReviewRecoveryChoice? selected = value.SelectedRecoveryPoint is { } selectedPoint
+            ? this.RecoveryChoices.SingleOrDefault(choice => ReferenceEquals(choice.Point, selectedPoint))
+                ?? throw new InvalidOperationException("The selected recovery presentation did not match the bounded current catalog.")
+            : null;
+        this.SetProperty(ref this.selectedRecoveryChoice, selected, nameof(this.SelectedRecoveryChoice));
+    }
+
+    private static PlanReviewRecoveryChoice CreateRecoveryChoice(PlanReviewRecoveryPoint point)
+    {
+        string title = point.IsCurrent
+            ? "Current recovery point"
+            : point.IsUserCheckpoint
+                ? $"Checkpoint {point.Ordinal}"
+                : $"Recovery point {point.Ordinal}";
+        string origin = point.OriginOperation switch
+        {
+            InstallerOperation.Install => "install",
+            InstallerOperation.Update => "update",
+            InstallerOperation.Repair => "repair",
+            InstallerOperation.Uninstall => "uninstall",
+            InstallerOperation.Backup => "user checkpoint",
+            InstallerOperation.Rollback => "rollback",
+            _ => throw new ArgumentOutOfRangeException(nameof(point), point.OriginOperation, null)
+        };
+        string target = point.RestoreTarget switch
+        {
+            PlanReviewRecoveryReleaseTarget release => $"Restore target: {release.Tag}\nVersion: {release.EmbeddedVersion}",
+            PlanReviewRecoveryUninstalledTarget => "Restore target: no managed SMAPI installation",
+            _ => throw new ArgumentOutOfRangeException(nameof(point), point.RestoreTarget, null)
+        };
+        string current = point.IsCurrent
+            ? "Newest committed point."
+            : "Earlier committed point.";
+        return new(point, title, $"{current} Origin: {origin}. {target}.");
     }
 
     private void OnCandidateSelectionChanged(PlanReviewCandidateChoice choice, bool _)
@@ -803,7 +1017,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         return risk switch
         {
             ProtocolPlanRisk.Uninstall => new("Removal requested", "The preview would remove receipt-owned SMAPI files where observed.", 1),
-            ProtocolPlanRisk.Rollback => throw new ArgumentOutOfRangeException(nameof(risk), risk, "Rollback risks aren't accepted by this screen."),
+            ProtocolPlanRisk.Rollback => new("Rollback requested", "The preview would restore only the exact explicitly selected committed recovery point.", 1),
             ProtocolPlanRisk.Downgrade => new("Older target release observed", "The verified target is earlier than the receipt-authenticated current release.", 1),
             ProtocolPlanRisk.ModifiedOrUnknownFileApproval => new("Modified or unknown files observed", "Explicit additive candidate approval can request a refreshed read-only preview. It does not change files, confirm, or execute the plan.", 1),
             ProtocolPlanRisk.RecoveryPrune => throw new ArgumentOutOfRangeException(nameof(risk), risk, "Recovery-pruning risks aren't accepted by this screen."),
@@ -886,9 +1100,12 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     {
         if (plan.TargetRelease is not null)
             return FormatRelease(plan.TargetRelease, "");
-        return plan.Operation == InstallerOperation.Uninstall
-            ? "No target release is present for this uninstall preview."
-            : "No target release was reported by this bounded inspection.";
+        return plan.Operation switch
+        {
+            InstallerOperation.Uninstall => "No target release is present for this uninstall preview.",
+            InstallerOperation.Rollback => "The selected recovery point would restore an uninstalled managed-SMAPI state.",
+            _ => "No target release was reported by this bounded inspection."
+        };
     }
 
     private static int Sum(IReadOnlyList<PlanReviewOperationCount> values)
@@ -912,13 +1129,25 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             InstallerOperation.Repair => "Repair",
             InstallerOperation.Uninstall => "Uninstall",
             InstallerOperation.Backup => "Backup",
-            InstallerOperation.Rollback => throw new ArgumentOutOfRangeException(nameof(operation), operation, "Rollback isn't available on this screen."),
+            InstallerOperation.Rollback => "Rollback",
             _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, null)
         };
     }
 
     private PlanReviewFocusTarget GetFocusTarget(PlanReviewSnapshot value)
     {
+        if (value.SelectedOperation is null && value.RecoveryState == PlanReviewRecoveryState.Listing)
+            return PlanReviewFocusTarget.RecoveryStatus;
+        if (value.State == PlanReviewState.Choosing
+            && value.SelectedOperation is null
+            && value.RecoveryState == PlanReviewRecoveryState.Available)
+            return value.SelectedRecoveryPoint is null
+                ? PlanReviewFocusTarget.RecoveryList
+                : PlanReviewFocusTarget.InspectRollback;
+        if (value.State == PlanReviewState.Choosing
+            && value.SelectedOperation is null
+            && value.RecoveryState == PlanReviewRecoveryState.NoHistory)
+            return PlanReviewFocusTarget.RecoveryStatus;
         return value.State switch
         {
             PlanReviewState.SelectionChanged => PlanReviewFocusTarget.OperationList,
@@ -933,6 +1162,13 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     private void NotifyDerivedProperties()
     {
         this.OnPropertyChanged(nameof(this.IsOperationSelectionEnabled));
+        this.OnPropertyChanged(nameof(this.RecoveryStatusDetail));
+        this.OnPropertyChanged(nameof(this.IsRecoverySectionVisible));
+        this.OnPropertyChanged(nameof(this.IsRecoveryListVisible));
+        this.OnPropertyChanged(nameof(this.IsRecoveryEmptyVisible));
+        this.OnPropertyChanged(nameof(this.IsRecoveryBusy));
+        this.OnPropertyChanged(nameof(this.IsLoadRecoveriesVisible));
+        this.OnPropertyChanged(nameof(this.IsInspectRollbackVisible));
         this.OnPropertyChanged(nameof(this.IsInspectVisible));
         this.OnPropertyChanged(nameof(this.IsBusy));
         this.OnPropertyChanged(nameof(this.IsResultVisible));
@@ -957,6 +1193,8 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.OnPropertyChanged(nameof(this.CandidateCapacityDetail));
         this.OnPropertyChanged(nameof(this.StatusLiveSetting));
         this.InspectCommand.NotifyCanExecuteChanged();
+        this.LoadRecoveriesCommand.NotifyCanExecuteChanged();
+        this.InspectRollbackCommand.NotifyCanExecuteChanged();
         this.CancelCommand.NotifyCanExecuteChanged();
         this.RetryCommand.NotifyCanExecuteChanged();
         this.ApplyCandidatesCommand.NotifyCanExecuteChanged();
@@ -972,5 +1210,16 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.Message = "Close and reopen the installer before trying again. No installer action ran.";
         this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
         this.FocusRequested?.Invoke(this, PlanReviewFocusTarget.Status);
+    }
+
+    private void HandleRecoveryActionFailure(Exception exception)
+    {
+        if (exception is ArgumentException or InvalidOperationException)
+        {
+            this.ApplySnapshot(this.Controller.Snapshot, requestFocus: false);
+            this.FocusRequested?.Invoke(this, PlanReviewFocusTarget.RecoveryStatus);
+            return;
+        }
+        this.HandlePresentationFailure(exception);
     }
 }

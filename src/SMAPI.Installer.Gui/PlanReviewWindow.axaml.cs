@@ -130,6 +130,9 @@ internal sealed partial class PlanReviewWindow : Window, IAsyncDisposable
                 Control control = target switch
                 {
                     PlanReviewFocusTarget.OperationList => this.OperationList,
+                    PlanReviewFocusTarget.RecoveryList => this.RecoveryList,
+                    PlanReviewFocusTarget.RecoveryStatus => this.RecoveryStatusRegion,
+                    PlanReviewFocusTarget.InspectRollback => this.InspectRollbackButton,
                     PlanReviewFocusTarget.CandidateList => this.CandidateList,
                     PlanReviewFocusTarget.CandidateStatus => this.CandidateSelectionStatusRegion,
                     PlanReviewFocusTarget.Result => this.ResultSummaryRegion,
