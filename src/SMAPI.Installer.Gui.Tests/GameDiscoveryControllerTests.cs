@@ -668,7 +668,7 @@ internal sealed class GameDiscoveryControllerTests
         IPlanInspectionSession handoff = controller.TakeSelectedGameSession();
 
         session.BoundCandidate.Should().BeSameAs(valid);
-        handoff.Game.CanonicalPath.Should().Be(valid.CanonicalPath);
+        handoff.Game.DisplayPath.Should().Be(valid.CanonicalPath);
         handoff.Game.DisplayName.Should().Be(valid.DisplayName);
         controller.Snapshot.State.Should().Be(GameDiscoveryState.Transferred);
         controller.Snapshot.Candidates.Should().BeEmpty();
@@ -694,7 +694,7 @@ internal sealed class GameDiscoveryControllerTests
         IPlanInspectionSession handoff = controller.TakeSelectedGameSession();
 
         session.BoundCandidate.Should().BeSameAs(valid);
-        handoff.Game.CanonicalPath.Should().Be(valid.CanonicalPath);
+        handoff.Game.DisplayPath.Should().Be(valid.CanonicalPath);
         handoff.Game.DisplayName.Should().Be(valid.DisplayName);
         await controller.DisposeAsync();
         session.DisposeCalls.Should().Be(0);
@@ -839,16 +839,69 @@ internal sealed class GameDiscoveryControllerTests
         results.Count(result => result.Error is InvalidOperationException).Should().Be(1);
         session.BindCalls.Should().Be(1);
         session.BoundCandidate.Should().BeSameAs(valid);
-        handoff.Game.CanonicalPath.Should().Be(valid.CanonicalPath);
+        handoff.Game.DisplayPath.Should().Be(valid.CanonicalPath);
         await controller.DisposeAsync();
         session.DisposeCalls.Should().Be(0);
         await handoff.DisposeAsync();
         session.DisposeCalls.Should().Be(1);
     }
 
+    [Test]
+    public void BoundGamePresentationEscapesUnsafeDisplayScalarsWithoutExposingAnAuthorityProperty()
+    {
+        const string exactPath = "/games/right-to-left-\u202E-control-\u0007-unpaired-\uD800-game-\U0001F3AE-tag-\U000E0001";
+        const string exactName = "Stardew\u202E Valley\u0001 \uDC00 \U0001F3AE";
+
+        VerifiedGamePresentation presentation = new(exactPath, exactName);
+
+        presentation.DisplayPath.Should().Be("/games/right-to-left-\\u202E-control-\\u0007-unpaired-\\uD800-game-\U0001F3AE-tag-\\uDB40\\uDC01");
+        presentation.DisplayName.Should().Be("Stardew\\u202E Valley\\u0001 \\uDC00 \U0001F3AE");
+        AssertDisplaySafe(presentation.DisplayPath);
+        AssertDisplaySafe(presentation.DisplayName);
+        typeof(VerifiedGamePresentation).GetProperties().Select(property => property.Name).Should().Equal(
+            nameof(VerifiedGamePresentation.DisplayPath),
+            nameof(VerifiedGamePresentation.DisplayName)
+        );
+    }
+
+    [Test]
+    public void BoundGamePresentationHasAClosedSourceAndEscapedDisplayLengthBound()
+    {
+        string exactPath = "/" + new string('\u202E', 4095);
+        string exactName = new('\u202E', 4096);
+
+        VerifiedGamePresentation presentation = new(exactPath, exactName);
+
+        presentation.DisplayPath.Should().HaveLength(1 + 4095 * 6).And.StartWith("/\\u202E");
+        presentation.DisplayName.Should().HaveLength(4096 * 6).And.StartWith("\\u202E");
+        Action longPath = () => _ = new VerifiedGamePresentation("/" + new string('a', 4096), "Stardew Valley");
+        Action longName = () => _ = new VerifiedGamePresentation("/games/Stardew", new string('a', 4097));
+        longPath.Should().Throw<ArgumentException>().WithMessage("*too long*");
+        longName.Should().Throw<ArgumentException>().WithMessage("*too long*");
+    }
+
     internal static ProtocolGameCandidate Candidate(string suffix, LinuxGameFolderStatus status)
     {
         return new($"/games/{suffix}", status, $"Stardew Valley {suffix}");
+    }
+
+    private static void AssertDisplaySafe(string value)
+    {
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value[index];
+            if (char.IsHighSurrogate(current))
+            {
+                (index + 1 < value.Length && char.IsLowSurrogate(value[index + 1])).Should().BeTrue();
+                System.Globalization.CharUnicodeInfo.GetUnicodeCategory(value, index)
+                    .Should().NotBe(System.Globalization.UnicodeCategory.Format);
+                index++;
+                continue;
+            }
+            char.IsLowSurrogate(current).Should().BeFalse();
+            char.IsControl(current).Should().BeFalse();
+            char.GetUnicodeCategory(current).Should().NotBe(System.Globalization.UnicodeCategory.Format);
+        }
     }
 
     internal static ProtocolReleaseIdentity Release()

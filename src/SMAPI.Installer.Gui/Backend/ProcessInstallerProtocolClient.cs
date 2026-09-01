@@ -50,7 +50,6 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private ProtocolSessionId? SessionId;
     private ProtocolPackageId? VerifiedPackageId;
     private ProtocolReleaseIdentity? VerifiedRelease;
-    private bool PlanInspectionSupported;
     private int CleanupStarted;
     private int DisposeStarted;
     private int ObservedStderrBytesValue;
@@ -159,10 +158,10 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 !response.Capabilities.Contains(PackageVerificationCapability, StringComparer.Ordinal)
                 || !response.Capabilities.Contains(GameDiscoveryCapability, StringComparer.Ordinal)
                 || !response.Capabilities.Contains(GameValidationCapability, StringComparer.Ordinal)
+                || !response.Capabilities.Contains(PlanInspectionCapability, StringComparer.Ordinal)
             )
                 return await this.FailProtocolAsync<HandshakeEvent>().ConfigureAwait(false);
             this.SessionId = response.SessionId;
-            this.PlanInspectionSupported = response.Capabilities.Contains(PlanInspectionCapability, StringComparer.Ordinal);
             return response;
         }
         finally
@@ -280,18 +279,13 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             ProtocolSessionId session;
             ProtocolPackageId? packageId;
             ProtocolReleaseIdentity? verifiedRelease;
-            bool planInspectionSupported;
             lock (this.ResponseLock)
             {
                 session = this.SessionId
                     ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
                 packageId = this.VerifiedPackageId;
                 verifiedRelease = this.VerifiedRelease;
-                planInspectionSupported = this.PlanInspectionSupported;
             }
-
-            if (!planInspectionSupported)
-                return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
 
             if (packageId is null || verifiedRelease is null)
                 throw new InstallerProtocolClientException("A verified package session is required before inspecting an operation.");
@@ -309,6 +303,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
 
                 if (response is PrePlanRejectedEvent rejected && rejected.SessionId == session)
                 {
+                    if (!IsReachableInspectPlanRejection(rejected.ErrorCode))
+                        return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                     InstallerReadOnlyPlanRejection result = new(rejected.ErrorCode, rejected.NextAction, rejected.IsTerminal);
                     if (rejected.IsTerminal)
                         await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
@@ -441,9 +437,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         )
             return false;
 
-        if (plan.ObservedState == ObservedInstallState.NotInstalled && plan.CurrentRelease is not null)
-            return false;
-        if (plan.ObservedState is ObservedInstallState.KnownUnmodified or ObservedInstallState.KnownModified && plan.CurrentRelease is null)
+        bool knownReceipt = plan.ObservedState is ObservedInstallState.KnownUnmodified or ObservedInstallState.KnownModified;
+        if (knownReceipt != (plan.CurrentRelease is not null))
             return false;
 
         if (operation is InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair)
@@ -504,6 +499,9 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         if (recomputed != plan.PlanDigest)
             return false;
 
+        if (plan.Operation == InstallerOperation.Backup && plan.CurrentRelease is null && !ValidateReceiptlessBackup(plan, collections))
+            return false;
+
         ProtocolPlanRisk[] expectedRisks;
         try
         {
@@ -514,6 +512,28 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             return false;
         }
         return plan.Risks.SequenceEqual(expectedRisks);
+    }
+
+    private static bool ValidateReceiptlessBackup(PlanEvent plan, PlanCollections collections)
+    {
+        ProtocolPlanConflict[] expectedConflicts = collections.Conflicts.Count switch
+        {
+            1 => [new(PlanConflictCode.InstalledReceiptRequired, null)],
+            2 =>
+            [
+                new(PlanConflictCode.InstalledReceiptRequired, null),
+                new(PlanConflictCode.RecoveryCapacityReached, null)
+            ],
+            _ => []
+        };
+        string[] expectedWarnings = expectedConflicts
+            .Select(conflict => $"{conflict.Code}.")
+            .ToArray();
+        return !plan.CanExecute
+            && collections.Operations.Count == 0
+            && collections.Candidates.Count == 0
+            && collections.Conflicts.SequenceEqual(expectedConflicts)
+            && collections.Warnings.SequenceEqual(expectedWarnings, StringComparer.Ordinal);
     }
 
     private static bool IsCanonicalOperationSequence(IReadOnlyList<ProtocolPlanOperation> operations)
@@ -555,6 +575,14 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             risks.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
         return risks.ToArray();
     }
+
+    private static bool IsReachableInspectPlanRejection(ProtocolPrePlanErrorCode errorCode) => errorCode is
+        ProtocolPrePlanErrorCode.RequestCancelled
+        or ProtocolPrePlanErrorCode.InvalidGameFolder
+        or ProtocolPrePlanErrorCode.PackageRejected
+        or ProtocolPrePlanErrorCode.InspectionFailed
+        or ProtocolPrePlanErrorCode.PermissionDenied
+        or ProtocolPrePlanErrorCode.UnexpectedFailure;
 
     private static bool IsEarlierRelease(string targetTag, string currentTag)
     {
@@ -604,7 +632,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             plan.ObservedState,
             ProjectRelease(plan.CurrentRelease),
             ProjectRelease(plan.TargetRelease),
-            plan.CanExecute,
+            plan.ConflictCount > 0,
             Array.AsReadOnly(plan.Risks),
             plan.RecommendedDefault,
             plan.RequiresConfirmation,

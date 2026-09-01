@@ -215,6 +215,50 @@ internal sealed class ProtocolJsonSerializerTests
     }
 
     [Test]
+    public void PrePlanRejected_RequiresTheExactServiceCodeActionTerminalAndLogMatrix()
+    {
+        ProtocolSessionId session = ProtocolSessionId.CreateRandom();
+        Dictionary<ProtocolPrePlanErrorCode, ProtocolNextAction> recoverable = new()
+        {
+            [ProtocolPrePlanErrorCode.RequestCancelled] = ProtocolNextAction.RetryRequest,
+            [ProtocolPrePlanErrorCode.InvalidGameFolder] = ProtocolNextAction.SelectGameFolder,
+            [ProtocolPrePlanErrorCode.PackageRejected] = ProtocolNextAction.ReopenVerifiedPackage,
+            [ProtocolPrePlanErrorCode.RecoveryUnavailable] = ProtocolNextAction.ListRecoveries,
+            [ProtocolPrePlanErrorCode.InspectionFailed] = ProtocolNextAction.InspectAgain,
+            [ProtocolPrePlanErrorCode.CandidateApprovalFailed] = ProtocolNextAction.InspectAgain,
+            [ProtocolPrePlanErrorCode.PermissionDenied] = ProtocolNextAction.ReviewFilesystem,
+            [ProtocolPrePlanErrorCode.InputOutputFailure] = ProtocolNextAction.RetryRequest
+        };
+        recoverable.Keys.Append(ProtocolPrePlanErrorCode.UnexpectedFailure)
+            .Should().BeEquivalentTo(Enum.GetValues<ProtocolPrePlanErrorCode>());
+
+        foreach (ProtocolPrePlanErrorCode code in Enum.GetValues<ProtocolPrePlanErrorCode>())
+        {
+            foreach (string? log in new[] { null, "/tmp/private-installer.log" })
+            {
+                ProtocolNextAction validAction = code == ProtocolPrePlanErrorCode.UnexpectedFailure
+                    ? log is null ? ProtocolNextAction.StartNewSession : ProtocolNextAction.ViewPrivateLog
+                    : recoverable[code];
+                bool validTerminal = code == ProtocolPrePlanErrorCode.UnexpectedFailure;
+                PrePlanRejectedEvent valid = new(session, code, "Rejected safely.", validAction, validTerminal, log);
+                ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(valid)).Should().BeEquivalentTo(valid);
+
+                foreach (ProtocolNextAction action in Enum.GetValues<ProtocolNextAction>())
+                {
+                    foreach (bool terminal in new[] { false, true })
+                    {
+                        if (action == validAction && terminal == validTerminal)
+                            continue;
+                        new PrePlanRejectedEvent(session, code, "Rejected safely.", action, terminal, log)
+                            .Invoking(ProtocolJsonSerializer.SerializeLine)
+                            .Should().Throw<ProtocolException>().WithMessage("*exact error class*");
+                    }
+                }
+            }
+        }
+    }
+
+    [Test]
     public void RollbackDigest_BindsFullCatalogRootHeadAndGenerationAuthority()
     {
         ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId selection = ProtocolRecoverySelectionId.CreateRandom();

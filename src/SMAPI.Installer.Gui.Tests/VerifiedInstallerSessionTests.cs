@@ -20,7 +20,7 @@ internal sealed class VerifiedInstallerSessionTests
         forged.Should().Throw<ArgumentException>().WithMessage("*exact valid result*");
 
         await using IPlanInspectionSession bound = session.BindToGame(issued);
-        bound.Game.CanonicalPath.Should().Be(valid.CanonicalPath);
+        bound.Game.DisplayPath.Should().Be(valid.CanonicalPath);
         client.DisposeCalls.Should().Be(0);
     }
 
@@ -100,6 +100,99 @@ internal sealed class VerifiedInstallerSessionTests
     }
 
     [Test]
+    public async Task NewManualValidationRevokesOnlyThePreviousManualCandidateAndRetainsDiscoveryCandidates()
+    {
+        ProtocolGameCandidate discovered = Candidate("discovered-retained", LinuxGameFolderStatus.Valid);
+        ProtocolGameCandidate firstManual = Candidate("manual-stale", LinuxGameFolderStatus.Valid);
+        ProtocolGameCandidate currentManual = Candidate("manual-current", LinuxGameFolderStatus.Valid);
+        Queue<ProtocolGameCandidate> validations = new([firstManual, currentManual]);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([discovered]),
+            Validation = (_, _) => Task.FromResult(validations.Dequeue())
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        ProtocolGameCandidate issuedDiscovery = (await session.DiscoverGamesAsync()).Single();
+        ProtocolGameCandidate stale = await session.ValidateGameAsync("/games/manual-stale");
+        ProtocolGameCandidate current = await session.ValidateGameAsync("/games/manual-current");
+
+        Action bindStale = () => session.BindToGame(stale);
+        bindStale.Should().Throw<ArgumentException>().WithMessage("*exact valid result*");
+
+        await using IPlanInspectionSession bound = session.BindToGame(issuedDiscovery);
+        bound.Game.DisplayPath.Should().Be(discovered.CanonicalPath);
+        current.Should().BeSameAs(currentManual);
+    }
+
+    [Test]
+    public async Task LatestManualCandidateRemainsCurrentAcrossANewerDiscoverySnapshot()
+    {
+        ProtocolGameCandidate manual = Candidate("manual-retained", LinuxGameFolderStatus.Valid);
+        ProtocolGameCandidate firstDiscovery = Candidate("discovery-old", LinuxGameFolderStatus.Valid);
+        ProtocolGameCandidate latestDiscovery = Candidate("discovery-current", LinuxGameFolderStatus.Valid);
+        Queue<IReadOnlyList<ProtocolGameCandidate>> discoveries = new([[firstDiscovery], [latestDiscovery]]);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult(discoveries.Dequeue()),
+            Validation = (_, _) => Task.FromResult(manual)
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        ProtocolGameCandidate old = (await session.DiscoverGamesAsync()).Single();
+        ProtocolGameCandidate issuedManual = await session.ValidateGameAsync(manual.CanonicalPath);
+        ProtocolGameCandidate current = (await session.DiscoverGamesAsync()).Single();
+
+        Action bindOld = () => session.BindToGame(old);
+        bindOld.Should().Throw<ArgumentException>().WithMessage("*exact valid result*");
+        await using IPlanInspectionSession bound = session.BindToGame(issuedManual);
+        bound.Game.DisplayPath.Should().Be(manual.CanonicalPath);
+        current.Should().BeSameAs(latestDiscovery);
+    }
+
+    [Test]
+    public async Task ManualCandidateAuthorityRemainsBoundedToOnlyTheLatestValidation()
+    {
+        ProtocolGameCandidate[] validations = Enumerable.Range(0, ProtocolJsonSerializer.MaxGameCandidates + 10)
+            .Select(index => Candidate($"bounded-manual-{index:D3}", LinuxGameFolderStatus.Valid))
+            .ToArray();
+        int next = 0;
+        RecordingClient client = new() { Validation = (_, _) => Task.FromResult(validations[next++]) };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        foreach (ProtocolGameCandidate candidate in validations)
+            (await session.ValidateGameAsync(candidate.CanonicalPath)).Should().BeSameAs(candidate);
+
+        Action bindOldest = () => session.BindToGame(validations[0]);
+        bindOldest.Should().Throw<ArgumentException>().WithMessage("*exact valid result*");
+        await using IPlanInspectionSession bound = session.BindToGame(validations[^1]);
+        bound.Game.DisplayPath.Should().Be(validations[^1].CanonicalPath);
+    }
+
+    [Test]
+    public async Task OversizedDiscoverySnapshotIsRejectedBeforeItCanGrantCandidateAuthority()
+    {
+        ProtocolGameCandidate[] oversized = Enumerable.Range(0, ProtocolJsonSerializer.MaxGameCandidates + 1)
+            .Select(index => Candidate($"oversized-{index:D3}", LinuxGameFolderStatus.Valid))
+            .ToArray();
+        ProtocolGameCandidate bounded = Candidate("bounded-discovery", LinuxGameFolderStatus.Valid);
+        int calls = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>(
+                Interlocked.Increment(ref calls) == 1 ? oversized : [bounded]
+            )
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+
+        Func<Task> discoverOversized = () => session.DiscoverGamesAsync();
+        await discoverOversized.Should().ThrowAsync<InstallerProtocolClientException>();
+        Action bindRejected = () => session.BindToGame(oversized[0]);
+        bindRejected.Should().Throw<ArgumentException>().WithMessage("*exact valid result*");
+
+        ProtocolGameCandidate issued = (await session.DiscoverGamesAsync()).Single();
+        await using IPlanInspectionSession bound = session.BindToGame(issued);
+        bound.Game.DisplayPath.Should().Be(bounded.CanonicalPath);
+    }
+
+    [Test]
     public async Task BoundOwnerPreservesReleaseAndGamePresentationAndFixesTheInspectPath()
     {
         ProtocolReleaseIdentity release = CreateRelease();
@@ -118,9 +211,45 @@ internal sealed class VerifiedInstallerSessionTests
 
         actual.Should().BeSameAs(expected);
         bound.Release.Should().BeSameAs(release);
-        bound.Game.CanonicalPath.Should().Be(valid.CanonicalPath);
+        bound.Game.DisplayPath.Should().Be(valid.CanonicalPath);
         bound.Game.DisplayName.Should().Be(valid.DisplayName);
         client.InspectedPaths.Should().Equal(valid.CanonicalPath);
+        client.InspectedOperations.Should().Equal(InstallerOperation.Backup);
+    }
+
+    [TestCase(InstallerOperation.Install)]
+    [TestCase(InstallerOperation.Update)]
+    [TestCase(InstallerOperation.Repair)]
+    [TestCase(InstallerOperation.Uninstall)]
+    [TestCase(InstallerOperation.Backup)]
+    public async Task BoundOwnerAdmitsExactlyTheFiveReadOnlyOperations(InstallerOperation operation)
+    {
+        ProtocolGameCandidate valid = Candidate($"supported-{operation}", LinuxGameFolderStatus.Valid);
+        RecordingClient client = new() { Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]) };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        InstallerReadOnlyPlanSuccess result = (await bound.InspectPlanAsync(operation))
+            .Should().BeOfType<InstallerReadOnlyPlanSuccess>().Subject;
+
+        result.Operation.Should().Be(operation);
+        client.InspectedOperations.Should().Equal(operation);
+    }
+
+    [TestCase(InstallerOperation.Rollback)]
+    [TestCase((InstallerOperation)999)]
+    public async Task UnsupportedPlanOperationFailsLocallyWithoutCorruptingTheBoundSession(InstallerOperation unsupported)
+    {
+        ProtocolGameCandidate valid = Candidate("unsupported-operation", LinuxGameFolderStatus.Valid);
+        RecordingClient client = new() { Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]) };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        Func<Task> reject = () => bound.InspectPlanAsync(unsupported);
+        await reject.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        client.InspectedOperations.Should().BeEmpty();
+
+        (await bound.InspectPlanAsync(InstallerOperation.Backup)).Should().BeOfType<InstallerReadOnlyPlanSuccess>();
         client.InspectedOperations.Should().Equal(InstallerOperation.Backup);
     }
 
@@ -182,9 +311,85 @@ internal sealed class VerifiedInstallerSessionTests
         resultReady.SetResult();
 
         await FluentActions.Awaiting(() => inspection).Should().ThrowAsync<OperationCanceledException>();
-        client.DisposeCalls.Should().Be(0);
+        client.DisposeCalls.Should().Be(1, "an admitted cancellation is terminal and cleanup completes before it is rethrown");
+        Func<Task> retry = () => bound.InspectPlanAsync(InstallerOperation.Backup);
+        await retry.Should().ThrowAsync<ObjectDisposedException>();
+        client.InspectedOperations.Should().ContainSingle();
         await session.DisposeAsync();
-        client.DisposeCalls.Should().Be(0);
+        client.DisposeCalls.Should().Be(1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task QueuedCallerCancellationTerminatesTheActiveCommandAndDisposesOnceBeforeBothSettle()
+    {
+        ProtocolGameCandidate valid = Candidate("queued-cancel", LinuxGameFolderStatus.Valid);
+        TaskCompletionSource firstStarted = NewCompletion();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Inspection = async (_, operation, cancellationToken) =>
+            {
+                firstStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return Plan(operation);
+            }
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        Task<InstallerReadOnlyPlanResult> active = bound.InspectPlanAsync(InstallerOperation.Backup);
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using CancellationTokenSource queuedCancellation = new();
+        Task<InstallerReadOnlyPlanResult> queued = bound.InspectPlanAsync(InstallerOperation.Backup, queuedCancellation.Token);
+        queuedCancellation.Cancel();
+
+        await FluentActions.Awaiting(() => queued).Should().ThrowAsync<OperationCanceledException>();
+        await FluentActions.Awaiting(() => active).Should().ThrowAsync<ObjectDisposedException>();
+        client.InspectedOperations.Should().ContainSingle();
+        client.DisposeCalls.Should().Be(1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ClientFailureTerminatesAndCleansUpBeforeRethrowAndRetryFailsLocally()
+    {
+        ProtocolGameCandidate valid = Candidate("client-failure", LinuxGameFolderStatus.Valid);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Inspection = (_, _, _) => throw new InstallerProtocolClientException("synthetic bounded timeout")
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        Func<Task> inspect = () => bound.InspectPlanAsync(InstallerOperation.Backup);
+        await inspect.Should().ThrowAsync<InstallerProtocolClientException>().WithMessage("synthetic bounded timeout");
+        client.DisposeCalls.Should().Be(1);
+        await inspect.Should().ThrowAsync<ObjectDisposedException>();
+        client.InspectedOperations.Should().ContainSingle();
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task UnexpectedPlanClientExceptionAlsoTerminatesAndCleansUpBeforeRethrow()
+    {
+        ProtocolGameCandidate valid = Candidate("unexpected-client-failure", LinuxGameFolderStatus.Valid);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid]),
+            Inspection = (_, _, _) => throw new InvalidOperationException("synthetic unexpected client failure")
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        Func<Task> inspect = () => bound.InspectPlanAsync(InstallerOperation.Backup);
+        await inspect.Should().ThrowAsync<InvalidOperationException>().WithMessage("synthetic unexpected client failure");
+        client.DisposeCalls.Should().Be(1);
+        await inspect.Should().ThrowAsync<ObjectDisposedException>();
+        client.InspectedOperations.Should().ContainSingle();
         await bound.DisposeAsync();
         client.DisposeCalls.Should().Be(1);
     }
@@ -204,6 +409,10 @@ internal sealed class VerifiedInstallerSessionTests
         await FluentActions.Awaiting(() => inspection)
             .Should().ThrowAsync<InstallerProtocolClientException>()
             .WithMessage("*faulted before the plan result*");
+        client.DisposeCalls.Should().Be(1);
+        Func<Task> retry = () => bound.InspectPlanAsync(InstallerOperation.Backup);
+        await retry.Should().ThrowAsync<ObjectDisposedException>();
+        client.InspectedOperations.Should().ContainSingle();
         await bound.DisposeAsync();
         client.DisposeCalls.Should().Be(1);
     }
@@ -257,7 +466,7 @@ internal sealed class VerifiedInstallerSessionTests
             ObservedInstallState.KnownUnmodified,
             release,
             release,
-            true,
+            false,
             [],
             ProtocolRecommendedDefault.Cancel,
             true,

@@ -6,20 +6,23 @@ namespace StardewModdingAPI.Installer.Gui.Backend;
 /// <summary>A sanitized read-only result which never exposes transport authority, file identities, or paths.</summary>
 internal abstract record InstallerReadOnlyPlanResult;
 
-/// <summary>A complete, digest-verified projection of a backend plan.</summary>
+/// <summary>
+/// A complete, digest-verified read-only description of a backend plan. These facts do not carry execution,
+/// approval, or confirmation authority, even when no blocking conflict was observed.
+/// </summary>
 internal sealed record InstallerReadOnlyPlanSuccess(
     InstallerOperation Operation,
     ObservedInstallState ObservedState,
     InstallerPlanRelease? CurrentRelease,
     InstallerPlanRelease? TargetRelease,
-    bool CanExecute,
+    bool HasBlockingConflicts,
     IReadOnlyList<ProtocolPlanRisk> Risks,
     ProtocolRecommendedDefault RecommendedDefault,
-    bool RequiresConfirmation,
+    bool SeparateConfirmationRequired,
     IReadOnlyList<InstallerPlanOperationCount> OperationCounts,
     IReadOnlyList<InstallerPlanConflictCount> ConflictCounts,
     IReadOnlyList<InstallerPlanCandidateCount> CandidateCounts,
-    int WarningCount
+    int AdditionalNoticeCount
 ) : InstallerReadOnlyPlanResult;
 
 /// <summary>A normal pre-plan domain rejection without backend text, private logs, paths, or opaque IDs.</summary>

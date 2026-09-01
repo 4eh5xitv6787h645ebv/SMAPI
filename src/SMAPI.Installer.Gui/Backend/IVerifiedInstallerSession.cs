@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
@@ -18,23 +20,25 @@ internal interface IPlanInspectionSession : IAsyncDisposable
     Task<InstallerReadOnlyPlanResult> InspectPlanAsync(InstallerOperation operation, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Non-authoritative display data for an exact valid game-folder selection.</summary>
+/// <summary>Bounded, non-authoritative display data for an exact valid game-folder selection.</summary>
 internal sealed class VerifiedGamePresentation
 {
-    public string CanonicalPath { get; }
+    private const int MaximumSourceTextLength = 4096;
+
+    public string DisplayPath { get; }
     public string DisplayName { get; }
 
     internal VerifiedGamePresentation(string canonicalPath, string displayName)
     {
         AssertCanonicalLinuxPath(canonicalPath);
-        AssertSafeText(displayName, nameof(displayName));
-        this.CanonicalPath = canonicalPath;
-        this.DisplayName = displayName;
+        AssertBoundedText(displayName, nameof(displayName));
+        this.DisplayPath = EscapeForDisplay(canonicalPath);
+        this.DisplayName = EscapeForDisplay(displayName);
     }
 
     private static void AssertCanonicalLinuxPath(string value)
     {
-        AssertSafeText(value, nameof(value));
+        AssertBoundedText(value, nameof(value));
         if (
             value[0] != '/'
             || value.IndexOf('\\') >= 0
@@ -46,10 +50,59 @@ internal sealed class VerifiedGamePresentation
         }
     }
 
-    private static void AssertSafeText(string value, string parameterName)
+    private static void AssertBoundedText(string value, string parameterName)
     {
-        if (string.IsNullOrWhiteSpace(value) || value.Length > 4096 || value.Any(char.IsControl))
-            throw new ArgumentException("The selected game presentation is empty, too long, or contains control characters.", parameterName);
+        if (string.IsNullOrWhiteSpace(value) || value.Length > MaximumSourceTextLength)
+            throw new ArgumentException("The selected game presentation is empty or too long.", parameterName);
+    }
+
+    private static string EscapeForDisplay(string value)
+    {
+        StringBuilder? escaped = null;
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value[index];
+            int scalarLength = 1;
+            bool invalidSurrogate = char.IsSurrogate(current);
+            UnicodeCategory category;
+            if (char.IsHighSurrogate(current) && index + 1 < value.Length && char.IsLowSurrogate(value[index + 1]))
+            {
+                scalarLength = 2;
+                invalidSurrogate = false;
+                category = CharUnicodeInfo.GetUnicodeCategory(value, index);
+            }
+            else if (invalidSurrogate)
+                category = UnicodeCategory.Surrogate;
+            else
+                category = char.GetUnicodeCategory(current);
+
+            bool mustEscape = invalidSurrogate
+                || category is UnicodeCategory.Control
+                    or UnicodeCategory.Format
+                    or UnicodeCategory.LineSeparator
+                    or UnicodeCategory.ParagraphSeparator;
+            if (mustEscape)
+            {
+                escaped ??= new StringBuilder(value.Length + 8).Append(value, 0, index);
+                AppendEscapedCodeUnit(escaped, current);
+                if (scalarLength == 2)
+                    AppendEscapedCodeUnit(escaped, value[++index]);
+            }
+            else if (escaped is not null)
+            {
+                escaped.Append(current);
+                if (scalarLength == 2)
+                    escaped.Append(value[++index]);
+            }
+            else if (scalarLength == 2)
+                index++;
+        }
+        return escaped?.ToString() ?? value;
+    }
+
+    private static void AppendEscapedCodeUnit(StringBuilder target, char value)
+    {
+        target.Append("\\u").Append(((int)value).ToString("X4", CultureInfo.InvariantCulture));
     }
 }
 

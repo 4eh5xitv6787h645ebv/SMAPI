@@ -52,7 +52,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 IFS= read -r request || exit 43
                 command_id=$(printf '%s\n' "$request" | sed -n 's/.*"commandId":"\([0-9a-f]*\)".*/\1/p')
                 test "${#command_id}" -eq 32 || exit 44
-                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\",\"linux-game-discovery\",\"linux-game-validation\"]}}"
+                printf '%s\n' "{\"protocolVersion\":1,\"messageType\":\"handshake.event\",\"payload\":{\"commandId\":\"$command_id\",\"sessionId\":\"11111111111111111111111111111111\",\"serverVersion\":\"1\",\"capabilities\":[\"verified-local-package\",\"linux-game-discovery\",\"linux-game-validation\",\"install-update-repair-uninstall-backup-rollback\"]}}"
                 while IFS= read -r ignored; do :; done
                 """);
             File.SetUnixFileMode(installer, UnixFileMode.UserRead | UnixFileMode.UserExecute);
@@ -186,9 +186,10 @@ public sealed class ProcessInstallerProtocolClientTests
         result.OperationCounts.Should().BeEmpty();
         result.ConflictCounts.Should().BeEmpty();
         result.CandidateCounts.Should().BeEmpty();
-        result.WarningCount.Should().Be(0);
+        result.AdditionalNoticeCount.Should().Be(0);
         result.RecommendedDefault.Should().Be(ProtocolRecommendedDefault.Cancel);
-        result.RequiresConfirmation.Should().BeTrue();
+        result.SeparateConfirmationRequired.Should().BeTrue();
+        result.HasBlockingConflicts.Should().BeFalse();
         if (operation == InstallerOperation.Backup)
             result.TargetRelease.Should().Be(result.CurrentRelease);
     }
@@ -199,7 +200,9 @@ public sealed class ProcessInstallerProtocolClientTests
         ReadOnlyPlanScript script = new(InstallerOperation.Backup)
         {
             CurrentRelease = null,
-            ObservedState = ObservedInstallState.NotInstalled
+            ObservedState = ObservedInstallState.NotInstalled,
+            Conflicts = [new(PlanConflictCode.InstalledReceiptRequired, null)],
+            Warnings = [$"{PlanConflictCode.InstalledReceiptRequired}."]
         };
         ScriptedProcess process = new(script.Respond);
         await using ProcessInstallerProtocolClient client = Create(process);
@@ -211,6 +214,106 @@ public sealed class ProcessInstallerProtocolClientTests
         result.ObservedState.Should().Be(ObservedInstallState.NotInstalled);
         result.CurrentRelease.Should().BeNull();
         result.TargetRelease.Should().BeNull();
+        result.HasBlockingConflicts.Should().BeTrue();
+        result.ConflictCounts.Should().Equal(new InstallerPlanConflictCount(PlanConflictCode.InstalledReceiptRequired, 1));
+        result.AdditionalNoticeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task BackupWithoutAReceiptAllowsTheIndependentExactRecoveryCapacityConflict()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup)
+        {
+            CurrentRelease = null,
+            ObservedState = ObservedInstallState.Unknown,
+            Conflicts =
+            [
+                new(PlanConflictCode.InstalledReceiptRequired, null),
+                new(PlanConflictCode.RecoveryCapacityReached, null)
+            ],
+            Warnings =
+            [
+                $"{PlanConflictCode.InstalledReceiptRequired}.",
+                $"{PlanConflictCode.RecoveryCapacityReached}."
+            ]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        InstallerReadOnlyPlanSuccess result = (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Backup))
+            .Should().BeOfType<InstallerReadOnlyPlanSuccess>().Subject;
+
+        result.HasBlockingConflicts.Should().BeTrue();
+        result.ConflictCounts.Should().Equal(
+            new InstallerPlanConflictCount(PlanConflictCode.InstalledReceiptRequired, 1),
+            new InstallerPlanConflictCount(PlanConflictCode.RecoveryCapacityReached, 1)
+        );
+        result.AdditionalNoticeCount.Should().Be(2);
+    }
+
+    [TestCase(BackupWithoutReceiptFault.ExecutableWithoutReceipt)]
+    [TestCase(BackupWithoutReceiptFault.ContainsOperation)]
+    [TestCase(BackupWithoutReceiptFault.ContainsCandidate)]
+    [TestCase(BackupWithoutReceiptFault.WrongConflict)]
+    [TestCase(BackupWithoutReceiptFault.ConflictHasPath)]
+    [TestCase(BackupWithoutReceiptFault.AdditionalConflict)]
+    [TestCase(BackupWithoutReceiptFault.MissingExactNotice)]
+    public async Task BackupWithoutAReceiptRejectsForgedExecutableOrNoncanonicalBlockedSemantics(BackupWithoutReceiptFault fault)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup)
+        {
+            CurrentRelease = null,
+            ObservedState = ObservedInstallState.NotInstalled,
+            Conflicts = [new(PlanConflictCode.InstalledReceiptRequired, null)],
+            Warnings = [$"{PlanConflictCode.InstalledReceiptRequired}."]
+        };
+        switch (fault)
+        {
+            case BackupWithoutReceiptFault.ExecutableWithoutReceipt:
+                script.Conflicts = [];
+                script.Warnings = [];
+                break;
+            case BackupWithoutReceiptFault.ContainsOperation:
+                script.Operations = [CreateOperation(PlanOperationKind.Backup, "private.dll", 'a', 'a')];
+                break;
+            case BackupWithoutReceiptFault.ContainsCandidate:
+                script.Candidates = [CreateCandidate('4', "private.dll", false)];
+                break;
+            case BackupWithoutReceiptFault.WrongConflict:
+                script.Conflicts = [new(PlanConflictCode.TargetManifestRequired, null)];
+                script.Warnings = [$"{PlanConflictCode.TargetManifestRequired}."];
+                break;
+            case BackupWithoutReceiptFault.ConflictHasPath:
+                script.Conflicts = [new(PlanConflictCode.InstalledReceiptRequired, "private.dll")];
+                script.Warnings = [$"{PlanConflictCode.InstalledReceiptRequired}: private.dll."];
+                break;
+            case BackupWithoutReceiptFault.AdditionalConflict:
+                script.Conflicts =
+                [
+                    new(PlanConflictCode.TargetManifestRequired, null),
+                    new(PlanConflictCode.InstalledReceiptRequired, null)
+                ];
+                script.Warnings =
+                [
+                    $"{PlanConflictCode.TargetManifestRequired}.",
+                    $"{PlanConflictCode.InstalledReceiptRequired}."
+                ];
+                break;
+            case BackupWithoutReceiptFault.MissingExactNotice:
+                script.Warnings = [];
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(fault));
+        }
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Backup);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -248,7 +351,7 @@ public sealed class ProcessInstallerProtocolClientTests
         result.ObservedState.Should().Be(ObservedInstallState.KnownUnmodified);
         result.CurrentRelease.Should().Be(new InstallerPlanRelease(CreateRelease(3).Tag, CreateRelease(3).EmbeddedVersion));
         result.TargetRelease.Should().Be(new InstallerPlanRelease(CreateRelease(2).Tag, CreateRelease(2).EmbeddedVersion));
-        result.CanExecute.Should().BeFalse();
+        result.HasBlockingConflicts.Should().BeTrue();
         result.Risks.Should().Equal(ProtocolPlanRisk.Downgrade, ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
         result.OperationCounts.Should().Equal(
             new InstallerPlanOperationCount(PlanOperationKind.Create, 1),
@@ -262,7 +365,7 @@ public sealed class ProcessInstallerProtocolClientTests
             new InstallerPlanCandidateCount(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, false, 1),
             new InstallerPlanCandidateCount(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, true, 1)
         );
-        result.WarningCount.Should().Be(2);
+        result.AdditionalNoticeCount.Should().Be(2);
         process.Requests.OfType<GetPlanPageRequest>().Select(page => (page.PageKind, page.Offset)).Should().Equal(
             (ProtocolPlanPageKind.Operations, 0),
             (ProtocolPlanPageKind.Operations, 1),
@@ -288,7 +391,9 @@ public sealed class ProcessInstallerProtocolClientTests
             || name.EndsWith("Ids", StringComparison.OrdinalIgnoreCase)
             || name.Contains("Digest", StringComparison.OrdinalIgnoreCase)
             || name.Contains("Evidence", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Warning", StringComparison.OrdinalIgnoreCase) && name != nameof(InstallerReadOnlyPlanSuccess.WarningCount)
+            || name.Contains("Warning", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Execute", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Confirmation", StringComparison.OrdinalIgnoreCase) && name != nameof(InstallerReadOnlyPlanSuccess.SeparateConfirmationRequired)
         );
     }
 
@@ -310,6 +415,21 @@ public sealed class ProcessInstallerProtocolClientTests
         await OpenVerifiedSessionAsync(client);
 
         Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [TestCase(ObservedInstallState.LegacyOrOfficial)]
+    [TestCase(ObservedInstallState.Unknown)]
+    public async Task InspectPlanRejectsAReceiptReleaseForReceiptlessObservedStates(ObservedInstallState observedState)
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Uninstall) { ObservedState = observedState };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Uninstall);
 
         await action.Should().ThrowAsync<InstallerProtocolClientException>();
         process.Terminated.Should().BeTrue();
@@ -364,18 +484,26 @@ public sealed class ProcessInstallerProtocolClientTests
         process.Terminated.Should().BeTrue();
     }
 
-    [TestCase(false)]
-    [TestCase(true)]
-    public async Task InspectPlanProjectsNormalRejectionWithoutPrivateTextOrAuthorityAndClosesOnlyTerminal(bool terminal)
+    [TestCase(ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest, false)]
+    [TestCase(ProtocolPrePlanErrorCode.InvalidGameFolder, ProtocolNextAction.SelectGameFolder, false)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageRejected, ProtocolNextAction.ReopenVerifiedPackage, false)]
+    [TestCase(ProtocolPrePlanErrorCode.InspectionFailed, ProtocolNextAction.InspectAgain, false)]
+    [TestCase(ProtocolPrePlanErrorCode.PermissionDenied, ProtocolNextAction.ReviewFilesystem, false)]
+    [TestCase(ProtocolPrePlanErrorCode.UnexpectedFailure, ProtocolNextAction.ViewPrivateLog, true)]
+    public async Task InspectPlanProjectsOnlyRequestReachableRejectionsWithoutPrivateTextOrAuthority(
+        ProtocolPrePlanErrorCode errorCode,
+        ProtocolNextAction nextAction,
+        bool terminal
+    )
     {
         const string privateText = "/home/private-user/secret package detail";
         ReadOnlyPlanScript script = new(InstallerOperation.Install)
         {
             Rejection = new(
                 Session,
-                ProtocolPrePlanErrorCode.InspectionFailed,
+                errorCode,
                 privateText,
-                ProtocolNextAction.InspectAgain,
+                nextAction,
                 terminal,
                 "/tmp/private-installer.log"
             )
@@ -387,7 +515,7 @@ public sealed class ProcessInstallerProtocolClientTests
         InstallerReadOnlyPlanRejection result = (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install))
             .Should().BeOfType<InstallerReadOnlyPlanRejection>().Subject;
 
-        result.Should().Be(new InstallerReadOnlyPlanRejection(ProtocolPrePlanErrorCode.InspectionFailed, ProtocolNextAction.InspectAgain, terminal));
+        result.Should().Be(new InstallerReadOnlyPlanRejection(errorCode, nextAction, terminal));
         result.ToString().Should().NotContain(privateText).And.NotContain("private-installer.log");
         process.Terminated.Should().Be(terminal);
         if (!terminal)
@@ -395,6 +523,28 @@ public sealed class ProcessInstallerProtocolClientTests
             script.Rejection = null;
             (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install)).Should().BeOfType<InstallerReadOnlyPlanSuccess>();
         }
+    }
+
+    [TestCase(ProtocolPrePlanErrorCode.RecoveryUnavailable, ProtocolNextAction.ListRecoveries)]
+    [TestCase(ProtocolPrePlanErrorCode.CandidateApprovalFailed, ProtocolNextAction.InspectAgain)]
+    [TestCase(ProtocolPrePlanErrorCode.InputOutputFailure, ProtocolNextAction.RetryRequest)]
+    public async Task InspectPlanFailStopsGloballyValidButRequestUnreachableRejections(
+        ProtocolPrePlanErrorCode errorCode,
+        ProtocolNextAction nextAction
+    )
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            Rejection = new(Session, errorCode, "Rejected safely.", nextAction, false, null)
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -695,12 +845,12 @@ public sealed class ProcessInstallerProtocolClientTests
     [Test]
     public async Task RejectsHandshakeWithoutEveryRequiredCapability()
     {
-        foreach (string omitted in BaseRequiredCapabilities)
+        foreach (string omitted in RequiredCapabilities)
         {
             ScriptedProcess process = new(request => Serialize(new HandshakeEvent(
                 Session,
                 "1",
-                BaseRequiredCapabilities.Where(value => value != omitted).ToArray()
+                RequiredCapabilities.Where(value => value != omitted).ToArray()
             )
             {
                 CommandId = request.CommandId
@@ -712,25 +862,6 @@ public sealed class ProcessInstallerProtocolClientTests
             await action.Should().ThrowAsync<InstallerProtocolClientException>();
             process.Terminated.Should().BeTrue();
         }
-    }
-
-    [Test]
-    public async Task MissingOptionalPlanCapabilityFailsClosedOnlyWhenPlanInspectionIsRequested()
-    {
-        ScriptedProcess process = new(request => request switch
-        {
-            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", BaseRequiredCapabilities) { CommandId = request.CommandId }),
-            OpenPackageRequest => Serialize(CreateOpened(Session, request.CommandId)),
-            _ => throw new AssertionException("A capability-rejected plan must not be sent to the backend.")
-        });
-        await using ProcessInstallerProtocolClient client = Create(process);
-        await OpenVerifiedSessionAsync(client);
-
-        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
-
-        await action.Should().ThrowAsync<InstallerProtocolClientException>();
-        process.Requests.Any(item => item is InspectPlanRequest).Should().BeFalse();
-        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -1231,6 +1362,17 @@ public sealed class ProcessInstallerProtocolClientTests
         DuplicateWarning
     }
 
+    public enum BackupWithoutReceiptFault
+    {
+        ExecutableWithoutReceipt,
+        ContainsOperation,
+        ContainsCandidate,
+        WrongConflict,
+        ConflictHasPath,
+        AdditionalConflict,
+        MissingExactNotice
+    }
+
     private sealed class ReadOnlyPlanScript
     {
         public const string GamePath = "/games/private Stardew Valley";
@@ -1518,16 +1660,11 @@ public sealed class ProcessInstallerProtocolClientTests
 
     private static string PackageName(int alpha) => $"SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}-linux-x64-installer.zip";
 
-    private static string[] BaseRequiredCapabilities =>
+    private static string[] RequiredCapabilities =>
     [
         ProcessInstallerProtocolClient.PackageVerificationCapability,
         ProcessInstallerProtocolClient.GameDiscoveryCapability,
-        ProcessInstallerProtocolClient.GameValidationCapability
-    ];
-
-    private static string[] RequiredCapabilities =>
-    [
-        .. BaseRequiredCapabilities,
+        ProcessInstallerProtocolClient.GameValidationCapability,
         ProcessInstallerProtocolClient.PlanInspectionCapability
     ];
 

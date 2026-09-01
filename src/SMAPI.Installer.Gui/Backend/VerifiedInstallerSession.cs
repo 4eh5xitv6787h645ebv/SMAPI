@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
@@ -18,7 +19,8 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private readonly SemaphoreSlim CommandGate = new(1, 1);
     private readonly CancellationTokenSource Lifetime = new();
     private readonly object DisposeLock = new();
-    private readonly HashSet<ProtocolGameCandidate> IssuedCandidates = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<ProtocolGameCandidate> DiscoveredCandidates = new(ReferenceEqualityComparer.Instance);
+    private ProtocolGameCandidate? LatestManualCandidate;
     private Task? DisposalTask;
     private SessionStage Stage = SessionStage.Discovery;
     private int AdmittedDiscoveryCommands;
@@ -40,11 +42,11 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             {
                 ProtocolGameCandidate[] snapshot = candidates?.ToArray()
                     ?? throw new InstallerProtocolClientException("The installer backend returned an invalid game-folder result.");
-                if (snapshot.Any(candidate => candidate is null))
+                if (snapshot.Length > ProtocolJsonSerializer.MaxGameCandidates || snapshot.Any(candidate => candidate is null))
                     throw new InstallerProtocolClientException("The installer backend returned an invalid game-folder result.");
-                this.IssuedCandidates.Clear();
+                this.DiscoveredCandidates.Clear();
                 foreach (ProtocolGameCandidate candidate in snapshot)
-                    this.IssuedCandidates.Add(candidate);
+                    this.DiscoveredCandidates.Add(candidate);
                 return Array.AsReadOnly(snapshot);
             },
             cancellationToken
@@ -67,12 +69,15 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 throw new InvalidOperationException("A game-folder operation is still active.");
             if (this.Client.SessionFaulted.IsCompleted)
                 throw new InvalidOperationException("The verified installer session has already faulted.");
-            if (candidate.State != Core.Engine.LinuxGameFolderStatus.Valid || !this.IssuedCandidates.Contains(candidate))
+            if (
+                candidate.State != Core.Engine.LinuxGameFolderStatus.Valid
+                || !this.DiscoveredCandidates.Contains(candidate) && !ReferenceEquals(this.LatestManualCandidate, candidate)
+            )
                 throw new ArgumentException("The game must be the exact valid result issued by this verified session.", nameof(candidate));
 
             VerifiedGamePresentation game = new(candidate.CanonicalPath, candidate.DisplayName);
-            BoundPlanInspectionSession result = new(this, this.Release, game);
-            this.IssuedCandidates.Clear();
+            BoundPlanInspectionSession result = new(this, this.Release, candidate.CanonicalPath, game);
+            this.ClearIssuedCandidates();
             this.Stage = SessionStage.Bound;
             return result;
         }
@@ -99,7 +104,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             {
                 if (candidate is null)
                     throw new InstallerProtocolClientException("The installer backend returned an invalid game-folder result.");
-                this.IssuedCandidates.Add(candidate);
+                this.LatestManualCandidate = candidate;
                 return candidate;
             },
             cancellationToken
@@ -162,11 +167,12 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     }
 
     private async Task<InstallerReadOnlyPlanResult> InspectBoundPlanAsync(
-        VerifiedGamePresentation game,
+        string exactCanonicalPath,
         InstallerOperation operation,
         CancellationToken cancellationToken
     )
     {
+        AssertSupportedPlanOperation(operation);
         CancellationToken lifetime;
         lock (this.DisposeLock)
         {
@@ -175,17 +181,20 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             lifetime = this.Lifetime.Token;
         }
         using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
-        await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
-        InstallerReadOnlyPlanResult result;
+        InstallerReadOnlyPlanResult? result = null;
+        Exception? failure = null;
+        bool gateEntered = false;
         try
         {
+            await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
+            gateEntered = true;
             lock (this.DisposeLock)
             {
                 if (this.Stage != SessionStage.Bound)
                     throw new ObjectDisposedException(nameof(IPlanInspectionSession));
             }
             result = await this.Client.InspectPlanAsync(
-                game.CanonicalPath,
+                exactCanonicalPath,
                 operation,
                 request.Token
             ).ConfigureAwait(false);
@@ -200,13 +209,50 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                     this.Stage = SessionStage.Terminal;
             }
         }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
         finally
         {
-            this.CommandGate.Release();
+            if (gateEntered)
+                this.CommandGate.Release();
+        }
+
+        if (failure is not null)
+        {
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
         }
         if (result is InstallerReadOnlyPlanRejection { IsTerminal: true })
             await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
-        return result;
+        return result!;
+    }
+
+    private Exception GetPlanFailure(Exception failure)
+    {
+        lock (this.DisposeLock)
+        {
+            if (this.Stage is SessionStage.Disposing or SessionStage.Disposed)
+                return new ObjectDisposedException(nameof(IPlanInspectionSession));
+            if (this.Client.SessionFaulted.IsCompleted)
+                return new InstallerProtocolClientException("The verified installer session faulted before the plan result could be accepted.");
+            if (this.Stage == SessionStage.Bound)
+                this.Stage = SessionStage.Terminal;
+            return failure;
+        }
+    }
+
+    private static void AssertSupportedPlanOperation(InstallerOperation operation)
+    {
+        if (operation is not (InstallerOperation.Install
+            or InstallerOperation.Update
+            or InstallerOperation.Repair
+            or InstallerOperation.Uninstall
+            or InstallerOperation.Backup))
+        {
+            throw new ArgumentOutOfRangeException(nameof(operation), operation, "Only non-rollback read-only plan inspection is available.");
+        }
     }
 
     private async Task DisposeCoreAsync()
@@ -247,7 +293,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             this.CommandGate.Dispose();
             lock (this.DisposeLock)
             {
-                this.IssuedCandidates.Clear();
+                this.ClearIssuedCandidates();
                 this.Stage = SessionStage.Disposed;
             }
         }
@@ -264,17 +310,25 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         throw new ObjectDisposedException(nameof(VerifiedInstallerSession));
     }
 
+    private void ClearIssuedCandidates()
+    {
+        this.DiscoveredCandidates.Clear();
+        this.LatestManualCandidate = null;
+    }
+
     private sealed class BoundPlanInspectionSession : IPlanInspectionSession
     {
         private readonly VerifiedInstallerSession Owner;
+        private readonly string ExactCanonicalPath;
 
         public ProtocolReleaseIdentity Release { get; }
         public VerifiedGamePresentation Game { get; }
         public Task<InstallerProtocolClientException> SessionFaulted => this.Owner.SessionFaulted;
 
-        public BoundPlanInspectionSession(VerifiedInstallerSession owner, ProtocolReleaseIdentity release, VerifiedGamePresentation game)
+        public BoundPlanInspectionSession(VerifiedInstallerSession owner, ProtocolReleaseIdentity release, string exactCanonicalPath, VerifiedGamePresentation game)
         {
             this.Owner = owner;
+            this.ExactCanonicalPath = exactCanonicalPath;
             this.Release = release;
             this.Game = game;
         }
@@ -282,6 +336,6 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         public ValueTask DisposeAsync() => this.Owner.DisposeFromBoundSessionAsync();
 
         public Task<InstallerReadOnlyPlanResult> InspectPlanAsync(InstallerOperation operation, CancellationToken cancellationToken = default)
-            => this.Owner.InspectBoundPlanAsync(this.Game, operation, cancellationToken);
+            => this.Owner.InspectBoundPlanAsync(this.ExactCanonicalPath, operation, cancellationToken);
     }
 }

@@ -169,6 +169,47 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
+    public async Task TransferredStateAnnouncesATruthfulReadOnlyTransitionAndHidesEveryDiscoveryAction()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("transfer", LinuxGameFolderStatus.Valid);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        GameDiscoveryController controller = new(session);
+        await using GameDiscoveryViewModel viewModel = new(controller);
+        viewModel.FolderPickerRequested += (_, _) => { };
+        GameDiscoveryFocusTarget? focus = null;
+        viewModel.FocusRequested += (_, target) => focus = target;
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        IPlanInspectionSession handoff = controller.TakeSelectedGameSession();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.Heading.Should().Be("Opening plan review…");
+        viewModel.Message.Should().Contain("read-only plan screen").And.Contain("Nothing has been changed");
+        viewModel.Message.Should().NotContain("installing").And.NotContain("approved").And.NotContain("executed");
+        viewModel.LiveAnnouncement.Should().Be(viewModel.Heading);
+        focus.Should().Be(GameDiscoveryFocusTarget.Status);
+        viewModel.Candidates.Should().BeEmpty();
+        viewModel.SelectedCandidate.Should().BeNull();
+        viewModel.IsCandidateListVisible.Should().BeFalse();
+        viewModel.IsEmptyVisible.Should().BeFalse();
+        viewModel.IsProblemVisible.Should().BeFalse();
+        viewModel.IsBrowseVisible.Should().BeFalse();
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.IsCancelVisible.Should().BeFalse();
+        viewModel.IsExitVisible.Should().BeFalse();
+        viewModel.BrowseCommand.CanExecute(null).Should().BeFalse();
+        viewModel.RetryCommand.CanExecute(null).Should().BeFalse();
+        viewModel.CancelCommand.CanExecute(null).Should().BeFalse();
+        viewModel.ExitCommand.CanExecute(null).Should().BeFalse();
+
+        await handoff.DisposeAsync();
+    }
+
+    [AvaloniaTest]
     public async Task EveryInvalidFolderStatusHasSpecificSafeGuidance()
     {
         foreach (LinuxGameFolderStatus status in Enum.GetValues<LinuxGameFolderStatus>().Where(value => value != LinuxGameFolderStatus.Valid))
