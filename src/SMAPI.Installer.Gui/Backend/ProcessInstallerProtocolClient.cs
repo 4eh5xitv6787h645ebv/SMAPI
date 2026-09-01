@@ -52,6 +52,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private ProtocolPackageId? VerifiedPackageId;
     private ProtocolReleaseIdentity? VerifiedRelease;
     private RetainedPlanBinding? CurrentPlanBinding;
+    private RetainedConfirmedPlanBinding? CurrentConfirmedPlanBinding;
     private readonly HashSet<ProtocolCandidateId> IssuedCandidateIds = [];
     private int CleanupStarted;
     private int DisposeStarted;
@@ -62,6 +63,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     private bool SessionFaultRaised;
     internal Action? BeforePackageAuthorityCommitForTesting { get; set; }
     internal Action? BeforePlanBindingCommitForTesting { get; set; }
+    internal Action? BeforeConfirmationAuthorityCommitForTesting { get; set; }
     internal int IssuedCandidateCapacityForTesting { get; set; } = InstallerCandidateSelection.MaximumIssuedCandidatesPerSession;
 
     internal int ObservedStderrBytes => Volatile.Read(ref this.ObservedStderrBytesValue);
@@ -289,6 +291,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             {
                 session = this.SessionId
                     ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+                if (this.CurrentConfirmedPlanBinding is not null)
+                    throw new InvalidOperationException("The confirmed backend session can no longer inspect a plan.");
                 packageId = this.VerifiedPackageId;
                 verifiedRelease = this.VerifiedRelease;
                 this.CurrentPlanBinding = null;
@@ -335,7 +339,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                if (!this.TryRetainPlanBinding(new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, candidates)))
+                if (!this.TryRetainPlanBinding(new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, candidates, projected.Confirmation)))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
@@ -434,7 +438,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                if (!this.TryRetainPlanBinding(new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, replacementCandidates)))
+                if (!this.TryRetainPlanBinding(new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, replacementCandidates, projected.Confirmation)))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
@@ -449,6 +453,100 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 throw new InstallerProtocolClientException(this.CleanupConfirmed
                     ? "The installer backend candidate approval exceeded its bounded deadline and was stopped."
                     : "The installer backend candidate approval exceeded its bounded deadline, and termination could not be confirmed.");
+            }
+        }
+        finally
+        {
+            this.CommandGate.Release();
+        }
+    }
+
+    public async Task<InstallerConfirmedPlanAuthority> ConfirmPlanAsync(
+        InstallerPlanConfirmation confirmation,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(confirmation);
+        await this.CommandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            this.AssertUsable();
+            RetainedPlanBinding binding;
+            lock (this.ResponseLock)
+            {
+                binding = this.CurrentPlanBinding
+                    ?? throw new InvalidOperationException("A current executable inspected plan is required before confirmation.");
+                if (binding.Confirmation is null || !ReferenceEquals(binding.Confirmation, confirmation))
+                    throw new ArgumentException("The confirmation must be the exact current capability issued by this plan.", nameof(confirmation));
+                if (this.CurrentConfirmedPlanBinding is not null)
+                    throw new InvalidOperationException("A plan was already confirmed in this backend session.");
+
+                // Confirmation authority is consumed before any wire operation. An admitted failure is fail-stop and
+                // can never make this exact reference current again.
+                this.CurrentPlanBinding = null;
+            }
+
+            ProtocolSessionId session = this.SessionId
+                ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
+            ConfirmPlanRequest request = new(session, binding.PlanId, binding.PlanDigest);
+            try
+            {
+                CommandAcknowledgedEvent acknowledged = await this.ExchangeAsync<CommandAcknowledgedEvent>(request, cancellationToken).ConfigureAwait(false);
+                if (
+                    acknowledged.SessionId != session
+                    || acknowledged.Acknowledgement != ProtocolAcknowledgementKind.PlanConfirmed
+                    || acknowledged.PlanId != binding.PlanId
+                    || acknowledged.PrunePlanId is not null
+                )
+                {
+                    return await this.FailProtocolAsync<InstallerConfirmedPlanAuthority>().ConfigureAwait(false);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (this.SessionFault.Task.IsCompletedSuccessfully)
+                    throw await this.SessionFault.Task.ConfigureAwait(false);
+                this.BeforeConfirmationAuthorityCommitForTesting?.Invoke();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (this.SessionFault.Task.IsCompletedSuccessfully)
+                    throw await this.SessionFault.Task.ConfigureAwait(false);
+
+                InstallerConfirmedPlanAuthority authority = new();
+                bool committed;
+                lock (this.ResponseLock)
+                {
+                    committed = !this.SessionFaultRaised
+                        && Volatile.Read(ref this.CleanupStarted) == 0
+                        && !cancellationToken.IsCancellationRequested
+                        && this.CurrentConfirmedPlanBinding is null;
+                    if (committed)
+                        this.CurrentConfirmedPlanBinding = new(
+                            binding.Operation,
+                            binding.GameRoot,
+                            binding.PlanId,
+                            binding.PlanDigest,
+                            authority
+                        );
+                }
+                if (!committed)
+                    return await this.FailProtocolAsync<InstallerConfirmedPlanAuthority>().ConfigureAwait(false);
+                return authority;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw;
+            }
+            catch (InstallerProtocolClientException)
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw;
+            }
+            catch
+            {
+                await this.CleanupAsync(allowCleanExit: false).ConfigureAwait(false);
+                throw new InstallerProtocolClientException(this.CleanupConfirmed
+                    ? "The installer backend confirmation stopped safely."
+                    : "The installer backend confirmation stopped, and termination could not be confirmed.");
             }
         }
         finally
@@ -820,7 +918,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             collections.Warnings.Count
         )
         {
-            Candidates = Array.AsReadOnly(projectedCandidates)
+            Candidates = Array.AsReadOnly(projectedCandidates),
+            Confirmation = plan.CanExecute ? new InstallerPlanConfirmation() : null
         };
         return (result, candidateIds);
     }
@@ -854,6 +953,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         public ProtocolPlanId PlanId { get; }
         public ProtocolPlanDigest PlanDigest { get; }
         public Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> Candidates { get; }
+        public InstallerPlanConfirmation? Confirmation { get; }
 
         public RetainedPlanBinding(
             string canonicalGamePath,
@@ -863,7 +963,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             ProtocolGameRootIdentity gameRoot,
             ProtocolPlanId planId,
             ProtocolPlanDigest planDigest,
-            Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates
+            Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates,
+            InstallerPlanConfirmation? confirmation
         )
         {
             this.CanonicalGamePath = canonicalGamePath;
@@ -874,8 +975,17 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.PlanId = planId;
             this.PlanDigest = planDigest;
             this.Candidates = candidates;
+            this.Confirmation = confirmation;
         }
     }
+
+    private sealed record RetainedConfirmedPlanBinding(
+        InstallerOperation Operation,
+        ProtocolGameRootIdentity GameRoot,
+        ProtocolPlanId PlanId,
+        ProtocolPlanDigest PlanDigest,
+        InstallerConfirmedPlanAuthority Authority
+    );
 
     public ValueTask DisposeAsync()
     {
@@ -1124,6 +1234,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.VerifiedPackageId = null;
             this.VerifiedRelease = null;
             this.CurrentPlanBinding = null;
+            this.CurrentConfirmedPlanBinding = null;
             this.IssuedCandidateIds.Clear();
             pending = this.PendingResponse;
             this.PendingResponse = null;
@@ -1232,6 +1343,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 this.VerifiedPackageId = null;
                 this.VerifiedRelease = null;
                 this.CurrentPlanBinding = null;
+                this.CurrentConfirmedPlanBinding = null;
                 this.IssuedCandidateIds.Clear();
             }
             IInstallerProtocolProcess? process = this.Process;

@@ -1,6 +1,6 @@
+using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
-using StardewModdingAPI.Installer.Core.Ownership;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
 
@@ -13,7 +13,8 @@ internal abstract record InstallerReadOnlyPlanResult;
 
 /// <summary>
 /// A complete, digest-verified read-only description of a backend plan. Candidate objects are exact scoped
-/// approval capabilities; no result carries confirmation or execution authority.
+/// approval capabilities. An executable result may carry one non-presentational exact-reference confirmation
+/// capability for the bound backend layer; no result carries execution authority.
 /// </summary>
 internal sealed record InstallerReadOnlyPlanSuccess(
     InstallerOperation Operation,
@@ -31,10 +32,34 @@ internal sealed record InstallerReadOnlyPlanSuccess(
 ) : InstallerReadOnlyPlanResult
 {
     /// <summary>
+    /// A layer-local exact-reference capability for confirming this executable plan. Presentation code must not
+    /// retain or expose it, and each ownership layer must replace it with a freshly minted reference.
+    /// </summary>
+    internal InstallerPlanConfirmation? Confirmation { get; init; }
+
+    /// <summary>
     /// Sanitized, reference-identity approval capabilities for the exact candidates in this plan. These can only
     /// be presented or returned to the session which issued them; their opaque protocol authority remains private.
     /// </summary>
     public IReadOnlyList<InstallerReadOnlyPlanCandidate> Candidates { get; init; } = [];
+}
+
+/// <summary>
+/// One opaque, property-free, exact-reference capability for confirming the current executable plan at one backend
+/// ownership layer. It deliberately has no value equality and carries no transport identifier or digest.
+/// </summary>
+internal sealed class InstallerPlanConfirmation
+{
+    internal InstallerPlanConfirmation() { }
+}
+
+/// <summary>
+/// One opaque exact-reference authority returned only after the process backend acknowledged confirmation of the
+/// retained plan. It is held by the confirmed session owner for a later execution slice and carries no public data.
+/// </summary>
+internal sealed class InstallerConfirmedPlanAuthority
+{
+    internal InstallerConfirmedPlanAuthority() { }
 }
 
 /// <summary>A normal pre-plan domain rejection without backend text, private logs, paths, or opaque IDs.</summary>

@@ -212,7 +212,11 @@ internal sealed class VerifiedInstallerSessionTests
 
         InstallerReadOnlyPlanSuccess safe = actual.Should().BeOfType<InstallerReadOnlyPlanSuccess>().Which;
         safe.Should().NotBeSameAs(expected);
-        safe.Should().Be((InstallerReadOnlyPlanSuccess)expected with { Candidates = safe.Candidates });
+        safe.Should().BeEquivalentTo(
+            (InstallerReadOnlyPlanSuccess)expected,
+            options => options.Excluding(member => member.Name == nameof(InstallerReadOnlyPlanSuccess.Confirmation))
+        );
+        safe.Confirmation.Should().NotBeNull().And.NotBeSameAs(((InstallerReadOnlyPlanSuccess)expected).Confirmation, "the bound session remints layer-local authority");
         bound.Release.Should().BeSameAs(release);
         bound.Game.DisplayPath.Should().Be(valid.CanonicalPath);
         bound.Game.DisplayName.Should().Be(valid.DisplayName);
@@ -477,7 +481,246 @@ internal sealed class VerifiedInstallerSessionTests
             [],
             [],
             0
-        );
+        )
+        {
+            Confirmation = new InstallerPlanConfirmation()
+        };
+    }
+
+    [Test]
+    public async Task ConfirmationRemintsExactAuthorityAndTransfersExclusiveCleanupOwnership()
+    {
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("confirm", LinuxGameFolderStatus.Valid)])
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+
+        IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+
+        client.ConfirmedPlans.Should().ContainSingle();
+        client.ConfirmedPlans.Single().Should().NotBeSameAs(plan.Confirmation, "the process authority must remain below the bound-session layer");
+        confirmed.Release.Should().Be(bound.Release);
+        confirmed.Game.Should().BeSameAs(bound.Game);
+        await FluentActions.Awaiting(() => bound.InspectPlanAsync(InstallerOperation.Backup)).Should().ThrowAsync<ObjectDisposedException>();
+        await FluentActions.Awaiting(() => bound.ConfirmPlanAsync(plan.Confirmation!)).Should().ThrowAsync<ObjectDisposedException>();
+
+        await session.DisposeAsync();
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(0, "only the confirmed owner retains cleanup authority");
+        await confirmed.DisposeAsync();
+        await confirmed.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ConcurrentConfirmationTransfersExactlyOneOwnerAndCleansUpOnce()
+    {
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("concurrent-confirm", LinuxGameFolderStatus.Valid)])
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        TaskCompletionSource start = NewCompletion();
+
+        async Task<(IConfirmedInstallerSession? Owner, Exception? Error)> AttemptAsync()
+        {
+            await start.Task;
+            try { return (await bound.ConfirmPlanAsync(plan.Confirmation!), null); }
+            catch (Exception error) { return (null, error); }
+        }
+
+        Task<(IConfirmedInstallerSession? Owner, Exception? Error)>[] attempts = [AttemptAsync(), AttemptAsync()];
+        start.TrySetResult();
+        (IConfirmedInstallerSession? Owner, Exception? Error)[] results = await Task.WhenAll(attempts);
+
+        IConfirmedInstallerSession owner = results.Should().ContainSingle(result => result.Owner != null && result.Error == null).Subject.Owner!;
+        results.Should().ContainSingle(result => result.Owner == null && result.Error != null && result.Error.GetType() == typeof(ObjectDisposedException));
+        client.ConfirmedPlans.Should().ContainSingle();
+        await bound.DisposeAsync();
+        await session.DisposeAsync();
+        client.DisposeCalls.Should().Be(0);
+        await owner.DisposeAsync();
+        await owner.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ForeignAndStaleConfirmationReferencesFailBeforeTheClientAndPreserveTheCurrentCapability()
+    {
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("stale-confirm", LinuxGameFolderStatus.Valid)])
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess stale = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        InstallerReadOnlyPlanSuccess current = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+
+        await FluentActions.Awaiting(() => bound.ConfirmPlanAsync(new InstallerPlanConfirmation())).Should().ThrowAsync<ArgumentException>();
+        await FluentActions.Awaiting(() => bound.ConfirmPlanAsync(stale.Confirmation!)).Should().ThrowAsync<ArgumentException>();
+        client.ConfirmedPlans.Should().BeEmpty();
+
+        await using IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(current.Confirmation!);
+        client.ConfirmedPlans.Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task CandidateReissueRevokesThePriorConfirmationAndTheReplacementCanConfirm()
+    {
+        InstallerReadOnlyPlanCandidate candidate = CandidateCapability('4', "mods/reissue.dll", false);
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("reissue-confirm", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation) with { Candidates = [candidate] }),
+            Approval = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(InstallerOperation.Install))
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess first = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Install);
+        InstallerReadOnlyPlanSuccess replacement = (InstallerReadOnlyPlanSuccess)await bound.ApprovePlanCandidatesAsync([first.Candidates.Single()]);
+
+        await FluentActions.Awaiting(() => bound.ConfirmPlanAsync(first.Confirmation!)).Should().ThrowAsync<ArgumentException>();
+        client.ConfirmedPlans.Should().BeEmpty();
+        await using IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(replacement.Confirmation!);
+        client.ConfirmedPlans.Should().ContainSingle();
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task BlockedPlanNeverPublishesConfirmationAuthority(bool maliciousAuthority)
+    {
+        InstallerReadOnlyPlanSuccess blocked = Plan(InstallerOperation.Backup) with
+        {
+            HasBlockingConflicts = true,
+            Confirmation = maliciousAuthority ? new InstallerPlanConfirmation() : null
+        };
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("blocked-confirm", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, _, _) => Task.FromResult<InstallerReadOnlyPlanResult>(blocked)
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        if (maliciousAuthority)
+        {
+            await FluentActions.Awaiting(() => bound.InspectPlanAsync(InstallerOperation.Backup)).Should().ThrowAsync<InstallerProtocolClientException>();
+            client.DisposeCalls.Should().Be(1);
+        }
+        else
+        {
+            InstallerReadOnlyPlanSuccess result = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+            result.Confirmation.Should().BeNull();
+            await FluentActions.Awaiting(() => bound.ConfirmPlanAsync(new InstallerPlanConfirmation())).Should().ThrowAsync<ArgumentException>();
+            client.ConfirmedPlans.Should().BeEmpty();
+            await bound.DisposeAsync();
+        }
+    }
+
+    [Test]
+    public async Task ExecutablePlanWithoutConfirmationAuthorityFailsClosedAndDisposesOnce()
+    {
+        InstallerReadOnlyPlanSuccess malformed = Plan(InstallerOperation.Backup) with { Confirmation = null };
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("missing-confirm", LinuxGameFolderStatus.Valid)]),
+            Inspection = (_, _, _) => Task.FromResult<InstallerReadOnlyPlanResult>(malformed)
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+
+        await FluentActions.Awaiting(() => bound.InspectPlanAsync(InstallerOperation.Backup)).Should().ThrowAsync<InstallerProtocolClientException>();
+
+        client.ConfirmedPlans.Should().BeEmpty();
+        client.DisposeCalls.Should().Be(1);
+        await session.DisposeAsync();
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ConfirmationCallerCancellationRevokesAuthorityAndDisposesExactlyOnce()
+    {
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("cancel-confirm", LinuxGameFolderStatus.Valid)]),
+            Confirmation = async (_, token) =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return new InstallerConfirmedPlanAuthority();
+            }
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        using CancellationTokenSource cancellation = new();
+        Task<IConfirmedInstallerSession> confirming = bound.ConfirmPlanAsync(plan.Confirmation!, cancellation.Token);
+        await client.ConfirmationStarted.Task;
+
+        cancellation.Cancel();
+
+        await FluentActions.Awaiting(() => confirming).Should().ThrowAsync<OperationCanceledException>();
+        client.DisposeCalls.Should().Be(1);
+        await FluentActions.Awaiting(() => bound.ConfirmPlanAsync(plan.Confirmation!)).Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task ConfirmationDisposalOrSessionFaultWinsOverALateAuthority(bool fault)
+    {
+        TaskCompletionSource<InstallerConfirmedPlanAuthority> completion = NewCompletion<InstallerConfirmedPlanAuthority>();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("late-confirm", LinuxGameFolderStatus.Valid)]),
+            Confirmation = (_, _) => completion.Task
+        };
+        VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+        Task<IConfirmedInstallerSession> confirming = bound.ConfirmPlanAsync(plan.Confirmation!);
+        await client.ConfirmationStarted.Task;
+
+        Task? disposal = null;
+        if (fault)
+            client.Fault.TrySetResult(new InstallerProtocolClientException("generic test fault"));
+        else
+            disposal = bound.DisposeAsync().AsTask();
+        completion.TrySetResult(new InstallerConfirmedPlanAuthority());
+
+        if (fault)
+            await FluentActions.Awaiting(() => confirming).Should().ThrowAsync<InstallerProtocolClientException>();
+        else
+            await FluentActions.Awaiting(() => confirming).Should().ThrowAsync<ObjectDisposedException>();
+        if (disposal is not null)
+            await disposal;
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ConfirmationReentrancyObservesRevokedBoundStateWithoutDeadlock()
+    {
+        IPlanInspectionSession bound = null!;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("reentrant-confirm", LinuxGameFolderStatus.Valid)]),
+            Confirmation = (_, _) =>
+            {
+                Action reentrant = () => bound.InspectPlanAsync(InstallerOperation.Backup).GetAwaiter().GetResult();
+                reentrant.Should().Throw<ObjectDisposedException>();
+                return Task.FromResult(new InstallerConfirmedPlanAuthority());
+            }
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        InstallerReadOnlyPlanSuccess plan = (InstallerReadOnlyPlanSuccess)await bound.InspectPlanAsync(InstallerOperation.Backup);
+
+        await using IConfirmedInstallerSession confirmed = await bound.ConfirmPlanAsync(plan.Confirmation!);
+        client.ConfirmedPlans.Should().ContainSingle();
     }
 
     [Test]
@@ -955,6 +1198,7 @@ internal sealed class VerifiedInstallerSessionTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InspectionStarted { get; } = NewCompletion();
         public TaskCompletionSource ApprovalStarted { get; } = NewCompletion();
+        public TaskCompletionSource ConfirmationStarted { get; } = NewCompletion();
         public Func<CancellationToken, Task<IReadOnlyList<ProtocolGameCandidate>>> Discovery { get; init; } =
             _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([]);
         public Func<string, CancellationToken, Task<ProtocolGameCandidate>> Validation { get; init; } =
@@ -963,9 +1207,12 @@ internal sealed class VerifiedInstallerSessionTests
             (_, operation, _) => Task.FromResult<InstallerReadOnlyPlanResult>(Plan(operation));
         public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; } =
             (_, _) => throw new AssertionException("Candidate approval wasn't expected.");
+        public Func<InstallerPlanConfirmation, CancellationToken, Task<InstallerConfirmedPlanAuthority>> Confirmation { get; init; } =
+            (_, _) => Task.FromResult(new InstallerConfirmedPlanAuthority());
         public List<string> InspectedPaths { get; } = [];
         public List<InstallerOperation> InspectedOperations { get; } = [];
         public List<IReadOnlyList<InstallerReadOnlyPlanCandidate>> ApprovedCandidates { get; } = [];
+        public List<InstallerPlanConfirmation> ConfirmedPlans { get; } = [];
         public int DiscoverCalls { get; private set; }
         public int ValidateCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -1018,6 +1265,16 @@ internal sealed class VerifiedInstallerSessionTests
             this.ApprovedCandidates.Add(candidates.ToArray());
             this.ApprovalStarted.TrySetResult();
             return this.Approval(candidates, cancellationToken);
+        }
+
+        public Task<InstallerConfirmedPlanAuthority> ConfirmPlanAsync(
+            InstallerPlanConfirmation confirmation,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.ConfirmedPlans.Add(confirmation);
+            this.ConfirmationStarted.TrySetResult();
+            return this.Confirmation(confirmation, cancellationToken);
         }
 
         public ValueTask DisposeAsync()
