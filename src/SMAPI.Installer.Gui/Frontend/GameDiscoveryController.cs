@@ -182,7 +182,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                     this.StateValue = GameDiscoveryState.SessionFaulted;
                     return;
                 }
-                if (operation.UserCancellation)
+                if (IsCancellationRequested(operation))
                 {
                     this.SelectedCandidateValue = null;
                     this.StateValue = GameDiscoveryState.Cancelled;
@@ -246,7 +246,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                     this.StateValue = GameDiscoveryState.SessionFaulted;
                     return;
                 }
-                if (operation.UserCancellation)
+                if (IsCancellationRequested(operation))
                 {
                     this.SelectedCandidateValue = null;
                     this.StateValue = GameDiscoveryState.Cancelled;
@@ -377,7 +377,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                     this.SelectedCandidateValue = null;
                     this.StateValue = GameDiscoveryState.SessionFaulted;
                 }
-                else if (operation.UserCancellation)
+                else if (IsCancellationRequested(operation))
                 {
                     this.SelectedCandidateValue = null;
                     this.StateValue = GameDiscoveryState.Cancelled;
@@ -402,7 +402,7 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
                 ? GameDiscoveryState.Cancelling
                 : this.SessionHasFaulted
                     ? GameDiscoveryState.SessionFaulted
-                    : operation.UserCancellation
+                    : IsCancellationRequested(operation)
                         ? GameDiscoveryState.Cancelled
                         : state;
         }
@@ -428,6 +428,11 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private bool IsCurrent(ActiveOperation operation)
     {
         return ReferenceEquals(this.Operation, operation) && operation.Generation == this.GenerationValue;
+    }
+
+    private static bool IsCancellationRequested(ActiveOperation operation)
+    {
+        return operation.UserCancellation || operation.Cancellation.IsCancellationRequested;
     }
 
     private void AssertCanStart()
