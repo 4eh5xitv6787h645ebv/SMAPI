@@ -57,10 +57,13 @@ Source and Actions candidates built after the reviewed Phase 4 packaging change 
 `install on Linux (graphical).sh` entry point and the unchanged `install on Linux.sh` terminal
 fallback in the same ZIP. The GUI is a self-contained, untrimmed Linux x86_64 application; its
 single-file native runtime is extracted into a private per-run temporary directory which the
-launcher removes after an ordinary exit or handled HUP, INT, or TERM signal. SIGKILL, power loss,
-or another abrupt stop can leave that private directory under the configured temporary root. The
-supported first desktop path is X11 or XWayland, not Avalonia's experimental native Wayland backend;
-headless and native-Wayland-only sessions retain the terminal launcher.
+launcher normally removes after an ordinary exit or successfully settled HUP, INT, or TERM signal.
+If the bounded child-settlement deadline expires, the launcher retains those private runtime files
+to avoid unsafe deletion; after confirming no installer process remains, remove the leftover
+directory manually. SIGKILL, power loss, or another abrupt stop can also leave that private
+directory under the configured temporary root. The supported first desktop path is X11 or XWayland,
+not Avalonia's experimental native Wayland backend; headless and native-Wayland-only sessions retain
+the terminal launcher.
 
 No published release contains that candidate yet. Do not treat a branch artifact as a tagged
 release, substitute it for the alpha.1 instructions below, or use it as production screenshot or
