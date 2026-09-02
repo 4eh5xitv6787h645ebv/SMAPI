@@ -167,6 +167,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     private string observedStateDetail = "No plan has been inspected.";
     private string currentReleaseDetail = "No inspected current release.";
     private string targetReleaseDetail = "No inspected target release.";
+    private string releaseRelationshipDetail = "No authenticated target-release labels are available.";
     private string safetyDetail = "No plan safety facts have been reported.";
     private string riskSummary = "No plan has been inspected.";
     private string operationSummary = "No plan has been inspected.";
@@ -288,6 +289,12 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     {
         get => this.targetReleaseDetail;
         private set => this.SetProperty(ref this.targetReleaseDetail, value);
+    }
+
+    public string ReleaseRelationshipDetail
+    {
+        get => this.releaseRelationshipDetail;
+        private set => this.SetProperty(ref this.releaseRelationshipDetail, value);
     }
 
     public string SafetyDetail
@@ -790,6 +797,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             this.ObservedStateDetail = "No plan has been inspected.";
             this.CurrentReleaseDetail = "No inspected current release.";
             this.TargetReleaseDetail = "No inspected target release.";
+            this.ReleaseRelationshipDetail = "No authenticated target-release labels are available.";
             this.SafetyDetail = "No plan safety facts have been reported.";
             this.RiskSummary = "No plan has been inspected.";
             this.OperationSummary = "No plan has been inspected.";
@@ -806,6 +814,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.ObservedStateDetail = GetObservedStateDetail(plan.ObservedState);
         this.CurrentReleaseDetail = FormatRelease(plan.CurrentRelease, "No receipt-authenticated current fork release was observed.");
         this.TargetReleaseDetail = FormatTargetRelease(plan);
+        this.ReleaseRelationshipDetail = FormatReleaseLabels(plan.TargetReleaseLabels);
         this.SafetyDetail = plan.Operation == InstallerOperation.Rollback
             ? "Recommended default: Cancel. This preview is bound to the exact selected recovery point. Confirm plan seals it but does not change files; a separate explicit Run action is still required."
             : "Recommended default: Cancel. Candidate approval only requests a refreshed read-only preview. Confirm plan seals the exact current preview but does not change files; a separate explicit Run action is still required.";
@@ -1105,6 +1114,23 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             InstallerOperation.Uninstall => "No target release is present for this uninstall preview.",
             InstallerOperation.Rollback => "The selected recovery point would restore an uninstalled managed-SMAPI state.",
             _ => "No target release was reported by this bounded inspection."
+        };
+    }
+
+    private static string FormatReleaseLabels(PlanReviewReleaseLabels? labels)
+    {
+        if (labels is null)
+            return "No target release is present, so no release relationship labels apply. Descriptive only; this does not confirm, authorize, or run this plan.";
+
+        const string prerelease = "Fork Linux alpha (experimental)";
+        const string limitation = "Version comparison only; this does not establish identical package bytes or acquisition source, and does not confirm, authorize, or run this plan.";
+        return labels.Relationship switch
+        {
+            PlanReviewReleaseRelationship.Current => $"Same version as receipt • {prerelease}. {limitation}",
+            PlanReviewReleaseRelationship.Upgrade => $"Upgrade • {prerelease}. {limitation}",
+            PlanReviewReleaseRelationship.Downgrade => $"Downgrade • {prerelease}. {limitation}",
+            null => $"{prerelease}. No receipt-authenticated current release is available for comparison. {limitation}",
+            _ => throw new ArgumentOutOfRangeException(nameof(labels), labels.Relationship, null)
         };
     }
 

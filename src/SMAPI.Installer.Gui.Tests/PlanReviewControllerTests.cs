@@ -58,6 +58,15 @@ internal sealed class PlanReviewControllerTests
         PlanReviewPlan plan = snapshot.Result.Should().BeOfType<PlanReviewPlan>().Subject;
         plan.Operation.Should().Be(operation);
         plan.AdditionalNoticeCount.Should().Be(0);
+        if (operation == InstallerOperation.Uninstall)
+            plan.TargetReleaseLabels.Should().BeNull();
+        else
+        {
+            plan.TargetReleaseLabels.Should().NotBeNull();
+            plan.TargetReleaseLabels.Relationship.Should().Be(operation == InstallerOperation.Install
+                ? null
+                : PlanReviewReleaseRelationship.Current);
+        }
         snapshot.CanSelect.Should().BeTrue();
         snapshot.CanInspect.Should().BeTrue("the same operation can be refreshed explicitly");
         snapshot.CanCancel.Should().BeFalse();
@@ -202,6 +211,7 @@ internal sealed class PlanReviewControllerTests
             OlderRecoveryRelease().Tag,
             OlderRecoveryRelease().EmbeddedVersion
         ));
+        plan.TargetReleaseLabels.Should().Be(new PlanReviewReleaseLabels(PlanReviewReleaseRelationship.Downgrade));
         plan.Risks.Should().Equal(ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade);
         plan.Candidates.Should().BeEmpty();
         inspected.CanConfirm.Should().BeTrue();
@@ -215,6 +225,165 @@ internal sealed class PlanReviewControllerTests
         confirmed.ExecuteCalls.Should().Be(0);
         await controller.DisposeAsync();
         await confirmed.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ProjectsUpgradeOnlyAfterReceiptAndTargetSemanticsAreValidated()
+    {
+        ProtocolReleaseIdentity verified = GameDiscoveryControllerTests.Release();
+        InstallerPlanRelease current = new(
+            "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.9",
+            "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.9"
+        );
+        InstallerPlanRelease target = new(verified.Tag, verified.EmbeddedVersion);
+        FakePlanSession session = new()
+        {
+            Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(InstallerOperation.Update) with
+            {
+                CurrentRelease = current,
+                TargetRelease = target
+            })
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+
+        await controller.InspectAsync();
+
+        PlanReviewPlan plan = controller.Snapshot.Result.Should().BeOfType<PlanReviewPlan>().Subject;
+        plan.TargetReleaseLabels.Should().Be(new PlanReviewReleaseLabels(PlanReviewReleaseRelationship.Upgrade));
+    }
+
+    [Test]
+    public async Task ProjectsOrdinaryDowngradeOnlyAfterTheExactRiskIsValidated()
+    {
+        ProtocolReleaseIdentity verified = GameDiscoveryControllerTests.Release();
+        FakePlanSession session = new()
+        {
+            Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(InstallerOperation.Update) with
+            {
+                CurrentRelease = new(
+                    "fork-4eh5xitv6787h645ebv-linux-v4.5.5-alpha.1",
+                    "4.5.5-unofficial.4eh5xitv6787h645ebv.linux.alpha.1"
+                ),
+                TargetRelease = new(verified.Tag, verified.EmbeddedVersion),
+                Risks = [ProtocolPlanRisk.Downgrade]
+            })
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+
+        await controller.InspectAsync();
+
+        PlanReviewPlan plan = controller.Snapshot.Result.Should().BeOfType<PlanReviewPlan>().Subject;
+        plan.TargetReleaseLabels.Should().Be(new PlanReviewReleaseLabels(PlanReviewReleaseRelationship.Downgrade));
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task MissingOrExtraDowngradeRiskFailsClosedBeforeLabelsArePublished(bool missing)
+    {
+        ProtocolReleaseIdentity verified = GameDiscoveryControllerTests.Release();
+        InstallerPlanRelease current = missing
+            ? new(
+                "fork-4eh5xitv6787h645ebv-linux-v4.5.5-alpha.1",
+                "4.5.5-unofficial.4eh5xitv6787h645ebv.linux.alpha.1"
+            )
+            : new(
+                "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.9",
+                "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.9"
+            );
+        FakePlanSession session = new()
+        {
+            Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(InstallerOperation.Update) with
+            {
+                CurrentRelease = current,
+                TargetRelease = new(verified.Tag, verified.EmbeddedVersion),
+                Risks = missing ? [] : [ProtocolPlanRisk.Downgrade]
+            })
+        };
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+
+        await controller.InspectAsync();
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.Failed);
+        controller.Snapshot.Result.Should().BeNull();
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
+    }
+
+    [Test]
+    public async Task AuthenticatedHugeCanonicalReleaseProjectsWithoutClosingTheSession()
+    {
+        const string currentVersion = "2147483648.0.0";
+        const string targetVersion = "9999999999999999999999999999999999999999.0.0";
+        ProtocolReleaseIdentity verified = ReleaseIdentity(targetVersion, 3);
+        InstallerPlanRelease current = new(ReleaseTag(currentVersion, 9), EmbeddedVersion(currentVersion, 9));
+        InstallerPlanRelease target = new(verified.Tag, verified.EmbeddedVersion);
+        FakePlanSession session = new()
+        {
+            Release = verified,
+            Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(CreatePlan(InstallerOperation.Update) with
+            {
+                CurrentRelease = current,
+                TargetRelease = target
+            })
+        };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+
+        await controller.InspectAsync();
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.Available);
+        controller.Snapshot.Result.Should().BeOfType<PlanReviewPlan>().Which.TargetReleaseLabels.Should().Be(
+            new PlanReviewReleaseLabels(PlanReviewReleaseRelationship.Upgrade)
+        );
+        session.DisposeCalls.Should().Be(0);
+    }
+
+    [TestCase("noncanonical target tag")]
+    [TestCase("overlong current tag")]
+    [TestCase("target embedded-version mismatch")]
+    [TestCase("observed state/current mismatch")]
+    public async Task MalformedReleaseInputFailsClosedWithoutPublishingLabels(string malformed)
+    {
+        InstallerReadOnlyPlanSuccess plan = CreatePlan(InstallerOperation.Update);
+        plan = malformed switch
+        {
+            "noncanonical target tag" => plan with
+            {
+                TargetRelease = new(
+                    "fork-4eh5xitv6787h645ebv-linux-v04.5.4-alpha.2",
+                    "04.5.4-unofficial.4eh5xitv6787h645ebv.linux.alpha.2"
+                )
+            },
+            "overlong current tag" => plan with
+            {
+                CurrentRelease = new(new string('9', 161), "synthetic-overlong")
+            },
+            "target embedded-version mismatch" => plan with
+            {
+                TargetRelease = new(
+                    GameDiscoveryControllerTests.Release().Tag,
+                    "4.5.4-unofficial.4eh5xitv6787h645ebv.linux.alpha.999"
+                )
+            },
+            "observed state/current mismatch" => plan with { ObservedState = ObservedInstallState.NotInstalled },
+            _ => throw new AssertionException("Unsupported malformed release fixture.")
+        };
+        FakePlanSession session = new()
+        {
+            Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(plan)
+        };
+        PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Update);
+
+        await controller.InspectAsync();
+
+        controller.Snapshot.State.Should().Be(PlanReviewState.Failed);
+        controller.Snapshot.Result.Should().BeNull("invalid release input cannot publish relationship labels");
+        session.DisposeCalls.Should().Be(1);
+        await controller.DisposeAsync();
     }
 
     [Test]
@@ -236,6 +405,7 @@ internal sealed class PlanReviewControllerTests
 
         PlanReviewPlan plan = controller.Snapshot.Result.Should().BeOfType<PlanReviewPlan>().Subject;
         plan.TargetRelease.Should().BeNull();
+        plan.TargetReleaseLabels.Should().BeNull();
         plan.Risks.Should().Equal(ProtocolPlanRisk.Rollback);
     }
 
@@ -1708,6 +1878,24 @@ internal sealed class PlanReviewControllerTests
             "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1"
         );
 
+    private static string ReleaseTag(string version, int alpha)
+        => $"fork-4eh5xitv6787h645ebv-linux-v{version}-alpha.{alpha}";
+
+    private static string EmbeddedVersion(string version, int alpha)
+        => $"{version}-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}";
+
+    private static ProtocolReleaseIdentity ReleaseIdentity(string version, int alpha)
+    {
+        ProtocolReleaseIdentity template = GameDiscoveryControllerTests.Release();
+        string tag = ReleaseTag(version, alpha);
+        return template with
+        {
+            Tag = tag,
+            EmbeddedVersion = EmbeddedVersion(version, alpha),
+            BuildWorkflow = $"4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/{tag}"
+        };
+    }
+
     private static InstallerReadOnlyPlanSuccess RollbackPlan(BoundInstallerRecoveryRestoreTarget target)
     {
         ProtocolReleaseIdentity current = GameDiscoveryControllerTests.Release();
@@ -1811,7 +1999,7 @@ internal sealed class PlanReviewControllerTests
         private int DisposeCount;
         private int RecoveryListCount;
 
-        public ProtocolReleaseIdentity Release { get; } = GameDiscoveryControllerTests.Release();
+        public ProtocolReleaseIdentity Release { get; init; } = GameDiscoveryControllerTests.Release();
         public VerifiedGamePresentation Game { get; init; } = new("/games/Stardew Valley", "Stardew Valley");
         public TaskCompletionSource<InstallerProtocolClientException> Fault { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<InstallerProtocolClientException>? FaultNotification { get; init; }

@@ -49,6 +49,17 @@ public sealed class ReviewedGitHubReleaseCatalogTests
     }
 
     [Test]
+    public void Parse_UnboundedCanonicalVersionComponentsOrderNumericallyDescending()
+    {
+        ForkReleaseIdentity older = Identity("2147483648.999999999999999999999999.9", 99);
+        ForkReleaseIdentity newer = Identity("9999999999999999999999999999999999999999.0.0", 1);
+        byte[] document = JsonSerializer.SerializeToUtf8Bytes(new[] { Release(older), Release(newer) });
+
+        ReviewedGitHubReleaseCatalog.Parse(document).Select(candidate => candidate.Identity.Tag)
+            .Should().Equal(newer.Tag, older.Tag);
+    }
+
+    [Test]
     public void Parse_RemoteNamesAndOrdering_DoNotAffectLocalLabelsOrOrder()
     {
         ForkReleaseIdentity older = Identity("4.5.4", 1);

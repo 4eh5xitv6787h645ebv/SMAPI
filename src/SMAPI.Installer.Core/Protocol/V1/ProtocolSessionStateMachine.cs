@@ -451,24 +451,14 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         List<ProtocolPlanRisk> risks = [];
         if (operation == InstallerOperation.Uninstall) risks.Add(ProtocolPlanRisk.Uninstall);
         if (operation == InstallerOperation.Rollback) risks.Add(ProtocolPlanRisk.Rollback);
-        if (current is not null && target is not null && IsEarlierRelease(target.Tag, current.Tag)) risks.Add(ProtocolPlanRisk.Downgrade);
+        if (
+            current is not null
+            && target is not null
+            && ForkReleaseIdentity.Compare(ForkReleaseIdentity.Parse(target.Tag), ForkReleaseIdentity.Parse(current.Tag)) < 0
+        )
+            risks.Add(ProtocolPlanRisk.Downgrade);
         if (candidates.Length > 0) risks.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
         return risks.ToArray();
-    }
-
-    private static bool IsEarlierRelease(string targetTag, string currentTag)
-    {
-        static (Version Version, int Alpha) Parse(string tag)
-        {
-            const string prefix = "fork-4eh5xitv6787h645ebv-linux-v";
-            int separator = tag.LastIndexOf("-alpha.", StringComparison.Ordinal);
-            if (!tag.StartsWith(prefix, StringComparison.Ordinal) || separator <= prefix.Length || !Version.TryParse(tag[prefix.Length..separator], out Version? version) || !int.TryParse(tag[(separator + "-alpha.".Length)..], out int alpha))
-                throw new ProtocolException("A release tag couldn't be compared for downgrade risk.");
-            return (version, alpha);
-        }
-        (Version targetVersion, int targetAlpha) = Parse(targetTag); (Version currentVersion, int currentAlpha) = Parse(currentTag);
-        int version = targetVersion.CompareTo(currentVersion);
-        return version < 0 || version == 0 && targetAlpha < currentAlpha;
     }
 
     private sealed record PackageAuthority(object Identity, IVerifiedPackageContentAuthority Authority, InstallationReleaseIdentity Release, IDisposable? Owner);

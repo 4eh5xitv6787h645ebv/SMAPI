@@ -412,6 +412,44 @@ internal sealed class ProductionInstallerWorkflowTests
     }
 
     [AvaloniaTest]
+    public async Task VerifiedReleaseRelationshipRemainsExactThroughTheProductionUpdatePreview()
+    {
+        InstallerPlanRelease current = new(
+            "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1",
+            "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1"
+        );
+        TrackingClient client = new()
+        {
+            EnablePlan = true,
+            CurrentPlanRelease = current
+        };
+        WorkflowContext context = await OpenPlanReviewAsync(client);
+
+        context.Plan.ReleaseRelationshipDetail.Should().Be("No authenticated target-release labels are available.");
+        client.PlanInspectionCalls.Should().Be(0);
+        context.Plan.SelectedOperation = context.Plan.OperationChoices.Single(choice => choice.Operation == InstallerOperation.Update);
+        context.Plan.ReleaseRelationshipDetail.Should().Be("No authenticated target-release labels are available.");
+
+        await context.Plan.InspectCommand.ExecuteAsync();
+
+        client.OpenedRelease.Should().NotBeNull();
+        ProtocolReleaseIdentity opened = client.OpenedRelease!;
+        context.Plan.TargetReleaseDetail.Should().Be($"Tag: {opened.Tag}\nVersion: {opened.EmbeddedVersion}");
+        context.Plan.ReleaseRelationshipDetail.Should()
+            .StartWith("Upgrade • Fork Linux alpha (experimental).")
+            .And.Contain("Version comparison only")
+            .And.Contain("does not establish identical package bytes or acquisition source");
+        client.PlanInspectionCalls.Should().Be(1);
+        client.ConfirmCalls.Should().Be(0);
+        client.ExecuteCalls.Should().Be(0);
+
+        await context.PlanWindow.DisposeAsync();
+        await context.DiscoveryWindow.DisposeAsync();
+        await context.ReleaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
     public async Task ExplicitRollbackSelectionReachesReadyWindowWithoutRunningUntilExplicitRun()
     {
         TrackingClient client = new() { EnableRollback = true };
@@ -619,6 +657,7 @@ internal sealed class ProductionInstallerWorkflowTests
         public int DisposeCalls { get; private set; }
         public int ConfirmCalls { get; private set; }
         public int ExecuteCalls { get; private set; }
+        public int PlanInspectionCalls { get; private set; }
         public int RecoveryListCalls { get; private set; }
         public int RollbackInspectionCalls { get; private set; }
         public string? ValidatedPath { get; private set; }
@@ -626,7 +665,8 @@ internal sealed class ProductionInstallerWorkflowTests
         public bool ThrowOnDispose { get; init; }
         public bool EnablePlan { get; init; }
         public bool EnableRollback { get; init; }
-        private ProtocolReleaseIdentity? OpenedRelease;
+        public InstallerPlanRelease? CurrentPlanRelease { get; init; }
+        public ProtocolReleaseIdentity? OpenedRelease { get; private set; }
         private InstallerRecoveryPoint? CurrentRecoveryPoint;
         public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
 
@@ -693,11 +733,12 @@ internal sealed class ProductionInstallerWorkflowTests
         {
             if (!this.EnablePlan)
                 throw new AssertionException("The release-to-discovery workflow must not inspect a plan.");
+            this.PlanInspectionCalls++;
             InstallerPlanRelease release = new(this.OpenedRelease!.Tag, this.OpenedRelease.EmbeddedVersion);
             return Task.FromResult<InstallerReadOnlyPlanResult>(new InstallerReadOnlyPlanSuccess(
                 operation,
-                ObservedInstallState.NotInstalled,
-                null,
+                this.CurrentPlanRelease is null ? ObservedInstallState.NotInstalled : ObservedInstallState.KnownUnmodified,
+                this.CurrentPlanRelease,
                 release,
                 false,
                 [],

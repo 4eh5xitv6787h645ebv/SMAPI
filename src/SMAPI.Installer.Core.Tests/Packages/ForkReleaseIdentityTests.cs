@@ -47,4 +47,40 @@ public sealed class ForkReleaseIdentityTests
         identity.Invoking(p => p.AssertMatches(p.EmbeddedVersion, "other.zip"))
             .Should().Throw<PackageSecurityException>();
     }
+
+    [TestCase("4.10.0", 1, "4.9.0", 1, 1)]
+    [TestCase("4.9.0", 1, "4.10.0", 1, -1)]
+    [TestCase("4.5.4", 10, "4.5.4", 2, 1)]
+    [TestCase("5.0.0", 1, "4.999999999999999999999999.999999999999999999", 999, 1)]
+    [TestCase("4.5.4", 2, "4.5.4", 2, 0)]
+    [TestCase("9999999999999999999999999999999999999999.0.0", 1, "2147483648.0.0", 1, 1)]
+    public void Compare_UsesCanonicalUnboundedNumericAndAlphaOrdering(
+        string leftVersion,
+        int leftAlpha,
+        string rightVersion,
+        int rightAlpha,
+        int expectedSign
+    )
+    {
+        ForkReleaseIdentity left = Identity(leftVersion, leftAlpha);
+        ForkReleaseIdentity right = Identity(rightVersion, rightAlpha);
+
+        Math.Sign(ForkReleaseIdentity.Compare(left, right)).Should().Be(expectedSign);
+        Math.Sign(ForkReleaseIdentity.Compare(right, left)).Should().Be(-expectedSign);
+    }
+
+    [Test]
+    public void Compare_IsTransitiveAcrossBaseAndAlphaBoundaries()
+    {
+        ForkReleaseIdentity first = Identity("4.9.999999999999999999999999", 10);
+        ForkReleaseIdentity second = Identity("4.10.0", 1);
+        ForkReleaseIdentity third = Identity("9999999999999999999999999999999999999999.0.0", 1);
+
+        ForkReleaseIdentity.Compare(first, second).Should().BeNegative();
+        ForkReleaseIdentity.Compare(second, third).Should().BeNegative();
+        ForkReleaseIdentity.Compare(first, third).Should().BeNegative();
+    }
+
+    private static ForkReleaseIdentity Identity(string version, int alpha)
+        => ForkReleaseIdentity.Parse($"fork-4eh5xitv6787h645ebv-linux-v{version}-alpha.{alpha}");
 }

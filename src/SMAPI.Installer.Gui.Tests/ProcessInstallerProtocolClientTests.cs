@@ -3140,6 +3140,27 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    public async Task InspectPlanAcceptsCanonicalVersionComponentsBeyondInt32()
+    {
+        ProtocolReleaseIdentity current = CreateRelease("4.5.2147483648", 9);
+        ReadOnlyPlanScript script = new(InstallerOperation.Update)
+        {
+            CurrentRelease = current,
+            RisksOverride = [ProtocolPlanRisk.Downgrade]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        InstallerReadOnlyPlanSuccess result = (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Update))
+            .Should().BeOfType<InstallerReadOnlyPlanSuccess>().Subject;
+
+        result.CurrentRelease.Should().Be(new InstallerPlanRelease(current.Tag, current.EmbeddedVersion));
+        result.Risks.Should().Equal(ProtocolPlanRisk.Downgrade);
+        process.Terminated.Should().BeFalse();
+    }
+
+    [Test]
     public async Task InspectPlanAggregatesDynamicPagesAndReturnsOnlySanitizedCandidatePresentation()
     {
         ReadOnlyPlanScript script = new(InstallerOperation.Update)
@@ -4530,6 +4551,20 @@ public sealed class ProcessInstallerProtocolClientTests
 
     private static ProtocolReleaseIdentity CreateRelease(int alpha) => CreateOpened(Session, ProtocolCommandId.CreateRandom(), alpha).Release;
 
+    private static ProtocolReleaseIdentity CreateRelease(string version, int alpha)
+    {
+        ProtocolReleaseIdentity template = CreateRelease(alpha);
+        string tag = $"fork-4eh5xitv6787h645ebv-linux-v{version}-alpha.{alpha}";
+        string embeddedVersion = $"{version}-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}";
+        return template with
+        {
+            Tag = tag,
+            EmbeddedVersion = embeddedVersion,
+            PackageAssetName = $"SMAPI-{embeddedVersion}-linux-x64-installer.zip",
+            BuildWorkflow = $"4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/{tag}"
+        };
+    }
+
     private static ProtocolPlanOperation CreateOperation(PlanOperationKind kind, string path, char? expected, char result)
     {
         string? expectedHash = expected is { } value ? new string(value, 64) : null;
@@ -4823,6 +4858,7 @@ public sealed class ProcessInstallerProtocolClientTests
         public ProtocolPlanConflict[] Conflicts { get; set; } = [];
         public ProtocolPlanCandidate[] Candidates { get; set; } = [];
         public string[] Warnings { get; set; } = [];
+        public ProtocolPlanRisk[]? RisksOverride { get; init; }
         public int PageSize { get; init; } = 128;
         public PlanHeaderFault HeaderFault { get; init; }
         public PlanPageFault PageFault { get; init; }
@@ -5047,7 +5083,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 _ => null
             };
             ObservedInstallState observed = this.ObservedState;
-            ProtocolPlanRisk[] risks = this.GetExpectedRisks(current, target);
+            ProtocolPlanRisk[] risks = this.RisksOverride ?? this.GetExpectedRisks(current, target);
             if (this.HeaderFault == PlanHeaderFault.WrongRisk)
                 risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval];
             string summary = this.Conflicts.Length == 0 ? "The plan is ready for review." : "The plan is blocked by observed conflicts.";

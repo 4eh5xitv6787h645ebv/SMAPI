@@ -119,6 +119,30 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void PlanRisks_AcceptCanonicalVersionComponentsBeyondInt32()
+    {
+        InstallationReleaseIdentity current = CreateRelease("2147483648.0.0", 9);
+        InstallationReleaseIdentity target = CreateRelease("9999999999999999999999999999999999999999.0.0", 3);
+        ProtocolSessionStateMachine machine = Ready();
+        FakePackageAuthority packageAuthority = new(target);
+        PackageOpenedEvent package = Register(machine, packageAuthority);
+
+        PlanEvent plan = machine.IssuePlan(
+            new(machine.SessionId, "/game", InstallerOperation.Update, package.PackageId, null),
+            Inspection(
+                InstallationAction.Update,
+                packageAuthority,
+                currentRelease: current,
+                expectedResultRelease: target
+            )
+        );
+
+        plan.CurrentRelease!.Tag.Should().Be(current.Tag);
+        plan.TargetRelease!.Tag.Should().Be(target.Tag);
+        plan.Risks.Should().BeEmpty("the unbounded canonical target version is newer");
+    }
+
+    [Test]
     public void CandidateSelection_IsAdditiveAcrossReplansAndRejectsDroppedOrAlteredPriorApprovals()
     {
         ProtocolSessionStateMachine machine = Ready(); FakePackageAuthority packageAuthority = new(CreateRelease()); PackageOpenedEvent package = Register(machine, packageAuthority);
@@ -655,7 +679,9 @@ internal sealed class ProtocolSessionStateMachineTests
         ModifiedFileReplacementApproval[]? approvals = null,
         PlanConflict[]? conflicts = null,
         object? repairAuthority = null,
-        PlannedOperation[]? operations = null
+        PlannedOperation[]? operations = null,
+        InstallationReleaseIdentity? currentRelease = null,
+        InstallationReleaseIdentity? expectedResultRelease = null
     )
     {
         PlannedOperation operation = action switch
@@ -667,12 +693,42 @@ internal sealed class ProtocolSessionStateMachineTests
         InstallationPlan plan = new(action, operations ?? [operation], conflicts ?? [], ObservedInstallationState.KnownModified, new RecoveryCapacityState(0, 64));
         Sha256Digest planSha = Sha256Digest.Hash(System.Text.Encoding.UTF8.GetBytes(plan.ToCanonicalJson()));
         BoundInstallationPlan binding = new(action, Root, 7, planSha, package?.ManifestSha256, null, null, recovery?.SnapshotSha256, null, recovery?.GenerationId, recovery?.AuthorizedHeadPointerSha256, package, recovery);
-        return new(plan, binding, package, recovery, repairAuthority ?? new object(), action == InstallationAction.Install ? null : CreateRelease(), action is InstallationAction.Uninstall or InstallationAction.Backup ? null : CreateRelease(), ObservedInstallationState.KnownModified, new RecoveryCapacityState(0, 64), candidates, approvals);
+        return new(
+            plan,
+            binding,
+            package,
+            recovery,
+            repairAuthority ?? new object(),
+            currentRelease ?? (action == InstallationAction.Install ? null : CreateRelease()),
+            expectedResultRelease ?? (action is InstallationAction.Uninstall or InstallationAction.Backup ? null : CreateRelease()),
+            ObservedInstallationState.KnownModified,
+            new RecoveryCapacityState(0, 64),
+            candidates,
+            approvals
+        );
     }
 
     private static RecoveryPrunePlan Prune(Guid[] catalog, int retain, Guid[] retained, Guid[] removed, Guid[]? cleanup = null, bool hasAuxiliaryCleanup = false) => new(Root, 7, Sha256Digest.Parse(HashA), retain, catalog, retained, removed, cleanup ?? removed, [], null, hasAuxiliaryCleanup);
     private static FakeRecoveryAuthority Recovery(Guid id, string head, GameRootIdentity root) => new(id, InstallationAction.Backup, root, Sha256Digest.Parse(head), CreateRelease());
     private static InstallationReleaseIdentity CreateRelease() => CreateReleaseWithPackage(Sha256Digest.Parse(HashA), 123);
+    private static InstallationReleaseIdentity CreateRelease(string version, int alpha)
+    {
+        string tag = $"fork-4eh5xitv6787h645ebv-linux-v{version}-alpha.{alpha}";
+        string embeddedVersion = $"{version}-unofficial.4eh5xitv6787h645ebv.linux.alpha.{alpha}";
+        return new(
+            "https://github.com/4eh5xitv6787h645ebv/SMAPI",
+            tag,
+            embeddedVersion,
+            $"SMAPI-{embeddedVersion}-linux-x64-installer.zip",
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+            Sha256Digest.Parse(HashA),
+            123,
+            $"4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/{tag}",
+            "Release",
+            "linux-x64"
+        );
+    }
     private static InstallationReleaseIdentity CreateReleaseWithPackage(Sha256Digest packageSha256, long packageSize) => new("https://github.com/4eh5xitv6787h645ebv/SMAPI", "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2", "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", packageSha256, packageSize, "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "Release", "linux-x64");
 
     private sealed class FakePackageAuthority : IVerifiedPackageContentAuthority, IDisposable

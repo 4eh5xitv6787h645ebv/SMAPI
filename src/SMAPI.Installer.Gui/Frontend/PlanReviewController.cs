@@ -27,6 +27,19 @@ internal enum PlanReviewState
 
 internal sealed record PlanReviewRelease(string Tag, string EmbeddedVersion);
 
+/// <summary>A comparison derived only from receipt-authenticated current and target release identities.</summary>
+internal enum PlanReviewReleaseRelationship
+{
+    Current,
+    Upgrade,
+    Downgrade
+}
+
+/// <summary>Bounded labels for a target release whose plan semantics have already been validated.</summary>
+internal sealed record PlanReviewReleaseLabels(
+    PlanReviewReleaseRelationship? Relationship
+);
+
 internal enum PlanReviewRecoveryState
 {
     NotLoaded,
@@ -98,6 +111,7 @@ internal sealed record PlanReviewPlan(
 ) : PlanReviewResult
 {
     public IReadOnlyList<PlanReviewCandidate> Candidates { get; init; } = [];
+    public PlanReviewReleaseLabels? TargetReleaseLabels { get; init; }
 }
 
 internal sealed record PlanReviewRejection(
@@ -1499,6 +1513,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         if (!detailedCounts.SequenceEqual(aggregateCounts))
             throw new InvalidOperationException("The plan candidate detail did not match its aggregate summary.");
 
+        PlanReviewReleaseLabels? targetLabels = ProjectTargetReleaseLabels(current, target, risks);
         PlanReviewPlan result = new(
             plan.Operation,
             plan.ObservedState,
@@ -1514,7 +1529,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
             plan.AdditionalNoticeCount
         )
         {
-            Candidates = Array.AsReadOnly(detailedCandidates)
+            Candidates = Array.AsReadOnly(detailedCandidates),
+            TargetReleaseLabels = targetLabels
         };
         return new(result, authorities, plan.Confirmation);
     }
@@ -1719,7 +1735,11 @@ internal sealed class PlanReviewController : IAsyncDisposable
             expected.Add(ProtocolPlanRisk.Uninstall);
         if (operation == InstallerOperation.Rollback)
             expected.Add(ProtocolPlanRisk.Rollback);
-        if (current is not null && target is not null && IsEarlierRelease(target.Tag, current.Tag))
+        if (
+            current is not null
+            && target is not null
+            && ForkReleaseIdentity.Compare(ForkReleaseIdentity.Parse(target.Tag), ForkReleaseIdentity.Parse(current.Tag)) < 0
+        )
             expected.Add(ProtocolPlanRisk.Downgrade);
         if (candidateCount > 0)
             expected.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
@@ -1727,14 +1747,24 @@ internal sealed class PlanReviewController : IAsyncDisposable
             throw new InvalidOperationException("The plan risk semantics were inconsistent.");
     }
 
-    private static bool IsEarlierRelease(string candidateTag, string currentTag)
+    private static PlanReviewReleaseLabels? ProjectTargetReleaseLabels(
+        PlanReviewRelease? current,
+        PlanReviewRelease? target,
+        IReadOnlyList<ProtocolPlanRisk> validatedRisks
+    )
     {
-        ForkReleaseIdentity candidate = ForkReleaseIdentity.Parse(candidateTag);
-        ForkReleaseIdentity current = ForkReleaseIdentity.Parse(currentTag);
-        Version candidateVersion = Version.Parse(candidate.Version);
-        Version currentVersion = Version.Parse(current.Version);
-        int comparison = candidateVersion.CompareTo(currentVersion);
-        return comparison < 0 || comparison == 0 && candidate.AlphaSequence < current.AlphaSequence;
+        if (target is null)
+            return null;
+
+        _ = ForkReleaseIdentity.Parse(target.Tag);
+        if (current is null)
+            return new(null);
+
+        if (target == current)
+            return new(PlanReviewReleaseRelationship.Current);
+        return new(validatedRisks.Contains(ProtocolPlanRisk.Downgrade)
+            ? PlanReviewReleaseRelationship.Downgrade
+            : PlanReviewReleaseRelationship.Upgrade);
     }
 
     private static bool IsValidCandidatePair(

@@ -166,22 +166,8 @@ public static class ReviewedGitHubReleaseCatalog
             if (right is null)
                 return -1;
 
-            string[] leftVersion = left.Identity.Version.Split('.');
-            string[] rightVersion = right.Identity.Version.Split('.');
-            for (int index = 0; index < 3; index++)
-            {
-                int numeric = CompareCanonicalNumberDescending(leftVersion[index], rightVersion[index]);
-                if (numeric != 0)
-                    return numeric;
-            }
-            int alpha = right.Identity.AlphaSequence.CompareTo(left.Identity.AlphaSequence);
-            return alpha != 0 ? alpha : StringComparer.Ordinal.Compare(left.Identity.Tag, right.Identity.Tag);
-        }
-
-        private static int CompareCanonicalNumberDescending(string left, string right)
-        {
-            int length = right.Length.CompareTo(left.Length);
-            return length != 0 ? length : StringComparer.Ordinal.Compare(right, left);
+            int release = ForkReleaseIdentity.Compare(right.Identity, left.Identity);
+            return release != 0 ? release : StringComparer.Ordinal.Compare(left.Identity.Tag, right.Identity.Tag);
         }
     }
 }
