@@ -697,6 +697,247 @@ run_launcher_signal_smoke() {
     assert_no_runtime_leak "$state_root" "$output_path"
 }
 
+run_prelaunch_signal_smoke() {
+    local first_signal="$1"
+    local expected_status="$2"
+    local second_signal="$3"
+    local third_signal="$4"
+    local case_name="prelaunch-${first_signal,,}-${second_signal,,}-${third_signal,,}"
+    local state_root output_path instrumented_root instrumented_launcher child_marker status
+
+    state_root="$(make_state_root "$case_name")"
+    output_path="$test_root/$case_name.output"
+    instrumented_root="$state_root/instrumented-package"
+    instrumented_launcher="$instrumented_root/install on Linux (graphical).sh"
+    child_marker="$state_root/prelaunch-child-started"
+    mkdir -p "$instrumented_root/internal/linux"
+
+    # Inject synchronized signals immediately after private bundle creation. Bash runs each trap
+    # after its kill command, so this deterministically proves first-signal retention and the
+    # normal-path pre-launch safe point without adding a production-only test hook.
+    sed "/^chmod 700 -- \"\\\$bundle_root\"$/a\\
+kill -s $first_signal -- \"\\\$BASHPID\"\\
+kill -s $second_signal -- \"\\\$BASHPID\"\\
+kill -s $third_signal -- \"\\\$BASHPID\"" \
+        "$launcher" > "$instrumented_launcher"
+    chmod 755 "$instrumented_launcher"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'set -euo pipefail' \
+        ': > "$SMAPI_GUI_PRELAUNCH_CHILD_MARKER"' \
+        'exit 99' \
+        > "$instrumented_root/internal/linux/SMAPI.Installer.Gui"
+    chmod 755 "$instrumented_root/internal/linux/SMAPI.Installer.Gui"
+
+    set +e
+    (
+        cd "$state_root/work"
+        env -i \
+            PATH="$guarded_path" \
+            HOME="$state_root/home" \
+            XDG_CACHE_HOME="$state_root/cache" \
+            XDG_CONFIG_HOME="$state_root/config" \
+            XDG_DATA_HOME="$state_root/data" \
+            XDG_RUNTIME_DIR="$state_root/runtime" \
+            TMPDIR="$state_root/tmp" \
+            SMAPI_GUI_PRELAUNCH_CHILD_MARKER="$child_marker" \
+            timeout --signal=TERM --kill-after=5s 10s "$instrumented_launcher" --demo
+    ) > "$output_path" 2>&1
+    status=$?
+    set -e
+
+    if [[ "$status" -ne "$expected_status" ]]; then
+        echo "The graphical launcher did not retain the first pre-launch signal ($first_signal, exit $status instead of $expected_status); raw output is withheld from CI logs." >&2
+        exit 1
+    fi
+    if [[ -e "$child_marker" ]]; then
+        echo "The graphical launcher started its apphost after a pre-launch signal." >&2
+        exit 1
+    fi
+    assert_no_runtime_leak "$state_root" "$output_path"
+}
+
+run_instrumented_signal_boundary_smoke() {
+    local scenario="$1"
+    local case_name="signal-boundary-$scenario"
+    local state_root output_path instrumented_launcher status captured_status
+    local signal_retained_marker job_query_marker wait_entry_marker wait_observed_marker
+    local wait_returned_marker stale_job_query_marker captured_status_marker
+
+    state_root="$(make_state_root "$case_name")"
+    output_path="$test_root/$case_name.output"
+    instrumented_launcher="$package_root/install on Linux (graphical) - $scenario test.sh"
+    signal_retained_marker="$state_root/signal-retained"
+    job_query_marker="$state_root/job-query-boundary"
+    wait_entry_marker="$state_root/wait-entry"
+    wait_observed_marker="$state_root/wait-observed"
+    wait_returned_marker="$state_root/wait-returned"
+    stale_job_query_marker="$state_root/stale-job-query"
+    captured_status_marker="$state_root/captured-status"
+    case "$scenario" in
+        job-query)
+            # Deliver TERM from the process substitution boundary immediately before the real
+            # running/stopped/proc queries. The following normal-path settlement must observe it.
+            sed '
+                /^    requested_exit_status="\$2"$/a\
+    : > "$SMAPI_GUI_SIGNAL_RETAINED_MARKER"
+                0,/^    child_appears_live=false$/ {
+                    /^    child_appears_live=false$/a\
+    : > "$SMAPI_GUI_JOB_QUERY_BOUNDARY_MARKER"\
+    while IFS= read -r _; do :; done < <(kill -TERM -- "$$")
+                }
+            ' \
+                "$launcher" > "$instrumented_launcher"
+            ;;
+        wait)
+            # Force the retained live child through the real wait statement, then deliver TERM
+            # only after /proc proves Bash is blocked there. Post-wait settlement must reap it.
+            sed '
+                /^    requested_exit_status="\$2"$/a\
+    : > "$SMAPI_GUI_SIGNAL_RETAINED_MARKER"
+                /^status=0$/,/^done$/ {
+                s/^    if is_running_child_job || is_stopped_child_job || is_retained_child_process_live; then$/    if false; then/
+                s/^    if is_active_child_job; then$/    if false; then/
+                /^    wait "\$child_pid" 2>\/dev\/null$/i\
+    : > "$SMAPI_GUI_WAIT_ENTRY_MARKER"\
+    (\
+        for _ in {1..300}; do\
+            wait_channel=""\
+            IFS= read -r wait_channel < "/proc/$$/wchan" 2>/dev/null || true\
+            if [[ "$wait_channel" == *wait* ]]; then\
+                : > "$SMAPI_GUI_WAIT_OBSERVED_MARKER"\
+                kill -TERM -- "$$"\
+                exit 0\
+            fi\
+            sleep 0.01 || true\
+        done\
+        exit 98\
+    ) &
+                }
+            ' "$launcher" > "$instrumented_launcher"
+            ;;
+        completed-status)
+            # Terminate the retained child without signalling the launcher, force the real normal
+            # wait path, and make any post-wait jobs-bookkeeping query observable and stale.
+            sed '
+                /^is_active_child_job() {$/a\
+    if [[ -e "$SMAPI_GUI_WAIT_RETURNED_MARKER" ]]; then\
+        : > "$SMAPI_GUI_STALE_JOB_QUERY_MARKER"\
+        return 0\
+    fi
+                /^    requested_exit_status="\$2"$/a\
+    : > "$SMAPI_GUI_SIGNAL_RETAINED_MARKER"
+                /^status=0$/i\
+kill -TERM -- "$child_pid"
+                /^status=0$/,/^done$/ {
+                    s/^    if is_active_child_job; then$/    if false; then/
+                    /^    wait "\$child_pid" 2>\/dev\/null$/i\
+    : > "$SMAPI_GUI_WAIT_ENTRY_MARKER"
+                    /^    status=\$?$/a\
+    : > "$SMAPI_GUI_WAIT_RETURNED_MARKER"\
+    printf "%s\\n" "$status" > "$SMAPI_GUI_CAPTURED_STATUS_MARKER"
+                }
+            ' "$launcher" > "$instrumented_launcher"
+            ;;
+        *)
+            echo "Unknown instrumented signal-boundary scenario: $scenario" >&2
+            exit 2
+            ;;
+    esac
+    chmod 755 "$instrumented_launcher"
+    bash -n "$instrumented_launcher"
+    case "$scenario" in
+        job-query)
+            [[ "$(grep -Fc 'SMAPI_GUI_JOB_QUERY_BOUNDARY_MARKER' "$instrumented_launcher")" -eq 1 ]] || {
+                echo "The job-query boundary test did not instrument exactly one production site." >&2
+                exit 1
+            }
+            ;;
+        wait)
+            [[ "$(grep -Fc 'SMAPI_GUI_WAIT_ENTRY_MARKER' "$instrumented_launcher")" -eq 1 ]] || {
+                echo "The wait boundary test did not instrument exactly one production wait site." >&2
+                exit 1
+            }
+            ;;
+        completed-status)
+            [[ "$(grep -Fc 'SMAPI_GUI_CAPTURED_STATUS_MARKER' "$instrumented_launcher")" -eq 1 ]] || {
+                echo "The completed-status test did not instrument exactly one captured wait status." >&2
+                exit 1
+            }
+            ;;
+    esac
+
+    set +e
+    (
+        cd "$state_root/work"
+        env -i \
+            PATH="$guarded_path" \
+            HOME="$state_root/home" \
+            XDG_CACHE_HOME="$state_root/cache" \
+            XDG_CONFIG_HOME="$state_root/config" \
+            XDG_DATA_HOME="$state_root/data" \
+            XDG_RUNTIME_DIR="$state_root/runtime" \
+            TMPDIR="$state_root/tmp" \
+            SMAPI_GUI_DOTNET_MARKER="$dotnet_marker" \
+            SMAPI_GUI_SIGNAL_RETAINED_MARKER="$signal_retained_marker" \
+            SMAPI_GUI_JOB_QUERY_BOUNDARY_MARKER="$job_query_marker" \
+            SMAPI_GUI_WAIT_ENTRY_MARKER="$wait_entry_marker" \
+            SMAPI_GUI_WAIT_OBSERVED_MARKER="$wait_observed_marker" \
+            SMAPI_GUI_WAIT_RETURNED_MARKER="$wait_returned_marker" \
+            SMAPI_GUI_STALE_JOB_QUERY_MARKER="$stale_job_query_marker" \
+            SMAPI_GUI_CAPTURED_STATUS_MARKER="$captured_status_marker" \
+            DOTNET_ROOT="$state_root/no-system-dotnet" \
+            DOTNET_ROOT_X64="$state_root/no-system-dotnet" \
+            DOTNET_MULTILEVEL_LOOKUP=0 \
+            DOTNET_EnableDiagnostics=0 \
+            DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+            DOTNET_NOLOGO=1 \
+            XDG_SESSION_TYPE=x11 \
+            timeout --signal=TERM --kill-after=5s 20s \
+                xvfb-run -a /usr/bin/env \
+                    --default-signal=HUP \
+                    --default-signal=INT \
+                    --default-signal=TERM \
+                    "$instrumented_launcher" --demo
+    ) > "$output_path" 2>&1
+    status=$?
+    set -e
+
+    if [[ "$status" -ne 143 ]]; then
+        echo "The graphical launcher did not settle TERM at its $scenario boundary (exit $status); raw output is withheld from CI logs." >&2
+        exit 1
+    fi
+    case "$scenario" in
+        job-query)
+            if [[ ! -f "$job_query_marker" || ! -f "$signal_retained_marker" ]]; then
+                echo "The job-query boundary test did not observe both its exact boundary and retained TERM." >&2
+                exit 1
+            fi
+            ;;
+        wait)
+            if [[ ! -f "$wait_entry_marker" || ! -f "$wait_observed_marker" || ! -f "$signal_retained_marker" ]]; then
+                echo "The wait boundary test did not prove that TERM interrupted the exact blocking wait." >&2
+                exit 1
+            fi
+            ;;
+        completed-status)
+            captured_status=""
+            if [[ -f "$captured_status_marker" ]]; then
+                IFS= read -r captured_status < "$captured_status_marker" || [[ -n "$captured_status" ]]
+            fi
+            if [[ ! -f "$wait_entry_marker" || ! -f "$wait_returned_marker" || "$captured_status" != 143 ]]; then
+                echo "The completed-status test did not preserve the exact status returned by wait." >&2
+                exit 1
+            fi
+            if [[ -e "$signal_retained_marker" || -e "$stale_job_query_marker" ]]; then
+                echo "The completed-status path either retained an unexpected launcher signal or consulted stale job bookkeeping." >&2
+                exit 1
+            fi
+            ;;
+    esac
+    assert_no_runtime_leak "$state_root" "$output_path"
+}
+
 run_identity_failure_smoke() {
     local scenario="$1"
     local fail_after expected_status case_name launch_argument read_delay expect_failure_marker stop_before_capture
@@ -1049,11 +1290,27 @@ run_identity_failure_smoke() {
 # package download, sibling-backend launch, discovery, logging, and game mutation require user action.
 run_window_smoke demo false --demo
 run_window_smoke production true
-run_launcher_signal_smoke HUP 129 false
-run_launcher_signal_smoke INT 130 false
-run_launcher_signal_smoke TERM 143 false
-run_launcher_signal_smoke TERM 143 true
-run_launcher_signal_smoke TERM 143 true true
+signal_stress_repetitions="${SMAPI_GUI_SIGNAL_STRESS_REPETITIONS:-1}"
+if [[ ! "$signal_stress_repetitions" =~ ^[1-9][0-9]*$ ]] || (( signal_stress_repetitions > 20 )); then
+    echo "SMAPI_GUI_SIGNAL_STRESS_REPETITIONS must be an integer from 1 through 20." >&2
+    exit 1
+fi
+for ((signal_stress_iteration = 1; signal_stress_iteration <= signal_stress_repetitions; signal_stress_iteration++)); do
+    run_launcher_signal_smoke HUP 129 false
+    run_launcher_signal_smoke INT 130 false
+    run_launcher_signal_smoke TERM 143 false
+    run_launcher_signal_smoke TERM 143 true
+    run_launcher_signal_smoke TERM 143 true true
+done
+run_prelaunch_signal_smoke HUP 129 TERM INT
+run_prelaunch_signal_smoke HUP 129 INT TERM
+run_prelaunch_signal_smoke INT 130 HUP TERM
+run_prelaunch_signal_smoke INT 130 TERM HUP
+run_prelaunch_signal_smoke TERM 143 HUP INT
+run_prelaunch_signal_smoke TERM 143 INT HUP
+run_instrumented_signal_boundary_smoke job-query
+run_instrumented_signal_boundary_smoke wait
+run_instrumented_signal_boundary_smoke completed-status
 run_identity_failure_smoke initial
 run_identity_failure_smoke initial-stopped
 run_identity_failure_smoke post-capture

@@ -26,6 +26,19 @@ if [[ "$launcher_source_text" != *"$settled_diagnostic_guard"* ]] \
     exit 1
 fi
 
+if [[ "$launcher_source_text" != *$'begin_signal_settlement() {\n    [[ -n "$requested_signal_name" && "$signal_forwarded" == false ]] || return 0\n    # Enter settlement on the normal execution path. Mask all later handled signals before\n    # checking or forwarding the exact child identity so traps can\'t interrupt this sequence.\n    trap \'\' HUP INT TERM'* ]] \
+    || [[ "$launcher_source_text" != *$'record_signal() {\n    if (( handled_signal_count > 0 )); then\n        return 0\n    fi\n    handled_signal_count=1\n    requested_signal_name="$1"\n    requested_exit_status="$2"'* ]]; then
+    echo "The launcher traps must retain only the first signal and enter masked settlement on the normal execution path." >&2
+    exit 1
+fi
+
+if [[ "$launcher_source_text" != *$'abort_before_launch_if_requested() {\n    [[ -n "$requested_exit_status" ]] || return 0\n    # A signal can arrive after traps are installed but before the apphost is a retainable child.\n    # Settle that request on the normal path without creating or launching any further state.\n    trap \'\' HUP INT TERM\n    exit "$requested_exit_status"'* ]] \
+    || [[ "$launcher_source_text" != *$'trap \'record_signal TERM 143\' TERM\n\nabort_before_launch_if_requested\nbundle_root='* ]] \
+    || [[ "$launcher_source_text" != *$'chmod 700 -- "$bundle_root"\nabort_before_launch_if_requested\n\n/usr/bin/env'* ]]; then
+    echo "The launcher must settle a retained signal before creating state and again before launching its child." >&2
+    exit 1
+fi
+
 run_expect_status() {
     local expected_status="$1"
     local expected_text="$2"
