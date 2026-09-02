@@ -79,6 +79,9 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
 
         prerequisites.Text.Should().Contain("Back up your saves and Mods")
             .And.Contain("verify all six public release files before extracting")
+            .And.Contain("extract the ZIP into a new directory")
+            .And.Contain("open a terminal in that extracted installer directory")
+            .And.Contain("every relative command below assumes it is the current directory")
             .And.Contain("normal desktop user")
             .And.Contain("never use root or sudo");
         interactive.Text.Should().Be("bash \"install on Linux.sh\"");

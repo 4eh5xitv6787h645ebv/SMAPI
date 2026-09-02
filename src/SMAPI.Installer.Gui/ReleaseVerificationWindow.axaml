@@ -301,7 +301,7 @@
                 TextWrapping="Wrap" />
             <TextBlock
                 x:Name="ManualPrerequisitesText"
-                Text="Close Stardew Valley. Back up your saves and Mods. Download and verify all six public release files before extracting the installer ZIP. Run every command as your normal desktop user; never use root or sudo."
+                Text="Close Stardew Valley. Back up your saves and Mods. Download and verify all six public release files before extracting the installer ZIP. After verification, extract the ZIP into a new directory and open a terminal in that extracted installer directory; every relative command below assumes it is the current directory. Run every command as your normal desktop user; never use root or sudo."
                 TextWrapping="Wrap" />
           </StackPanel>
 
