@@ -177,31 +177,31 @@ Scope constraints apply throughout:
 
 ### Architecture and behavior
 
-- [ ] Build a simple, maintainable Linux desktop GUI around existing installer behavior without duplicating installation rules.
+- [x] Build a simple, maintainable Linux desktop GUI around existing installer behavior without duplicating installation rules ([shared-Core production composition and operation guide](linux-gui-shell.md); [final integration PR #250](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250)).
 - [x] Support bounded read-only game-folder detection through the shared installer core ([merged PR #202](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202)).
 - [x] Support user game-folder selection and backend-authoritative manual validation without duplicating installer rules ([exact-head review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/202#issuecomment-5491551755)).
-- [ ] Support install.
-- [ ] Support update.
-- [ ] Support repair.
-- [ ] Support uninstall.
-- [ ] Support backup.
-- [ ] Support rollback.
-- [ ] Support release selection.
-- [ ] Show download progress.
-- [ ] Verify package checksums before installation.
-- [ ] Show understandable errors.
+- [x] Support install through the production GUI and shared transactional backend ([operation guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Support update through the production GUI and shared transactional backend ([operation guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Support repair through the production GUI and shared transactional backend ([operation guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Support uninstall through the production GUI and shared transactional backend ([operation guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Support backup through the production GUI and shared transactional backend ([operation guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Support rollback through authenticated history inspection, reviewed plan confirmation, and shared backend execution ([final exact-head review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Support reviewed public-release and authenticated local-package selection ([final integration PR #250](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250)).
+- [x] Show bounded aggregate download progress ([release workflow guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Verify package checksums before installation and keep integrity distinct from provenance ([release workflow guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Show understandable typed errors with safe next steps ([troubleshooting guide](linux-gui-shell.md#private-diagnostics-and-troubleshooting)).
 - [x] Write a detailed bounded local log with a privacy-restricted viewer on every production screen ([merged PR #244](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/244); [exact-head security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/244#issuecomment-5509002769)).
-- [ ] Never require root for a normal user installation.
-- [ ] Protect unrelated game files.
-- [ ] Detect modified or unknown existing SMAPI files before replacement.
-- [ ] Make destructive actions explicit and recoverable.
-- [ ] Keep the non-GUI/manual installation path documented.
+- [x] Never require root for a normal user installation and refuse effective UID 0 before discovery, network, logging, or mutation ([root-refusal implementation and tests in PR #250](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250)).
+- [x] Protect unrelated game files through receipt-owned transactional planning and lifecycle preservation assertions ([lifecycle test at the exact reviewed commit](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/052699e8ccba0d13f9d4f02e0bb199aa04cec605/build/scripts/test-linux-installer-lifecycle.sh)).
+- [x] Detect modified or unknown existing SMAPI files before replacement and require explicit reviewed approval ([production operation guide](linux-gui-shell.md#use-the-production-workflow)).
+- [x] Make destructive actions explicit and recoverable with Cancel-focused confirmation, durable recovery, and rollback ([final exact-head review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Keep the non-GUI/manual installation path documented ([terminal fallback](linux-gui-shell.md#private-diagnostics-and-troubleshooting)).
 
 ### Desktop UX and accessibility
 
-- [ ] Support complete keyboard-only operation.
-- [ ] Provide readable focus indication.
-- [ ] Support practical screen scaling.
+- [x] Support complete keyboard-only operation across production operation and rollback workflows ([930-test exact-head GUI suite](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Provide readable focus indication and deterministic safe default focus ([930-test exact-head GUI suite](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Support practical 420-DIP layouts and 100%, 125%, 150%, and 200% scaling models without hidden actions or horizontal page scrolling ([GUI shell validation](linux-gui-shell.md#build-and-run-on-linux)).
 - [ ] Verify practical X11 behavior.
 - [ ] Verify practical Wayland behavior.
 
@@ -725,28 +725,28 @@ This Core slice imports but does not authenticate local bytes by itself: trust i
 - [x] Pass 926/926 complete GUI tests three consecutive times, 30/30 focused cancellation/disposal race repetitions, Release warnings-as-errors, changed-file formatting, diff checks, and independent architecture, security/privacy, UX/accessibility, testing, and final test-gate reviews after every actionable finding was fixed ([review and validation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/249#issuecomment-5512579309)).
 - [x] Pass exact-head deterministic performance and Linux package qualification workflows, merge PR #249 into `develop` at [`3f446765`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/3f44676584c80768cd698c2f8565e53f2d892f38), and delete `phase4/local-package-gui` locally and on origin ([performance `33652819167`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33652819167); [Linux qualification `33652819292`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33652819292)).
 
-Local-package verification is now production-composed, but the next public GUI release, clean-environment lifecycle qualification, trusted-workload smoke test, and authentic screenshot matrix remain unchecked.
+Local-package verification is now production-composed. The exact reviewed merge candidate at `052699e8ccba0d13f9d4f02e0bb199aa04cec605` subsequently passed the complete authorized trusted-workload gate: the installed `StardewModdingAPI-net6.dll` matched its `install.dat` package entry byte-for-byte, the private workload identity matched the Phase 1 baseline, 132 code mods and 176 content packs loaded with one expected skip, 180.004 seconds of steady gameplay and both transitions completed with zero invalid/location/position ticks, the process exited normally, and all immutable fixture-source manifests remained unchanged ([sanitized evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5514688251)). The public GUI release, clean public-artifact lifecycle qualification, and authentic screenshot matrix remain unchecked until their own evidence exists.
 
 ### Phase 4 tests, reviews, packaging, and integration
 
-- [ ] Add GUI unit tests.
-- [ ] Add GUI integration tests.
-- [ ] Add failure-path tests.
-- [ ] Add interrupted-download tests.
-- [ ] Add corrupted-package tests.
+- [x] Add GUI unit tests ([930/930 exact-head GUI suite](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Add GUI integration tests covering the production frontend, process client, and shared backend workflows ([930/930 exact-head GUI suite](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Add typed failure-path, construction, activation, selection, execution, recovery, and cleanup tests ([final exact-head review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Add interrupted-download cancellation and incomplete-file cleanup tests ([final exact-head review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Add corrupted-package, checksum, metadata, and provenance rejection tests ([final exact-head review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
 - [x] Add rollback tests ([controller, presentation, accessibility, execution, and production-workflow coverage in merged PRs #234–#235](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/235)).
-- [ ] Add accessibility-focused tests.
+- [x] Add accessibility-focused keyboard, focus, automation-name/state, contrast, scaling, narrow-layout, and live-status tests ([930/930 exact-head GUI suite](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
 - [x] Obtain [independent installer architecture review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453931128).
 - [x] Obtain [independent security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890576).
 - [x] Obtain [independent UX/accessibility review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
 - [x] Obtain [independent Phase 4 testing review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175#issuecomment-5453890879).
-- [ ] Obtain independent Phase 4 final-diff review.
-- [ ] Address every actionable Phase 4 review finding.
-- [ ] Package and document the GUI through the release workflow only after independent security/privacy and UX/accessibility findings are addressed.
-- [ ] Document GUI installation, update, repair, uninstall, backup, rollback, logs, errors, and troubleshooting.
+- [x] Obtain independent Phase 4 final-diff architecture, security/privacy, and testing/release reviews ([exact-head PASS record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Address every actionable Phase 4 review finding and obtain clean exact-head re-review ([exact-head PASS record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
+- [x] Package and document the GUI through the exact-commit release workflow after independent findings were addressed ([successful merge-candidate workflow](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33663912751)).
+- [x] Document GUI installation, update, repair, uninstall, backup, rollback, logs, errors, and troubleshooting ([production GUI guide](linux-gui-shell.md)).
 - [x] Open focused [Phase 4 fork pull request #175](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/175).
-- [ ] Pass required CI and repository checks.
-- [ ] Merge the Phase 4 pull request into `develop` and close it.
+- [x] Pass required CI and repository checks on the exact reviewed final-integration head ([Linux qualification](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33663197989); [deterministic performance gates](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33663198004)).
+- [x] Merge and close final Phase 4 integration/release-preparation [PR #250](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250) into `develop` at [`052699e8`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/052699e8ccba0d13f9d4f02e0bb199aa04cec605).
 - [ ] Publish a publicly downloadable GUI package tied to an exact reviewed commit.
 - [ ] Verify the public GUI package from a clean isolated environment.
 - [ ] Verify `develop` equals `origin/develop` after the phase.
