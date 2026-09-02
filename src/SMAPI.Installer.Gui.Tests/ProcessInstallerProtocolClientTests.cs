@@ -852,6 +852,126 @@ public sealed class ProcessInstallerProtocolClientTests
         process.Requests.OfType<CancelPruneRequest>().Should().BeEmpty();
     }
 
+    [TestCase(ProtocolPruneOutcome.FailedBeforePublication)]
+    [TestCase(ProtocolPruneOutcome.CancelledBeforePublication)]
+    [TestCase(ProtocolPruneOutcome.Interrupted)]
+    [TestCase(ProtocolPruneOutcome.CancelledWithCleanupPending)]
+    [TestCase(ProtocolPruneOutcome.FailedWithCleanupPending)]
+    [TestCase(ProtocolPruneOutcome.UnexpectedCoreFailure)]
+    [TestCase(ProtocolPruneOutcome.CancelledAfterApply)]
+    [TestCase(ProtocolPruneOutcome.FailedAfterApply)]
+    public async Task RecoveryPruneAcceptsEveryValidNonSuccessTypedTerminal(ProtocolPruneOutcome outcome)
+    {
+        RecoveryPruneScript script = new();
+        ScriptedProcess process = new(request => request switch
+        {
+            ExecutePruneRequest => null,
+            CancelPruneRequest cancel => Serialize(new CommandAcknowledgedEvent(
+                Session,
+                ProtocolAcknowledgementKind.PruneCancellationRequested,
+                null,
+                script.Plan!.PrunePlanId
+            )
+            {
+                CommandId = cancel.CommandId
+            }),
+            _ => script.Respond(request)
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedRecoveryPruneAuthority authority = await PrepareConfirmedPruneAsync(client, script);
+        InstallerRecoveryPruneOperation operation = await client.ExecuteRecoveryPruneAsync(authority);
+        if (outcome is ProtocolPruneOutcome.CancelledBeforePublication or ProtocolPruneOutcome.CancelledWithCleanupPending or ProtocolPruneOutcome.CancelledAfterApply)
+            await operation.RequestCancellationAsync();
+        ExecutePruneRequest execute = process.Requests.OfType<ExecutePruneRequest>().Single();
+        process.Publish(Serialize(CreatePruneTerminal(script, execute.CommandId, outcome)));
+
+        InstallerRecoveryPruneTerminalResult result = (await operation.Completion)
+            .Should().BeOfType<InstallerRecoveryPruneTerminalResult>().Subject;
+
+        result.Outcome.Should().Be(outcome);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.ConfirmedClosed);
+        process.Requests.OfType<CancelPruneRequest>().Should().HaveCount(
+            outcome is ProtocolPruneOutcome.CancelledBeforePublication or ProtocolPruneOutcome.CancelledWithCleanupPending or ProtocolPruneOutcome.CancelledAfterApply ? 1 : 0
+        );
+    }
+
+    [Test]
+    public async Task RecoveryPruneAcceptsAndExecutesAuxiliaryOnlyCleanupPlan()
+    {
+        RecoveryPruneScript script = new() { AuxiliaryOnly = true };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+        InstallerRecoveryCatalogSuccess catalog = (InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath);
+
+        InstallerRecoveryPrunePlanSuccess plan = (InstallerRecoveryPrunePlanSuccess)await client.InspectRecoveryPruneAsync(
+            RecoveryGamePath,
+            catalog.RecoveryPoints[^1]
+        );
+
+        plan.RetainNewest.Should().Be(3);
+        plan.RemovedCount.Should().Be(0);
+        plan.CleanupGenerationCount.Should().Be(0);
+        plan.AuxiliaryCleanupPlanned.Should().BeTrue();
+        InstallerConfirmedRecoveryPruneAuthority authority = await client.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+        InstallerRecoveryPruneTerminalResult result = (await (await client.ExecuteRecoveryPruneAsync(authority)).Completion)
+            .Should().BeOfType<InstallerRecoveryPruneTerminalResult>().Subject;
+        result.Outcome.Should().Be(ProtocolPruneOutcome.Succeeded);
+        result.Summary.Should().Be(new InstallerRecoveryPruneSummary(0, 0, 0, false));
+    }
+
+    [Test]
+    public async Task RecoveryPruneReaderJoinTimeoutMarksExactTerminalSettlementUnconfirmed()
+    {
+        RecoveryPruneScript script = new();
+        TaskCompletionSource blockedRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int blockNextChunk = 0;
+        ScriptedProcess process = new(
+            request => request is ExecutePruneRequest ? null : script.Respond(request),
+            completeWaitInitially: false,
+            beforeResponseChunk: async _ =>
+            {
+                if (Interlocked.Exchange(ref blockNextChunk, 0) != 0)
+                {
+                    blockedRead.TrySetResult();
+                    await releaseRead.Task;
+                }
+            }
+        );
+        await using ProcessInstallerProtocolClient client = Create(process, reap: TimeSpan.FromMilliseconds(20));
+        InstallerConfirmedRecoveryPruneAuthority authority = await PrepareConfirmedPruneAsync(client, script);
+        InstallerRecoveryPruneOperation operation = await client.ExecuteRecoveryPruneAsync(authority);
+        ExecutePruneRequest execute = process.Requests.OfType<ExecutePruneRequest>().Single();
+        TaskCompletionSource terminalRouted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.PruneTerminalRoutedForTesting = () => terminalRouted.TrySetResult();
+        process.Publish(Serialize(CreatePruneSuccess(script, execute.CommandId)));
+        await terminalRouted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Volatile.Write(ref blockNextChunk, 1);
+        PrunePlanEvent plan = script.Plan!;
+        process.Publish(Serialize(new PruneProgressEvent(
+            Session,
+            plan.PrunePlanId,
+            plan.PruneDigest,
+            1,
+            TransactionStage.CleaningRecovery,
+            1,
+            1,
+            "private pipe-buffered frame"
+        )
+        {
+            CommandId = execute.CommandId
+        }));
+        await blockedRead.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        process.CompleteExit();
+
+        InstallerRecoveryPruneTerminalResult result = (await operation.Completion)
+            .Should().BeOfType<InstallerRecoveryPruneTerminalResult>().Subject;
+        result.Outcome.Should().Be(ProtocolPruneOutcome.Succeeded);
+        result.BackendSettlement.Should().Be(InstallerBackendSettlement.Unconfirmed);
+        releaseRead.TrySetResult();
+    }
+
     [TestCase(0)]
     [TestCase(1)]
     public async Task InspectsExactRollbackPointWithoutSendingPackageAuthority(int selectedIndex)
@@ -4554,6 +4674,7 @@ public sealed class ProcessInstallerProtocolClientTests
         public PrunePlanEvent? Plan { get; private set; }
         public bool SubstituteCleanupGeneration { get; init; }
         public bool ImpossibleTerminalAccounting { get; init; }
+        public bool AuxiliaryOnly { get; init; }
 
         public byte[]? Respond(ProtocolRequest request) => request switch
         {
@@ -4582,6 +4703,7 @@ public sealed class ProcessInstallerProtocolClientTests
             string[] cleanup = this.SubstituteCleanupGeneration
                 ? ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]
                 : removedGenerations.Select(value => value.GenerationId).ToArray();
+            bool auxiliaryCleanupPlanned = this.AuxiliaryOnly;
             const string summary = "private backend prune summary";
             string[] warnings = ["private backend prune warning"];
             ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(
@@ -4593,7 +4715,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 retained,
                 removed,
                 cleanup,
-                false,
+                auxiliaryCleanupPlanned,
                 summary,
                 warnings,
                 true
@@ -4610,7 +4732,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 retained,
                 removed,
                 cleanup,
-                false,
+                auxiliaryCleanupPlanned,
                 summary,
                 warnings,
                 [ProtocolPlanRisk.RecoveryPrune],
@@ -5299,7 +5421,7 @@ public sealed class ProcessInstallerProtocolClientTests
         InstallerRecoveryCatalogSuccess catalog = (InstallerRecoveryCatalogSuccess)await client.ListRecoveriesAsync(RecoveryGamePath);
         InstallerRecoveryPrunePlanSuccess plan = (InstallerRecoveryPrunePlanSuccess)await client.InspectRecoveryPruneAsync(
             RecoveryGamePath,
-            catalog.RecoveryPoints[1]
+            catalog.RecoveryPoints[script.AuxiliaryOnly ? 2 : 1]
         );
         script.Plan.Should().NotBeNull();
         return await client.ConfirmRecoveryPruneAsync(plan.Confirmation!);
@@ -5341,6 +5463,65 @@ public sealed class ProcessInstallerProtocolClientTests
         {
             CommandId = commandId
         };
+    }
+
+    private static ProtocolEvent CreatePruneTerminal(
+        RecoveryPruneScript script,
+        ProtocolCommandId commandId,
+        ProtocolPruneOutcome outcome
+    )
+    {
+        PrunePlanEvent plan = script.Plan ?? throw new AssertionException("A prune plan must be issued first.");
+        int removed = plan.RemovedSelectionIds.Length;
+        int cleanup = plan.CleanupGenerationIds.Length;
+        ProtocolPruneSummary before = new(0, 0, 0, false);
+        ProtocolPruneSummary pending = new(removed, 0, cleanup, false);
+        ProtocolPruneSummary applied = new(removed, cleanup, 0, false);
+        ProtocolEvent terminal = outcome switch
+        {
+            ProtocolPruneOutcome.FailedBeforePublication => new PruneFailureEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries),
+                before, "private failure", "/home/private-user/prune.log"
+            ),
+            ProtocolPruneOutcome.CancelledBeforePublication => new PruneCancelledEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries),
+                before, "private cancellation", "/home/private-user/prune.log"
+            ),
+            ProtocolPruneOutcome.Interrupted => new PruneInterruptionEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.PruneApplied, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries),
+                pending, "private interruption", "/home/private-user/prune.log"
+            ),
+            ProtocolPruneOutcome.CancelledWithCleanupPending => new PruneCancelledEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.PruneApplied, null, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries),
+                pending, "private cancellation", "/home/private-user/prune.log"
+            ),
+            ProtocolPruneOutcome.FailedWithCleanupPending => new PruneFailureEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.PruneApplied, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries),
+                pending, "private failure", "/home/private-user/prune.log"
+            ),
+            ProtocolPruneOutcome.UnexpectedCoreFailure => new PruneInterruptionEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries),
+                new(null, null, null, null), "private core failure", "/home/private-user/prune.log"
+            ),
+            ProtocolPruneOutcome.CancelledAfterApply => new PruneCancelledEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.PruneApplied, null, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries),
+                applied, "private cancellation", "/home/private-user/prune.log"
+            ),
+            ProtocolPruneOutcome.FailedAfterApply => new PruneFailureEvent(
+                Session, plan.PrunePlanId, plan.PruneDigest, outcome,
+                new(ProtocolDurableState.PruneApplied, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries),
+                applied, "private failure", "/home/private-user/prune.log"
+            ),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "The success terminal has a dedicated helper.")
+        };
+        return terminal with { CommandId = commandId };
     }
 
     private static async Task SpinWaitUntilAsync(Func<bool> condition)

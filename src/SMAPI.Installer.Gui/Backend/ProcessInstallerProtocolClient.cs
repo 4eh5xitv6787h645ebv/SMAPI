@@ -2848,6 +2848,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                 {
                     settling?.MarkSettlementUnconfirmed();
                     settlingRecovery?.MarkSettlementUnconfirmed();
+                    settlingPrune?.MarkSettlementUnconfirmed();
                     Volatile.Write(ref this.CleanupUnconfirmed, 1);
                 }
                 this.ClearSettlingExecution(settling);
