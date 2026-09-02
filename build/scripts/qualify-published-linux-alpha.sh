@@ -83,7 +83,7 @@ smapi_fetch_release_inventory() {
         exec timeout --signal=TERM --kill-after=10s 60s \
             "$pinned_gh" api \
                 --method GET \
-                --hostname api.github.com \
+                --hostname github.com \
                 -H 'Accept: application/vnd.github+json' \
                 -H 'X-GitHub-Api-Version: 2022-11-28' \
                 "repos/$SMAPI_RELEASE_REPOSITORY/releases/tags/$release_tag"
