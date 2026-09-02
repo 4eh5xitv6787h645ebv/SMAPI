@@ -172,11 +172,11 @@ function Assert-LinuxGuiPublishOutput {
     }
     $entries = @(Get-ChildItem -LiteralPath $directory.FullName -Force)
     if (
-        $entries.Count -ne 1
-        -or $entries[0].Name -ne "SMAPI.Installer.Gui"
-        -or $entries[0] -isnot [System.IO.FileInfo]
-        -or ![string]::IsNullOrEmpty($entries[0].LinkType)
-        -or $entries[0].Length -le 0
+        $entries.Count -ne 1 -or
+        $entries[0].Name -ne "SMAPI.Installer.Gui" -or
+        $entries[0] -isnot [System.IO.FileInfo] -or
+        ![string]::IsNullOrEmpty($entries[0].LinkType) -or
+        $entries[0].Length -le 0
     ) {
         throw "The Linux graphical-installer publish output must contain exactly one nonempty ordinary 'SMAPI.Installer.Gui' apphost."
     }
@@ -353,10 +353,10 @@ foreach ($folder in $folders) {
         Copy-Item -LiteralPath "$linuxGuiPublishPath/SMAPI.Installer.Gui" -Destination "$internalPath/SMAPI.Installer.Gui"
         $packagedGui = Get-Item -LiteralPath "$internalPath/SMAPI.Installer.Gui" -Force
         if (
-            $packagedGui -isnot [System.IO.FileInfo]
-            -or ![string]::IsNullOrEmpty($packagedGui.LinkType)
-            -or $packagedGui.Length -le 0
-            -or (Get-FileHash -LiteralPath $packagedGui.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath "$linuxGuiPublishPath/SMAPI.Installer.Gui" -Algorithm SHA256).Hash
+            $packagedGui -isnot [System.IO.FileInfo] -or
+            ![string]::IsNullOrEmpty($packagedGui.LinkType) -or
+            $packagedGui.Length -le 0 -or
+            (Get-FileHash -LiteralPath $packagedGui.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath "$linuxGuiPublishPath/SMAPI.Installer.Gui" -Algorithm SHA256).Hash
         ) {
             throw "The packaged Linux graphical-installer apphost isn't the exact ordinary published file."
         }

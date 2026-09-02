@@ -20,12 +20,15 @@ This package may be an unofficial fork. Check the release page and embedded vers
 it. For the experimental Linux fork, verify the checksum and GitHub attestation first, then see:
 https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release.html
 
-On Linux, close the game and run "install on Linux (graphical).sh" for the graphical installer.
-It runs as your normal desktop user and never needs sudo or root. The graphical launcher uses a
-private temporary runtime-extraction directory and removes it when the installer closes.
+On Linux in an X11 or XWayland desktop session, close the game and run
+"install on Linux (graphical).sh". It runs as your normal desktop user and never needs sudo or root.
+The graphical launcher uses a private temporary runtime-extraction directory and removes it after
+an ordinary exit or handled HUP, INT, or TERM signal. A power loss or SIGKILL can leave that private
+temporary directory behind.
 
 The existing "install on Linux.sh" console installer remains available as the non-graphical
-fallback. Headless and scripted users can also run "internal/linux/SMAPI.Installer" directly.
+fallback. Use it for headless or native-Wayland-only sessions, or if the graphical launcher fails.
+Scripted users can also run "internal/linux/SMAPI.Installer" directly.
 
 For official SMAPI and general mod help, see:
 https://stardewvalleywiki.com/Modding:Player_Guide
