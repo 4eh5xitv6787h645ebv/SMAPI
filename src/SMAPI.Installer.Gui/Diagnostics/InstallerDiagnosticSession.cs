@@ -79,7 +79,7 @@ internal sealed record InstallerDiagnosticEntry(
 internal enum InstallerDiagnosticHealth
 {
     Healthy,
-    Truncated,
+    BoundedWithOmissions,
     WriteFailed,
     Disposed
 }
@@ -89,8 +89,21 @@ internal sealed record InstallerDiagnosticSnapshot(
     long Revision,
     InstallerDiagnosticHealth Health,
     IReadOnlyList<InstallerDiagnosticEntry> Entries,
-    int OmittedEntryCount,
+    int DisplayOmittedEntryCount,
+    int RawLogOmittedEntryCount,
     int CoalescedEventCount
+);
+
+/// <summary>One immutable sanitized viewer capture derived from a single diagnostic snapshot.</summary>
+internal sealed record InstallerDiagnosticCapture(
+    long Revision,
+    InstallerDiagnosticHealth Health,
+    string HealthLabel,
+    int DisplayedEntryCount,
+    int DisplayOmittedEntryCount,
+    int RawLogOmittedEntryCount,
+    int CoalescedEventCount,
+    string Text
 );
 
 /// <summary>One GUI-owned, local-only diagnostic writer for a production desktop session.</summary>
@@ -119,25 +132,33 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     private readonly object Sync = new();
     private readonly List<InstallerDiagnosticEntry> EntriesValue = [];
     private readonly HashSet<ProgressKey> ObservedProgress = [];
+    private readonly Task WriterStartGate;
     private readonly Task Writer;
     private int coalescedEvents;
     private int clipboardWriteActive;
     private long revision;
-    private int omittedEntries;
+    private int displayOmittedEntries;
+    private int rawLogOmittedEntries;
     private bool unavailable;
-    private bool truncated;
     private bool completed;
     private bool disposeStarted;
 
-    public InstallerDiagnosticSession(InstallerLog log, Guid operationId, Func<DateTimeOffset>? getNow = null)
+    public InstallerDiagnosticSession(
+        InstallerLog log,
+        Guid operationId,
+        Func<DateTimeOffset>? getNow = null,
+        Task? writerStartGate = null,
+        int? progressCapacity = null
+    )
     {
         this.Log = log ?? throw new ArgumentNullException(nameof(log));
         if (operationId == Guid.Empty)
             throw new ArgumentException("A diagnostic operation ID is required.", nameof(operationId));
         this.OperationId = operationId;
         this.GetNow = getNow ?? (() => DateTimeOffset.UtcNow);
+        this.WriterStartGate = writerStartGate ?? Task.CompletedTask;
         this.Normal = CreateChannel(NormalCapacity, BoundedChannelFullMode.Wait);
-        this.Progress = CreateChannel(ProgressCapacity, BoundedChannelFullMode.Wait);
+        this.Progress = CreateChannel(progressCapacity ?? ProgressCapacity, BoundedChannelFullMode.Wait);
         this.Terminal = CreateChannel(TerminalCapacity, BoundedChannelFullMode.Wait);
 
         // This synchronous fixed record proves the private log can be created and written before the production
@@ -196,9 +217,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     }
 
     public bool IsTruncated
-    {
-        get { lock (this.Sync) return this.truncated; }
-    }
+        => this.Snapshot.Health == InstallerDiagnosticHealth.BoundedWithOmissions;
 
     public int CoalescedEventCount => Math.Max(0, Volatile.Read(ref this.coalescedEvents));
 
@@ -208,60 +227,92 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         {
             lock (this.Sync)
             {
+                int coalescedEventCount = Math.Max(0, Volatile.Read(ref this.coalescedEvents));
                 InstallerDiagnosticHealth health = this.disposeStarted
                     ? InstallerDiagnosticHealth.Disposed
                     : this.unavailable
                         ? InstallerDiagnosticHealth.WriteFailed
-                        : this.truncated
-                            ? InstallerDiagnosticHealth.Truncated
+                        : this.displayOmittedEntries > 0 || this.rawLogOmittedEntries > 0 || coalescedEventCount > 0
+                            ? InstallerDiagnosticHealth.BoundedWithOmissions
                             : InstallerDiagnosticHealth.Healthy;
                 return new(
                     this.revision,
                     health,
                     this.EntriesValue.ToArray(),
-                    this.omittedEntries,
-                    Math.Max(0, Volatile.Read(ref this.coalescedEvents))
+                    this.displayOmittedEntries,
+                    this.rawLogOmittedEntries,
+                    coalescedEventCount
                 );
             }
         }
     }
 
-    /// <summary>Create a bounded, path-free text projection for one explicit clipboard write.</summary>
-    public string CreateSanitizedCopyText()
+    /// <summary>Capture one immutable, path-free diagnostic snapshot for both viewer labels and copied text.</summary>
+    public InstallerDiagnosticCapture CreateSanitizedCapture()
     {
         InstallerDiagnosticSnapshot snapshot = this.Snapshot;
-        StringBuilder result = new();
-        AppendBounded(result, "SMAPI Linux graphical installer — sanitized diagnostics\n");
-        AppendBounded(result, "Review this text before sharing it. Local paths, identifiers, and backend prose are excluded.\n");
-        AppendBounded(result, $"Health: {GetHealthLabel(snapshot.Health)}\n");
+        SanitizedCopyProjection projection = CreateSanitizedCopyProjection(snapshot);
+        return new(
+            snapshot.Revision,
+            projection.Health,
+            GetHealthLabel(projection.Health),
+            projection.DisplayedEntryCount,
+            projection.DisplayOmittedEntryCount,
+            snapshot.RawLogOmittedEntryCount,
+            snapshot.CoalescedEventCount,
+            projection.Text
+        );
+    }
 
-        IReadOnlyList<InstallerDiagnosticEntry> entries = snapshot.Entries.Count <= MaximumSanitizedCopyEntries
-            ? snapshot.Entries
-            : snapshot.Entries.Skip(snapshot.Entries.Count - MaximumSanitizedCopyEntries).ToArray();
-        int additionalOmissions = snapshot.Entries.Count - entries.Count;
-        int omitted = snapshot.OmittedEntryCount > int.MaxValue - additionalOmissions
-            ? int.MaxValue
-            : snapshot.OmittedEntryCount + additionalOmissions;
-        if (omitted > 0 || snapshot.CoalescedEventCount > 0)
-        {
-            AppendBounded(
-                result,
-                $"Bounded omissions: {omitted.ToString(CultureInfo.InvariantCulture)} displayed entries; {snapshot.CoalescedEventCount.ToString(CultureInfo.InvariantCulture)} intermediate events.\n"
-            );
-        }
+    /// <summary>Create a bounded, path-free text projection for one explicit clipboard write.</summary>
+    public string CreateSanitizedCopyText()
+        => this.CreateSanitizedCapture().Text;
 
-        foreach (InstallerDiagnosticEntry entry in entries)
+    private static SanitizedCopyProjection CreateSanitizedCopyProjection(InstallerDiagnosticSnapshot snapshot)
+    {
+        int maximumEntryCount = Math.Min(snapshot.Entries.Count, MaximumSanitizedCopyEntries);
+        for (int displayedEntryCount = maximumEntryCount; displayedEntryCount >= 0; displayedEntryCount--)
         {
-            string line = $"{entry.Timestamp.ToUniversalTime():O} [{GetLevelLabel(entry.Level)}] {entry.EventCode}: {entry.Message}";
-            if (entry.StableErrorCode is not null)
-                line += $" error={entry.StableErrorCode}";
-            if (!TryAppendBounded(result, line + "\n", Encoding.UTF8.GetByteCount(SanitizedCopyTruncationMarker)))
+            int additionalDisplayOmissions = snapshot.Entries.Count - displayedEntryCount;
+            int displayOmittedEntryCount = snapshot.DisplayOmittedEntryCount > int.MaxValue - additionalDisplayOmissions
+                ? int.MaxValue
+                : snapshot.DisplayOmittedEntryCount + additionalDisplayOmissions;
+            InstallerDiagnosticHealth health = snapshot.Health == InstallerDiagnosticHealth.Healthy && displayOmittedEntryCount > 0
+                ? InstallerDiagnosticHealth.BoundedWithOmissions
+                : snapshot.Health;
+            bool byteLimited = displayedEntryCount < maximumEntryCount;
+            StringBuilder result = new();
+            AppendBounded(result, "SMAPI Linux graphical installer — sanitized diagnostics\n");
+            AppendBounded(result, "Review this text before sharing it. Local paths, identifiers, and backend prose are excluded.\n");
+            AppendBounded(result, $"Snapshot health: {GetHealthLabel(health)}\n");
+            AppendBounded(result, $"Displayed entries in this copy: {displayedEntryCount.ToString(CultureInfo.InvariantCulture)}\n");
+            AppendBounded(result, $"Display-window omissions: {displayOmittedEntryCount.ToString(CultureInfo.InvariantCulture)}\n");
+            AppendBounded(result, $"Private raw-log omissions: {snapshot.RawLogOmittedEntryCount.ToString(CultureInfo.InvariantCulture)}\n");
+            AppendBounded(result, $"Coalesced intermediate events: {snapshot.CoalescedEventCount.ToString(CultureInfo.InvariantCulture)}\n");
+
+            IReadOnlyList<InstallerDiagnosticEntry> entries = snapshot.Entries.Count == displayedEntryCount
+                ? snapshot.Entries
+                : snapshot.Entries.Skip(snapshot.Entries.Count - displayedEntryCount).ToArray();
+            bool fits = true;
+            int reservedBytes = byteLimited ? Encoding.UTF8.GetByteCount(SanitizedCopyTruncationMarker) : 0;
+            foreach (InstallerDiagnosticEntry entry in entries)
             {
-                AppendBounded(result, SanitizedCopyTruncationMarker);
-                break;
+                string line = $"{entry.Timestamp.ToUniversalTime():O} [{GetLevelLabel(entry.Level)}] {entry.EventCode}: {entry.Message}";
+                if (entry.StableErrorCode is not null)
+                    line += $" error={entry.StableErrorCode}";
+                if (!TryAppendBounded(result, line + "\n", reservedBytes))
+                {
+                    fits = false;
+                    break;
+                }
             }
+            if (!fits)
+                continue;
+            if (byteLimited)
+                AppendBounded(result, SanitizedCopyTruncationMarker);
+            return new(result.ToString(), health, displayedEntryCount, displayOmittedEntryCount);
         }
-        return result.ToString();
+        throw new InvalidOperationException("The fixed diagnostic copy header exceeded its reviewed bound.");
     }
 
     /// <summary>Acquire the one cross-window clipboard-write authority for this production session.</summary>
@@ -276,28 +327,42 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
 
     /// <summary>Queue a fixed state event without blocking the publishing controller.</summary>
     public void Record(InstallerDiagnosticCode code, string? releaseTag = null)
-        => this.Enqueue(new(code, null, releaseTag), IsTerminal(code) ? DiagnosticLane.Terminal : DiagnosticLane.Normal);
+    {
+        ValidatePlainRecordCode(code);
+        this.Enqueue(new(code, null, releaseTag), IsTerminal(code) ? DiagnosticLane.Terminal : DiagnosticLane.Normal);
+    }
 
     /// <summary>Queue a fixed state event with a validated protocol error classification.</summary>
     public void Record(InstallerDiagnosticCode code, ProtocolPrePlanErrorCode? error, string? releaseTag = null)
-        => this.Enqueue(new(code, GetStablePrePlanCode(error), releaseTag), IsTerminal(code) ? DiagnosticLane.Terminal : DiagnosticLane.Normal);
+    {
+        ValidatePlainRecordCode(code);
+        this.Enqueue(new(code, GetStablePrePlanCode(error), releaseTag), IsTerminal(code) ? DiagnosticLane.Terminal : DiagnosticLane.Normal);
+    }
 
     /// <summary>Queue a fixed terminal event with a validated protocol error classification.</summary>
     public void Record(InstallerDiagnosticCode code, ProtocolTerminalErrorCode? error, string? releaseTag = null)
-        => this.Enqueue(new(code, GetStableTerminalCode(error), releaseTag), IsTerminal(code) ? DiagnosticLane.Terminal : DiagnosticLane.Normal);
+    {
+        ValidatePlainRecordCode(code);
+        this.Enqueue(new(code, GetStableTerminalCode(error), releaseTag), IsTerminal(code) ? DiagnosticLane.Terminal : DiagnosticLane.Normal);
+    }
 
     /// <summary>Queue a latest-value progress event. Replaced intermediate values are intentionally coalesced.</summary>
     public void RecordProgress(InstallerDiagnosticCode code, string? releaseTag = null)
-        => this.RecordProgress(new ProgressKey(code, null, null), releaseTag);
+    {
+        ValidateUntypedProgressCode(code);
+        this.RecordProgress(new ProgressKey(code, null, null), releaseTag);
+    }
 
     void IProductionInstallerDiagnosticSink.RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage)
     {
+        ValidateReleaseProgressCode(code, stage);
         _ = GetReleaseStageMessage(stage);
         this.RecordProgress(new ProgressKey(code, stage, null), releaseTag: null);
     }
 
     void IProductionInstallerDiagnosticSink.RecordProgress(InstallerDiagnosticCode code, TransactionStage stage)
     {
+        ValidateTransactionProgressCode(code);
         _ = GetTransactionStageMessage(stage);
         this.RecordProgress(new ProgressKey(code, null, stage), releaseTag: null);
     }
@@ -307,6 +372,47 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     void IProductionInstallerDiagnosticSink.Record(InstallerDiagnosticCode code, ProtocolPrePlanErrorCode? error) => this.Record(code, error);
 
     void IProductionInstallerDiagnosticSink.Record(InstallerDiagnosticCode code, ProtocolTerminalErrorCode? error) => this.Record(code, error);
+
+    void IProductionInstallerDiagnosticSink.RecordExecutionTerminal(
+        InstallerOperation operation,
+        ProtocolExecutionOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolTerminalErrorCode? error,
+        ProtocolNextAction nextAction
+    ) => this.RecordExactTerminal(
+        InstallerDiagnosticCode.ExecutionTerminal,
+        GetStableTerminalCode(error),
+        ProjectExecutionTerminal(operation, outcome, durableState, nextAction)
+    );
+
+    void IProductionInstallerDiagnosticSink.RecordRecoveryTerminal(
+        InstallerOperation operation,
+        ProtocolInterruptedRecoveryOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolTerminalErrorCode? error,
+        ProtocolNextAction nextAction
+    ) => this.RecordExactTerminal(
+        InstallerDiagnosticCode.ExecutionRecoveryTerminal,
+        GetStableTerminalCode(error),
+        ProjectRecoveryTerminal(operation, outcome, durableState, nextAction)
+    );
+
+    void IProductionInstallerDiagnosticSink.RecordPruneTerminal(
+        ProtocolPruneOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolTerminalErrorCode? error,
+        ProtocolNextAction nextAction
+    ) => this.RecordExactTerminal(
+        InstallerDiagnosticCode.RecoveryPruneTerminal,
+        GetStableTerminalCode(error),
+        ProjectPruneTerminal(outcome, durableState, nextAction)
+    );
+
+    private void RecordExactTerminal(
+        InstallerDiagnosticCode code,
+        string? stableErrorCode,
+        DiagnosticProjection projection
+    ) => this.Enqueue(new(code, stableErrorCode, null, Projection: projection), DiagnosticLane.Terminal);
 
     private void RecordProgress(ProgressKey key, string? releaseTag)
     {
@@ -435,9 +541,14 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         };
         if (!writer.TryWrite(value))
         {
-            this.IncrementCoalescedEvents();
-            if (lane == DiagnosticLane.Terminal)
-                this.MarkUnavailable();
+            if (lane == DiagnosticLane.Progress)
+                this.IncrementCoalescedEvents();
+            else
+            {
+                this.IncrementRawLogOmittedEntries();
+                if (lane == DiagnosticLane.Terminal)
+                    this.MarkUnavailable();
+            }
         }
         else
             this.SignalWriter();
@@ -447,6 +558,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     {
         try
         {
+            await this.WriterStartGate.ConfigureAwait(false);
             while (true)
             {
                 bool wrote = false;
@@ -512,6 +624,16 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         while (Interlocked.CompareExchange(ref this.coalescedEvents, observed + 1, observed) != observed);
     }
 
+    private void IncrementRawLogOmittedEntries()
+    {
+        lock (this.Sync)
+        {
+            if (this.rawLogOmittedEntries < int.MaxValue)
+                this.rawLogOmittedEntries++;
+            this.revision++;
+        }
+    }
+
     private bool WriteCore(PendingDiagnostic pending, bool isLogTerminal = false)
     {
         DiagnosticProjection projection = Project(pending);
@@ -525,15 +647,25 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
             pending.ReleaseTag,
             StableErrorCode: pending.StableErrorCode
         );
-        bool written = isLogTerminal
-            ? this.Log.WriteTerminal(entry)
-            : this.Log.Write(entry);
+        bool written;
+        try
+        {
+            written = isLogTerminal
+                ? this.Log.WriteTerminal(entry)
+                : this.Log.Write(entry);
+        }
+        catch
+        {
+            this.IncrementRawLogOmittedEntries();
+            throw;
+        }
 
         lock (this.Sync)
         {
             if (!written)
             {
-                this.truncated = true;
+                if (this.rawLogOmittedEntries < int.MaxValue)
+                    this.rawLogOmittedEntries++;
                 this.revision++;
             }
             else
@@ -541,9 +673,8 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
                 if (this.EntriesValue.Count == MaximumDisplayEntries)
                 {
                     this.EntriesValue.RemoveAt(0);
-                    if (this.omittedEntries < int.MaxValue)
-                        this.omittedEntries++;
-                    this.truncated = true;
+                    if (this.displayOmittedEntries < int.MaxValue)
+                        this.displayOmittedEntries++;
                 }
                 this.EntriesValue.Add(new(timestamp, projection.Level, projection.EventCode, projection.Message, pending.StableErrorCode));
                 this.revision++;
@@ -638,8 +769,49 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
             or InstallerDiagnosticCode.RecoveryPruneTerminal
             or InstallerDiagnosticCode.RecoveryPruneFailed;
 
+    private static void ValidatePlainRecordCode(InstallerDiagnosticCode code)
+    {
+        if (code is InstallerDiagnosticCode.ExecutionTerminal
+            or InstallerDiagnosticCode.ExecutionRecoveryTerminal
+            or InstallerDiagnosticCode.RecoveryPruneTerminal)
+        {
+            throw new ArgumentException("An exact typed terminal projection is required for this diagnostic code.", nameof(code));
+        }
+    }
+
+    private static void ValidateUntypedProgressCode(InstallerDiagnosticCode code)
+    {
+        if (code is not (InstallerDiagnosticCode.ReleaseDownloading
+            or InstallerDiagnosticCode.ReleaseVerifying
+            or InstallerDiagnosticCode.ExecutionProgress
+            or InstallerDiagnosticCode.ExecutionRecoveryProgress
+            or InstallerDiagnosticCode.RecoveryPruneProgress))
+        {
+            throw new ArgumentException("A reviewed progress diagnostic code is required.", nameof(code));
+        }
+    }
+
+    private static void ValidateReleaseProgressCode(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage)
+    {
+        InstallerDiagnosticCode expected = ProductionInstallerDiagnosticObserver.MapReleaseProgressStage(stage);
+        if (code != expected)
+            throw new ArgumentException("The release-progress diagnostic code must match its reviewed stage.", nameof(code));
+    }
+
+    private static void ValidateTransactionProgressCode(InstallerDiagnosticCode code)
+    {
+        if (code is not (InstallerDiagnosticCode.ExecutionProgress
+            or InstallerDiagnosticCode.ExecutionRecoveryProgress
+            or InstallerDiagnosticCode.RecoveryPruneProgress))
+        {
+            throw new ArgumentException("A reviewed transaction-progress diagnostic code is required.", nameof(code));
+        }
+    }
+
     private static DiagnosticProjection Project(PendingDiagnostic pending)
     {
+        if (pending.Projection is { } exact)
+            return exact;
         DiagnosticProjection projection = Project(pending.Code);
         if (pending.ReleaseStage is { } releaseStage)
             return projection with { Message = GetReleaseStageMessage(releaseStage) };
@@ -706,12 +878,124 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         _ => throw new ArgumentOutOfRangeException(nameof(code))
     };
 
+    private static DiagnosticProjection ProjectExecutionTerminal(
+        InstallerOperation operation,
+        ProtocolExecutionOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolNextAction nextAction
+    )
+    {
+        (string suffix, InstallerLogLevel level, string label) = outcome switch
+        {
+            ProtocolExecutionOutcome.Succeeded => ("succeeded", InstallerLogLevel.Information, "succeeded"),
+            ProtocolExecutionOutcome.SucceededWithCleanupWarning => ("succeeded-cleanup-warning", InstallerLogLevel.Warning, "succeeded with a cleanup warning"),
+            ProtocolExecutionOutcome.FailedBeforeMutation => ("failed-before-mutation", InstallerLogLevel.Error, "failed before mutation"),
+            ProtocolExecutionOutcome.CancelledBeforeMutation => ("cancelled-before-mutation", InstallerLogLevel.Warning, "was cancelled before mutation"),
+            ProtocolExecutionOutcome.CancelledAndRolledBack => ("cancelled-rolled-back", InstallerLogLevel.Warning, "was cancelled and rolled back"),
+            ProtocolExecutionOutcome.FailedAndRolledBack => ("failed-rolled-back", InstallerLogLevel.Error, "failed and rolled back"),
+            ProtocolExecutionOutcome.InterruptedRecoveryRequired => ("interrupted-recovery-required", InstallerLogLevel.Error, "was interrupted and requires recovery"),
+            ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired => ("automatic-recovery-completed", InstallerLogLevel.Warning, "completed automatic recovery and requires fresh inspection"),
+            ProtocolExecutionOutcome.UnexpectedCoreFailure => ("unexpected-core-failure", InstallerLogLevel.Error, "ended with an unexpected core failure"),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+        return new(
+            $"execution.terminal.{suffix}",
+            level,
+            $"{GetOperationLabel(operation)} {label}. Durable state: {GetDurableStateLabel(durableState)}. Safe next action: {GetNextActionLabel(nextAction)}."
+        );
+    }
+
+    private static DiagnosticProjection ProjectRecoveryTerminal(
+        InstallerOperation operation,
+        ProtocolInterruptedRecoveryOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolNextAction nextAction
+    )
+    {
+        (string suffix, InstallerLogLevel level, string label) = outcome switch
+        {
+            ProtocolInterruptedRecoveryOutcome.RecoveryCompleted => ("completed", InstallerLogLevel.Information, "completed"),
+            ProtocolInterruptedRecoveryOutcome.CancelledBeforeRecovery => ("cancelled-before-start", InstallerLogLevel.Warning, "was cancelled before recovery began"),
+            ProtocolInterruptedRecoveryOutcome.PartialFailure => ("partial-failure", InstallerLogLevel.Error, "completed only partially"),
+            ProtocolInterruptedRecoveryOutcome.UnexpectedFailure => ("unexpected-failure", InstallerLogLevel.Error, "ended with an unexpected failure"),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+        return new(
+            $"execution.recovery.terminal.{suffix}",
+            level,
+            $"Interrupted recovery for {GetOperationLabel(operation).ToLowerInvariant()} {label}. Durable state: {GetDurableStateLabel(durableState)}. Safe next action: {GetNextActionLabel(nextAction)}."
+        );
+    }
+
+    private static DiagnosticProjection ProjectPruneTerminal(
+        ProtocolPruneOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolNextAction nextAction
+    )
+    {
+        (string suffix, InstallerLogLevel level, string label) = outcome switch
+        {
+            ProtocolPruneOutcome.Succeeded => ("succeeded", InstallerLogLevel.Information, "succeeded"),
+            ProtocolPruneOutcome.FailedBeforePublication => ("failed-before-publication", InstallerLogLevel.Error, "failed before publication"),
+            ProtocolPruneOutcome.CancelledBeforePublication => ("cancelled-before-publication", InstallerLogLevel.Warning, "was cancelled before publication"),
+            ProtocolPruneOutcome.Interrupted => ("interrupted", InstallerLogLevel.Error, "was interrupted"),
+            ProtocolPruneOutcome.CancelledWithCleanupPending => ("cancelled-cleanup-pending", InstallerLogLevel.Warning, "was cancelled with cleanup pending"),
+            ProtocolPruneOutcome.FailedWithCleanupPending => ("failed-cleanup-pending", InstallerLogLevel.Error, "failed with cleanup pending"),
+            ProtocolPruneOutcome.UnexpectedCoreFailure => ("unexpected-core-failure", InstallerLogLevel.Error, "ended with an unexpected core failure"),
+            ProtocolPruneOutcome.CancelledAfterApply => ("cancelled-after-apply", InstallerLogLevel.Warning, "was cancelled after applying the reviewed prune"),
+            ProtocolPruneOutcome.FailedAfterApply => ("failed-after-apply", InstallerLogLevel.Error, "failed after applying the reviewed prune"),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+        return new(
+            $"recovery.prune.terminal.{suffix}",
+            level,
+            $"Recovery cleanup {label}. Durable state: {GetDurableStateLabel(durableState)}. Safe next action: {GetNextActionLabel(nextAction)}."
+        );
+    }
+
+    private static string GetOperationLabel(InstallerOperation operation) => operation switch
+    {
+        InstallerOperation.Install => "Install",
+        InstallerOperation.Update => "Update",
+        InstallerOperation.Repair => "Repair",
+        InstallerOperation.Uninstall => "Uninstall",
+        InstallerOperation.Backup => "Backup",
+        InstallerOperation.Rollback => "Rollback",
+        _ => throw new ArgumentOutOfRangeException(nameof(operation))
+    };
+
+    private static string GetDurableStateLabel(ProtocolDurableState durableState) => durableState switch
+    {
+        ProtocolDurableState.Committed => "committed",
+        ProtocolDurableState.Unchanged => "unchanged",
+        ProtocolDurableState.RolledBack => "rolled back",
+        ProtocolDurableState.RecoveryRequired => "recovery required",
+        ProtocolDurableState.RecoveryCompleted => "recovery completed",
+        ProtocolDurableState.Unknown => "unknown; inspect before another action",
+        ProtocolDurableState.PruneApplied => "recovery cleanup applied",
+        _ => throw new ArgumentOutOfRangeException(nameof(durableState))
+    };
+
+    private static string GetNextActionLabel(ProtocolNextAction nextAction) => nextAction switch
+    {
+        ProtocolNextAction.RetryRequest => "retry the request",
+        ProtocolNextAction.SelectGameFolder => "select a game folder",
+        ProtocolNextAction.ReopenVerifiedPackage => "reopen the verified package",
+        ProtocolNextAction.InspectAgain => "inspect again",
+        ProtocolNextAction.ListRecoveries => "list authenticated recoveries",
+        ProtocolNextAction.RecoverInterrupted => "recover interrupted state",
+        ProtocolNextAction.StartNewSession => "start a new verified session",
+        ProtocolNextAction.ReviewFilesystem => "review the filesystem",
+        ProtocolNextAction.ViewPrivateLog => "review the private raw log",
+        _ => throw new ArgumentOutOfRangeException(nameof(nextAction))
+    };
+
     private static string GetHealthLabel(InstallerDiagnosticHealth health) => health switch
     {
-        InstallerDiagnosticHealth.Healthy => "healthy",
-        InstallerDiagnosticHealth.Truncated => "bounded and truncated",
-        InstallerDiagnosticHealth.WriteFailed => "local log write failed",
-        InstallerDiagnosticHealth.Disposed => "session closed",
+        InstallerDiagnosticHealth.Healthy => "complete within configured bounds",
+        InstallerDiagnosticHealth.BoundedWithOmissions => "bounded; some events were omitted or coalesced",
+        InstallerDiagnosticHealth.WriteFailed => "private raw-log write failed; no further mutation is admitted",
+        InstallerDiagnosticHealth.Disposed => "session closed; this is the last captured in-memory state",
         _ => throw new ArgumentOutOfRangeException(nameof(health))
     };
 
@@ -728,6 +1012,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         ReviewedReleasePreparationStage.ObservingTag => "Release preparation stage: observing the selected public tag.",
         ReviewedReleasePreparationStage.Downloading => "Release preparation stage: downloading the reviewed assets.",
         ReviewedReleasePreparationStage.RefreshingTag => "Release preparation stage: refreshing the selected public tag.",
+        ReviewedReleasePreparationStage.ImportingLocalPackage => "Release preparation stage: importing the selected local package.",
         _ => throw new ArgumentOutOfRangeException(nameof(stage))
     };
 
@@ -780,9 +1065,16 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         string? StableErrorCode,
         string? ReleaseTag,
         ReviewedReleasePreparationStage? ReleaseStage = null,
-        TransactionStage? TransactionStage = null
+        TransactionStage? TransactionStage = null,
+        DiagnosticProjection? Projection = null
     );
     private sealed record DiagnosticProjection(string EventCode, InstallerLogLevel Level, string Message);
+    private sealed record SanitizedCopyProjection(
+        string Text,
+        InstallerDiagnosticHealth Health,
+        int DisplayedEntryCount,
+        int DisplayOmittedEntryCount
+    );
 }
 
 /// <summary>A safe refusal raised before mutation when the required private diagnostic record is unavailable.</summary>

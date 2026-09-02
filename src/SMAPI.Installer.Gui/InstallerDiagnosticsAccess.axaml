@@ -10,7 +10,7 @@
       Margin="0,8,0,0"
       AutomationProperties.AccessKey="Alt+D"
       AutomationProperties.HelpText="Opens a bounded local-only diagnostic snapshot. It never opens a path supplied by the installer backend."
-      AutomationProperties.Name="View private diagnostic log"
+      AutomationProperties.Name="View local diagnostic snapshot"
       Click="OnOpenClicked"
-      Content="View _diagnostic log" />
+      Content="View _diagnostic snapshot" />
 </UserControl>
