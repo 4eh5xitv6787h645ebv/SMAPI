@@ -629,6 +629,16 @@ This completes the reviewed fixture-free rollback-selection and visible-executio
 
 This foundation does not yet make recovery pruning visible or reachable from the production GUI. The destructive retention selector, default-Cancel confirmation, progress/cancellation presentation, packaged public artifact, clean-isolated qualification, trusted-workload validation, and production screenshots remain unchecked. The implementation and tests use no private workload or live game data.
 
+### Bound recovery-prune session and frontend-controller lifecycle
+
+- [x] Bind recovery-prune inspection and confirmation to one exact game session, remint catalog choices by reference, consume catalog and confirmation authority once, and expose a confirmed owner whose only mutation entry is explicit execution ([merged PR #240](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/240); exact reviewed head [`1899aeaa`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/1899aeaaf54dd4fbef823d2439e4fc61ffd3d300)).
+- [x] Settle cancellation, session faults, pending-start disposal, late operation publication, and post-admission transport uncertainty without exposing backend paths, identifiers, digests, logs, prose, or private exception text; preserve exact validated terminal authority and otherwise report only typed state uncertainty ([session lifecycle and privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/240)).
+- [x] Add a dedicated presentation controller for explicit list, exact selection, read-only inspection, typed destructive consent, zero-execution Ready state, separate one-shot Run, bounded/coalesced progress, cancellation, terminal validation, and reentrant disposal; keep all backend capabilities below the presentation boundary ([merged PR #241](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/241); exact reviewed head [`55a7980e`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/55a7980e7f948494135c3bd12b26b5a0bc8da1f1)).
+- [x] Reject stale or reconstructed choices, foreign confirmed owners or fault tasks, invalid plan and terminal accounting, unrequested cancellation outcomes, malformed or overflowing progress, late success after cancellation, duplicate commands, and disposal/confirmation/start races; suppress ancillary cancellation failures while the exact terminal remains authoritative ([controller tests and review-finding fixes](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/241)).
+- [x] Pass 112/112 focused bound-session tests and 772/772 full GUI tests for PR #240, then 50/50 focused controller tests, 822/822 full GUI tests, ten repeated 13-case race runs, warnings-as-errors, formatting, and diff checks for PR #241; obtain clean exact-head architecture/concurrency, security/privacy/ownership, and testing reviews, pass both required CI workflows, and merge at [`4437fffd`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/4437fffd5c8fa825715a7a973984800bd135a45e).
+
+These merged ownership/controller slices deliberately add no visible recovery-prune controls, production screenshot, package, or public-artifact qualification. The destructive desktop surface and all broader Phase 4 completion checkboxes remain unchecked until their exact reviewed UI and packaged evidence exist.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
