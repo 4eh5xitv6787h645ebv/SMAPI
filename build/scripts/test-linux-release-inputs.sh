@@ -51,7 +51,7 @@ if grep -Fq "local-package picker is not available" "$release_workflow"; then
     exit 1
 fi
 grep -Fq 'exact six files' "$release_workflow"
-grep -Fq 'Use **Roll back** only for an authenticated recovery generation' "$release_workflow"
+grep -Fq 'For rollback, choose **Load or refresh history**, select one authenticated generation, then use **Inspect rollback**, **Confirm reviewed plan**, and **Run rollback**.' "$release_workflow"
 grep -Fq 'use **Uninstall** first' "$release_workflow"
 grep -Fq 'never treats the folder path or metadata as verified identity' "$release_workflow"
 

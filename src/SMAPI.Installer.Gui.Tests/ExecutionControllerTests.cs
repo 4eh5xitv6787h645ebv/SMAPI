@@ -406,9 +406,10 @@ internal sealed class ExecutionControllerTests
         viewModel.OperationLabel.Should().Be("Rollback");
         viewModel.Heading.Should().Be("Ready to run rollback");
         viewModel.Message.Should().Contain("No files have changed");
+        viewModel.Message.Should().Contain("Choose Run rollback");
         viewModel.Message.Should().Contain("restore the selected previous managed state");
         viewModel.PlanDetail.Should().Contain("Confirmed operation: Rollback");
-        viewModel.BoundaryDetail.Should().Contain("Nothing runs until you choose Run operation");
+        viewModel.BoundaryDetail.Should().Contain("Nothing runs until you choose Run rollback");
         runButton.Content.Should().Be("_Run rollback");
         AutomationProperties.GetName(runButton).Should().Be("Run the exact confirmed rollback");
         viewModel.RunCommand.CanExecute(null).Should().BeTrue();

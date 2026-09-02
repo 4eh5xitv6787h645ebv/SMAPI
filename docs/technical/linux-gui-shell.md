@@ -57,7 +57,8 @@ deliberately staged; reaching a later screen never means an earlier read-only ac
    Applying those choices only refreshes the read-only plan.
 4. **Confirm, then run.** **Confirm reviewed plan** still changes no files and opens a separate final
    screen. Recheck the safety boundary, leave Cancel selected if anything is unexpected, and use the
-   explicit **Run** action once. Do not start the game, replace the selected folder, or run another
+   explicit **Run operation** action once, or **Run rollback** for an inspected rollback. Do not start
+   the game, replace the selected folder, or run another
    installer while a mutation is active. The final screen distinguishes the durable result from
    backend-settlement warnings and offers recovery when the exact recorded state requires it.
 

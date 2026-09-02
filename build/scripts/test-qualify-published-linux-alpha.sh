@@ -152,6 +152,7 @@ printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
     '[[ "$*" != *synthetic-public-read-token* ]]' \
+    '[[ -z "${SMAPI_TEST_AMBIENT_SECRET+x}" ]]' \
     'printf "%s\n" "$*" >> "$0.log"' \
     'if [[ -f "$0.fail" ]]; then exit 124; fi' \
     'while [[ "$1" == --* ]]; do shift; done' \
@@ -159,6 +160,17 @@ printf '%s\n' \
     'exec "$@"' \
     > "$fake_bin/timeout"
 chmod 0700 -- "$fake_bin/timeout"
+
+printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'for argument in "$@"; do' \
+    '    [[ "$argument" != *synthetic-public-read-token* ]] || exit 98' \
+    'done' \
+    'printf "%s\n" "$*" >> "$SMAPI_TEST_ENV_ARGUMENT_LOG"' \
+    'exec /usr/bin/env "$@"' \
+    > "$fake_bin/env"
+chmod 0700 -- "$fake_bin/env"
 
 fake_gh="$test_root/fake-gh/gh"
 mkdir -m 0700 -- "$(dirname -- "$fake_gh")"
@@ -237,13 +249,16 @@ chmod 0700 -- "$fake_gh"
 curl_log="$test_root/curl.log"
 curl_argument_log="$test_root/curl-arguments.log"
 timeout_log="$fake_bin/timeout.log"
+env_argument_log="$test_root/env-arguments.log"
 curl_fail_name="$test_root/curl-fail-name"
 curl_extra_name="$test_root/curl-extra-name"
 export SMAPI_TEST_RELEASE_FIXTURE="$fixture"
 export SMAPI_TEST_CURL_LOG="$curl_log"
 export SMAPI_TEST_CURL_ARGUMENT_LOG="$curl_argument_log"
+export SMAPI_TEST_ENV_ARGUMENT_LOG="$env_argument_log"
 export SMAPI_TEST_CURL_FAIL_NAME="$curl_fail_name"
 export SMAPI_TEST_CURL_EXTRA_NAME="$curl_extra_name"
+export SMAPI_TEST_AMBIENT_SECRET=synthetic-ambient-secret
 github_token=synthetic-public-read-token
 export SMAPI_TEST_EXPLICIT_TOKEN="$github_token"
 
@@ -260,6 +275,7 @@ run_success() {
     : > "$curl_log"
     : > "$curl_argument_log"
     : > "$timeout_log"
+    : > "$env_argument_log"
     new_case_directories "$case_name"
     PATH="$fake_bin:$PATH" smapi_download_and_verify_linux_alpha \
         "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh" "$github_token"
@@ -280,6 +296,7 @@ test "$(wc -l < "$curl_log")" = 6
 test "$(grep -Fc -- '--connect-timeout 15 --max-time 300 --speed-limit 1024 --speed-time 30' "$curl_argument_log")" = 6
 test "$(grep -Fc -- '--signal=TERM --kill-after=10s 60s' "$timeout_log")" = 2
 test "$(grep -Fc -- '--signal=TERM --kill-after=15s 120s' "$timeout_log")" = 2
+test "$(wc -l < "$env_argument_log")" = 2
 test "$(wc -l < "$(dirname -- "$fake_gh")/gh.calls")" = 4
 test "$(grep -Fc -- "api --method GET --hostname api.github.com" "$(dirname -- "$fake_gh")/gh.calls")" = 2
 grep -F -- "attestation verify $case_assets/$package_name" "$(dirname -- "$fake_gh")/gh.calls" >/dev/null
@@ -291,7 +308,7 @@ if grep -E -i 'modpack|save|blossom|/home/' "$curl_log" >/dev/null; then
     echo "The qualifier attempted to access private-workload-shaped input." >&2
     exit 1
 fi
-if grep -F -- "$github_token" "$curl_log" "$curl_argument_log" "$timeout_log" "$(dirname -- "$fake_gh")/gh.calls" >/dev/null; then
+if grep -F -- "$github_token" "$curl_log" "$curl_argument_log" "$timeout_log" "$env_argument_log" "$(dirname -- "$fake_gh")/gh.calls" >/dev/null; then
     echo "The qualifier exposed its GitHub token in a helper argument or call log." >&2
     exit 1
 fi
@@ -328,6 +345,7 @@ rm -f -- "$(dirname -- "$fake_gh")/gh.mode" "$(dirname -- "$fake_gh")/api.count"
 : > "$curl_log"
 : > "$curl_argument_log"
 : > "$timeout_log"
+: > "$env_argument_log"
 published_assets="$test_root/published-assets"
 if ! GH_TOKEN="$github_token" PATH="$fake_bin:$PATH" \
     "$entrypoint_root/qualify-published-linux-alpha.sh" \
@@ -343,9 +361,10 @@ test "$(find "$test_root" -mindepth 1 -maxdepth 1 -name '.smapi-public-alpha.*' 
 test "$(grep -Fc -- '--connect-timeout 15 --max-time 300 --speed-limit 1024 --speed-time 30' "$curl_argument_log")" = 6
 test "$(grep -Fc -- '--signal=TERM --kill-after=10s 60s' "$timeout_log")" = 2
 test "$(grep -Fc -- '--signal=TERM --kill-after=15s 120s' "$timeout_log")" = 2
+test "$(wc -l < "$env_argument_log")" = 2
 if grep -F -- "$github_token" \
     "$test_root/public-entrypoint.stdout" "$test_root/public-entrypoint.stderr" \
-    "$curl_log" "$curl_argument_log" "$timeout_log" >/dev/null; then
+    "$curl_log" "$curl_argument_log" "$timeout_log" "$env_argument_log" >/dev/null; then
     echo "The public qualifier wrote its GitHub token to terminal output." >&2
     exit 1
 fi

@@ -223,6 +223,8 @@ def validate_reference(
         fail(f"{context} real evidence requires a dedicated qualification/validation record or Actions run")
     if evidence_class == "controlled_fixture" and path != screenshot_spec and not is_dedicated_record:
         fail(f"{context} controlled evidence requires the anchored screenshot spec or a dedicated record")
+    if evidence_id == "A8" and path == screenshot_spec:
+        fail(f"{context} A8 requires separate AT-SPI/Orca qualification evidence")
     document = read_single_link_text(candidate, f"qualification reference {path_text}")
     if not markdown_anchor_exists(document, anchor):
         fail(f"{context} anchor does not exist in {path_text}: {anchor}")
@@ -549,7 +551,7 @@ def validate_capture(
     repository_root: Path,
     private_strings: tuple[str, ...],
     production_identity: dict[str, str],
-) -> tuple[str, str, tuple[tuple[str, tuple[Any, ...]], ...], tuple[Any, ...]]:
+) -> tuple[str, str, str, tuple[tuple[str, tuple[Any, ...]], ...], tuple[Any, ...]]:
     context = f"captures[{index}]"
     required = (
         "id", "filename", "alt_text", "caption", "evidence_class", "source", "release", "binaries",
@@ -741,7 +743,7 @@ def validate_capture(
         json.dumps(capture, sort_keys=True), json.dumps(editing, sort_keys=True),
         json.dumps(privacy, sort_keys=True),
     )
-    return evidence_id, filename, tuple(original_provenance), shared_final_provenance
+    return evidence_id, filename, expected_sha256, tuple(original_provenance), shared_final_provenance
 
 
 def validate_manifest(
@@ -781,15 +783,22 @@ def validate_manifest(
 
     seen_ids: list[str] = []
     final_provenance: dict[str, tuple[Any, ...]] = {}
+    final_hashes: dict[str, str] = {}
     original_provenance: dict[str, tuple[Any, ...]] = {}
     for index, item in enumerate(captures):
-        evidence_id, filename, originals, provenance = validate_capture(
+        evidence_id, filename, final_sha256, originals, provenance = validate_capture(
             item, index, assets_root, repository_root, private_strings, production_identity
         )
         seen_ids.append(evidence_id)
-        if filename in final_provenance and final_provenance[filename] != provenance:
-            fail(f"shared screenshot filename {filename} has inconsistent pixel or capture provenance")
+        if filename in final_provenance:
+            fail(f"each evidence ID must use a distinct final screenshot filename; repeated: {filename}")
+        if final_sha256 in final_hashes:
+            fail(
+                "each evidence ID must use distinct final screenshot pixels; "
+                f"{filename} duplicates {final_hashes[final_sha256]}"
+            )
         final_provenance[filename] = provenance
+        final_hashes[final_sha256] = filename
         for original_filename, original_identity in originals:
             if (
                 original_filename in original_provenance

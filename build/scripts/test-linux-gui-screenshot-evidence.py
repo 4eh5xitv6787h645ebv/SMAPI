@@ -137,7 +137,7 @@ def make_capture(evidence_id: str, filename: str, digest: str) -> dict[str, Any]
         },
         "qualification_reference": (
             "https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/123456789"
-            if real
+            if real or evidence_id == "A8"
             else f"docs/technical/linux-gui-screenshot-evidence.md#evidence-{evidence_id.casefold()}"
         ),
     }
@@ -331,7 +331,24 @@ def main() -> int:
         for field in ("environment", "runtime", "capture", "editing", "privacy_review"):
             second[field] = json.loads(json.dumps(first[field]))
 
-    expect_success("shared adjacent-state final PNG", duplicate_filename)
+    expect_failure(
+        "shared final PNG across different evidence IDs",
+        duplicate_filename,
+        "each evidence ID must use a distinct final screenshot filename",
+    )
+
+    def duplicate_final_pixels(manifest: dict[str, Any], assets: Path) -> None:
+        first = manifest["captures"][0]
+        second = manifest["captures"][1]
+        duplicate = (assets / first["filename"]).read_bytes()
+        (assets / second["filename"]).write_bytes(duplicate)
+        second["capture"]["sha256"] = hashlib.sha256(duplicate).hexdigest()
+
+    expect_failure(
+        "same final pixels under distinct filenames",
+        duplicate_final_pixels,
+        "each evidence ID must use distinct final screenshot pixels",
+    )
     expect_failure(
         "path traversal",
         lambda manifest, _assets: manifest["captures"][1].__setitem__("filename", "../d2.png"),
@@ -443,6 +460,13 @@ def main() -> int:
             "qualification_reference", "docs/technical/linux-gui-screenshot-evidence.md#evidence-d3"
         ),
         "local anchor must identify evidence-d2",
+    )
+    expect_failure(
+        "A8 generic screenshot plan instead of separate AT-SPI evidence",
+        lambda manifest, _assets: manifest["captures"][53].__setitem__(
+            "qualification_reference", "docs/technical/linux-gui-screenshot-evidence.md#evidence-a8"
+        ),
+        "A8 requires separate AT-SPI/Orca qualification evidence",
     )
     expect_failure(
         "edited pixels",
@@ -567,7 +591,7 @@ def main() -> int:
         lambda manifest, _assets: manifest["captures"][52]["editing"]["original_sources"][1]["environment"].__setitem__("display_backend", "x11"),
         "GNOME+KDE wayland/xwayland",
     )
-    print("Linux GUI screenshot evidence validator self-tests passed (3 success and 40 negative cases).")
+    print("Linux GUI screenshot evidence validator self-tests passed (2 success and 43 negative cases).")
     return 0
 
 

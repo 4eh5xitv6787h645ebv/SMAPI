@@ -17,7 +17,7 @@ Each `qualification_reference` is evidence-ID-specific. A real-qualification row
 
 ## Capture matrix
 
-One image may cover adjacent states when every state remains legible and the caption is exact; shared filenames must have identical pixel, capture, environment, runtime, editing, and privacy provenance. A contact sheet may cover environment or scale variants only when its individual source PNGs are also retained, hashed, and recorded with their own complete environment, capture method/time, and original-resolution privacy review.
+Every evidence ID must have its own distinct final PNG filename and pixel hash, so one image cannot silently satisfy semantically different rows by being copied or renamed. A contact sheet may cover the environment or scale variants within one A4, A5, A6, or A7 row only when its individual source PNGs are also retained, hashed, and recorded with their own complete environment, capture method/time, and original-resolution privacy review.
 
 ### Detection and selection
 
@@ -101,7 +101,7 @@ One image may cover adjacent states when every state remains legible and the cap
 | A5 | <a id="evidence-a5"></a>Light, dark, and high-contrast focus and error states | Three controlled captures or one contact sheet retaining all sources |
 | A6 | <a id="evidence-a6"></a>Packaged GUI on GNOME and KDE under X11 | Real desktop qualification; a contact sheet is acceptable |
 | A7 | <a id="evidence-a7"></a>Packaged GUI on GNOME and KDE through XWayland in Wayland sessions | Real desktop qualification; a contact sheet is acceptable |
-| A8 | <a id="evidence-a8"></a>Representative screen-reader/live-status state | Controlled fixture linked to separate AT-SPI/Orca evidence |
+| A8 | <a id="evidence-a8"></a>Representative screen-reader/live-status state | Controlled fixture linked through its qualification reference to a separate AT-SPI/Orca validation record or exact Actions run; the generic screenshot-plan anchor is insufficient |
 | M1 | <a id="evidence-m1"></a>GUI manual-installation help with exact non-GUI steps and limitations | Packaged production GUI |
 | M2 | <a id="evidence-m2"></a>Manual console fallback launched from the same verified public package | Real clean isolated package qualification |
 | M3 | <a id="evidence-m3"></a>Manual install or rollback completion | Real clean isolated lifecycle qualification |

@@ -606,12 +606,24 @@ internal sealed class GameDiscoveryControllerTests
     public async Task SessionFaultWinsActiveValidationAndLaterFaultRevokesSelection()
     {
         TaskCompletionSource<ProtocolGameCandidate> validating = NewCompletion<ProtocolGameCandidate>();
-        FakeVerifiedSession activeSession = new() { Validation = (_, _) => validating.Task };
+        TaskCompletionSource validationStarted = NewCompletion();
+        using ManualResetEventSlim releaseValidation = new(initialState: false);
+        FakeVerifiedSession activeSession = new()
+        {
+            Validation = (_, _) =>
+            {
+                validationStarted.TrySetResult();
+                releaseValidation.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+                return validating.Task;
+            }
+        };
         await using (GameDiscoveryController controller = new(activeSession))
         {
-            Task operation = controller.ValidateManualAsync("/games/private-name");
+            Task operation = Task.Run(() => controller.ValidateManualAsync("/games/private-name"));
+            await validationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
             activeSession.Fault.TrySetResult(new InstallerProtocolClientException("private /home/alice SECRET"));
             validating.TrySetCanceled();
+            releaseValidation.Set();
             await operation;
 
             controller.Snapshot.State.Should().Be(GameDiscoveryState.SessionFaulted);

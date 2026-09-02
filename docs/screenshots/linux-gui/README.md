@@ -23,13 +23,13 @@ The validator fails closed on:
 
 - any missing, duplicate, or unknown matrix ID, or anything other than exactly 57 entries;
 - an incomplete assets-root inventory: only `README.md`, `manifest.schema.json`, `manifest.json`, and every referenced final/original PNG are allowed; directories, nested assets, orphan files, symlinks, and multiply-linked files fail;
-- unsafe filenames, inconsistent provenance for a shared adjacent-state PNG, bad PNG structure or CRCs, interlacing, unsupported color encodings, unknown/needless chunks, animation, trailing bytes, invalid zlib data, decoded-size excess, or malformed scanlines;
+- unsafe filenames, any final PNG filename or pixel hash reused across evidence IDs, bad PNG structure or CRCs, interlacing, unsupported color encodings, unknown/needless chunks, animation, trailing bytes, invalid zlib data, decoded-size excess, or malformed scanlines;
 - mismatched SHA-256 hashes or pixel dimensions;
 - a top-level production identity mismatch in any of the 57 entries, including a controlled fixture;
 - missing source, binary, environment, runtime, capture, durable-state, editing, privacy-review, qualification, alt-text, or caption provenance, including environment/capture/privacy provenance for retained originals;
 - anything other than the exact A4 100/125/150/200 scale sources, A5 light/dark/high-contrast sources, A6 GNOME+KDE X11/x11 sources, or A7 GNOME+KDE Wayland/xwayland sources;
 - a controlled fixture used for an ID which requires real qualification;
-- unsafe release links; unanchored, missing, wrong-ID, generic, or untrusted qualification references; common path/credential/signed-URL patterns; or configured private strings in manifest text or PNG bytes. Real rows accept only an exact fork Actions run URL or an evidence-ID-specific anchor in a dedicated qualification/validation record; controlled rows may also use their anchored row in the screenshot specification.
+- unsafe release links; unanchored, missing, wrong-ID, generic, or untrusted qualification references; common path/credential/signed-URL patterns; or configured private strings in manifest text or PNG bytes. Real rows accept only an exact fork Actions run URL or an evidence-ID-specific anchor in a dedicated qualification/validation record; controlled rows may also use their anchored row in the screenshot specification, except A8 which requires separate AT-SPI/Orca qualification evidence.
 
 The automated scan cannot determine what rendered pixels depict. Every image still requires the recorded original-resolution human privacy review mandated by the specification. If that review finds private data, discard and recapture the image; do not redact application pixels.
 
@@ -44,4 +44,4 @@ Run the validator's fixture-free self-tests with:
 python3 build/scripts/test-linux-gui-screenshot-evidence.py
 ```
 
-The self-tests create all data under private temporary directories and cover a valid 57-ID bundle, a safely shared adjacent-state PNG, production-identity mixing, exact inventory failures, environment-matrix gaps, invalid or bomb-like PNG streams, unknown metadata/critical chunks, privacy leaks, and other tampered or broken-provenance cases.
+The self-tests create all data under private temporary directories and cover a valid 57-ID bundle, rejection of cross-ID filename or pixel reuse, production-identity mixing, exact inventory failures, environment-matrix gaps, invalid or bomb-like PNG streams, unknown metadata/critical chunks, privacy leaks, and other tampered or broken-provenance cases.

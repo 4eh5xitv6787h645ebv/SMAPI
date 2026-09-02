@@ -37,6 +37,59 @@ smapi_assert_downloaded_asset() {
     fi
 }
 
+smapi_fetch_release_inventory() {
+    if [[ $# -ne 4 ]]; then
+        smapi_release_error "Internal usage: smapi_fetch_release_inventory PRIVATE-HOME GITHUB-TOKEN PINNED-GH RELEASE-TAG"
+        return
+    fi
+
+    local private_home="$1"
+    local github_token="$2"
+    local pinned_gh="$3"
+    local release_tag="$4"
+    local -a inherited_exported_names inherited_function_names
+    mapfile -t inherited_exported_names < <(compgen -e)
+    mapfile -t inherited_function_names < <(compgen -A function)
+
+    # A forked shell can establish the process environment entirely through builtins. In
+    # particular, don't pass GH_TOKEN through external `env` arguments where process/audit
+    # observers could capture it before the bounded inventory process starts.
+    (
+        local inherited_name
+        for inherited_name in "${inherited_exported_names[@]}"; do
+            export -n "$inherited_name"
+        done
+        for inherited_name in "${inherited_function_names[@]}"; do
+            export -n -f "$inherited_name"
+        done
+        export \
+            HOME="$private_home" \
+            GH_CONFIG_DIR="$private_home" \
+            XDG_CONFIG_HOME="$private_home" \
+            XDG_CACHE_HOME="$private_home" \
+            XDG_RUNTIME_DIR="$private_home" \
+            TMPDIR="$private_home" \
+            GH_TOKEN="$github_token" \
+            GH_PROMPT_DISABLED=1 \
+            GH_NO_UPDATE_NOTIFIER=1 \
+            GH_NO_EXTENSION_UPDATE_NOTIFIER=1 \
+            GH_PAGER= \
+            PAGER= \
+            NO_COLOR=1 \
+            TERM=dumb \
+            LANG=C.UTF-8 \
+            LC_ALL=C.UTF-8 \
+            PATH="$PATH"
+        exec timeout --signal=TERM --kill-after=10s 60s \
+            "$pinned_gh" api \
+                --method GET \
+                --hostname api.github.com \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "repos/$SMAPI_RELEASE_REPOSITORY/releases/tags/$release_tag"
+    )
+}
+
 # Internal testable core. The public entry point below always supplies a GitHub CLI staged by the
 # repository's exact 2.92.0 archive/hash verifier. Callers should use the script entry point, not this function.
 smapi_download_and_verify_linux_alpha() {
@@ -111,32 +164,9 @@ smapi_download_and_verify_linux_alpha() {
     local inventory_stage inventory_output
     for inventory_stage in before-download; do
         inventory_output="$verification_directory/release-inventory-$inventory_stage.json"
-        env -i \
-            HOME="$private_home" \
-            GH_CONFIG_DIR="$private_home" \
-            XDG_CONFIG_HOME="$private_home" \
-            XDG_CACHE_HOME="$private_home" \
-            XDG_RUNTIME_DIR="$private_home" \
-            TMPDIR="$private_home" \
-            GH_TOKEN="$github_token" \
-            GH_PROMPT_DISABLED=1 \
-            GH_NO_UPDATE_NOTIFIER=1 \
-            GH_NO_EXTENSION_UPDATE_NOTIFIER=1 \
-            GH_PAGER= \
-            PAGER= \
-            NO_COLOR=1 \
-            TERM=dumb \
-            LANG=C.UTF-8 \
-            LC_ALL=C.UTF-8 \
-            PATH="$PATH" \
-            timeout --signal=TERM --kill-after=10s 60s \
-            "$pinned_gh" api \
-                --method GET \
-                --hostname api.github.com \
-                -H 'Accept: application/vnd.github+json' \
-                -H 'X-GitHub-Api-Version: 2022-11-28' \
-                "repos/$SMAPI_RELEASE_REPOSITORY/releases/tags/$release_tag" \
-                > "$inventory_output"
+        smapi_fetch_release_inventory \
+            "$private_home" "$github_token" "$pinned_gh" "$release_tag" \
+            > "$inventory_output"
         smapi_assert_downloaded_asset "$inventory_output" $((2 * 1024 * 1024)) || return
         jq -e \
             --arg tag "$release_tag" \
@@ -408,32 +438,9 @@ smapi_download_and_verify_linux_alpha() {
     fi
 
     inventory_output="$verification_directory/release-inventory-after-verification.json"
-    env -i \
-        HOME="$private_home" \
-        GH_CONFIG_DIR="$private_home" \
-        XDG_CONFIG_HOME="$private_home" \
-        XDG_CACHE_HOME="$private_home" \
-        XDG_RUNTIME_DIR="$private_home" \
-        TMPDIR="$private_home" \
-        GH_TOKEN="$github_token" \
-        GH_PROMPT_DISABLED=1 \
-        GH_NO_UPDATE_NOTIFIER=1 \
-        GH_NO_EXTENSION_UPDATE_NOTIFIER=1 \
-        GH_PAGER= \
-        PAGER= \
-        NO_COLOR=1 \
-        TERM=dumb \
-        LANG=C.UTF-8 \
-        LC_ALL=C.UTF-8 \
-        PATH="$PATH" \
-        timeout --signal=TERM --kill-after=10s 60s \
-        "$pinned_gh" api \
-            --method GET \
-            --hostname api.github.com \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "repos/$SMAPI_RELEASE_REPOSITORY/releases/tags/$release_tag" \
-            > "$inventory_output"
+    smapi_fetch_release_inventory \
+        "$private_home" "$github_token" "$pinned_gh" "$release_tag" \
+        > "$inventory_output"
     smapi_assert_downloaded_asset "$inventory_output" $((2 * 1024 * 1024)) || return
     jq -e \
         --arg tag "$release_tag" \

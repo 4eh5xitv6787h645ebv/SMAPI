@@ -407,6 +407,24 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": { "const": "A8" }
+            },
+            "required": ["id"]
+          },
+          "then": {
+            "properties": {
+              "qualification_reference": {
+                "oneOf": [
+                  { "$ref": "#/$defs/actionsRunReference" },
+                  { "$ref": "#/$defs/anchoredQualificationRecordReference" }
+                ]
+              }
+            }
+          }
         }
       ]
     }

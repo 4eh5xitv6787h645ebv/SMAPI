@@ -81,7 +81,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
     public IReadOnlyList<ExecutionFactRow> ResultRows { get => this.resultRows; private set => this.SetProperty(ref this.resultRows, value); }
 
     public string BoundaryDetail => this.snapshot.State == ExecutionState.Ready
-        ? "Final confirmation. Nothing runs until you choose Run operation. Cancel is the recommended default."
+        ? $"Final confirmation. Nothing runs until you choose {(this.snapshot.Plan.Operation == InstallerOperation.Rollback ? "Run rollback" : "Run operation")}. Cancel is the recommended default."
         : "This screen reports bounded local installer progress and durable results. Keep it open while an operation is active.";
 
     public string PlanDetail => $"Confirmed operation: {this.OperationLabel}. {this.snapshot.Plan.OperationCounts.Sum(item => item.Count)} planned file action(s).";
@@ -300,7 +300,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         string operation = GetOperationLabel(value.Plan.Operation);
         return value.State switch
         {
-            ExecutionState.Ready when value.Plan.Operation == InstallerOperation.Rollback => ("Ready to run rollback", "The rollback plan is confirmed. No files have changed. Choose Run operation to restore the selected previous managed state, or Cancel."),
+            ExecutionState.Ready when value.Plan.Operation == InstallerOperation.Rollback => ("Ready to run rollback", "The rollback plan is confirmed. No files have changed. Choose Run rollback to restore the selected previous managed state, or Cancel."),
             ExecutionState.Ready => ($"Ready to run {operation}", "The plan is confirmed. No files have changed. Choose Run operation to begin, or Cancel."),
             ExecutionState.Starting when value.Plan.Operation == InstallerOperation.Rollback => ("Starting rollback…", "Submitting the exact confirmed rollback plan. Cancellation can still be requested safely."),
             ExecutionState.Starting => ($"Starting {operation}…", "Submitting the exact confirmed plan. Cancellation can still be requested safely."),
