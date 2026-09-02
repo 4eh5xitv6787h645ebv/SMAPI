@@ -141,7 +141,8 @@ function Get-UnixHardLinkCount {
     )
 
     $count = if ($IsMacOS) {
-        & stat -f '%l' -- $Path
+        # BSD stat doesn't consistently accept GNU's `--` option. Callers pass absolute paths.
+        & stat -f '%l' $Path
     }
     else {
         & stat -c '%h' -- $Path
