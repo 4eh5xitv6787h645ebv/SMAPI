@@ -122,6 +122,7 @@ internal sealed partial class GameDiscoveryWindow : Window, IAsyncDisposable
                     GameDiscoveryFocusTarget.Browse => this.BrowseButton,
                     GameDiscoveryFocusTarget.Retry => this.RetryButton,
                     GameDiscoveryFocusTarget.Continue => this.ContinueButton,
+                    GameDiscoveryFocusTarget.RecoveryCleanup => this.RecoveryCleanupButton,
                     GameDiscoveryFocusTarget.Exit => this.ExitButton,
                     _ when this.ViewModel.IsProblemVisible => this.ProblemRegion,
                     _ => this.StatusRegion

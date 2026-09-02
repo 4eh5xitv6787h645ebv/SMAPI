@@ -211,6 +211,71 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
+    public async Task RecoveryCleanupIsAnExplicitOneShotRouteWithTruthfulNoExecutionCopy()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("recovery", LinuxGameFolderStatus.Valid);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        GameDiscoveryController controller = new(session);
+        await using GameDiscoveryViewModel viewModel = new(controller);
+        int planRequests = 0;
+        int recoveryRequests = 0;
+        IPlanInspectionSession? handoff = null;
+        viewModel.ContinueRequested += (_, _) => planRequests++;
+        viewModel.RecoveryCleanupRequested += (_, _) =>
+        {
+            recoveryRequests++;
+            handoff = controller.TakeSelectedGameSession();
+        };
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.IsContinueVisible.Should().BeTrue();
+        viewModel.IsRecoveryCleanupVisible.Should().BeTrue();
+        viewModel.ManageRecoveriesCommand.CanExecute(null).Should().BeTrue();
+
+        viewModel.ManageRecoveriesCommand.Execute(null);
+        viewModel.ContinueCommand.Execute(null);
+        Dispatcher.UIThread.RunJobs();
+
+        recoveryRequests.Should().Be(1);
+        planRequests.Should().Be(0, "a selected-game authority has only one destination");
+        handoff.Should().NotBeNull();
+        viewModel.Heading.Should().Be("Opening recovery history…");
+        viewModel.Message.Should().Contain("does not begin until").And.Contain("explicitly run");
+        viewModel.Message.Should().Contain("Nothing has been changed");
+        viewModel.IsContinueVisible.Should().BeFalse();
+        viewModel.IsRecoveryCleanupVisible.Should().BeFalse();
+        viewModel.ContinueCommand.CanExecute(null).Should().BeFalse();
+        viewModel.ManageRecoveriesCommand.CanExecute(null).Should().BeFalse();
+
+        await handoff!.DisposeAsync();
+    }
+
+    [AvaloniaTest]
+    public async Task RecoveryOnlyHostReceivesRecoveryButtonFocusForAValidSelection()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("recovery-focus", LinuxGameFolderStatus.Valid);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        await using GameDiscoveryViewModel viewModel = CreateViewModel(session);
+        GameDiscoveryFocusTarget? focus = null;
+        viewModel.RecoveryCleanupRequested += (_, _) => { };
+        viewModel.FocusRequested += (_, target) => focus = target;
+
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.IsContinueVisible.Should().BeFalse();
+        viewModel.IsRecoveryCleanupVisible.Should().BeTrue();
+        focus.Should().Be(GameDiscoveryFocusTarget.RecoveryCleanup);
+    }
+
+    [AvaloniaTest]
     public async Task EveryInvalidFolderStatusHasSpecificSafeGuidance()
     {
         foreach (LinuxGameFolderStatus status in Enum.GetValues<LinuxGameFolderStatus>().Where(value => value != LinuxGameFolderStatus.Valid))
