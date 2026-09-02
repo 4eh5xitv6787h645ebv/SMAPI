@@ -189,7 +189,7 @@ Scope constraints apply throughout:
 - [x] Support reviewed public-release and authenticated local-package selection ([final integration PR #250](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250)).
 - [x] Show bounded aggregate download progress ([release workflow guide](linux-gui-shell.md#use-the-production-workflow)).
 - [x] Verify package checksums before installation and keep integrity distinct from provenance ([release workflow guide](linux-gui-shell.md#use-the-production-workflow)).
-- [x] Show understandable typed errors with safe next steps ([troubleshooting guide](linux-gui-shell.md#private-diagnostics-and-troubleshooting)).
+- [x] Show understandable typed errors with safe next steps ([troubleshooting guide](linux-gui-shell.md#local-diagnostics-and-troubleshooting)).
 - [x] Write a detailed bounded local log with a privacy-restricted viewer on every production screen ([merged PR #244](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/244); [exact-head security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/244#issuecomment-5509002769)).
 - [x] Never require root for a normal user installation and refuse effective UID 0 before discovery, network, logging, or mutation ([root-refusal implementation and tests in PR #250](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250)).
 - [x] Protect unrelated game files through receipt-owned transactional planning and lifecycle preservation assertions ([lifecycle test at the exact reviewed commit](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/052699e8ccba0d13f9d4f02e0bb199aa04cec605/build/scripts/test-linux-installer-lifecycle.sh)).
