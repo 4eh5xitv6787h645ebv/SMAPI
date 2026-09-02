@@ -212,6 +212,13 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
         return new LinuxAnchoredFileSystem(this.OpenDirectoryPath(relativePath));
     }
 
+    /// <summary>Duplicate this retained directory authority without resolving it through a path.</summary>
+    internal LinuxAnchoredFileSystem DuplicateAuthority()
+    {
+        this.AssertUsable();
+        return new LinuxAnchoredFileSystem(Duplicate(this.RootHandle));
+    }
+
     /// <summary>Create and retain a new real subdirectory without replacing any existing entry.</summary>
     internal LinuxAnchoredFileSystem CreateNewSubdirectory(
         string relativePath,
@@ -444,6 +451,153 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
                 // The original copy error is more useful; a caller can inspect the private staging root.
             }
             throw;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>Copy the exact captured bytes from an already-open regular file to a new anchored path within a fixed byte bound.</summary>
+    public LinuxFileIdentity CopyFileBounded(
+        LinuxAnchoredFile source,
+        string destinationRelativePath,
+        int unixMode,
+        long expectedSize,
+        long maximumBytes,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return this.CopyFileBounded(
+            source,
+            destinationRelativePath,
+            unixMode,
+            expectedSize,
+            maximumBytes,
+            afterChunkCopiedForTesting: null,
+            beforeVerificationForTesting: null,
+            cancellationToken
+        );
+    }
+
+    internal LinuxFileIdentity CopyFileBounded(
+        LinuxAnchoredFile source,
+        string destinationRelativePath,
+        int unixMode,
+        long expectedSize,
+        long maximumBytes,
+        Action<long>? afterChunkCopiedForTesting,
+        Action? beforeVerificationForTesting,
+        CancellationToken cancellationToken = default
+    )
+    {
+        this.AssertUsable();
+        ArgumentNullException.ThrowIfNull(source);
+        ValidateUnixMode(unixMode);
+        if (expectedSize < 0)
+            throw new ArgumentOutOfRangeException(nameof(expectedSize));
+        if (maximumBytes < 0)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        if (expectedSize > maximumBytes)
+            throw new IOException("The bounded-copy expected size exceeds its configured byte bound.");
+        cancellationToken.ThrowIfCancellationRequested();
+        source.AssertOpen();
+
+        LinuxFileIdentity sourceBefore = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
+        if (sourceBefore != source.Identity || sourceBefore.Size != expectedSize)
+            throw new IOException("The bounded-copy source or expected size changed after it was captured.");
+
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
+        try
+        {
+            using ParentAndLeaf parent = this.OpenParent(destinationRelativePath);
+            using SafeFileHandle destinationHandle = OpenAt(
+                parent.Parent,
+                parent.Leaf,
+                OpenReadWrite | OpenCreate | OpenExclusive | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec,
+                (uint)unixMode,
+                "Couldn't create an anchored bounded-copy destination without replacement"
+            );
+            try
+            {
+                SetHandleMode(destinationHandle, unixMode);
+                LinuxFileIdentity destinationCreated = GetHandleIdentity(destinationHandle, requireSingleLinkRegularFile: true);
+                LinuxFileIdentity? namedCreated = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+                if (
+                    destinationCreated.Kind != LinuxAnchoredEntryKind.RegularFile
+                    || destinationCreated.Size != 0
+                    || destinationCreated.UnixMode != unixMode
+                    || destinationCreated.SpecialModeBits != 0
+                    || namedCreated != destinationCreated
+                )
+                    throw new IOException("The bounded-copy destination failed its creation identity or mode check.");
+                Fsync(parent.Parent);
+
+                using IncrementalHash sourceHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                long offset = 0;
+                while (offset < expectedSize)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int count = RandomAccess.Read(
+                        source.Handle,
+                        buffer.AsSpan(0, (int)Math.Min(buffer.Length, expectedSize - offset)),
+                        offset
+                    );
+                    if (count == 0)
+                        throw new EndOfStreamException("The bounded-copy source became shorter while it was copied.");
+                    sourceHasher.AppendData(buffer, 0, count);
+                    RandomAccess.Write(destinationHandle, buffer.AsSpan(0, count), offset);
+                    offset = checked(offset + count);
+                    afterChunkCopiedForTesting?.Invoke(offset);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                Fsync(destinationHandle);
+
+                LinuxFileIdentity sourceAfterCopy = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
+                LinuxFileIdentity destinationAfterCopy = GetHandleIdentity(destinationHandle, requireSingleLinkRegularFile: true);
+                LinuxFileIdentity? namedAfterCopy = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+                if (sourceAfterCopy != sourceBefore)
+                    throw new IOException("The bounded-copy source identity changed while it was copied.");
+                if (
+                    !destinationAfterCopy.IsSameObject(destinationCreated)
+                    || destinationAfterCopy.Size != expectedSize
+                    || destinationAfterCopy.UnixMode != unixMode
+                    || destinationAfterCopy.SpecialModeBits != 0
+                    || namedAfterCopy != destinationAfterCopy
+                )
+                    throw new IOException("The bounded-copy destination failed its exact identity, size, or mode check.");
+
+                beforeVerificationForTesting?.Invoke();
+                cancellationToken.ThrowIfCancellationRequested();
+                byte[] sourceHash = sourceHasher.GetHashAndReset();
+                byte[] destinationHash = ComputeSha256ExactBytes(destinationHandle, expectedSize, cancellationToken);
+                LinuxFileIdentity sourceFinal = GetHandleIdentity(source.Handle, requireSingleLinkRegularFile: true);
+                LinuxFileIdentity destinationFinal = GetHandleIdentity(destinationHandle, requireSingleLinkRegularFile: true);
+                LinuxFileIdentity? namedFinal = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+                if (
+                    sourceFinal != sourceBefore
+                    || !destinationFinal.IsSameObject(destinationCreated)
+                    || destinationFinal.Size != expectedSize
+                    || destinationFinal.UnixMode != unixMode
+                    || destinationFinal.SpecialModeBits != 0
+                    || namedFinal != destinationFinal
+                    || !CryptographicOperations.FixedTimeEquals(sourceHash, destinationHash)
+                )
+                    throw new IOException("The bounded anchored copy failed exact byte, identity, size, or mode verification.");
+
+                Fsync(destinationHandle);
+                Fsync(parent.Parent);
+                LinuxFileIdentity result = GetHandleIdentity(destinationHandle, requireSingleLinkRegularFile: true);
+                LinuxFileIdentity? namedResult = GetIdentityAt(parent.Parent, parent.Leaf, allowMissing: false, requireSingleLinkRegularFile: true);
+                if (result != destinationFinal || namedResult != result)
+                    throw new IOException("The bounded-copy destination changed while it was durably finalized.");
+                return result;
+            }
+            catch
+            {
+                TryUnlinkExactOpenFile(parent.Parent, parent.Leaf, destinationHandle);
+                throw;
+            }
         }
         finally
         {
@@ -939,6 +1093,63 @@ public sealed class LinuxAnchoredFileSystem : IDisposable
             && observed.UnixMode == expected.UnixMode
             && observed.ModificationSeconds == expected.ModificationSeconds
             && observed.ModificationNanoseconds == expected.ModificationNanoseconds;
+    }
+
+    private static void TryUnlinkExactOpenFile(SafeFileHandle parent, string leaf, SafeFileHandle openedFile)
+    {
+        try
+        {
+            LinuxFileIdentity opened = GetHandleIdentity(openedFile, requireSingleLinkRegularFile: true);
+            LinuxFileIdentity? named = GetIdentityAt(parent, leaf, allowMissing: true, requireSingleLinkRegularFile: true);
+            if (named != opened)
+                return;
+            if (unlinkat(parent, leaf, 0) != 0)
+                return;
+            Fsync(parent);
+        }
+        catch
+        {
+            // Never follow or remove a different entry while cleaning up a failed bounded copy.
+        }
+    }
+
+    private static byte[] ComputeSha256ExactBytes(
+        SafeFileHandle file,
+        long expectedLength,
+        CancellationToken cancellationToken
+    )
+    {
+        LinuxFileIdentity before = GetHandleIdentity(file, requireSingleLinkRegularFile: true);
+        if (before.Size != expectedLength)
+            throw new IOException("The bounded-copy verification target has an unexpected size.");
+
+        using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
+        try
+        {
+            long offset = 0;
+            while (offset < expectedLength)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int count = RandomAccess.Read(
+                    file,
+                    buffer.AsSpan(0, (int)Math.Min(buffer.Length, expectedLength - offset)),
+                    offset
+                );
+                if (count == 0)
+                    throw new EndOfStreamException("The bounded-copy verification target became shorter while it was hashed.");
+                hasher.AppendData(buffer, 0, count);
+                offset = checked(offset + count);
+            }
+            LinuxFileIdentity after = GetHandleIdentity(file, requireSingleLinkRegularFile: true);
+            if (after != before || after.Size != expectedLength)
+                throw new IOException("The bounded-copy verification target changed while it was hashed.");
+            return hasher.GetHashAndReset();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     /// <summary>Rename a known real directory without replacing a destination.</summary>

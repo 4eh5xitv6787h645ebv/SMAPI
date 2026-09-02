@@ -267,6 +267,281 @@ public sealed class LinuxAnchoredFileSystemTests
     }
 
     [Test]
+    public void CopyFileBounded_ExactCapturedBytes_CreatesVerifiedDestinationWithExactMode()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        byte[] content = Enumerable.Range(0, (128 * 1024) + 17).Select(index => (byte)(index % 251)).ToArray();
+        File.WriteAllBytes(Path.Combine(sourceRoot, "payload"), content);
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+
+        LinuxFileIdentity result = destinationFileSystem.CopyFileBounded(source, "payload", 0x180, content.Length, content.Length);
+
+        File.ReadAllBytes(Path.Combine(this.RootPath, "payload")).Should().Equal(content);
+        result.Kind.Should().Be(LinuxAnchoredEntryKind.RegularFile);
+        result.LinkCount.Should().Be(1);
+        result.Size.Should().Be(content.Length);
+        result.UnixMode.Should().Be(0x180);
+    }
+
+    [Test]
+    public void CopyFileBounded_SourceExceedsMaximum_RejectsBeforeCreatingDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "12345");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(source, "payload", 0x180, 5, 4);
+
+        copy.Should().Throw<IOException>().WithMessage("*byte bound*");
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_SourceChangedAfterCapture_RejectsBeforeCreatingDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        string sourcePath = Path.Combine(sourceRoot, "payload");
+        File.WriteAllText(sourcePath, "captured");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        File.AppendAllText(sourcePath, " growth");
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(source, "payload", 0x180, source.Identity.Size, 1024);
+
+        copy.Should().Throw<IOException>().WithMessage("*changed after it was captured*");
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_ExpectedSizeDiffersFromCapturedSize_RejectsBeforeCreatingDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "captured");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(source, "payload", 0x180, source.Identity.Size - 1, 1024);
+
+        copy.Should().Throw<IOException>().WithMessage("*expected size changed*");
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_CancelledBeforeCopy_DoesNotCreateDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "captured");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(
+            source,
+            "payload",
+            0x180,
+            source.Identity.Size,
+            1024,
+            cancellation.Token
+        );
+
+        copy.Should().Throw<OperationCanceledException>();
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_SourceGrowsDuringCopy_RejectsAndRemovesExactPartialDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        string sourcePath = Path.Combine(sourceRoot, "payload");
+        File.WriteAllBytes(sourcePath, new byte[32]);
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        bool grew = false;
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(
+            source,
+            "payload",
+            0x180,
+            source.Identity.Size,
+            1024,
+            afterChunkCopiedForTesting: _ =>
+            {
+                if (!grew)
+                {
+                    File.AppendAllText(sourcePath, "growth");
+                    grew = true;
+                }
+            },
+            beforeVerificationForTesting: null
+        );
+
+        copy.Should().Throw<IOException>().WithMessage("*source identity changed*");
+        grew.Should().BeTrue();
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_CancelledDuringCopy_RemovesExactPartialDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllBytes(Path.Combine(sourceRoot, "payload"), new byte[256 * 1024]);
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        using CancellationTokenSource cancellation = new();
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(
+            source,
+            "payload",
+            0x180,
+            source.Identity.Size,
+            source.Identity.Size,
+            afterChunkCopiedForTesting: _ => cancellation.Cancel(),
+            beforeVerificationForTesting: null,
+            cancellation.Token
+        );
+
+        copy.Should().Throw<OperationCanceledException>();
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_SourceTruncatesDuringCopy_RejectsBoundedReadAndRemovesPartialDestination()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        string sourcePath = Path.Combine(sourceRoot, "payload");
+        File.WriteAllBytes(sourcePath, new byte[256 * 1024]);
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+        bool truncated = false;
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(
+            source,
+            "payload",
+            0x180,
+            source.Identity.Size,
+            256 * 1024,
+            afterChunkCopiedForTesting: copied =>
+            {
+                if (!truncated)
+                {
+                    using FileStream writer = File.OpenWrite(sourcePath);
+                    writer.SetLength(copied);
+                    truncated = true;
+                }
+            },
+            beforeVerificationForTesting: null
+        );
+
+        copy.Should().Throw<EndOfStreamException>().WithMessage("*became shorter*");
+        truncated.Should().BeTrue();
+        File.Exists(Path.Combine(this.RootPath, "payload")).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_DestinationBytesChangedBeforeVerification_RejectsAndRemovesIt()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "trusted");
+        string destinationPath = Path.Combine(this.RootPath, "payload");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(
+            source,
+            "payload",
+            0x180,
+            source.Identity.Size,
+            1024,
+            afterChunkCopiedForTesting: null,
+            beforeVerificationForTesting: () => File.WriteAllText(destinationPath, "altered")
+        );
+
+        copy.Should().Throw<IOException>().WithMessage("*exact byte*");
+        File.Exists(destinationPath).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_DestinationModeChangedBeforeVerification_RejectsAndRemovesIt()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "trusted");
+        string destinationPath = Path.Combine(this.RootPath, "payload");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(
+            source,
+            "payload",
+            0x180,
+            source.Identity.Size,
+            1024,
+            afterChunkCopiedForTesting: null,
+            beforeVerificationForTesting: () =>
+                chmod(destinationPath, 0x100).Should().Be(0, $"chmod(2) failed with errno {Marshal.GetLastWin32Error()}")
+        );
+
+        copy.Should().Throw<IOException>().WithMessage("*mode verification*");
+        File.Exists(destinationPath).Should().BeFalse();
+    }
+
+    [Test]
+    public void CopyFileBounded_DestinationNameReplacedBySymlink_RejectsWithoutFollowingOrRemovingReplacement()
+    {
+        string sourceRoot = Path.Combine(this.TempRoot, "source");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllText(Path.Combine(sourceRoot, "payload"), "trusted");
+        string destinationPath = Path.Combine(this.RootPath, "payload");
+        string parkedPath = Path.Combine(this.RootPath, "parked");
+        string outsidePath = Path.Combine(this.TempRoot, "outside");
+        File.WriteAllText(outsidePath, "preserve");
+        using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+        using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("payload");
+        using LinuxAnchoredFileSystem destinationFileSystem = new(this.RootPath);
+
+        Action copy = () => destinationFileSystem.CopyFileBounded(
+            source,
+            "payload",
+            0x180,
+            source.Identity.Size,
+            1024,
+            afterChunkCopiedForTesting: null,
+            beforeVerificationForTesting: () =>
+            {
+                File.Move(destinationPath, parkedPath);
+                File.CreateSymbolicLink(destinationPath, outsidePath);
+            }
+        );
+
+        copy.Should().Throw<IOException>();
+        File.ResolveLinkTarget(destinationPath, returnFinalTarget: false)!.FullName.Should().Be(outsidePath);
+        File.ReadAllText(outsidePath).Should().Be("preserve");
+        File.ReadAllText(parkedPath).Should().Be("trusted");
+    }
+
+    [Test]
     public void RenameFileNoReplace_DestinationExists_RejectsAndPreservesBothFiles()
     {
         File.WriteAllText(Path.Combine(this.RootPath, "source"), "source bytes");
@@ -519,4 +794,7 @@ public sealed class LinuxAnchoredFileSystemTests
 
     [DllImport("libc", SetLastError = true)]
     private static extern int close(int descriptor);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int chmod(string path, int mode);
 }

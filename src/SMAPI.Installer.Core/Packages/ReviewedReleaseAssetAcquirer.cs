@@ -75,13 +75,21 @@ public sealed class ReviewedReleaseProtocolAssetPaths
 /// </remarks>
 public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
 {
+    private readonly object Gate = new();
     private readonly ReviewedReleaseCandidate Candidate;
-    private readonly ReviewedReleaseAssetWorkspace Workspace;
+    private readonly PrivateReleaseAssetWorkspace Workspace;
+    private readonly Action? BeforeBindForTesting;
+    private Task? CleanupTask;
 
-    internal ReviewedReleaseAssetLease(ReviewedReleaseCandidate candidate, ReviewedReleaseAssetWorkspace workspace)
+    internal ReviewedReleaseAssetLease(
+        ReviewedReleaseCandidate candidate,
+        PrivateReleaseAssetWorkspace workspace,
+        Action? beforeBindForTesting = null
+    )
     {
         this.Candidate = candidate;
         this.Workspace = workspace;
+        this.BeforeBindForTesting = beforeBindForTesting;
     }
 
     /// <summary>The exact release tag selected from the reviewed catalog.</summary>
@@ -96,32 +104,42 @@ public sealed class ReviewedReleaseAssetLease : IAsyncDisposable
     public ReviewedReleaseProtocolAssetPaths Bind(ReviewedGitHubResolvedTag resolvedTag)
     {
         ArgumentNullException.ThrowIfNull(resolvedTag);
-        if (!ReferenceEquals(resolvedTag.Release, this.Candidate))
-            throw new PackageSecurityException("The resolved tag belongs to a different reviewed release selection.");
-        this.Workspace.AssertComplete(this.Candidate);
+        lock (this.Gate)
+        {
+            if (this.CleanupTask is not null)
+                throw new ObjectDisposedException(nameof(ReviewedReleaseAssetLease));
+            this.BeforeBindForTesting?.Invoke();
+            if (!ReferenceEquals(resolvedTag.Release, this.Candidate))
+                throw new PackageSecurityException("The resolved tag belongs to a different reviewed release selection.");
+            this.Workspace.AssertContainsExactly(this.Candidate.Assets.Select(asset => asset.Name));
 
-        LinuxFileIdentity workspaceIdentity = this.Workspace.Identity;
-        return new ReviewedReleaseProtocolAssetPaths(
-            resolvedTag.ReleaseTag,
-            resolvedTag.SourceCommit,
-            this.GetPath(ReviewedReleaseAssetKind.InstallerPackage),
-            this.GetPath(ReviewedReleaseAssetKind.InstallManifest),
-            this.GetPath(ReviewedReleaseAssetKind.Checksums),
-            this.GetPath(ReviewedReleaseAssetKind.BuildMetadata),
-            this.GetPath(ReviewedReleaseAssetKind.AttestationBundle),
-            this.GetPath(ReviewedReleaseAssetKind.AttestationBundleChecksum),
-            workspaceIdentity.DeviceMajor,
-            workspaceIdentity.DeviceMinor,
-            workspaceIdentity.Inode,
-            workspaceIdentity.ChangeSeconds,
-            workspaceIdentity.ChangeNanoseconds
-        );
+            LinuxFileIdentity workspaceIdentity = this.Workspace.Identity;
+            return new ReviewedReleaseProtocolAssetPaths(
+                resolvedTag.ReleaseTag,
+                resolvedTag.SourceCommit,
+                this.GetPath(ReviewedReleaseAssetKind.InstallerPackage),
+                this.GetPath(ReviewedReleaseAssetKind.InstallManifest),
+                this.GetPath(ReviewedReleaseAssetKind.Checksums),
+                this.GetPath(ReviewedReleaseAssetKind.BuildMetadata),
+                this.GetPath(ReviewedReleaseAssetKind.AttestationBundle),
+                this.GetPath(ReviewedReleaseAssetKind.AttestationBundleChecksum),
+                workspaceIdentity.DeviceMajor,
+                workspaceIdentity.DeviceMinor,
+                workspaceIdentity.Inode,
+                workspaceIdentity.ChangeSeconds,
+                workspaceIdentity.ChangeNanoseconds
+            );
+        }
     }
 
     /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
-        return this.Workspace.DisposeAsync();
+        lock (this.Gate)
+        {
+            this.CleanupTask ??= this.Workspace.DisposeAsync().AsTask();
+            return new ValueTask(this.CleanupTask);
+        }
     }
 
     private string GetPath(ReviewedReleaseAssetKind kind)
@@ -155,7 +173,8 @@ public static class ReviewedReleaseAssetAcquirer
         IReviewedReleaseAssetTransport transport,
         IProgress<ReviewedReleaseAcquisitionProgress>? progress = null,
         CancellationToken cancellationToken = default,
-        Func<ReviewedReleaseAssetWorkspace>? workspaceFactory = null
+        Func<PrivateReleaseAssetWorkspace>? workspaceFactory = null,
+        Action? beforeBindForTesting = null
     )
     {
         ArgumentNullException.ThrowIfNull(transport);
@@ -166,7 +185,7 @@ public static class ReviewedReleaseAssetAcquirer
             ValidateCandidate(candidate);
             cancellationToken.ThrowIfCancellationRequested();
 
-            ReviewedReleaseAssetWorkspace? workspace = null;
+            PrivateReleaseAssetWorkspace? workspace = null;
             using CancellationTokenSource aggregateTimeout = new(AggregateTimeout);
             using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken,
@@ -174,7 +193,7 @@ public static class ReviewedReleaseAssetAcquirer
             );
             try
             {
-                workspace = (workspaceFactory ?? (() => ReviewedReleaseAssetWorkspace.Create()))();
+                workspace = (workspaceFactory ?? (() => PrivateReleaseAssetWorkspace.Create()))();
                 ReviewedReleaseAsset[] assets = Enum.GetValues<ReviewedReleaseAssetKind>()
                     .Select(candidate.GetAsset)
                     .ToArray();
@@ -183,9 +202,9 @@ public static class ReviewedReleaseAssetAcquirer
                 for (int index = 0; index < assets.Length; index++)
                 {
                     linked.Token.ThrowIfCancellationRequested();
-                    workspace.AssertExpectedPrefix(candidate, index);
+                    workspace.AssertContainsExactly(assets.Take(index).Select(previous => previous.Name));
                     ReviewedReleaseAsset asset = assets[index];
-                    AnchoredDownloadTarget target = workspace.CreateTarget(asset);
+                    AnchoredDownloadTarget target = workspace.CreateTarget(asset.Name, asset.SizeBytes);
                     int completedAssetsBefore = index;
                     long completedBytesBefore = completedBytes;
                     InlineProgress<DownloadProgress>? currentProgress = progress is null
@@ -209,7 +228,7 @@ public static class ReviewedReleaseAssetAcquirer
                     linked.Token.ThrowIfCancellationRequested();
                     if (result.BytesReceived != asset.SizeBytes)
                         throw new PackageSecurityException("A reviewed release asset length differs from its catalog advertisement.");
-                    workspace.RetainPublished(target, asset);
+                    workspace.RetainPublished(target, asset.Name, asset.SizeBytes);
                     completedBytes = checked(completedBytes + result.BytesReceived);
                     progress?.Report(new ReviewedReleaseAcquisitionProgress(
                         asset.Kind,
@@ -224,8 +243,8 @@ public static class ReviewedReleaseAssetAcquirer
                 }
 
                 linked.Token.ThrowIfCancellationRequested();
-                workspace.AssertComplete(candidate);
-                ReviewedReleaseAssetLease lease = new(candidate, workspace);
+                workspace.AssertContainsExactly(GetAssetNames(candidate));
+                ReviewedReleaseAssetLease lease = new(candidate, workspace, beforeBindForTesting);
                 workspace = null;
                 return lease;
             }
@@ -287,6 +306,12 @@ public static class ReviewedReleaseAssetAcquirer
         }
         if (aggregate > ReviewedGitHubReleaseUris.GetMaximumAssetSetBytes())
             throw new PackageSecurityException("The reviewed release asset set exceeds its fixed aggregate size bound.");
+    }
+
+    private static IEnumerable<string> GetAssetNames(ReviewedReleaseCandidate candidate)
+    {
+        return Enum.GetValues<ReviewedReleaseAssetKind>()
+            .Select(kind => candidate.GetAsset(kind).Name);
     }
 }
 
