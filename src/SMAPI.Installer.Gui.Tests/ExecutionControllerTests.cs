@@ -336,6 +336,86 @@ internal sealed class ExecutionControllerTests
         session.ExecuteCalls.Should().Be(0);
     }
 
+    [Test]
+    public async Task AcceptsRollbackFromAnUninstalledCurrentStateWithoutInventingAReleaseRelationship()
+    {
+        FakeConfirmedSession session = new();
+        ExecutionPlanPresentation plan = RollbackPlan() with
+        {
+            CurrentRelease = null,
+            Relationship = null
+        };
+
+        await using ExecutionController controller = new(session, plan);
+
+        controller.Snapshot.Plan.CurrentRelease.Should().BeNull();
+        controller.Snapshot.Plan.IntendedResult.Should().BeOfType<ExecutionReleaseTarget>();
+        controller.Snapshot.Plan.Relationship.Should().BeNull();
+        session.ExecuteCalls.Should().Be(0);
+    }
+
+    [Test]
+    public async Task ManagedPathFactTotalMustNotExceedTheExactOperationCount()
+    {
+        PlanReviewPathFact[] visible = Enumerable.Range(0, ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts)
+            .Select(index => new PlanReviewPathFact($"smapi-internal/missing-{index:D2}.dll", PlanReviewPathFactKind.MissingReceiptOwned, PlanOperationKind.Create))
+            .ToArray();
+        ExecutionPlanPresentation exact = PlanFor(InstallerOperation.Repair) with
+        {
+            OperationCounts = [new(PlanOperationKind.Create, visible.Length)],
+            PathFacts = visible,
+            AdditionalPathFactCount = 0
+        };
+        ExecutionPlanPresentation overstated = exact with { AdditionalPathFactCount = 1 };
+
+        await using ExecutionController accepted = new(new FakeConfirmedSession(), exact);
+        Action construct = () => _ = new ExecutionController(new FakeConfirmedSession(), overstated);
+
+        accepted.Snapshot.Plan.PathFacts.Should().HaveCount(visible.Length);
+        construct.Should().Throw<ArgumentException>();
+    }
+
+    [Test]
+    public async Task LauncherApprovalUsesItsOwnExactKindAndActionSemanticsAtHandoff()
+    {
+        ExecutionPlanPresentation valid = PlanFor(InstallerOperation.Repair) with
+        {
+            OperationCounts = [new(PlanOperationKind.Restore, 1)],
+            PathFacts = [new("StardewValley", PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore)]
+        };
+        ExecutionPlanPresentation receiptRestore = valid with
+        {
+            PathFacts = [new("StardewValley", PlanReviewPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Restore)]
+        };
+        ExecutionPlanPresentation launcherRemove = valid with
+        {
+            OperationCounts = [new(PlanOperationKind.Remove, 1)],
+            PathFacts = [new("StardewValley", PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Remove)]
+        };
+
+        await using ExecutionController accepted = new(new FakeConfirmedSession(), valid);
+        Action rejectReceiptRestore = () => _ = new ExecutionController(new FakeConfirmedSession(), receiptRestore);
+        Action rejectLauncherRemove = () => _ = new ExecutionController(new FakeConfirmedSession(), launcherRemove);
+
+        accepted.Snapshot.Plan.PathFacts.Should().ContainSingle().Which.FactKind.Should().Be(PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher);
+        rejectReceiptRestore.Should().Throw<ArgumentException>();
+        rejectLauncherRemove.Should().Throw<ArgumentException>();
+    }
+
+    [Test]
+    public void ReleaseRelationshipMustExactlyMatchCurrentAndTargetIdentities()
+    {
+        ExecutionPlanPresentation current = PlanFor(InstallerOperation.Repair);
+        ExecutionPlanPresentation falseUpgrade = current with { Relationship = PlanReviewReleaseRelationship.Upgrade };
+        ExecutionPlanPresentation unknown = current with { Relationship = (PlanReviewReleaseRelationship)int.MaxValue };
+
+        Action rejectFalseUpgrade = () => _ = new ExecutionController(new FakeConfirmedSession(), falseUpgrade);
+        Action rejectUnknown = () => _ = new ExecutionController(new FakeConfirmedSession(), unknown);
+
+        rejectFalseUpgrade.Should().Throw<ArgumentException>();
+        rejectUnknown.Should().Throw<ArgumentException>();
+    }
+
     [TestCase(false)]
     [TestCase(true)]
     public async Task RollbackPresentationIsImmutableAndNeverExecutesBeforeExplicitRun(bool downgrade)
@@ -344,12 +424,12 @@ internal sealed class ExecutionControllerTests
         List<ProtocolPlanRisk> risks = downgrade
             ? [ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade]
             : [ProtocolPlanRisk.Rollback];
-        ExecutionPlanPresentation source = new(
-            InstallerOperation.Rollback,
-            operationCounts,
-            risks,
-            1
-        );
+        ExecutionPlanPresentation source = RollbackPlan(downgrade) with
+        {
+            OperationCounts = operationCounts,
+            Risks = risks,
+            AdditionalNoticeCount = 1
+        };
         FakeConfirmedSession session = new()
         {
             Execute = _ => Task.FromResult(Operation(ExactSuccess()))
@@ -481,12 +561,7 @@ internal sealed class ExecutionControllerTests
     public void RejectsEveryMalformedRollbackRiskSequenceBeforeItCanExecute(ProtocolPlanRisk[] risks)
     {
         FakeConfirmedSession session = new();
-        ExecutionPlanPresentation invalid = new(
-            InstallerOperation.Rollback,
-            [new(PlanOperationKind.Restore, 1)],
-            risks,
-            0
-        );
+        ExecutionPlanPresentation invalid = RollbackPlan() with { Risks = risks };
 
         Action construct = () => _ = new ExecutionController(session, invalid);
 
@@ -503,12 +578,11 @@ internal sealed class ExecutionControllerTests
     public void RejectsRollbackRiskForEveryNonRollbackOperation(InstallerOperation operation)
     {
         FakeConfirmedSession session = new();
-        ExecutionPlanPresentation invalid = new(
-            operation,
-            [new(PlanOperationKind.Restore, 1)],
-            [ProtocolPlanRisk.Rollback],
-            0
-        );
+        ExecutionPlanPresentation invalid = PlanFor(operation) with
+        {
+            OperationCounts = [new(PlanOperationKind.Restore, 1)],
+            Risks = [ProtocolPlanRisk.Rollback]
+        };
 
         Action construct = () => _ = new ExecutionController(session, invalid);
 
@@ -535,6 +609,32 @@ internal sealed class ExecutionControllerTests
         viewModel.Heading.Should().ContainEquivalentOf(heading);
         viewModel.Heading.Should().NotContain("/home").And.NotContain("digest").And.NotContain("private");
         viewModel.ResultRows.Should().OnlyContain(row => !row.AccessibleName.Contains("/home", StringComparison.Ordinal));
+        bool committed = outcome is ProtocolExecutionOutcome.Succeeded or ProtocolExecutionOutcome.SucceededWithCleanupWarning;
+        viewModel.ResultRows.Any(row => row.Label == "Resulting managed state").Should().Be(committed);
+        viewModel.ResultRows.Any(row => row.Label.Contains("committed", StringComparison.OrdinalIgnoreCase)).Should().Be(committed);
+        if (committed)
+            viewModel.PlanDetail.Contains("Nothing has run", StringComparison.OrdinalIgnoreCase).Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ExactCommittedBackupAloneShowsBoundedCheckpointIdentityAndRestoreTarget()
+    {
+        ExecutionPlanPresentation plan = PlanFor(InstallerOperation.Backup) with
+        {
+            RecoveryCapacity = new(5, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            OperationCounts = [new(PlanOperationKind.Retain, 3)]
+        };
+        FakeConfirmedSession session = new();
+        await using ExecutionController controller = new(session, plan);
+        await using ExecutionViewModel viewModel = new(controller);
+
+        viewModel.ApplySnapshotForTesting(Snapshot(10, ExecutionState.Terminal, execution: TerminalForCopy(ProtocolExecutionOutcome.Succeeded), plan: plan));
+
+        viewModel.ResultRows.Should().Contain(new ExecutionFactRow("Newest user checkpoint", "New current user checkpoint; display identity only"));
+        viewModel.ResultRows.Should().Contain(row => row.Label == "Checkpoint restore target" && row.Value.Contains(session.Release.Tag, StringComparison.Ordinal));
+
+        viewModel.ApplySnapshotForTesting(Snapshot(11, ExecutionState.Terminal, execution: TerminalForCopy(ProtocolExecutionOutcome.FailedBeforeMutation), plan: plan));
+        viewModel.ResultRows.Should().NotContain(row => row.Label.Contains("checkpoint", StringComparison.OrdinalIgnoreCase));
     }
 
     [TestCase(ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, ProtocolNextAction.InspectAgain, "inspect again")]
@@ -599,6 +699,9 @@ internal sealed class ExecutionControllerTests
         AutomationProperties.GetAccessKey(run).Should().Be("Alt+R");
         AutomationProperties.GetAccessKey(recover).Should().Be("Alt+V");
         session.ExecuteCalls.Should().Be(0);
+        viewModel.ConfirmationRows.Should().Contain(new ExecutionFactRow("Selected game", "Stardew Valley"));
+        viewModel.ConfirmationRows.Should().Contain(row => row.Label == "Recovery capacity" && row.Value.Contains("64 slots", StringComparison.Ordinal));
+        viewModel.ConfirmationRows.Should().Contain(new ExecutionFactRow("Planned Preserve actions", "0"));
         window.MinWidth.Should().Be(420);
         window.ApplyResponsiveLayout(420);
         window.IsNarrowLayout.Should().BeTrue();
@@ -623,10 +726,21 @@ internal sealed class ExecutionControllerTests
             Summary = new(12, 11, 10, 9, 8, 7),
             BackendSettlement = InstallerBackendSettlement.Unconfirmed
         };
+        ExecutionPlanPresentation maximalPlan = PlanFor(InstallerOperation.Repair) with
+        {
+            OperationCounts =
+            [
+                new(PlanOperationKind.Restore, 2),
+                new(PlanOperationKind.Create, 8),
+                new(PlanOperationKind.Replace, 10)
+            ],
+            PathFacts = MaximalPathFacts(),
+            AdditionalPathFactCount = 8
+        };
         FakeConfirmedSession session = new();
-        await using ExecutionController controller = new(session, Plan());
+        await using ExecutionController controller = new(session, maximalPlan);
         await using ExecutionViewModel viewModel = new(controller);
-        viewModel.ApplySnapshotForTesting(Snapshot(10, ExecutionState.Terminal, execution: maximal));
+        viewModel.ApplySnapshotForTesting(Snapshot(10, ExecutionState.Terminal, execution: maximal, plan: maximalPlan));
         await using ExecutionWindow window = new(viewModel)
         {
             Width = PhysicalViewportWidth / scale,
@@ -645,13 +759,21 @@ internal sealed class ExecutionControllerTests
         TextBlock warning = window.FindControl<TextBlock>("SettlementWarningText")!;
         scroll.HorizontalScrollBarVisibility.Should().Be(ScrollBarVisibility.Disabled);
         scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
-        viewModel.ResultRows.Should().HaveCount(9);
+        viewModel.ResultRows.Should().HaveCount(15);
+        viewModel.ResultRows.Should().Contain(row => row.Label == "Resulting managed state" && row.Value.Contains("alpha.2", StringComparison.Ordinal));
+        viewModel.ResultRows.Should().Contain(new ExecutionFactRow("Explicit preserve actions committed", "0"));
+        viewModel.ResultRows.Should().Contain(new ExecutionFactRow(
+            "Committed game-file scope",
+            "No game files outside the confirmed managed target set were targeted; installer-internal recovery and receipt state was also written under .smapi-installer"
+        ));
         viewModel.IsSettlementWarningVisible.Should().BeTrue();
         exit.IsVisible.Should().BeTrue();
         exit.Bounds.Width.Should().BeGreaterThan(0);
         exit.Bounds.Right.Should().BeLessThanOrEqualTo(actions.Bounds.Width + 1);
         warning.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
         warning.Bounds.Height.Should().BeGreaterThan(24, "the safety warning should wrap instead of expanding the page horizontally");
+        viewModel.ConfirmationRows.Count(row => row.Label == "Managed path").Should().Be(ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts);
+        viewModel.ConfirmationRows.Should().Contain(row => row.Value.Contains("\\u202E", StringComparison.Ordinal));
         window.CaptureRenderedFrame().Should().NotBeNull();
 
         window.Close();
@@ -870,19 +992,77 @@ internal sealed class ExecutionControllerTests
         await WaitUntilUiAsync(() => !window.IsVisible);
     }
 
-    private static ExecutionPlanPresentation Plan() => new(
-        InstallerOperation.Install,
-        [new(PlanOperationKind.Create, 2)],
-        [],
-        0
-    );
+    private static ExecutionPlanPresentation Plan() => PlanFor(InstallerOperation.Install) with
+    {
+        OperationCounts = [new(PlanOperationKind.Create, 2)]
+    };
 
-    private static ExecutionPlanPresentation RollbackPlan() => new(
-        InstallerOperation.Rollback,
-        [new(PlanOperationKind.Restore, 2)],
-        [ProtocolPlanRisk.Rollback],
-        0
-    );
+    private static PlanReviewPathFact[] MaximalPathFacts()
+    {
+        List<PlanReviewPathFact> facts =
+        [
+            new("StardewValley", PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore)
+        ];
+        facts.AddRange(Enumerable.Range(1, 10).Select(index => new PlanReviewPathFact(
+            index == 10
+                ? $"smapi-internal/{new string('x', 220)}\\u202E.dll"
+                : $"smapi-internal/{index:D2}-owned.dll",
+            PlanReviewPathFactKind.ApprovedModifiedReceiptOwned,
+            PlanOperationKind.Replace
+        )));
+        facts.Add(new("smapi-internal/00-missing.dll", PlanReviewPathFactKind.MissingReceiptOwned, PlanOperationKind.Create));
+        return facts.ToArray();
+    }
+
+    private static ExecutionPlanPresentation RollbackPlan(bool downgrade = false)
+    {
+        ProtocolReleaseIdentity release = GameDiscoveryControllerTests.Release();
+        ExecutionReleasePresentation current = new(release.Tag, release.EmbeddedVersion);
+        ExecutionReleasePresentation target = downgrade
+            ? new("fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1")
+            : current;
+        return new(
+            InstallerOperation.Rollback,
+            "Stardew Valley",
+            current,
+            new ExecutionReleaseTarget(target),
+            downgrade ? PlanReviewReleaseRelationship.Downgrade : PlanReviewReleaseRelationship.Current,
+            new(0, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            [new(PlanOperationKind.Restore, 2)],
+            [],
+            0,
+            downgrade ? [ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade] : [ProtocolPlanRisk.Rollback],
+            0
+        );
+    }
+
+    private static ExecutionPlanPresentation PlanFor(InstallerOperation operation)
+    {
+        ProtocolReleaseIdentity release = GameDiscoveryControllerTests.Release();
+        ExecutionReleasePresentation projected = new(release.Tag, release.EmbeddedVersion);
+        ExecutionReleasePresentation? current = operation == InstallerOperation.Install ? null : projected;
+        ExecutionResultTarget target = operation == InstallerOperation.Uninstall
+            ? new ExecutionUninstalledTarget()
+            : new ExecutionReleaseTarget(projected);
+        PlanReviewReleaseRelationship? relationship = operation switch
+        {
+            InstallerOperation.Install or InstallerOperation.Uninstall => null,
+            _ => PlanReviewReleaseRelationship.Current
+        };
+        return new(
+            operation,
+            "Stardew Valley",
+            current,
+            target,
+            relationship,
+            new(0, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            [],
+            [],
+            0,
+            operation == InstallerOperation.Uninstall ? [ProtocolPlanRisk.Uninstall] : [],
+            0
+        );
+    }
 
     private static int CountVisibleLive(params Control[] controls)
         => controls.Count(control => control.IsVisible && ControlAutomationPeer.CreatePeerForElement(control).GetLiveSetting() != AutomationLiveSetting.Off);
@@ -949,8 +1129,9 @@ internal sealed class ExecutionControllerTests
         Core.Transactions.TransactionStage? stage = null,
         int completed = 0,
         int? total = null,
-        bool canRecover = false
-    ) => new(revision, state, Plan(), stage, completed, total, execution, recovery, state == ExecutionState.Ready, state is ExecutionState.Starting or ExecutionState.Running, canRecover, state is ExecutionState.Terminal or ExecutionState.RecoveryRequired or ExecutionState.RecoveryCompleted or ExecutionState.PrestartFault or ExecutionState.CancelledBeforeStart);
+        bool canRecover = false,
+        ExecutionPlanPresentation? plan = null
+    ) => new(revision, state, plan ?? Plan(), stage, completed, total, execution, recovery, state == ExecutionState.Ready, state is ExecutionState.Starting or ExecutionState.Running, canRecover, state is ExecutionState.Terminal or ExecutionState.RecoveryRequired or ExecutionState.RecoveryCompleted or ExecutionState.PrestartFault or ExecutionState.CancelledBeforeStart);
 
     private static InstallerExecutionOperation Operation(InstallerExecutionResult result)
         => Operation(Task.FromResult(result));

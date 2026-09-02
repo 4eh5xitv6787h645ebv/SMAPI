@@ -176,7 +176,22 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         => new(generation, revision, state, [], null, false, false, false, false);
 
     private static ExecutionPlanPresentation CreateExecutionPlan()
-        => new(InstallerOperation.Install, [], [], 0);
+    {
+        ProtocolReleaseIdentity release = GameDiscoveryControllerTests.Release();
+        return new(
+            InstallerOperation.Install,
+            "Stardew Valley",
+            null,
+            new ExecutionReleaseTarget(new(release.Tag, release.EmbeddedVersion)),
+            null,
+            new(0, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            [],
+            [],
+            0,
+            [],
+            0
+        );
+    }
 
     private static ExecutionSnapshot CreateExecution(
         long revision,

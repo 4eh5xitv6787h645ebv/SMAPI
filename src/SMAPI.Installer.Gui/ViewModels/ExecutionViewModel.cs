@@ -1,6 +1,7 @@
 using Avalonia.Automation;
 using Avalonia.Threading;
 using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Transactions;
 using StardewModdingAPI.Installer.Gui.Backend;
@@ -41,6 +42,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
     private string liveAnnouncement = "Ready to run. No files have changed.";
     private string stageAnnouncement = "No operation has started.";
     private string progressDetail = "No operation has started.";
+    private readonly IReadOnlyList<ExecutionFactRow> confirmationRows;
     private IReadOnlyList<ExecutionFactRow> resultRows = Array.Empty<ExecutionFactRow>();
     private TransactionStage? announcedStage;
     private bool disposed;
@@ -57,6 +59,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         this.PostToUiThread = postToUiThread ?? (action => Dispatcher.UIThread.Post(action));
         this.EnsureDiagnosticLoggingReady = ensureDiagnosticLoggingReady ?? (() => { });
         this.snapshot = controller.Snapshot;
+        this.confirmationRows = CreateConfirmationRows(this.snapshot.Plan);
         this.RunCommand = new(() => this.StartMutation(controller.RunAsync), () => this.snapshot.CanRun, this.HandlePresentationFailure);
         this.CancelCommand = new(this.CancelOrCloseAsync, this.CanCancelOrClose, this.HandleCancellationFailure);
         this.RecoverCommand = new(() => this.StartMutation(() => controller.RecoverAsync()), () => this.snapshot.CanRecover, this.HandlePresentationFailure);
@@ -78,13 +81,14 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
     public string LiveAnnouncement { get => this.liveAnnouncement; private set => this.SetProperty(ref this.liveAnnouncement, value); }
     public string StageAnnouncement { get => this.stageAnnouncement; private set => this.SetProperty(ref this.stageAnnouncement, value); }
     public string ProgressDetail { get => this.progressDetail; private set => this.SetProperty(ref this.progressDetail, value); }
+    public IReadOnlyList<ExecutionFactRow> ConfirmationRows => this.confirmationRows;
     public IReadOnlyList<ExecutionFactRow> ResultRows { get => this.resultRows; private set => this.SetProperty(ref this.resultRows, value); }
 
     public string BoundaryDetail => this.snapshot.State == ExecutionState.Ready
         ? $"Final confirmation. Nothing runs until you choose {(this.snapshot.Plan.Operation == InstallerOperation.Rollback ? "Run rollback" : "Run operation")}. Cancel is the recommended default."
         : "This screen reports bounded local installer progress and durable results. Keep it open while an operation is active.";
 
-    public string PlanDetail => $"Confirmed operation: {this.OperationLabel}. {this.snapshot.Plan.OperationCounts.Sum(item => item.Count)} planned file action(s).";
+    public string PlanDetail => $"Confirmed operation: {this.OperationLabel}. Intended result: {FormatResultTarget(this.snapshot.Plan.IntendedResult)}. {this.snapshot.Plan.OperationCounts.Sum(item => item.Count)} planned file action(s).";
 
     public bool IsReady => this.snapshot.State == ExecutionState.Ready;
     public bool IsBusy => this.snapshot.State is ExecutionState.Starting or ExecutionState.Running or ExecutionState.CancellationRequested or ExecutionState.RecoveryStarting or ExecutionState.RecoveryCancellationRequested or ExecutionState.RecoveryRunning or ExecutionState.Disposing;
@@ -400,6 +404,21 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
                 new("Recovery disposition", GetRecoveryDispositionLabel(execution.RecoveryDisposition)),
                 new("Next safe action", GetNextActionLabel(execution.NextAction))
             ];
+            if (IsCommitted(execution))
+            {
+                rows.Add(new("Resulting managed state", FormatResultTarget(value.Plan.IntendedResult)));
+                foreach (PlanReviewOperationCount operation in value.Plan.OperationCounts)
+                    rows.Add(new(GetCommittedOperationLabel(operation.Kind), operation.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                if (!value.Plan.OperationCounts.Any(item => item.Kind == PlanOperationKind.Preserve))
+                    rows.Add(new("Explicit preserve actions committed", "0"));
+                rows.Add(new("Committed game-file scope", "No game files outside the confirmed managed target set were targeted; installer-internal recovery and receipt state was also written under .smapi-installer"));
+                if (value.Plan.Operation == InstallerOperation.Backup
+                    && value.Plan.CurrentRelease is { } restoreRelease)
+                {
+                    rows.Add(new("Newest user checkpoint", "New current user checkpoint; display identity only"));
+                    rows.Add(new("Checkpoint restore target", FormatRelease(restoreRelease)));
+                }
+            }
             AddCount(rows, "Managed files changed", execution.Summary.ManagedFileChangeCount);
             AddCount(rows, "Managed files rolled back", execution.Summary.RolledBackManagedFileCount);
             AddCount(rows, "Installer-state changes", execution.Summary.InternalStateChangeCount);
@@ -410,6 +429,91 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         }
         return Array.Empty<ExecutionFactRow>();
     }
+
+    private static IReadOnlyList<ExecutionFactRow> CreateConfirmationRows(ExecutionPlanPresentation plan)
+    {
+        List<ExecutionFactRow> rows =
+        [
+            new("Selected game", plan.GameDisplayName),
+            new("Confirmed operation", GetOperationLabel(plan.Operation)),
+            new("Current managed release", plan.CurrentRelease is null ? "No receipt-authenticated current fork release" : FormatRelease(plan.CurrentRelease)),
+            new("Intended result if committed", FormatResultTarget(plan.IntendedResult)),
+            new("Observed relationship", FormatRelationship(plan.Relationship)),
+            new("Recovery location", ".smapi-installer/recovery inside the selected game folder"),
+            new("Recovery capacity", $"{plan.RecoveryCapacity.Used} of {plan.RecoveryCapacity.Maximum} slots used; {plan.RecoveryCapacity.Remaining} remaining"),
+            new("Pre-change recovery point", "A committed run creates one recovery point"),
+            new("Confirmed game-file scope", "Only game-file paths in the exact confirmed plan are targeted; they are derived from verified package content, receipt-authenticated ownership or launcher state, and exact approvals. Installer-internal recovery and ownership state is also written under .smapi-installer"),
+            new("Other game files", "Outside this confirmed plan and not targeted")
+        ];
+        foreach (PlanOperationKind kind in Enum.GetValues<PlanOperationKind>())
+        {
+            int count = plan.OperationCounts.SingleOrDefault(item => item.Kind == kind)?.Count ?? 0;
+            rows.Add(new($"Planned {GetOperationLabel(kind)} actions", count.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }
+        foreach (PlanReviewPathFact fact in plan.PathFacts)
+        {
+            string detail = fact.FactKind switch
+            {
+                PlanReviewPathFactKind.MissingReceiptOwned => $"{fact.DisplayPath} — missing; create from verified package content",
+                PlanReviewPathFactKind.ApprovedModifiedReceiptOwned => $"{fact.DisplayPath} — explicitly approved modified receipt-owned file; include in recovery point, then {GetOperationLabel(fact.PlannedAction).ToLowerInvariant()}",
+                PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher => $"{fact.DisplayPath} — explicitly approved installed launcher with a changed recorded identity; include in recovery point, then {GetOperationLabel(fact.PlannedAction).ToLowerInvariant()}",
+                _ => throw new ArgumentOutOfRangeException(nameof(fact))
+            };
+            rows.Add(new("Managed path", detail));
+        }
+        if (plan.AdditionalPathFactCount > 0)
+            rows.Add(new("Additional managed paths omitted", plan.AdditionalPathFactCount.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        if (plan.Operation == InstallerOperation.Backup)
+            rows.Add(new("Backup scope", "Installer-managed state only; Mods and saves are not included"));
+        return rows.AsReadOnly();
+    }
+
+    private static bool IsCommitted(InstallerExecutionTerminalResult terminal)
+        => terminal.DurableState == ProtocolDurableState.Committed
+            && terminal.Outcome is ProtocolExecutionOutcome.Succeeded or ProtocolExecutionOutcome.SucceededWithCleanupWarning;
+
+    private static string FormatRelease(ExecutionReleasePresentation release)
+        => $"{release.Tag} • Version: {release.Version}";
+
+    private static string FormatResultTarget(ExecutionResultTarget target) => target switch
+    {
+        ExecutionReleaseTarget release => FormatRelease(release.Release),
+        ExecutionUninstalledTarget => "No managed SMAPI installation",
+        _ => throw new ArgumentOutOfRangeException(nameof(target))
+    };
+
+    private static string FormatRelationship(PlanReviewReleaseRelationship? relationship) => relationship switch
+    {
+        PlanReviewReleaseRelationship.Current => "Same version",
+        PlanReviewReleaseRelationship.Upgrade => "Upgrade",
+        PlanReviewReleaseRelationship.Downgrade => "Downgrade",
+        null => "Not applicable",
+        _ => throw new ArgumentOutOfRangeException(nameof(relationship))
+    };
+
+    private static string GetCommittedOperationLabel(PlanOperationKind kind) => kind switch
+    {
+        PlanOperationKind.Backup => "Backup actions committed",
+        PlanOperationKind.Remove => "Receipt-owned files removed",
+        PlanOperationKind.Restore => "Receipt-owned files restored",
+        PlanOperationKind.Create => "Verified managed files created",
+        PlanOperationKind.Replace => "Receipt-owned files replaced",
+        PlanOperationKind.Retain => "Retain actions committed",
+        PlanOperationKind.Preserve => "Explicit preserve actions committed",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
+
+    private static string GetOperationLabel(PlanOperationKind kind) => kind switch
+    {
+        PlanOperationKind.Backup => "Back up",
+        PlanOperationKind.Remove => "Remove",
+        PlanOperationKind.Restore => "Restore",
+        PlanOperationKind.Create => "Create",
+        PlanOperationKind.Replace => "Replace",
+        PlanOperationKind.Retain => "Retain",
+        PlanOperationKind.Preserve => "Preserve",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
 
     private static void AddCount(List<ExecutionFactRow> rows, string label, int? count)
     {

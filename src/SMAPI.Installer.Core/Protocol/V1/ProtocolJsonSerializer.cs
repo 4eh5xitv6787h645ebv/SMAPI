@@ -119,7 +119,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.PackageOpenedEvent] = C("package-opened.event", typeof(PackageOpenedEvent), false, "sessionId", "packageId", "release"),
         [ProtocolMessageKind.RecoveryCatalogEvent] = C("recovery-catalog.event", typeof(RecoveryCatalogEvent), false, "sessionId", "catalogId", "gameRoot", "headSha256", "generations"),
         [ProtocolMessageKind.NoRecoveryHistoryEvent] = C("no-recovery-history.event", typeof(NoRecoveryHistoryEvent), false, "sessionId"),
-        [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operationCount", "conflictCount", "candidateCount", "warningCount", "canExecute", "risks", "recommendedDefault", "summary", "requiresConfirmation"),
+        [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "recoveryUsedGenerationCount", "recoveryMaximumGenerationCount", "operationCount", "conflictCount", "candidateCount", "warningCount", "canExecute", "risks", "recommendedDefault", "summary", "requiresConfirmation"),
         [ProtocolMessageKind.PlanPageEvent] = C("plan-page.event", typeof(PlanPageEvent), false, "sessionId", "planId", "planDigest", "pageKind", "offset", "totalCount", "nextOffset", "operations", "conflicts", "candidates", "warnings"),
         [ProtocolMessageKind.PrunePlanEvent] = C("prune-plan.event", typeof(PrunePlanEvent), false, "sessionId", "prunePlanId", "pruneDigest", "executionBindingDigest", "catalogId", "gameRoot", "headSha256", "retainNewest", "retainedSelectionIds", "removedSelectionIds", "cleanupGenerationIds", "auxiliaryCleanupPlanned", "summary", "warnings", "risks", "recommendedDefault", "requiresConfirmation"),
         [ProtocolMessageKind.ProgressEvent] = C("progress.event", typeof(ProgressEvent), false, "sessionId", "planId", "planDigest", "sequence", "stage", "completedUnits", "totalUnits", "message"),
@@ -274,6 +274,8 @@ public static class ProtocolJsonSerializer
         ValidatePlanAuthorities(v.Operation, v.PackageId, v.RecoveryAuthority?.SelectionId);
         GameRoot(v.GameRoot); ValidateRelease(v.CurrentRelease, "currentRelease", true); ValidateRelease(v.TargetRelease, "targetRelease", true); ValidateReleaseSemantics(v.Operation, v.CurrentRelease, v.TargetRelease);
         Defined(v.ObservedState, "observedState");
+        if (v.RecoveryUsedGenerationCount < 0 || v.RecoveryMaximumGenerationCount != MaxRecoveryGenerations || v.RecoveryUsedGenerationCount > v.RecoveryMaximumGenerationCount)
+            throw new ProtocolException("The plan recovery-capacity facts are outside their bounds.");
         if (v.OperationCount is < 0 or > TransactionPlan.MaximumOperationCount || v.ConflictCount is < 0 or > 256 || v.CandidateCount is < 0 or > MaxPlanCandidates || v.WarningCount is < 0 or > 256)
             throw new ProtocolException("The plan summary counts are outside their bounds.");
         if (v.CanExecute != (v.ConflictCount == 0)) throw new ProtocolException("The plan executability doesn't match its conflict count.");
@@ -360,6 +362,16 @@ public static class ProtocolJsonSerializer
         };
         if (!validPair)
             throw new ProtocolException("The candidate reason and disposition aren't a core-defined pair.");
+        if (candidate.Reason is FileReplacementCandidateReason.ModifiedInstalledLauncher or FileReplacementCandidateReason.OfficialOrLegacyLauncher
+            && !string.Equals(candidate.Path, "StardewValley", StringComparison.Ordinal))
+        {
+            throw new ProtocolException("An installed-launcher candidate must target the exact launcher path.");
+        }
+        if (candidate.Reason == FileReplacementCandidateReason.OfficialLauncherBackup
+            && !string.Equals(candidate.Path, "StardewValley-original", StringComparison.Ordinal))
+        {
+            throw new ProtocolException("An official-launcher backup candidate must target the exact backup path.");
+        }
         if (candidate.Disposition == FileReplacementCandidateDisposition.Remove != (candidate.ProposedResultSha256 is null))
             throw new ProtocolException("Only removal candidates may omit the proposed result digest.");
         if (candidate.Disposition == FileReplacementCandidateDisposition.TrustRetained && candidate.ProposedResultSha256 != candidate.ObservedSha256)

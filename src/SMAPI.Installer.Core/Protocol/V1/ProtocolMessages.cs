@@ -656,6 +656,10 @@ public sealed record PlanEvent : ProtocolEvent
     public ProtocolReleaseIdentity? CurrentRelease { get; }
     public ProtocolReleaseIdentity? TargetRelease { get; }
     public ObservedInstallState ObservedState { get; }
+    public int RecoveryUsedGenerationCount { get; }
+    public int RecoveryMaximumGenerationCount { get; }
+    [JsonIgnore] public int RecoveryRemainingGenerationCount => this.RecoveryMaximumGenerationCount - this.RecoveryUsedGenerationCount;
+    [JsonIgnore] public bool CanCreateRecoveryGeneration => this.RecoveryUsedGenerationCount < this.RecoveryMaximumGenerationCount;
     public int OperationCount { get; }
     public int ConflictCount { get; }
     public int CandidateCount { get; }
@@ -683,6 +687,8 @@ public sealed record PlanEvent : ProtocolEvent
         ProtocolReleaseIdentity? currentRelease,
         ProtocolReleaseIdentity? targetRelease,
         ObservedInstallState observedState,
+        int recoveryUsedGenerationCount,
+        int recoveryMaximumGenerationCount,
         int operationCount,
         int conflictCount,
         int candidateCount,
@@ -705,6 +711,8 @@ public sealed record PlanEvent : ProtocolEvent
         this.CurrentRelease = currentRelease;
         this.TargetRelease = targetRelease;
         this.ObservedState = observedState;
+        this.RecoveryUsedGenerationCount = recoveryUsedGenerationCount;
+        this.RecoveryMaximumGenerationCount = recoveryMaximumGenerationCount;
         this.OperationCount = operationCount;
         this.ConflictCount = conflictCount;
         this.CandidateCount = candidateCount;
@@ -717,7 +725,7 @@ public sealed record PlanEvent : ProtocolEvent
     }
 
     internal PlanEvent(ProtocolSessionId sessionId, ProtocolPlanId planId, ProtocolPlanDigest planDigest, ProtocolPlanDigest executionBindingDigest, InstallerOperation operation, ProtocolPackageId? packageId, ProtocolRecoveryAuthority? recoveryAuthority, ProtocolGameRootIdentity gameRoot, ProtocolReleaseIdentity? currentRelease, ProtocolReleaseIdentity? targetRelease, ObservedInstallState observedState, ProtocolPlanOperation[] operations, ProtocolPlanConflict[] conflicts, ProtocolPlanCandidate[] candidates, string summary, string[] warnings, bool requiresConfirmation)
-        : this(sessionId, planId, planDigest, executionBindingDigest, operation, packageId, recoveryAuthority, gameRoot, currentRelease, targetRelease, observedState, operations.Length, conflicts.Length, candidates.Length, warnings.Length, conflicts.Length == 0, GetCompatibilityRisks(operation, candidates), ProtocolRecommendedDefault.Cancel, summary, requiresConfirmation)
+        : this(sessionId, planId, planDigest, executionBindingDigest, operation, packageId, recoveryAuthority, gameRoot, currentRelease, targetRelease, observedState, 0, ProtocolJsonSerializer.MaxRecoveryGenerations, operations.Length, conflicts.Length, candidates.Length, warnings.Length, conflicts.Length == 0, GetCompatibilityRisks(operation, candidates), ProtocolRecommendedDefault.Cancel, summary, requiresConfirmation)
     {
         this.LegacyOperationValues = operations.ToArray();
         this.LegacyConflictValues = conflicts.ToArray();

@@ -5,6 +5,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Headless.NUnit;
 using Avalonia.Input;
+using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using FluentAssertions;
@@ -42,8 +43,8 @@ internal sealed partial class PlanReviewPresentationTests
         AutomationProperties.GetAccessKey(operations).Should().Be("Alt+O");
         ControlAutomationPeer.CreatePeerForElement(status).GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
         AutomationPeer gamePeer = ControlAutomationPeer.CreatePeerForElement(game);
-        gamePeer.GetName().Should().Be("Validated Stardew Valley game folder").And.NotContain(privatePath);
-        ControlAutomationPeer.CreatePeerForElement(gameContext).GetName().Should().Be("Bound game folder").And.NotContain(privatePath);
+        gamePeer.GetName().Should().Be("Selected game: Stardew Valley").And.NotContain(privatePath);
+        ControlAutomationPeer.CreatePeerForElement(gameContext).GetName().Should().Be("Bound selected game: Stardew Valley").And.NotContain(privatePath);
         ControlAutomationPeer.CreatePeerForElement(boundary).GetName().Should()
             .Contain("Review first").And.Contain("separate final Run screen").And.Contain("changes no files");
         relationship.IsEffectivelyVisible.Should().BeFalse();
@@ -515,7 +516,7 @@ internal sealed partial class PlanReviewPresentationTests
         InstallerReadOnlyPlanSuccess maximal = CreateMaximalPlan();
         FakePlanSession session = new() { Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(maximal) };
         PlanReviewViewModel viewModel = CreateViewModel(session);
-        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Repair);
         await viewModel.InspectCommand.ExecuteAsync();
         Dispatcher.UIThread.RunJobs();
         PlanReviewWindow window = new(viewModel);
@@ -523,6 +524,12 @@ internal sealed partial class PlanReviewPresentationTests
         ScrollViewer scroll = AssertRenderedLayout(window, PhysicalViewportWidth / scale);
 
         scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        TextBlock candidateHeading = window.FindControl<TextBlock>("CandidateSummaryHeading")!;
+        candidateHeading.TextWrapping.Should().Be(TextWrapping.Wrap);
+        candidateHeading.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        viewModel.PathFactRows.Should().HaveCount(ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts);
+        viewModel.PathFactSummary.Should().Contain("8 additional detail(s)");
+        viewModel.PathFactRows.Should().Contain(row => row.DisplayPath.Contains("\\u202E", StringComparison.Ordinal));
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
     }
@@ -943,15 +950,35 @@ internal sealed partial class PlanReviewPresentationTests
             CandidateCapability("mods/unknown-two.dll", true, FileReplacementCandidateReason.UnknownCollision),
             CandidateCapability("mods/modified.dll", false)
         ];
-        return CandidatePlan(InstallerOperation.Install, candidates) with
+        return CandidatePlan(InstallerOperation.Repair, candidates) with
         {
             HasBlockingConflicts = true,
             Confirmation = null,
             Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
-            OperationCounts = Enum.GetValues<PlanOperationKind>().Select(kind => new InstallerPlanOperationCount(kind, 1)).ToArray(),
+            OperationCounts = Enum.GetValues<PlanOperationKind>().Select(kind => new InstallerPlanOperationCount(kind, 20)).ToArray(),
+            RecoveryCapacity = new(ProtocolJsonSerializer.MaxRecoveryGenerations, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            PathFacts = MaximalPathFacts(),
+            AdditionalPathFactCount = 8,
             ConflictCounts = Enum.GetValues<PlanConflictCode>().Select(code => new InstallerPlanConflictCount(code, 1)).ToArray(),
             AdditionalNoticeCount = 256
         };
+    }
+
+    private static InstallerPlanPathFact[] MaximalPathFacts()
+    {
+        List<InstallerPlanPathFact> facts =
+        [
+            new("StardewValley", InstallerPlanPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore)
+        ];
+        facts.AddRange(Enumerable.Range(1, 10).Select(index => new InstallerPlanPathFact(
+            index == 10
+                ? $"smapi-internal/{new string('x', 220)}\\u202E.dll"
+                : $"smapi-internal/{index:D2}-owned.dll",
+            InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned,
+            PlanOperationKind.Replace
+        )));
+        facts.Add(new("smapi-internal/00-missing.dll", InstallerPlanPathFactKind.MissingReceiptOwned, PlanOperationKind.Create));
+        return facts.ToArray();
     }
 
     private static ScrollViewer AssertRenderedLayout(PlanReviewWindow window, double width)

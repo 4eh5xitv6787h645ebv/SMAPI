@@ -33,6 +33,10 @@ internal sealed record InstallerReadOnlyPlanSuccess(
     int AdditionalNoticeCount
 ) : InstallerReadOnlyPlanResult
 {
+    public InstallerPlanRecoveryCapacity RecoveryCapacity { get; init; } = new(0, ProtocolJsonSerializer.MaxRecoveryGenerations);
+    public IReadOnlyList<InstallerPlanPathFact> PathFacts { get; init; } = [];
+    public int AdditionalPathFactCount { get; init; }
+
     /// <summary>
     /// A layer-local exact-reference capability for confirming this executable plan. Presentation code must not
     /// retain or expose it, and each ownership layer must replace it with a freshly minted reference.
@@ -220,7 +224,27 @@ internal sealed record InstallerReadOnlyPlanRejection(
 /// <summary>The minimum public release label needed to explain current and target semantics.</summary>
 internal sealed record InstallerPlanRelease(string Tag, string EmbeddedVersion);
 
+internal sealed record InstallerPlanRecoveryCapacity(int Used, int Maximum)
+{
+    public int Remaining => this.Maximum - this.Used;
+    public bool CanCreate => this.Used < this.Maximum;
+}
+
 internal sealed record InstallerPlanOperationCount(PlanOperationKind Kind, int Count);
+
+internal enum InstallerPlanPathFactKind
+{
+    MissingReceiptOwned,
+    ApprovedModifiedReceiptOwned,
+    ApprovedModifiedInstalledLauncher
+}
+
+/// <summary>A bounded escaped managed relative path fact validated against the exact final plan.</summary>
+internal sealed record InstallerPlanPathFact(
+    string DisplayPath,
+    InstallerPlanPathFactKind FactKind,
+    PlanOperationKind PlannedAction
+);
 
 internal sealed record InstallerPlanConflictCount(PlanConflictCode Code, int Count);
 

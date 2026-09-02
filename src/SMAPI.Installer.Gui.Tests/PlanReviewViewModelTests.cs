@@ -226,6 +226,8 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.Message.Should().Contain("previous preview was cleared");
         viewModel.IsResultVisible.Should().BeFalse();
         viewModel.OperationRows.Should().BeEmpty();
+        viewModel.SafetyRows.Should().BeEmpty();
+        viewModel.PathFactRows.Should().BeEmpty();
         viewModel.ConflictRows.Should().BeEmpty();
         viewModel.CandidateRows.Should().BeEmpty();
         viewModel.AdditionalNoticeDetail.Should().Be("No plan has been inspected.");
@@ -249,6 +251,11 @@ internal sealed partial class PlanReviewPresentationTests
                 new(PlanOperationKind.Create, 2),
                 new(PlanOperationKind.Replace, 1)
             ],
+            RecoveryCapacity = new(63, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            PathFacts =
+            [
+                new("smapi-internal/approved.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace)
+            ],
             ConflictCounts = [new(PlanConflictCode.UnknownCollision, 2)],
             AdditionalNoticeCount = 3
         };
@@ -268,6 +275,14 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.CandidateRows.Single().Detail.Should().Contain("Provisionally included").And.Contain("not approved by you");
         viewModel.AdditionalNoticeDetail.Should().Contain("3").And.Contain("does not expose their text");
         viewModel.SafetyDetail.Should().Contain("Cancel").And.Contain("Confirm plan").And.Contain("does not change files").And.Contain("explicit Run");
+        viewModel.SafetyRows.Should().Contain(new PlanReviewFactRow("Recovery location", ".smapi-installer/recovery inside the selected game folder"));
+        viewModel.SafetyRows.Should().Contain(row => row.Label == "Recovery capacity" && row.Value == "63 of 64 slots used; 1 remaining");
+        viewModel.SafetyRows.Should().Contain(new PlanReviewFactRow("Explicit preserve actions", "0"));
+        viewModel.PathFactRows.Should().ContainSingle().Which.Should().Match<PlanReviewPathFactRow>(row =>
+            row.DisplayPath == "smapi-internal/approved.dll"
+            && row.ObservedState.Contains("approved modified", StringComparison.OrdinalIgnoreCase)
+            && row.PlannedAction.Contains("recovery point", StringComparison.OrdinalIgnoreCase)
+        );
         viewModel.DurableState.Should().Contain("no installer action has run");
         viewModel.ReleaseRelationshipDetail.Should().Be(
             "Fork Linux alpha (experimental). No receipt-authenticated current release is available for comparison. Version comparison only; this does not establish identical package bytes or acquisition source, and does not confirm, authorize, or run this plan."
@@ -438,8 +453,8 @@ internal sealed partial class PlanReviewPresentationTests
         const string privatePath = "/home/private-user/secret-game";
         FakePlanSession session = new(privatePath);
         await using PlanReviewViewModel viewModel = CreateViewModel(session);
-        viewModel.GameDetail.Should().Be("Validated Stardew Valley game folder").And.NotContain(privatePath);
-        viewModel.GameAccessibleName.Should().Be("Bound game folder").And.NotContain(privatePath);
+        viewModel.GameDetail.Should().Be("Selected game: Stardew Valley").And.NotContain(privatePath);
+        viewModel.GameAccessibleName.Should().Be("Bound selected game: Stardew Valley").And.NotContain(privatePath);
         viewModel.LiveAnnouncement.Should().NotContain(privatePath);
 
         viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);

@@ -352,12 +352,51 @@
             </Border>
           </StackPanel>
 
-          <Border Padding="12" Background="{DynamicResource InstallerInfoBackgroundBrush}" BorderBrush="{DynamicResource InstallerInfoBorderBrush}" BorderThickness="1" CornerRadius="6">
+          <Border
+              x:Name="PlanSafetyRegion"
+              Padding="12"
+              AutomationProperties.Name="Plan safety and recovery"
+              Background="{DynamicResource InstallerInfoBackgroundBrush}"
+              BorderBrush="{DynamicResource InstallerInfoBorderBrush}"
+              BorderThickness="1"
+              CornerRadius="6">
             <StackPanel Spacing="5">
-              <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Inspection safety boundary" />
+              <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Plan safety and recovery" TextWrapping="Wrap" />
               <TextBlock Text="{Binding SafetyDetail}" TextWrapping="Wrap" />
+              <ItemsControl ItemsSource="{Binding SafetyRows}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:PlanReviewFactRow">
+                    <Grid Margin="0,3" ColumnDefinitions="2*,3*" AutomationProperties.Name="{Binding AccessibleName}">
+                      <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                      <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
             </StackPanel>
           </Border>
+
+          <StackPanel
+              x:Name="ReceiptOwnedPathRegion"
+              IsVisible="{Binding HasPathFactRows}"
+              Spacing="7"
+              AutomationProperties.Name="Managed file details">
+            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Managed file details" TextWrapping="Wrap" />
+            <TextBlock Classes="muted" Text="{Binding PathFactSummary}" TextWrapping="Wrap" />
+            <ItemsControl ItemsSource="{Binding PathFactRows}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:PlanReviewPathFactRow">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="5">
+                    <StackPanel Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="{Binding DisplayPath}" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding ObservedState}" TextWrapping="Wrap" />
+                      <TextBlock Classes="muted" Text="{Binding PlannedAction}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
 
           <StackPanel Spacing="7">
             <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Risk categories" />
@@ -413,7 +452,7 @@
           </StackPanel>
 
           <StackPanel Spacing="7">
-            <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Modified or unknown file candidates" />
+            <TextBlock x:Name="CandidateSummaryHeading" AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Modified or unknown file candidates" TextWrapping="Wrap" />
             <TextBlock Classes="muted" Text="{Binding CandidateSummary}" TextWrapping="Wrap" />
             <ItemsControl IsVisible="{Binding HasCandidateRows}" ItemsSource="{Binding CandidateRows}">
               <ItemsControl.ItemTemplate>
