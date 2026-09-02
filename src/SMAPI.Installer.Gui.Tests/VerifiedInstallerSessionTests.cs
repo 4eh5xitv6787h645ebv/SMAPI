@@ -1013,6 +1013,48 @@ internal sealed class VerifiedInstallerSessionTests
     }
 
     [Test]
+    public async Task DisposeWhilePruneStartIsPendingSettlesTheLatePublishedOperationBeforeCleanup()
+    {
+        TaskCompletionSource releaseStart = NewCompletion();
+        TaskCompletionSource<InstallerRecoveryPruneResult> completion = NewCompletion<InstallerRecoveryPruneResult>();
+        TaskCompletionSource operationCancellation = NewCompletion();
+        RecordingClient client = PrunePipelineClient(
+            "prune-pending-start-dispose",
+            async _ =>
+            {
+                await releaseStart.Task;
+                return RecoveryPruneOperation(completion, () =>
+                {
+                    operationCancellation.TrySetResult();
+                    return Task.CompletedTask;
+                });
+            }
+        );
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+        IConfirmedRecoveryPruneSession confirmed = await bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+
+        Task<InstallerRecoveryPruneOperation> starting = confirmed.ExecuteAsync();
+        await WaitUntilAsync(() => client.ExecutedPrunes.Count == 1);
+        Task disposal = confirmed.DisposeAsync().AsTask();
+        disposal.IsCompleted.Should().BeFalse();
+        client.DisposeCalls.Should().Be(0);
+
+        releaseStart.SetResult();
+        InstallerRecoveryPruneOperation operation = await starting.WaitAsync(TimeSpan.FromSeconds(2));
+        await operationCancellation.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        disposal.IsCompleted.Should().BeFalse();
+        client.DisposeCalls.Should().Be(0);
+
+        completion.SetResult(new InstallerRecoveryPruneStateUnknownResult());
+        _ = await operation.Completion;
+        await disposal.WaitAsync(TimeSpan.FromSeconds(2));
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
     public async Task TerminalPlanRejectionCleansUpBeforePublishingAndRevokesTheChild()
     {
         ProtocolGameCandidate valid = Candidate("terminal", LinuxGameFolderStatus.Valid);
