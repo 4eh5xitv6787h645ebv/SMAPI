@@ -15,7 +15,7 @@ if [[ ! -f "$archive_path" ]]; then
     exit 1
 fi
 
-for command_name in cmp dirname find grep id mktemp readlink realpath sleep stat timeout unzip xauth xvfb-run zipinfo; do
+for command_name in cmp dirname find grep id mktemp readlink realpath sed sleep stat timeout unzip xauth xvfb-run zipinfo; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         echo "Required packaged-GUI test command is unavailable: $command_name" >&2
         exit 1
@@ -25,17 +25,64 @@ done
 test_root="$(mktemp -d)"
 active_smoke_pid=""
 active_gui_pid=""
+active_gui_start_time=""
+
+get_process_start_time() {
+    local pid="$1"
+    local stat_line stat_fields
+
+    IFS= read -r stat_line < "/proc/$pid/stat" 2>/dev/null || return 1
+    stat_fields="${stat_line##*) }"
+    set -- $stat_fields
+    [[ $# -ge 20 ]] || return 1
+    printf '%s\n' "${20}"
+}
+
+is_exact_gui_identity() {
+    local pid="$1"
+    local expected_start_time="$2"
+    local current_exe current_start_time
+
+    [[ -n "$pid" && -n "$expected_start_time" && -n "${gui_apphost-}" ]] || return 1
+    current_exe="$(readlink -- "/proc/$pid/exe" 2>/dev/null || true)"
+    [[ "$current_exe" == "$gui_apphost" ]] || return 1
+    current_start_time="$(get_process_start_time "$pid" 2>/dev/null || true)"
+    [[ "$current_start_time" == "$expected_start_time" ]]
+}
+
+is_running_direct_child_job() {
+    local pid="$1"
+    local active_pid child_pid children="" children_path jobs_snapshot
+    local is_running_job=false
+
+    [[ -n "$pid" ]] || return 1
+    jobs_snapshot="$test_root/.running-jobs"
+    jobs -pr > "$jobs_snapshot"
+    while IFS= read -r active_pid; do
+        if [[ "$active_pid" == "$pid" ]]; then
+            is_running_job=true
+            break
+        fi
+    done < "$jobs_snapshot"
+    [[ "$is_running_job" == true ]] || return 1
+    children_path="/proc/$BASHPID/task/$BASHPID/children"
+    [[ -r "$children_path" ]] || return 1
+    IFS= read -r children < "$children_path" 2>/dev/null || [[ -n "$children" ]] || return 1
+    for child_pid in $children; do
+        [[ "$child_pid" == "$pid" ]] && return 0
+    done
+    return 1
+}
+
 cleanup() {
-    local active_exe=""
     set +e
-    if [[ -n "$active_gui_pid" && -n "${gui_apphost-}" ]]; then
-        active_exe="$(readlink -- "/proc/$active_gui_pid/exe" 2>/dev/null || true)"
-    fi
-    if [[ "$active_exe" == "${gui_apphost-}" ]]; then
+    if is_exact_gui_identity "$active_gui_pid" "$active_gui_start_time"; then
         kill -TERM "$active_gui_pid" 2>/dev/null
     fi
     if [[ -n "$active_smoke_pid" ]]; then
-        kill -TERM "$active_smoke_pid" 2>/dev/null
+        if is_running_direct_child_job "$active_smoke_pid"; then
+            kill -TERM "$active_smoke_pid" 2>/dev/null
+        fi
         wait "$active_smoke_pid" 2>/dev/null
     fi
     if [[ -n "$test_root" && -d "$test_root" ]]; then
@@ -174,7 +221,7 @@ run_window_smoke() {
     local name="$1"
     local isolate_network="$2"
     shift 2
-    local state_root output_path status smoke_pid gui_pid process_exe resolved_exe current_uid current_gid
+    local state_root output_path status smoke_pid gui_pid gui_start_time process_exe resolved_exe current_uid current_gid
     local -a isolation_prefix=()
 
     state_root="$(make_state_root "$name")"
@@ -254,17 +301,28 @@ run_window_smoke() {
         echo "The packaged GUI $name apphost did not start before the bounded watchdog exited (exit $status)." >&2
         exit 1
     fi
+    gui_start_time="$(get_process_start_time "$gui_pid" 2>/dev/null || true)"
+    if [[ -z "$gui_start_time" ]] || ! is_exact_gui_identity "$gui_pid" "$gui_start_time"; then
+        set +e
+        wait "$smoke_pid"
+        status=$?
+        set -e
+        active_smoke_pid=""
+        echo "The packaged GUI $name apphost identity could not be retained (exit $status)." >&2
+        exit 1
+    fi
     active_gui_pid="$gui_pid"
+    active_gui_start_time="$gui_start_time"
     for _ in {1..50}; do
-        if ! kill -0 "$smoke_pid" 2>/dev/null || ! kill -0 "$gui_pid" 2>/dev/null; then
+        if ! kill -0 "$smoke_pid" 2>/dev/null || ! is_exact_gui_identity "$gui_pid" "$gui_start_time"; then
             echo "The packaged GUI $name window exited before the five-second health interval completed." >&2
             exit 1
         fi
         sleep 0.1
     done
-    resolved_exe="$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)"
-    if [[ "$resolved_exe" != "$gui_apphost" ]]; then
+    if ! is_exact_gui_identity "$gui_pid" "$gui_start_time"; then
         active_gui_pid=""
+        active_gui_start_time=""
         set +e
         wait "$smoke_pid"
         status=$?
@@ -279,6 +337,7 @@ run_window_smoke() {
     status=$?
     set -e
     active_gui_pid=""
+    active_gui_start_time=""
     active_smoke_pid=""
 
     if [[ "$status" -ne 143 ]]; then
@@ -288,11 +347,18 @@ run_window_smoke() {
     assert_no_runtime_leak "$state_root" "$output_path"
 }
 
-run_launcher_term_smoke() {
-    local state_root output_path status
+run_launcher_signal_smoke() {
+    local signal_name="$1"
+    local expected_status="$2"
+    local stop_child="$3"
+    local case_name state_root output_path status
 
-    state_root="$(make_state_root launcher-term)"
-    output_path="$test_root/launcher-term.output"
+    case_name="launcher-${signal_name,,}"
+    if [[ "$stop_child" == true ]]; then
+        case_name+="-stopped-child"
+    fi
+    state_root="$(make_state_root "$case_name")"
+    output_path="$test_root/$case_name.output"
     set +e
     (
         cd "$state_root/work"
@@ -318,28 +384,103 @@ run_launcher_term_smoke() {
                     launcher="$1"
                     gui_apphost="$2"
                     state_root="$3"
+                    signal_name="$4"
+                    expected_status="$5"
+                    stop_child="$6"
+                    state=""
                     launcher_pid=""
                     gui_pid=""
+                    gui_start_time=""
+
+                    fail_case() {
+                        printf "QUALIFIER_FAILURE=%s\n" "$1" >&2
+                        exit 1
+                    }
+
+                    get_start_time() {
+                        local pid="$1"
+                        local stat_line stat_fields
+
+                        IFS= read -r stat_line < "/proc/$pid/stat" 2>/dev/null || return 1
+                        stat_fields="${stat_line##*) }"
+                        set -- $stat_fields
+                        [[ $# -ge 20 ]] || return 1
+                        printf "%s\n" "${20}"
+                    }
+
+                    is_exact_gui_identity() {
+                        local current_exe current_start_time
+
+                        [[ -n "$gui_pid" && -n "$gui_start_time" ]] || return 1
+                        current_exe="$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)"
+                        [[ "$current_exe" == "$gui_apphost" ]] || return 1
+                        current_start_time="$(get_start_time "$gui_pid" 2>/dev/null || true)"
+                        [[ "$current_start_time" == "$gui_start_time" ]]
+                    }
+
+                    is_running_direct_launcher_job() {
+                        local active_pid child_pid children="" children_path jobs_snapshot
+                        local is_running_job=false
+
+                        [[ -n "$launcher_pid" ]] || return 1
+                        jobs_snapshot="$state_root/running-launcher-jobs"
+                        jobs -pr > "$jobs_snapshot"
+                        while IFS= read -r active_pid; do
+                            if [[ "$active_pid" == "$launcher_pid" ]]; then
+                                is_running_job=true
+                                break
+                            fi
+                        done < "$jobs_snapshot"
+                        [[ "$is_running_job" == true ]] || return 1
+                        children_path="/proc/$BASHPID/task/$BASHPID/children"
+                        [[ -r "$children_path" ]] || return 1
+                        IFS= read -r children < "$children_path" 2>/dev/null || [[ -n "$children" ]] || return 1
+                        for child_pid in $children; do
+                            [[ "$child_pid" == "$launcher_pid" ]] && return 0
+                        done
+                        return 1
+                    }
+
+                    signal_exact_gui() {
+                        local requested_signal="$1"
+
+                        is_exact_gui_identity || return 1
+                        kill -s "$requested_signal" -- "$gui_pid"
+                    }
 
                     cleanup_signal_case() {
-                        local current_exe=""
                         set +e
-                        if [[ -n "$launcher_pid" ]]; then
-                            # The launcher is this shell direct, unreaped child, so its PID cannot
-                            # be reused before wait returns.
+                        if is_running_direct_launcher_job; then
                             kill -TERM "$launcher_pid" 2>/dev/null
-                            wait "$launcher_pid" 2>/dev/null
                         fi
-                        if [[ -n "$gui_pid" ]]; then
-                            current_exe="$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)"
-                            if [[ "$current_exe" == "$gui_apphost" ]]; then
-                                kill -TERM "$gui_pid" 2>/dev/null
-                            fi
+                        if is_exact_gui_identity; then
+                            signal_exact_gui CONT 2>/dev/null || true
+                        fi
+                        if is_exact_gui_identity; then
+                            signal_exact_gui TERM 2>/dev/null || true
+                        fi
+                        for _ in {1..200}; do
+                            is_running_direct_launcher_job || break
+                            sleep 0.01
+                        done
+                        if is_running_direct_launcher_job; then
+                            kill -KILL "$launcher_pid" 2>/dev/null
+                        fi
+                        if [[ -n "$launcher_pid" ]]; then
+                            wait "$launcher_pid" 2>/dev/null
+                            launcher_pid=""
+                        fi
+                        if is_exact_gui_identity; then
+                            signal_exact_gui KILL 2>/dev/null || true
                         fi
                     }
                     trap cleanup_signal_case EXIT
 
-                    "$launcher" --demo &
+                    /usr/bin/env \
+                        --default-signal=HUP \
+                        --default-signal=INT \
+                        --default-signal=TERM \
+                        "$launcher" --demo &
                     launcher_pid=$!
                     for _ in {1..1500}; do
                         if [[ -r "/proc/$launcher_pid/task/$launcher_pid/children" ]]; then
@@ -356,48 +497,73 @@ run_launcher_term_smoke() {
                         sleep 0.01
                     done
                     if [[ -z "$gui_pid" ]]; then
-                        exit 1
+                        fail_case APPHOST_NOT_FOUND
+                    fi
+                    gui_start_time="$(get_start_time "$gui_pid" 2>/dev/null || true)"
+                    if [[ -z "$gui_start_time" ]] || ! is_exact_gui_identity; then
+                        fail_case APPHOST_IDENTITY_NOT_RETAINED
                     fi
 
-                    # Require a live exact child before signalling the launcher itself. Since the
-                    # launcher remains an unreaped direct child, this TERM cannot target a reused PID.
+                    # Require the launcher to be a currently running direct-child job immediately
+                    # before signalling it, and retain the exact child identity separately. A
+                    # same-UID check-to-signal race remains outside this shell test boundary.
                     for _ in {1..10}; do
-                        kill -0 "$launcher_pid"
-                        [[ "$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)" == "$gui_apphost" ]]
+                        is_running_direct_launcher_job || fail_case LAUNCHER_NOT_RUNNING_DIRECT_CHILD
+                        is_exact_gui_identity || fail_case APPHOST_IDENTITY_CHANGED_BEFORE_SIGNAL
                         sleep 0.1
                     done
-                    kill -TERM "$launcher_pid"
+                    if [[ "$stop_child" == true ]]; then
+                        signal_exact_gui STOP || fail_case APPHOST_STOP_REJECTED
+                        for _ in {1..100}; do
+                            state="$(sed -n "s/^State:[[:space:]]*\([^[:space:]]\).*/\1/p" "/proc/$gui_pid/status" 2>/dev/null || true)"
+                            [[ "$state" == T || "$state" == t ]] && break
+                            is_exact_gui_identity || fail_case APPHOST_IDENTITY_CHANGED_DURING_STOP
+                            sleep 0.01
+                        done
+                        if [[ "$state" != T && "$state" != t ]]; then
+                            fail_case APPHOST_DID_NOT_STOP
+                        fi
+                    fi
+                    is_running_direct_launcher_job || fail_case LAUNCHER_AUTHORITY_LOST_BEFORE_SIGNAL
+                    kill -s "$signal_name" -- "$launcher_pid" || fail_case LAUNCHER_SIGNAL_REJECTED
                     set +e
                     wait "$launcher_pid"
                     launcher_status=$?
                     set -e
                     launcher_pid=""
-                    if [[ "$launcher_status" -ne 143 ]]; then
-                        exit 1
+                    if [[ "$launcher_status" -ne "$expected_status" ]]; then
+                        fail_case LAUNCHER_STATUS_MISMATCH
                     fi
 
                     # The launcher must settle its exact apphost, not merely remove the bundle path.
                     for _ in {1..500}; do
-                        current_exe="$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)"
-                        if [[ "$current_exe" != "$gui_apphost" ]]; then
+                        if ! is_exact_gui_identity; then
                             gui_pid=""
+                            gui_start_time=""
                             break
                         fi
                         sleep 0.01
                     done
                     if [[ -n "$gui_pid" ]]; then
-                        exit 1
+                        fail_case APPHOST_DID_NOT_SETTLE
                     fi
                     if find "$state_root/tmp" -mindepth 1 -maxdepth 1 -name "smapi-installer-gui.*" -print -quit | grep -q .; then
-                        exit 1
+                        fail_case PRIVATE_BUNDLE_REMAINED
                     fi
                     trap - EXIT
-                ' signal-supervisor "$launcher" "$gui_apphost" "$state_root"
+                ' signal-supervisor "$launcher" "$gui_apphost" "$state_root" "$signal_name" "$expected_status" "$stop_child"
     ) > "$output_path" 2>&1
     status=$?
     set -e
     if [[ "$status" -ne 0 ]]; then
-        echo "The packaged graphical launcher did not settle its exact apphost and private bundle after TERM; raw output is withheld from CI logs." >&2
+        local failure_code="UNKNOWN"
+        local output_line
+        while IFS= read -r output_line; do
+            if [[ "$output_line" =~ ^QUALIFIER_FAILURE=([A-Z0-9_-]+)$ ]]; then
+                failure_code="${BASH_REMATCH[1]}"
+            fi
+        done < "$output_path"
+        echo "The packaged graphical launcher did not settle its exact apphost and private bundle after $signal_name (stopped child: $stop_child; code: $failure_code); raw output is withheld from CI logs." >&2
         exit 1
     fi
     assert_no_runtime_leak "$state_root" "$output_path"
@@ -408,7 +574,10 @@ run_launcher_term_smoke() {
 # package download, sibling-backend launch, discovery, logging, and game mutation require user action.
 run_window_smoke demo false --demo
 run_window_smoke production true
-run_launcher_term_smoke
+run_launcher_signal_smoke HUP 129 false
+run_launcher_signal_smoke INT 130 false
+run_launcher_signal_smoke TERM 143 false
+run_launcher_signal_smoke TERM 143 true
 
 invalid_state="$(make_state_root invalid-arguments)"
 set +e
