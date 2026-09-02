@@ -20,8 +20,8 @@ to collect a benchmark.
 
 ## Get the alpha or source
 
-Players should download only the
-[published alpha 2 and its six checksum, metadata, and provenance assets](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2),
+Players should download only
+[all six published alpha 2 assets—the installer and its checksum, metadata, and provenance companions](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2),
 then follow the [verification, installation, upgrade, uninstall, and rollback guide](technical/linux-alpha-release.md).
 Do not use unrelated mirrors.
 
