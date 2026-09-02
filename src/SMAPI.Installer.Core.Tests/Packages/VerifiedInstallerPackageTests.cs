@@ -92,7 +92,10 @@ public sealed class VerifiedInstallerPackageTests
 
         Func<Task> verify = () => new VerifiedInstallerPackageFactory().VerifyAsync(release, quartet.ManifestPath);
 
-        await verify.Should().ThrowAsync<PackageSecurityException>().WithMessage("*canonical or valid*");
+        PackageSecurityException exception = (await verify.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*canonical or valid*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.MetadataRejected);
         CountRetainedManifestDescriptors().Should().Be(before);
         release.GetArtifact(this.Identity.PackageAssetName).Sha256.Should().Be(quartet.PackageHash);
     }
@@ -108,7 +111,10 @@ public sealed class VerifiedInstallerPackageTests
         File.WriteAllBytes(quartet.ManifestPath, changed);
 
         Func<Task> digestFailure = () => new VerifiedInstallerPackageFactory().VerifyAsync(release, quartet.ManifestPath);
-        await digestFailure.Should().ThrowAsync<PackageSecurityException>().WithMessage("*doesn't match SHA256SUMS*");
+        PackageSecurityException exception = (await digestFailure.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*doesn't match SHA256SUMS*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.MetadataRejected);
         CountRetainedManifestDescriptors().Should().Be(before);
         release.GetArtifact(this.Identity.PackageAssetName).Sha256.Should().Be(quartet.PackageHash);
 
@@ -121,6 +127,22 @@ public sealed class VerifiedInstallerPackageTests
             cancellationToken: cancellation.Token
         );
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        CountRetainedManifestDescriptors().Should().Be(before);
+        release.GetArtifact(this.Identity.PackageAssetName).Sha256.Should().Be(quartet.PackageHash);
+    }
+
+    [Test]
+    public async Task VerifyAsync_MissingManifestAuthorityRemainsUnclassified()
+    {
+        Quartet quartet = await this.CreateQuartetAsync();
+        await using VerifiedReleasePackage release = quartet.Release;
+        File.Delete(quartet.ManifestPath);
+        int before = CountRetainedManifestDescriptors();
+
+        Func<Task> verify = () => new VerifiedInstallerPackageFactory().VerifyAsync(release, quartet.ManifestPath);
+
+        PackageSecurityException exception = (await verify.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
         CountRetainedManifestDescriptors().Should().Be(before);
         release.GetArtifact(this.Identity.PackageAssetName).Sha256.Should().Be(quartet.PackageHash);
     }

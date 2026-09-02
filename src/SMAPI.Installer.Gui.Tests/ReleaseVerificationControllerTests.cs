@@ -319,7 +319,7 @@ internal sealed class ReleaseVerificationControllerTests
             {
                 Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
                     ProtocolPrePlanErrorCode.PackageRejected,
-                    ProtocolNextAction.RetryRequest,
+                    ProtocolNextAction.ReopenVerifiedPackage,
                     "safe rejection",
                     false
                 ))
@@ -358,7 +358,7 @@ internal sealed class ReleaseVerificationControllerTests
         FakeClient client = new()
         {
             Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
-                ProtocolPrePlanErrorCode.PackageRejected,
+                ProtocolPrePlanErrorCode.UnexpectedFailure,
                 ProtocolNextAction.StartNewSession,
                 "private /proc/123/fd/9 ?token=SECRET",
                 true
@@ -370,7 +370,7 @@ internal sealed class ReleaseVerificationControllerTests
 
         ReleaseVerificationSnapshot snapshot = controller.Snapshot;
         snapshot.Error.Should().Be(ReleaseVerificationError.PackageRejected);
-        snapshot.RejectionCode.Should().Be(ProtocolPrePlanErrorCode.PackageRejected);
+        snapshot.RejectionCode.Should().Be(ProtocolPrePlanErrorCode.UnexpectedFailure);
         snapshot.RejectionNextAction.Should().Be(ProtocolNextAction.StartNewSession);
         snapshot.RejectionIsTerminal.Should().BeTrue();
         snapshot.CanRetry.Should().BeFalse();
@@ -378,6 +378,227 @@ internal sealed class ReleaseVerificationControllerTests
         Action retry = () => _ = controller.RetryAsync();
         retry.Should().Throw<InvalidOperationException>().WithMessage("*new installer session*");
         await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [TestCase(PackageSecurityFailureKind.NetworkUnavailable, ReleaseVerificationError.TransferUnavailable)]
+    [TestCase(PackageSecurityFailureKind.NetworkTimeout, ReleaseVerificationError.TransferTimedOut)]
+    [TestCase(PackageSecurityFailureKind.IncompleteDownload, ReleaseVerificationError.TransferInterrupted)]
+    public async Task PublicTransferFailureProjectsOnlyItsStableKindAfterCleanup(
+        PackageSecurityFailureKind failureKind,
+        ReleaseVerificationError expectedError
+    )
+    {
+        const string privateDetail = "/home/alice/private/download.partial?token=SECRET";
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate])
+        {
+            Prepare = (_, progress, _) =>
+            {
+                progress!.Report(NonDownload(ReviewedReleasePreparationStage.ObservingTag));
+                progress.Report(new(
+                    ReviewedReleasePreparationStage.Downloading,
+                    ReviewedReleaseAssetKind.InstallerPackage,
+                    0,
+                    6,
+                    7,
+                    60
+                ));
+                return Task.FromException<IPreparedReleasePackage>(new PackageSecurityException(
+                    failureKind,
+                    privateDetail
+                ));
+            }
+        };
+        FakeClient client = new();
+        ReleaseVerificationController controller = new(service, () => client);
+        List<ReleaseVerificationState> states = [];
+        controller.Changed += (_, _) => states.Add(controller.Snapshot.State);
+        await AwaitBounded(controller.LoadCatalogAsync());
+
+        await AwaitBounded(controller.StartAsync());
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Failed);
+        snapshot.Error.Should().Be(expectedError);
+        snapshot.Failure.Should().NotBeNull();
+        snapshot.RejectionCode.Should().BeNull();
+        snapshot.RejectionNextAction.Should().BeNull();
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.CanRetry.Should().BeTrue();
+        snapshot.CanChooseLocal.Should().BeTrue();
+        snapshot.ToString().Should().NotContain("alice").And.NotContain("SECRET");
+        states.Should().ContainInOrder(ReleaseVerificationState.CleaningUp, ReleaseVerificationState.Failed);
+        client.OpenCalls.Should().Be(0);
+        client.DisposeCalls.Should().Be(1, "the failed transfer must settle and reap its backend before publishing retry");
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [Test]
+    public async Task PublicPreparationIdentityFailureRequiresFreshSessionWithoutProtocolEvidence()
+    {
+        const string privateDetail = "/home/alice/private/tag-observation?token=SECRET";
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate])
+        {
+            Prepare = (_, progress, _) =>
+            {
+                progress!.Report(NonDownload(ReviewedReleasePreparationStage.ObservingTag));
+                return Task.FromException<IPreparedReleasePackage>(new PackageSecurityException(
+                    PackageSecurityFailureKind.ReleaseIdentityRejected,
+                    privateDetail
+                ));
+            }
+        };
+        FakeClient client = new();
+        ReleaseVerificationController controller = new(service, () => client);
+        await AwaitBounded(controller.LoadCatalogAsync());
+
+        await AwaitBounded(controller.StartAsync());
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Failed);
+        snapshot.Error.Should().Be(ReleaseVerificationError.PackageProvenanceOrIdentityRejected);
+        snapshot.Failure.Should().NotBeNull();
+        snapshot.RejectionCode.Should().BeNull("the identity mismatch happened before a package-open protocol response");
+        snapshot.RejectionNextAction.Should().BeNull();
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.CanRetry.Should().BeFalse();
+        snapshot.CanChooseLocal.Should().BeFalse("a changed reviewed identity must not be bypassed in the same session");
+        snapshot.ToString().Should().NotContain("alice").And.NotContain("SECRET");
+        client.OpenCalls.Should().Be(0);
+        client.DisposeCalls.Should().Be(1);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [TestCase(ProtocolPrePlanErrorCode.PackageIntegrityRejected, ReleaseVerificationError.PackageIntegrityOrMetadataRejected, true)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageMetadataRejected, ReleaseVerificationError.PackageIntegrityOrMetadataRejected, true)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageArchiveRejected, ReleaseVerificationError.PackageIntegrityOrMetadataRejected, true)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageProvenanceRejected, ReleaseVerificationError.PackageProvenanceOrIdentityRejected, false)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, ReleaseVerificationError.PackageProvenanceOrIdentityRejected, false)]
+    public async Task TypedPackageRejectionIsGroupedWithoutLosingExactEvidence(
+        ProtocolPrePlanErrorCode rejectionCode,
+        ReleaseVerificationError expectedError,
+        bool retryable
+    )
+    {
+        const string privateDetail = "/proc/4321/fd/8 ?token=SECRET";
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakePreparedPackage package = new();
+        FakeClient client = new()
+        {
+            Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
+                rejectionCode,
+                ProtocolNextAction.ReopenVerifiedPackage,
+                privateDetail,
+                false
+            ))
+        };
+        ReleaseVerificationController controller = new(PreparedService(candidate, package), () => client);
+        List<ReleaseVerificationState> states = [];
+        controller.Changed += (_, _) => states.Add(controller.Snapshot.State);
+        await AwaitBounded(controller.LoadCatalogAsync());
+
+        await AwaitBounded(controller.StartAsync());
+
+        ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+        snapshot.State.Should().Be(ReleaseVerificationState.Failed);
+        snapshot.Error.Should().Be(expectedError);
+        snapshot.RejectionCode.Should().Be(rejectionCode);
+        snapshot.RejectionNextAction.Should().Be(ProtocolNextAction.ReopenVerifiedPackage);
+        snapshot.RejectionIsTerminal.Should().BeFalse();
+        snapshot.VerifiedRelease.Should().BeNull();
+        snapshot.CanRetry.Should().Be(retryable);
+        snapshot.CanChooseLocal.Should().Be(retryable, "public provenance and identity failures require exit, while integrity failures permit a fresh acquisition");
+        snapshot.ToString().Should().NotContain("/proc/").And.NotContain("SECRET");
+        states.Should().ContainInOrder(ReleaseVerificationState.CleaningUp, ReleaseVerificationState.Failed);
+        package.DisposeCalls.Should().Be(1);
+        client.DisposeCalls.Should().Be(1);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [TestCase(ReleaseVerificationError.PackageRejected, ProtocolPrePlanErrorCode.PackageIntegrityRejected)]
+    [TestCase(ReleaseVerificationError.PackageRejected, ProtocolPrePlanErrorCode.PackageProvenanceRejected)]
+    [TestCase(ReleaseVerificationError.PackageIntegrityOrMetadataRejected, ProtocolPrePlanErrorCode.PackageRejected)]
+    [TestCase(ReleaseVerificationError.PackageIntegrityOrMetadataRejected, ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected)]
+    [TestCase(ReleaseVerificationError.PackageProvenanceOrIdentityRejected, ProtocolPrePlanErrorCode.PackageMetadataRejected)]
+    public void ReleaseFailureRejectsAProtocolCodeFromAnotherPresentationGroup(
+        ReleaseVerificationError error,
+        ProtocolPrePlanErrorCode code
+    )
+    {
+        Action construct = () => _ = new ReleaseVerificationFailure(
+            error,
+            code,
+            ProtocolNextAction.ReopenVerifiedPackage,
+            isTerminal: false
+        );
+
+        construct.Should().Throw<ArgumentException>().WithMessage("*do not describe one exact outcome*");
+    }
+
+    [Test]
+    public async Task RetryClearsPriorTypedEvidenceBeforeUsingFreshAuthorities()
+    {
+        ReviewedReleaseCandidate first = Candidate();
+        ReviewedReleaseCandidate refreshed = Candidate();
+        FakePreparedPackage firstPackage = new();
+        FakePreparedPackage secondPackage = new();
+        Queue<FakePreparedPackage> packages = new([firstPackage, secondPackage]);
+        FakeReleaseService service = new([first])
+        {
+            Prepare = (_, progress, _) =>
+            {
+                EmitValidProgress(progress!);
+                return Task.FromResult<IPreparedReleasePackage>(packages.Dequeue());
+            }
+        };
+        service.Catalogs.Enqueue([refreshed]);
+        FakeClient firstClient = new()
+        {
+            Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
+                ProtocolPrePlanErrorCode.PackageIntegrityRejected,
+                ProtocolNextAction.ReopenVerifiedPackage,
+                "first attempt rejected",
+                false
+            ))
+        };
+        TaskCompletionSource<HandshakeEvent> secondHandshake = NewCompletion<HandshakeEvent>();
+        FakeClient secondClient = new()
+        {
+            Handshake = (_, _, _) => secondHandshake.Task
+        };
+        Queue<FakeClient> clients = new([firstClient, secondClient]);
+        ReleaseVerificationController controller = new(service, () => clients.Dequeue());
+        await AwaitBounded(controller.LoadCatalogAsync());
+        await AwaitBounded(controller.StartAsync());
+        controller.Snapshot.RejectionCode.Should().Be(ProtocolPrePlanErrorCode.PackageIntegrityRejected);
+
+        Task retry = controller.RetryAsync();
+        await AwaitBounded(secondClient.HandshakeStarted.Task);
+
+        ReleaseVerificationSnapshot inProgress = controller.Snapshot;
+        inProgress.State.Should().Be(ReleaseVerificationState.Handshaking);
+        inProgress.AttemptNumber.Should().Be(2);
+        inProgress.Failure.Should().BeNull();
+        inProgress.VerifiedRelease.Should().BeNull();
+        inProgress.CanRetry.Should().BeFalse();
+        service.Candidates.Should().ContainSingle()
+            .Which.Should().BeSameAs(first, "the refreshed candidate isn't prepared before its fresh handshake completes");
+        firstClient.DisposeCalls.Should().Be(1);
+        secondClient.DisposeCalls.Should().Be(0);
+
+        secondHandshake.SetResult(CreateHandshake());
+        await AwaitBounded(retry);
+
+        controller.Snapshot.State.Should().Be(ReleaseVerificationState.Verified);
+        controller.Snapshot.AttemptNumber.Should().Be(2);
+        controller.Snapshot.Failure.Should().BeNull();
+        service.Candidates.Should().Equal(first, refreshed);
+        firstPackage.DisposeCalls.Should().Be(1);
+        secondPackage.DisposeCalls.Should().Be(1);
+        secondClient.DisposeCalls.Should().Be(0, "the verified fresh client transfers to the next-stage authority");
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+        secondClient.DisposeCalls.Should().Be(1);
     }
 
     [Test]
@@ -506,7 +727,7 @@ internal sealed class ReleaseVerificationControllerTests
     }
 
     [Test]
-    public async Task RejectionLeaseDisposalFailureSupersedesRetryableResultAndClearsAuthority()
+    public async Task TypedProvenanceRejectionLeaseDisposalFailureSupersedesResultAndClearsAuthority()
     {
         ReviewedReleaseCandidate candidate = Candidate();
         FakePreparedPackage package = new()
@@ -517,8 +738,8 @@ internal sealed class ReleaseVerificationControllerTests
         FakeClient client = new()
         {
             Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
-                ProtocolPrePlanErrorCode.PackageRejected,
-                ProtocolNextAction.RetryRequest,
+                ProtocolPrePlanErrorCode.PackageProvenanceRejected,
+                ProtocolNextAction.ReopenVerifiedPackage,
                 "retryable before cleanup",
                 false
             ))
@@ -580,7 +801,7 @@ internal sealed class ReleaseVerificationControllerTests
     }
 
     [Test]
-    public async Task ClientDisposalFailureSupersedesRejectionAndClearsAuthority()
+    public async Task TypedIntegrityRejectionClientDisposalFailureSupersedesResultAndClearsAuthority()
     {
         ReviewedReleaseCandidate candidate = Candidate();
         FakePreparedPackage package = new();
@@ -588,8 +809,8 @@ internal sealed class ReleaseVerificationControllerTests
         FakeClient client = new()
         {
             Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
-                ProtocolPrePlanErrorCode.PackageRejected,
-                ProtocolNextAction.RetryRequest,
+                ProtocolPrePlanErrorCode.PackageIntegrityRejected,
+                ProtocolNextAction.ReopenVerifiedPackage,
                 "retryable before client cleanup",
                 false
             )),

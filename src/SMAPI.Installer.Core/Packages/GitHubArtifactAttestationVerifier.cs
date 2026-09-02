@@ -124,7 +124,10 @@ internal sealed class GitHubArtifactAttestationVerifier
             cancellationToken.ThrowIfCancellationRequested();
 
             if (!bundle.Release.Equals(package.Release))
-                throw new PackageSecurityException("The local attestation bundle is bound to a different tagged release.");
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.ProvenanceRejected,
+                    "The local attestation bundle is bound to a different tagged release."
+                );
 
             GitHubArtifactAttestationVerificationRequest request = new(
                 package.Release,
@@ -561,6 +564,9 @@ internal sealed class GitHubArtifactAttestationVerifier
 
     private static PackageSecurityException InvalidEvidence()
     {
-        return new PackageSecurityException("The GitHub attestation verifier returned evidence outside the reviewed release policy.");
+        return new PackageSecurityException(
+            PackageSecurityFailureKind.ProvenanceRejected,
+            "The GitHub attestation verifier returned evidence outside the reviewed release policy."
+        );
     }
 }

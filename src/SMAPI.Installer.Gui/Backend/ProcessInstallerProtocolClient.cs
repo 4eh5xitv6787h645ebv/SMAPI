@@ -282,7 +282,9 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                         return await this.FailProtocolAsync<InstallerPackageOpenResult>().ConfigureAwait(false);
                     return new InstallerPackageOpenSuccess(opened.Release);
 
-                case PrePlanRejectedEvent rejected when rejected.SessionId == session:
+                case PrePlanRejectedEvent rejected when
+                    rejected.SessionId == session
+                    && IsReachableOpenPackageRejection(rejected):
                     return new InstallerPackageOpenRejection(rejected.ErrorCode, rejected.NextAction, rejected.Message, rejected.IsTerminal);
 
                 default:
@@ -1733,6 +1735,21 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
         { ErrorCode: ProtocolPrePlanErrorCode.InvalidGameFolder, NextAction: ProtocolNextAction.SelectGameFolder, IsTerminal: false } => true,
         { ErrorCode: ProtocolPrePlanErrorCode.RecoveryUnavailable, NextAction: ProtocolNextAction.ListRecoveries, IsTerminal: false } => true,
         { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
+        _ => false
+    };
+
+    private static bool IsReachableOpenPackageRejection(PrePlanRejectedEvent rejection) => rejection switch
+    {
+        { ErrorCode: ProtocolPrePlanErrorCode.RequestCancelled, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PackageRejected, NextAction: ProtocolNextAction.ReopenVerifiedPackage, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PackageIntegrityRejected, NextAction: ProtocolNextAction.ReopenVerifiedPackage, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PackageMetadataRejected, NextAction: ProtocolNextAction.ReopenVerifiedPackage, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PackageArchiveRejected, NextAction: ProtocolNextAction.ReopenVerifiedPackage, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PackageProvenanceRejected, NextAction: ProtocolNextAction.ReopenVerifiedPackage, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, NextAction: ProtocolNextAction.ReopenVerifiedPackage, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.InputOutputFailure, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
         { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
         _ => false
     };

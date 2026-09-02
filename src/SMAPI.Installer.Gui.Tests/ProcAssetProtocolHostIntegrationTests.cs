@@ -17,7 +17,8 @@ internal sealed class ProcAssetProtocolHostIntegrationTests
 {
     private const int OpenDirectory = 0x10000;
     private const int OpenCloseOnExec = 0x80000;
-    private const string ExpectedSanitizedMessage = "The selected release asset set failed strict package verification.";
+    private const string ExpectedGenericMessage = "The selected release asset set failed strict package verification.";
+    private const string ExpectedIntegrityMessage = "The selected release package failed an integrity verification check.";
 
     [Test]
     public async Task BuiltHostCorrelatesProcRejectionsAndRemainsUsableAfterMalformedPath()
@@ -94,7 +95,13 @@ internal sealed class ProcAssetProtocolHostIntegrationTests
 
                     InstallerPackageOpenRejection retainedAssetRejection = (await client.OpenPackageAsync(validProcInput))
                         .Should().BeOfType<InstallerPackageOpenRejection>().Subject;
-                    AssertNormalSanitizedPackageRejection(retainedAssetRejection, workspacePath, procRoot);
+                    AssertSanitizedPackageRejection(
+                        retainedAssetRejection,
+                        ProtocolPrePlanErrorCode.PackageIntegrityRejected,
+                        ExpectedIntegrityMessage,
+                        workspacePath,
+                        procRoot
+                    );
 
                     string malformedPid = validProcInput.PackagePath.Replace(
                         $"/proc/{Environment.ProcessId}/",
@@ -104,11 +111,23 @@ internal sealed class ProcAssetProtocolHostIntegrationTests
                     InstallerPackageOpenRejection malformedRejection = (await client.OpenPackageAsync(
                         validProcInput with { PackagePath = malformedPid }
                     )).Should().BeOfType<InstallerPackageOpenRejection>().Subject;
-                    AssertNormalSanitizedPackageRejection(malformedRejection, workspacePath, procRoot);
+                    AssertSanitizedPackageRejection(
+                        malformedRejection,
+                        ProtocolPrePlanErrorCode.PackageRejected,
+                        ExpectedGenericMessage,
+                        workspacePath,
+                        procRoot
+                    );
 
                     InstallerPackageOpenRejection postMalformedRejection = (await client.OpenPackageAsync(validProcInput))
                         .Should().BeOfType<InstallerPackageOpenRejection>().Subject;
-                    AssertNormalSanitizedPackageRejection(postMalformedRejection, workspacePath, procRoot);
+                    AssertSanitizedPackageRejection(
+                        postMalformedRejection,
+                        ProtocolPrePlanErrorCode.PackageIntegrityRejected,
+                        ExpectedIntegrityMessage,
+                        workspacePath,
+                        procRoot
+                    );
                     client.SessionFaulted.IsCompleted.Should().BeFalse("normal correlated rejections keep the live session usable");
                 }
             }
@@ -126,15 +145,17 @@ internal sealed class ProcAssetProtocolHostIntegrationTests
         Directory.Exists(workspacePath).Should().BeFalse("the private workspace and all six dummy assets must be removed");
     }
 
-    private static void AssertNormalSanitizedPackageRejection(
+    private static void AssertSanitizedPackageRejection(
         InstallerPackageOpenRejection rejection,
+        ProtocolPrePlanErrorCode expectedCode,
+        string expectedMessage,
         string privateWorkspacePath,
         string procRoot
     )
     {
-        rejection.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.PackageRejected);
+        rejection.ErrorCode.Should().Be(expectedCode);
         rejection.NextAction.Should().Be(ProtocolNextAction.ReopenVerifiedPackage);
-        rejection.Message.Should().Be(ExpectedSanitizedMessage);
+        rejection.Message.Should().Be(expectedMessage);
         rejection.Message.Should().NotContain(privateWorkspacePath).And.NotContain(procRoot);
         rejection.IsTerminal.Should().BeFalse();
     }

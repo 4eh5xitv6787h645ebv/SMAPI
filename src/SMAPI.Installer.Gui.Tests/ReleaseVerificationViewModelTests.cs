@@ -122,6 +122,270 @@ internal sealed class ReleaseVerificationViewModelTests
     }
 
     [AvaloniaTest]
+    [TestCase(PackageSecurityFailureKind.NetworkUnavailable, ReviewedReleasePreparationStage.ObservingTag, "Couldn’t finish release preparation", "A required release network request became unavailable before preparation finished", "A required network request became unavailable before release preparation finished.")]
+    [TestCase(PackageSecurityFailureKind.NetworkUnavailable, ReviewedReleasePreparationStage.RefreshingTag, "Couldn’t finish release preparation", "A required release network request became unavailable before preparation finished", "A required network request became unavailable before release preparation finished.")]
+    [TestCase(PackageSecurityFailureKind.NetworkTimeout, ReviewedReleasePreparationStage.ObservingTag, "Release preparation timed out", "A required release network request timed out before preparation finished", "A required network request timed out before release preparation finished.")]
+    [TestCase(PackageSecurityFailureKind.NetworkTimeout, ReviewedReleasePreparationStage.RefreshingTag, "Release preparation timed out", "A required release network request timed out before preparation finished", "A required network request timed out before release preparation finished.")]
+    [TestCase(PackageSecurityFailureKind.IncompleteDownload, ReviewedReleasePreparationStage.Downloading, "Release file transfer was incomplete", "A release file transfer did not produce one complete expected file", "A release file transfer did not produce one complete expected file.")]
+    public async Task PublicTransferFailureShowsExactRetryableEvidenceWithoutPrivateDetails(
+        PackageSecurityFailureKind failureKind,
+        ReviewedReleasePreparationStage failureStage,
+        string expectedHeading,
+        string expectedObservedFailure,
+        string expectedMessagePrefix
+    )
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate])
+        {
+            PreparationFailureKind = failureKind,
+            PreparationFailureStage = failureStage
+        };
+        await using ReleaseVerificationViewModel viewModel = CreateViewModel(service);
+        List<ReleaseVerificationFocusTarget> focus = [];
+        viewModel.FocusRequested += (_, target) => focus.Add(target);
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        await viewModel.DownloadAndVerifyCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.Heading.Should().Be(expectedHeading);
+        viewModel.Message.Should().Be($"{expectedMessagePrefix} No package from this attempt was published or retained for use, and no game files changed. Check your connection, then choose Try again.");
+        viewModel.FailureEvidence.Select(row => row.AccessibleName).Should().Equal(
+            $"Observed failure: {expectedObservedFailure}",
+            "Installer package availability: No package from this attempt was published or retained for use",
+            "Cleanup boundary: The failed attempt settled before this result was shown",
+            "Game files: Unchanged",
+            "Safe next step: Check your connection, then retry the download"
+        );
+        viewModel.IsFailureEvidenceVisible.Should().BeTrue();
+        viewModel.IsVerifiedVisible.Should().BeFalse();
+        viewModel.VerifiedIdentityDetail.Should().BeEmpty();
+        viewModel.IsRetryVisible.Should().BeTrue();
+        viewModel.RetryCommand.CanExecute(null).Should().BeTrue();
+        viewModel.RetryAutomationName.Should().Be("Retry the release download and verification");
+        viewModel.IsExitVisible.Should().BeFalse();
+        viewModel.StatusLiveSetting.Should().Be(AutomationLiveSetting.Off);
+        focus.Should().EndWith(ReleaseVerificationFocusTarget.Status);
+        string projection = string.Join('\n', new[]
+        {
+            viewModel.Heading,
+            viewModel.Message,
+            viewModel.LiveAnnouncement,
+            viewModel.ReleaseDetail,
+            viewModel.VerifiedIdentityDetail,
+            string.Join('\n', viewModel.FailureEvidence.Select(row => row.AccessibleName))
+        });
+        projection.Should().NotContain("alice").And.NotContain("SECRET").And.NotContain("download.partial");
+    }
+
+    [AvaloniaTest]
+    [TestCase(ProtocolPrePlanErrorCode.PackageIntegrityRejected, "Release checksum or package integrity did not match", "Package or checksum integrity did not agree")]
+    [TestCase(ProtocolPrePlanErrorCode.PackageMetadataRejected, "Release metadata did not match", "Release or install metadata did not satisfy strict verification")]
+    [TestCase(ProtocolPrePlanErrorCode.PackageArchiveRejected, "Release package archive was rejected", "Package archive or verified payload did not satisfy strict verification")]
+    public async Task PublicIntegrityFailureShowsExactEvidenceAndFreshDownloadAction(
+        ProtocolPrePlanErrorCode rejectionCode,
+        string expectedHeading,
+        string expectedObservedCheck
+    )
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate]) { CompletePreparation = true };
+        FakeProtocolClient client = new(
+            success: false,
+            candidate,
+            rejectionCode: rejectionCode,
+            nextAction: ProtocolNextAction.ReopenVerifiedPackage
+        );
+        await using ReleaseVerificationViewModel viewModel = CreateViewModel(service, client);
+        EventHandler localHandler = (_, _) => { };
+        viewModel.LocalPackageFolderRequested += localHandler;
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        await viewModel.DownloadAndVerifyCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.Heading.Should().Be(expectedHeading);
+        viewModel.Message.Should().Be("The selected release did not satisfy strict package verification. It was blocked before installation, the rejected package was not retained for use, and no game files changed. Download and verify the selected release again.");
+        viewModel.FailureEvidence.Select(row => row.AccessibleName).Should().Equal(
+            $"Observed check: {expectedObservedCheck}",
+            "Installation: Not started",
+            "Installer package availability: Rejected package was not retained for use",
+            "Game files: Unchanged",
+            "Safe next step: Download and verify the selected release again"
+        );
+        viewModel.IsRetryVisible.Should().BeTrue();
+        viewModel.RetryCommand.CanExecute(null).Should().BeTrue();
+        viewModel.RetryAutomationName.Should().Be("Download and verify the selected release again");
+        viewModel.IsLocalPackageActionVisible.Should().BeTrue();
+        viewModel.IsExitVisible.Should().BeFalse();
+        viewModel.IsVerifiedVisible.Should().BeFalse();
+        viewModel.VerifiedIdentityDetail.Should().BeEmpty();
+        viewModel.LiveAnnouncement.Should().Be($"{viewModel.Heading}. {viewModel.Message}");
+        viewModel.LiveAnnouncement.Should().NotContain("alice").And.NotContain("SECRET");
+        viewModel.LocalPackageFolderRequested -= localHandler;
+    }
+
+    [AvaloniaTest]
+    [TestCase(ProtocolPrePlanErrorCode.PackageProvenanceRejected, "GitHub provenance was not accepted")]
+    [TestCase(ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, "Release identity did not match")]
+    public async Task PublicProvenanceOrIdentityFailureRequiresExitAndOffersNoRetryOrLocalBypass(
+        ProtocolPrePlanErrorCode rejectionCode,
+        string expectedHeading
+    )
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate]) { CompletePreparation = true };
+        FakeProtocolClient client = new(
+            success: false,
+            candidate,
+            rejectionCode: rejectionCode,
+            nextAction: ProtocolNextAction.ReopenVerifiedPackage
+        );
+        await using ReleaseVerificationViewModel viewModel = CreateViewModel(service, client);
+        EventHandler localHandler = (_, _) => { };
+        viewModel.LocalPackageFolderRequested += localHandler;
+        List<ReleaseVerificationFocusTarget> focus = [];
+        viewModel.FocusRequested += (_, target) => focus.Add(target);
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        await viewModel.DownloadAndVerifyCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.Heading.Should().Be(expectedHeading);
+        viewModel.Message.Should().Be("The selected release did not satisfy strict release-identity or GitHub provenance verification. It was blocked before installation, and no game files changed. Close and reopen the installer to start a fresh verification session.");
+        IReadOnlyList<string> evidence = viewModel.FailureEvidence.Select(row => row.AccessibleName).ToArray();
+        if (rejectionCode == ProtocolPrePlanErrorCode.PackageProvenanceRejected)
+        {
+            evidence.Should().Equal(
+                "Package integrity: Passed before GitHub provenance verification",
+                "GitHub provenance: Evidence did not satisfy strict verification",
+                "Package extraction: Not started",
+                "Game files: Unchanged",
+                "Safe next step: Close and reopen the installer to start a fresh verification session"
+            );
+        }
+        else
+        {
+            evidence.Should().Equal(
+                "Observed check: Selected release identity did not satisfy strict verification",
+                "Package extraction: Not started",
+                "Installation: Blocked",
+                "Game files: Unchanged",
+                "Safe next step: Close and reopen the installer to start a fresh verification session"
+            );
+        }
+        viewModel.IsExitVisible.Should().BeTrue();
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.RetryCommand.CanExecute(null).Should().BeFalse();
+        viewModel.IsLocalPackageActionVisible.Should().BeFalse();
+        viewModel.IsReleaseSelectorEnabled.Should().BeFalse();
+        viewModel.IsVerifiedVisible.Should().BeFalse();
+        viewModel.VerifiedIdentityDetail.Should().BeEmpty();
+        viewModel.StatusLiveSetting.Should().Be(AutomationLiveSetting.Off);
+        focus.Should().EndWith(ReleaseVerificationFocusTarget.Status);
+        viewModel.LiveAnnouncement.Should().Be($"{viewModel.Heading}. {viewModel.Message}");
+        viewModel.LiveAnnouncement.Should().NotContain("alice").And.NotContain("SECRET");
+        viewModel.LocalPackageFolderRequested -= localHandler;
+    }
+
+    [AvaloniaTest]
+    public async Task PublicTagIdentityChangeBeforePackageOpenStillRequiresExitWithoutInventedEvidence()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate])
+        {
+            PreparationFailureKind = PackageSecurityFailureKind.ReleaseIdentityRejected
+        };
+        await using ReleaseVerificationViewModel viewModel = CreateViewModel(service);
+        EventHandler localHandler = (_, _) => { };
+        viewModel.LocalPackageFolderRequested += localHandler;
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        await viewModel.DownloadAndVerifyCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.Heading.Should().Be("Release identity changed or did not match");
+        viewModel.FailureEvidence.Select(row => row.AccessibleName).Should().Equal(
+            "Observed check: Selected release identity did not satisfy strict verification",
+            "Package extraction: Not started",
+            "Installation: Blocked",
+            "Game files: Unchanged",
+            "Safe next step: Close and reopen the installer to start a fresh verification session"
+        );
+        viewModel.IsExitVisible.Should().BeTrue();
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.RetryCommand.CanExecute(null).Should().BeFalse();
+        viewModel.IsLocalPackageActionVisible.Should().BeFalse();
+        viewModel.IsReleaseSelectorEnabled.Should().BeFalse();
+        viewModel.IsVerifiedVisible.Should().BeFalse();
+        viewModel.VerifiedIdentityDetail.Should().BeEmpty();
+        string projection = $"{viewModel.Heading}\n{viewModel.Message}\n{viewModel.LiveAnnouncement}\n{string.Join('\n', viewModel.FailureEvidence.Select(row => row.AccessibleName))}";
+        projection.Should().NotContain("alice").And.NotContain("SECRET").And.NotContain("tag-observation");
+        viewModel.LocalPackageFolderRequested -= localHandler;
+    }
+
+    [AvaloniaTest]
+    [TestCase(ProtocolPrePlanErrorCode.PackageIntegrityRejected, "Observed check: Package or checksum integrity did not agree")]
+    [TestCase(ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, "Observed check: Selected release identity did not satisfy strict verification")]
+    public async Task LocalTypedFailureRequiresFolderReselectionAndNeverExposesThePath(
+        ProtocolPrePlanErrorCode rejectionCode,
+        string expectedFirstEvidence
+    )
+    {
+        const string privatePath = "/home/alice/private/local-release?token=SECRET";
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeReleaseService service = new([candidate]);
+        FakeProtocolClient client = new(
+            success: false,
+            candidate,
+            rejectionCode: rejectionCode,
+            nextAction: ProtocolNextAction.ReopenVerifiedPackage
+        );
+        FakeLocalReleaseService local = new(candidate);
+        await using ReleaseVerificationViewModel viewModel = new(new ReleaseVerificationController(
+            service,
+            () => client,
+            local
+        ));
+        EventHandler localHandler = (_, _) => { };
+        viewModel.LocalPackageFolderRequested += localHandler;
+        await viewModel.StartAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        await viewModel.ApplyLocalPackageFolderAsync(privatePath);
+        Dispatcher.UIThread.RunJobs();
+
+        viewModel.FailureEvidence.Select(row => row.AccessibleName).Should().StartWith(expectedFirstEvidence);
+        viewModel.FailureEvidence.Select(row => row.AccessibleName).Should().Contain(
+            "Safe next step: Replace the six files with a fresh complete copy, then choose the folder again"
+        );
+        viewModel.Message.Should().Contain("Replace the six files with a fresh complete copy, then choose the folder again.");
+        viewModel.IsRetryVisible.Should().BeFalse();
+        viewModel.RetryCommand.CanExecute(null).Should().BeFalse();
+        viewModel.IsLocalPackageActionVisible.Should().BeTrue();
+        viewModel.IsReleaseSelectorEnabled.Should().BeTrue();
+        viewModel.IsExitVisible.Should().BeFalse();
+        viewModel.IsVerifiedVisible.Should().BeFalse();
+        viewModel.VerifiedIdentityDetail.Should().BeEmpty();
+        local.Paths.Should().Equal(privatePath);
+        string projection = string.Join('\n', new[]
+        {
+            viewModel.Heading,
+            viewModel.Message,
+            viewModel.LiveAnnouncement,
+            viewModel.ReleaseDetail,
+            string.Join('\n', viewModel.FailureEvidence.Select(row => row.AccessibleName))
+        });
+        projection.Should().NotContain("alice").And.NotContain("SECRET").And.NotContain(privatePath);
+        viewModel.LocalPackageFolderRequested -= localHandler;
+    }
+
+    [AvaloniaTest]
     public async Task DownloadAnnouncementsUseAssetAndTenPercentMilestonesInsteadOfEveryByte()
     {
         ReviewedReleaseCandidate candidate = Candidate(size: 100);
@@ -213,6 +477,10 @@ internal sealed class ReleaseVerificationViewModelTests
 
         public bool CompletePreparation { get; init; }
 
+        public PackageSecurityFailureKind? PreparationFailureKind { get; init; }
+
+        public ReviewedReleasePreparationStage PreparationFailureStage { get; init; } = ReviewedReleasePreparationStage.Downloading;
+
         public TaskCompletionSource PreparationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task<IReadOnlyList<ReviewedReleaseCandidate>> LoadCatalogAsync(CancellationToken cancellationToken = default)
@@ -229,6 +497,47 @@ internal sealed class ReleaseVerificationViewModelTests
         {
             this.Progress = progress;
             this.PreparationStarted.TrySetResult();
+            if (this.PreparationFailureKind is { } failureKind)
+            {
+                progress?.Report(new(ReviewedReleasePreparationStage.ObservingTag, null, 0, 0, 0, 0));
+                if (this.PreparationFailureStage != ReviewedReleasePreparationStage.ObservingTag)
+                {
+                    long total = candidate.Assets.Sum(asset => asset.SizeBytes);
+                    if (this.PreparationFailureStage == ReviewedReleasePreparationStage.RefreshingTag)
+                    {
+                        long transferred = 0;
+                        for (int index = 0; index < candidate.Assets.Length; index++)
+                        {
+                            transferred += candidate.Assets[index].SizeBytes;
+                            progress?.Report(new(
+                                ReviewedReleasePreparationStage.Downloading,
+                                candidate.Assets[index].Kind,
+                                index + 1,
+                                candidate.Assets.Length,
+                                transferred,
+                                total
+                            ));
+                        }
+                    }
+                    else
+                    {
+                        progress?.Report(new(
+                            ReviewedReleasePreparationStage.Downloading,
+                            ReviewedReleaseAssetKind.InstallerPackage,
+                            0,
+                            candidate.Assets.Length,
+                            7,
+                            total
+                        ));
+                    }
+                }
+                if (this.PreparationFailureStage == ReviewedReleasePreparationStage.RefreshingTag)
+                    progress?.Report(new(ReviewedReleasePreparationStage.RefreshingTag, null, 0, 0, 0, 0));
+                throw new PackageSecurityException(
+                    failureKind,
+                    "private /home/alice/download.partial?token=SECRET"
+                );
+            }
             if (this.CompletePreparation)
             {
                 progress?.Report(new(ReviewedReleasePreparationStage.ObservingTag, null, 0, 0, 0, 0));
@@ -285,10 +594,27 @@ internal sealed class ReleaseVerificationViewModelTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
+    private sealed class FakeLocalReleaseService(ReviewedReleaseCandidate candidate) : ILocalReleasePackageService
+    {
+        public List<string> Paths { get; } = [];
+
+        public Task<IPreparedReleasePackage> PrepareAsync(
+            string selectedDirectory,
+            CancellationToken cancellationToken = default
+        )
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            this.Paths.Add(selectedDirectory);
+            return Task.FromResult<IPreparedReleasePackage>(new FakePreparedPackage(candidate));
+        }
+    }
+
     internal sealed class FakeProtocolClient(
         bool success,
         ReviewedReleaseCandidate candidate,
-        bool terminalRejection = false
+        bool terminalRejection = false,
+        ProtocolPrePlanErrorCode rejectionCode = ProtocolPrePlanErrorCode.PackageRejected,
+        ProtocolNextAction? nextAction = null
     ) : IInstallerProtocolClient
     {
         private readonly TaskCompletionSource<InstallerProtocolClientException> Fault = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -329,9 +655,11 @@ internal sealed class ReleaseVerificationViewModelTests
                     "linux-x64"
                 ))
                 : new InstallerPackageOpenRejection(
-                    ProtocolPrePlanErrorCode.PackageRejected,
-                    terminalRejection ? ProtocolNextAction.StartNewSession : ProtocolNextAction.RetryRequest,
-                    "The package was rejected safely.",
+                    terminalRejection ? ProtocolPrePlanErrorCode.UnexpectedFailure : rejectionCode,
+                    terminalRejection
+                        ? ProtocolNextAction.StartNewSession
+                        : nextAction ?? ProtocolNextAction.ReopenVerifiedPackage,
+                    "Private /home/alice/package?token=SECRET",
                     terminalRejection
                 );
             return Task.FromResult(result);

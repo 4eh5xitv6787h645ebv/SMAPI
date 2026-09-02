@@ -110,7 +110,20 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
 
                     while (true)
                     {
-                        int bytesRead = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), linkedSource.Token).ConfigureAwait(false);
+                        int bytesRead;
+                        try
+                        {
+                            bytesRead = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), linkedSource.Token).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is IOException or HttpRequestException)
+                        {
+                            linkedSource.Token.ThrowIfCancellationRequested();
+                            throw new PackageSecurityException(
+                                PackageSecurityFailureKind.IncompleteDownload,
+                                "The release transfer ended before the asset was complete.",
+                                ex
+                            );
+                        }
                         if (bytesRead == 0)
                             break;
 
@@ -129,7 +142,10 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                     }
 
                     if (declaredLength.HasValue && totalBytes != declaredLength.Value)
-                        throw new PackageSecurityException("The release download ended before its declared content length was received.");
+                        throw new PackageSecurityException(
+                            PackageSecurityFailureKind.IncompleteDownload,
+                            "The release download ended before its declared content length was received."
+                        );
                     LinuxFileIdentity stagedIdentity = destinationFileSystem.Stat(temporaryName)
                         ?? throw new IOException("The private download staging file disappeared.");
                     if (
@@ -172,6 +188,7 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                 createdTemporaryIdentity
             );
             throw new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkTimeout,
                 $"The release download timed out before it completed ({ex.GetType().Name})."
             );
         }
@@ -192,6 +209,19 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                 createdTemporaryIdentity
             );
             throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            BoundedHttpDownloader.CleanupOwnedTemporary(
+                destinationFileSystem,
+                temporaryName,
+                createdTemporaryIdentity
+            );
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkUnavailable,
+                "The release download transport was unavailable.",
+                ex
+            );
         }
         catch (Exception ex)
         {
@@ -249,7 +279,10 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                 if (declaredLength > limits.MaxBytes)
                     throw new PackageSecurityException("The release asset exceeds the configured download size limit.");
                 if (declaredLength.HasValue && declaredLength.Value != destination.ExpectedBytes)
-                    throw new PackageSecurityException("The release asset length differs from its catalog advertisement.");
+                    throw new PackageSecurityException(
+                        PackageSecurityFailureKind.IncompleteDownload,
+                        "The release asset length differs from its catalog advertisement."
+                    );
 
                 long totalBytes = 0;
                 byte[] buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
@@ -261,7 +294,20 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                     temporaryIdentity = output.Identity;
                     while (true)
                     {
-                        int bytesRead = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), linkedSource.Token).ConfigureAwait(false);
+                        int bytesRead;
+                        try
+                        {
+                            bytesRead = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), linkedSource.Token).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is IOException or HttpRequestException)
+                        {
+                            linkedSource.Token.ThrowIfCancellationRequested();
+                            throw new PackageSecurityException(
+                                PackageSecurityFailureKind.IncompleteDownload,
+                                "The release transfer ended before the asset was complete.",
+                                ex
+                            );
+                        }
                         if (bytesRead == 0)
                             break;
 
@@ -279,9 +325,15 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                     }
 
                     if (declaredLength.HasValue && totalBytes != declaredLength.Value)
-                        throw new PackageSecurityException("The release download ended before its declared content length was received.");
+                        throw new PackageSecurityException(
+                            PackageSecurityFailureKind.IncompleteDownload,
+                            "The release download ended before its declared content length was received."
+                        );
                     if (totalBytes != destination.ExpectedBytes)
-                        throw new PackageSecurityException("The release asset length differs from its catalog advertisement.");
+                        throw new PackageSecurityException(
+                            PackageSecurityFailureKind.IncompleteDownload,
+                            "The release asset length differs from its catalog advertisement."
+                        );
                     LinuxFileIdentity staged = destination.FileSystem.Stat(temporaryName)
                         ?? throw new IOException("The private download staging file disappeared.");
                     if (
@@ -325,7 +377,10 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
         catch (OperationCanceledException ex) when (timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
             CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
-            throw new PackageSecurityException($"The release download timed out before it completed ({ex.GetType().Name}).");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkTimeout,
+                $"The release download timed out before it completed ({ex.GetType().Name})."
+            );
         }
         catch (OperationCanceledException)
         {
@@ -336,6 +391,15 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
         {
             CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
             throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkUnavailable,
+                "The release download transport was unavailable.",
+                ex
+            );
         }
         catch (Exception ex)
         {
@@ -378,6 +442,7 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                     HttpStatusCode statusCode = response.StatusCode;
                     response.Dispose();
                     throw new PackageSecurityException(
+                        PackageSecurityFailureKind.NetworkUnavailable,
                         $"The release server returned HTTP {(int)statusCode} from {BoundedHttpDownloader.GetSafeOrigin(currentUri)}."
                     );
                 }

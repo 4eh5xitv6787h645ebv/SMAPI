@@ -273,7 +273,8 @@ public sealed class ReleasePackageVerifierTests
                 this.Identity,
                 ReleasePackageVerifierTests.Commit
             );
-            await action.Should().ThrowAsync<PackageSecurityException>();
+            PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+            exception.FailureKind.Should().Be(PackageSecurityFailureKind.MetadataRejected);
         }
     }
 
@@ -436,6 +437,38 @@ public sealed class ReleasePackageVerifierTests
         writeAlias!.IsClosed.Should().BeTrue();
     }
 
+    [TestCase("digest")]
+    [TestCase("writable-authority")]
+    public async Task UseVerifiedStream_ChangedIntegrityAuthorityIsClassifiedAtSource(string kind)
+    {
+        byte[] bytes = "synthetic retained package authority"u8.ToArray();
+        string actualHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string recordedHash = kind == "digest" ? new string('0', 64) : actualHash;
+        MemoryStream stream = new(bytes, writable: kind == "writable-authority");
+        using VerifiedReleasePackage package = new(
+            this.Identity,
+            recordedHash,
+            bytes.LongLength,
+            Commit,
+            Tree,
+            $"{ForkReleaseIdentity.Repository}/.github/workflows/linux-alpha-release.yml@refs/tags/{this.Identity.Tag}",
+            "Release",
+            "linux-x64",
+            [new VerifiedReleaseArtifactIdentity(this.Identity.PackageAssetName, bytes.LongLength, recordedHash)],
+            stagingDirectory: null,
+            stagingPath: null,
+            stream
+        );
+
+        Func<Task> consume = () => package.UseVerifiedStreamAsync(
+            (_, _) => Task.FromResult(true),
+            CancellationToken.None
+        );
+
+        PackageSecurityException exception = (await consume.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IntegrityRejected);
+    }
+
     [Test]
     public async Task VerifyAsync_ChecksumDoesNotMatchPackage_Rejects()
     {
@@ -446,13 +479,15 @@ public sealed class ReleasePackageVerifierTests
         Func<Task> action = () => verifier.VerifyAsync(
             path,
             $"{otherHash}  {this.Identity.PackageAssetName}\n",
-            this.CreateMetadata(hash, bytes.Length),
+            this.CreateMetadata(otherHash, bytes.Length),
             this.Identity,
             ReleasePackageVerifierTests.Commit
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>()
-            .WithMessage("*SHA256SUMS*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*SHA256SUMS*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IntegrityRejected);
     }
 
     [Test]
@@ -469,8 +504,10 @@ public sealed class ReleasePackageVerifierTests
             ReleasePackageVerifierTests.Commit
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>()
-            .WithMessage("*build-metadata.json*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*build-metadata.json*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.MetadataRejected);
     }
 
     [Test]
@@ -488,8 +525,10 @@ public sealed class ReleasePackageVerifierTests
             ReleasePackageVerifierTests.Commit
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>()
-            .WithMessage("*repository*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*repository*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [Test]
@@ -506,8 +545,10 @@ public sealed class ReleasePackageVerifierTests
             new string('c', 40)
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>()
-            .WithMessage("*release target*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*release target*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [Test]
@@ -525,7 +566,44 @@ public sealed class ReleasePackageVerifierTests
             ReleasePackageVerifierTests.Commit
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>();
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.MetadataRejected);
+    }
+
+    [Test]
+    public async Task VerifyAsync_MalformedChecksumDocument_RejectsAsIntegrity()
+    {
+        (string path, byte[] bytes, string hash) = this.CreatePackage();
+
+        Func<Task> action = () => new ReleasePackageVerifier().VerifyAsync(
+            path,
+            $"not-a-sha256  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IntegrityRejected);
+    }
+
+    [Test]
+    public async Task VerifyAsync_PackageFilenameDoesNotMatchRelease_RejectsAsReleaseIdentity()
+    {
+        (string path, byte[] bytes, string hash) = this.CreatePackage();
+        string mismatchedPath = Path.Combine(this.TempRoot, "unrelated-installer.zip");
+        File.Move(path, mismatchedPath);
+
+        Func<Task> action = () => new ReleasePackageVerifier().VerifyAsync(
+            mismatchedPath,
+            $"{hash}  {this.Identity.PackageAssetName}\n",
+            this.CreateMetadata(hash, bytes.Length),
+            this.Identity,
+            ReleasePackageVerifierTests.Commit
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [Test]

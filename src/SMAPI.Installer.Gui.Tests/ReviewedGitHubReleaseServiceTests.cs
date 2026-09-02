@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
+using FluentAssertions.Specialized;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Gui.Backend;
 using StardewModdingAPI.Installer.Gui.Frontend;
@@ -151,9 +152,87 @@ internal sealed class ReviewedGitHubReleaseServiceTests
 
         Func<Task> action = async () => await service.PrepareAsync(candidate);
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*moved while its assets were acquired*");
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>()
+            .WithMessage("*moved while its assets were acquired*");
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
         acquisition.ResolvedTag.Should().BeNull();
         acquisition.DisposeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task PrepareRejectsMalformedInitialTagAsReleaseIdentityFailureBeforeAcquisition()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        int acquisitionCount = 0;
+        SequenceHandler handler = new(JsonResponse(Encoding.UTF8.GetBytes("{")));
+        await using ReviewedGitHubReleaseService service = new(
+            handler,
+            acquisitionFactory: (_, _, _) =>
+            {
+                acquisitionCount++;
+                return Task.FromResult<IReviewedReleaseAcquisition>(new FakeAcquisition([]));
+            }
+        );
+
+        Func<Task> action = async () => await service.PrepareAsync(candidate);
+
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>();
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
+        acquisitionCount.Should().Be(0, "an invalid tag authority must fail before any assets are acquired");
+        handler.Requests.Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task PrepareRejectsMalformedAnnotatedTagAsReleaseIdentityFailureAndCleansAcquisition()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        FakeAcquisition acquisition = new([]);
+        SequenceHandler handler = new(
+            JsonResponse(ReferenceDocument(TagObject)),
+            JsonResponse(Encoding.UTF8.GetBytes("{")),
+            JsonResponse(ReferenceDocument(TagObject))
+        );
+        await using ReviewedGitHubReleaseService service = new(
+            handler,
+            acquisitionFactory: (_, _, _) => Task.FromResult<IReviewedReleaseAcquisition>(acquisition)
+        );
+
+        Func<Task> action = async () => await service.PrepareAsync(candidate);
+
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>();
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
+        acquisition.ResolvedTag.Should().BeNull();
+        acquisition.DisposeCount.Should().Be(1);
+        handler.Requests.Should().HaveCount(3);
+    }
+
+    [Test]
+    public async Task PreparePreservesInjectedTypedAcquisitionFailureWithoutRefreshingOrPublishing()
+    {
+        ReviewedReleaseCandidate candidate = Candidate();
+        PackageSecurityException expected = new(
+            PackageSecurityFailureKind.IncompleteDownload,
+            "The injected acquisition ended before its complete asset set was published."
+        );
+        SequenceHandler handler = new(
+            JsonResponse(ReferenceDocument(TagObject)),
+            JsonResponse(AnnotatedTagDocument(TagObject))
+        );
+        await using ReviewedGitHubReleaseService service = new(
+            handler,
+            acquisitionFactory: (_, _, _) => Task.FromException<IReviewedReleaseAcquisition>(expected)
+        );
+
+        Func<Task> action = async () => await service.PrepareAsync(candidate);
+
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>();
+        exception.Which.Should().BeSameAs(expected);
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.IncompleteDownload);
+        handler.Requests.Should().HaveCount(2, "failed acquisition must not refresh the tag or publish a package");
     }
 
     [Test]
@@ -386,7 +465,10 @@ internal sealed class ReviewedGitHubReleaseServiceTests
 
         Func<Task> action = async () => await service.PrepareAsync(candidate);
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*unexpected HTTP status*");
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>()
+            .WithMessage("*unexpected HTTP status*");
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkUnavailable);
         acquisition.DisposeCount.Should().Be(1);
         acquisition.ResolvedTag.Should().BeNull();
     }
@@ -404,8 +486,54 @@ internal sealed class ReviewedGitHubReleaseServiceTests
 
         Func<Task> action = async () => await service.LoadCatalogAsync();
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*unexpected HTTP status*");
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>()
+            .WithMessage("*unexpected HTTP status*");
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkUnavailable);
         handler.Requests.Should().HaveCount(1);
+    }
+
+    [Test]
+    public async Task LoadCatalogMapsTransportFailureToNetworkUnavailable()
+    {
+        HttpRequestException transportFailure = new("private endpoint and credential sentinel");
+        await using ReviewedGitHubReleaseService service = new(new ThrowingHandler(transportFailure));
+
+        Func<Task> action = async () => await service.LoadCatalogAsync();
+
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>();
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkUnavailable);
+        exception.Which.InnerException.Should().BeSameAs(transportFailure);
+        exception.Which.Message.Should().NotContain("private endpoint and credential sentinel");
+    }
+
+    [Test]
+    public async Task LoadCatalogDoesNotMisclassifyUnexpectedLocalFailureAsNetworkUnavailable()
+    {
+        InvalidOperationException localFailure = new("synthetic handler contract failure");
+        await using ReviewedGitHubReleaseService service = new(new ThrowingHandler(localFailure));
+
+        Func<Task> action = async () => await service.LoadCatalogAsync();
+
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>();
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
+        exception.Which.InnerException.Should().BeSameAs(localFailure);
+    }
+
+    [Test]
+    public async Task LoadCatalogPreservesSpontaneousUnownedCancellation()
+    {
+        OperationCanceledException unownedCancellation = new("synthetic unowned cancellation");
+        await using ReviewedGitHubReleaseService service = new(new ThrowingHandler(unownedCancellation));
+
+        Func<Task> action = async () => await service.LoadCatalogAsync();
+
+        ExceptionAssertions<OperationCanceledException> exception = await action.Should()
+            .ThrowAsync<OperationCanceledException>();
+        exception.Which.Should().BeSameAs(unownedCancellation);
+        exception.Which.Should().NotBeOfType<PackageSecurityException>();
     }
 
     [Test]
@@ -473,7 +601,9 @@ internal sealed class ReviewedGitHubReleaseServiceTests
         cancellation.Cancel();
 
         Func<Task> action = async () => await loading;
-        await action.Should().ThrowAsync<OperationCanceledException>();
+        ExceptionAssertions<OperationCanceledException> exception = await action.Should()
+            .ThrowAsync<OperationCanceledException>();
+        exception.Which.Should().NotBeOfType<PackageSecurityException>();
     }
 
     [Test]
@@ -484,7 +614,38 @@ internal sealed class ReviewedGitHubReleaseServiceTests
 
         Func<Task> action = async () => await service.LoadCatalogAsync();
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*bounded time limit*");
+        ExceptionAssertions<PackageSecurityException> exception = await action.Should()
+            .ThrowAsync<PackageSecurityException>()
+            .WithMessage("*bounded time limit*");
+        exception.Which.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkTimeout);
+    }
+
+    [Test]
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task BodyReadIOExceptionAfterCancellationPreservesCancellationAuthority(bool timeout)
+    {
+        CancellationIOExceptionHandler handler = new();
+        using CancellationTokenSource cancellation = new();
+        await using ReviewedGitHubReleaseService service = new(
+            handler,
+            timeout ? TimeSpan.FromMilliseconds(100) : Timeout.InfiniteTimeSpan
+        );
+
+        Task<IReadOnlyList<ReviewedReleaseCandidate>> loading = service.LoadCatalogAsync(cancellation.Token);
+        await handler.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (!timeout)
+            cancellation.Cancel();
+
+        if (timeout)
+        {
+            PackageSecurityException exception = (
+                await loading.Invoking(async task => await task).Should().ThrowAsync<PackageSecurityException>()
+            ).Which;
+            exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkTimeout);
+        }
+        else
+            await loading.Invoking(async task => await task).Should().ThrowAsync<OperationCanceledException>();
     }
 
     [Test]
@@ -498,7 +659,9 @@ internal sealed class ReviewedGitHubReleaseServiceTests
         await service.DisposeAsync();
 
         Func<Task> active = async () => await loading;
-        await active.Should().ThrowAsync<ObjectDisposedException>();
+        ExceptionAssertions<ObjectDisposedException> exception = await active.Should()
+            .ThrowAsync<ObjectDisposedException>();
+        exception.Which.Should().NotBeOfType<PackageSecurityException>();
         Func<Task> later = async () => await service.LoadCatalogAsync();
         await later.Should().ThrowAsync<ObjectDisposedException>();
         await service.DisposeAsync();
@@ -712,6 +875,89 @@ internal sealed class ReviewedGitHubReleaseServiceTests
             this.Started.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             throw new AssertionException("The deterministic waiting request unexpectedly completed.");
+        }
+    }
+
+    private sealed class ThrowingHandler(Exception exception) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        )
+        {
+            return Task.FromException<HttpResponseMessage>(exception);
+        }
+    }
+
+    private sealed class CancellationIOExceptionHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource ReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        )
+        {
+            return Task.FromResult(
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(new CancellationIOExceptionStream(this.ReadStarted))
+                }
+            );
+        }
+    }
+
+    private sealed class CancellationIOExceptionStream(TaskCompletionSource readStarted) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default
+        )
+        {
+            readStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return 0;
+            }
+            catch (OperationCanceledException ex)
+            {
+                throw new IOException("Synthetic transport shutdown surfaced as I/O.", ex);
+            }
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
         }
     }
 

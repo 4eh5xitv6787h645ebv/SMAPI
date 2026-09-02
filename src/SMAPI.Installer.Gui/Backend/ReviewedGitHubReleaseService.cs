@@ -272,7 +272,10 @@ internal sealed class ReviewedGitHubReleaseService : IReviewedReleaseService
                 linked.Token
             ).ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.OK)
-                throw new PackageSecurityException("The reviewed GitHub release API returned an unexpected HTTP status.");
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.NetworkUnavailable,
+                    "The reviewed GitHub release API returned an unexpected HTTP status."
+                );
             if (response.Content.Headers.ContentEncoding.Count != 0)
                 throw new PackageSecurityException("The reviewed GitHub release API returned an unexpected content encoding.");
 
@@ -314,13 +317,39 @@ internal sealed class ReviewedGitHubReleaseService : IReviewedReleaseService
         {
             throw new ObjectDisposedException(nameof(ReviewedGitHubReleaseService));
         }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkTimeout,
+                "The reviewed GitHub release API request exceeded its bounded time limit."
+            );
+        }
         catch (OperationCanceledException)
         {
-            throw new PackageSecurityException("The reviewed GitHub release API request exceeded its bounded time limit.");
+            throw;
         }
         catch (PackageSecurityException)
         {
             throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (this.LifetimeToken.IsCancellationRequested)
+                throw new ObjectDisposedException(nameof(ReviewedGitHubReleaseService));
+            if (timeout.IsCancellationRequested)
+            {
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.NetworkTimeout,
+                    "The reviewed GitHub release API request exceeded its bounded time limit.",
+                    ex
+                );
+            }
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkUnavailable,
+                $"The reviewed GitHub release API request failed safely ({ex.GetType().Name}).",
+                ex
+            );
         }
         catch (Exception) when (this.LifetimeToken.IsCancellationRequested)
         {
@@ -328,7 +357,7 @@ internal sealed class ReviewedGitHubReleaseService : IReviewedReleaseService
         }
         catch (Exception ex)
         {
-            throw new PackageSecurityException($"The reviewed GitHub release API request failed safely ({ex.GetType().Name}).");
+            throw new PackageSecurityException($"The reviewed GitHub release API request failed safely ({ex.GetType().Name}).", ex);
         }
     }
 

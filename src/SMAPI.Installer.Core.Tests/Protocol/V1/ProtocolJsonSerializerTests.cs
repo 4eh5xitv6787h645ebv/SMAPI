@@ -277,6 +277,11 @@ internal sealed class ProtocolJsonSerializerTests
             [ProtocolPrePlanErrorCode.RequestCancelled] = ProtocolNextAction.RetryRequest,
             [ProtocolPrePlanErrorCode.InvalidGameFolder] = ProtocolNextAction.SelectGameFolder,
             [ProtocolPrePlanErrorCode.PackageRejected] = ProtocolNextAction.ReopenVerifiedPackage,
+            [ProtocolPrePlanErrorCode.PackageIntegrityRejected] = ProtocolNextAction.ReopenVerifiedPackage,
+            [ProtocolPrePlanErrorCode.PackageMetadataRejected] = ProtocolNextAction.ReopenVerifiedPackage,
+            [ProtocolPrePlanErrorCode.PackageArchiveRejected] = ProtocolNextAction.ReopenVerifiedPackage,
+            [ProtocolPrePlanErrorCode.PackageProvenanceRejected] = ProtocolNextAction.ReopenVerifiedPackage,
+            [ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected] = ProtocolNextAction.ReopenVerifiedPackage,
             [ProtocolPrePlanErrorCode.RecoveryUnavailable] = ProtocolNextAction.ListRecoveries,
             [ProtocolPrePlanErrorCode.NothingToPrune] = ProtocolNextAction.ListRecoveries,
             [ProtocolPrePlanErrorCode.InspectionFailed] = ProtocolNextAction.InspectAgain,
@@ -316,16 +321,25 @@ internal sealed class ProtocolJsonSerializerTests
     [Test]
     public void PrePlanErrorCode_AdditionPreservesExistingNumericValues()
     {
-        ((int)ProtocolPrePlanErrorCode.RequestCancelled).Should().Be(0);
-        ((int)ProtocolPrePlanErrorCode.InvalidGameFolder).Should().Be(1);
-        ((int)ProtocolPrePlanErrorCode.PackageRejected).Should().Be(2);
-        ((int)ProtocolPrePlanErrorCode.RecoveryUnavailable).Should().Be(3);
-        ((int)ProtocolPrePlanErrorCode.InspectionFailed).Should().Be(4);
-        ((int)ProtocolPrePlanErrorCode.CandidateApprovalFailed).Should().Be(5);
-        ((int)ProtocolPrePlanErrorCode.PermissionDenied).Should().Be(6);
-        ((int)ProtocolPrePlanErrorCode.InputOutputFailure).Should().Be(7);
-        ((int)ProtocolPrePlanErrorCode.UnexpectedFailure).Should().Be(8);
-        ((int)ProtocolPrePlanErrorCode.NothingToPrune).Should().Be(9);
+        Enum.GetValues<ProtocolPrePlanErrorCode>()
+            .Select(value => (Name: value.ToString(), NumericValue: (int)value))
+            .Should().Equal(
+                (nameof(ProtocolPrePlanErrorCode.RequestCancelled), 0),
+                (nameof(ProtocolPrePlanErrorCode.InvalidGameFolder), 1),
+                (nameof(ProtocolPrePlanErrorCode.PackageRejected), 2),
+                (nameof(ProtocolPrePlanErrorCode.RecoveryUnavailable), 3),
+                (nameof(ProtocolPrePlanErrorCode.InspectionFailed), 4),
+                (nameof(ProtocolPrePlanErrorCode.CandidateApprovalFailed), 5),
+                (nameof(ProtocolPrePlanErrorCode.PermissionDenied), 6),
+                (nameof(ProtocolPrePlanErrorCode.InputOutputFailure), 7),
+                (nameof(ProtocolPrePlanErrorCode.UnexpectedFailure), 8),
+                (nameof(ProtocolPrePlanErrorCode.NothingToPrune), 9),
+                (nameof(ProtocolPrePlanErrorCode.PackageIntegrityRejected), 10),
+                (nameof(ProtocolPrePlanErrorCode.PackageMetadataRejected), 11),
+                (nameof(ProtocolPrePlanErrorCode.PackageArchiveRejected), 12),
+                (nameof(ProtocolPrePlanErrorCode.PackageProvenanceRejected), 13),
+                (nameof(ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected), 14)
+            );
     }
 
     [Test]

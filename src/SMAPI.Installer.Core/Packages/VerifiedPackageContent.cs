@@ -114,6 +114,19 @@ public sealed class VerifiedPackageContent : IDisposable, IAsyncDisposable, IVer
 /// <summary>Extracts the exact nested Linux payload described by verified companion metadata.</summary>
 public sealed class VerifiedPackageContentFactory
 {
+    private readonly Action<string>? AfterPayloadExtractedForTesting;
+
+    /// <summary>Create a verified package-content factory.</summary>
+    public VerifiedPackageContentFactory()
+    {
+    }
+
+    internal VerifiedPackageContentFactory(Action<string> afterPayloadExtractedForTesting)
+    {
+        this.AfterPayloadExtractedForTesting = afterPayloadExtractedForTesting
+            ?? throw new ArgumentNullException(nameof(afterPayloadExtractedForTesting));
+    }
+
     /// <summary>
     /// Extract, authenticate, and anchor the package payload. On success ownership of
     /// <paramref name="authority"/> transfers to the returned handle.
@@ -147,6 +160,13 @@ public sealed class VerifiedPackageContentFactory
             ).ConfigureAwait(false);
 
             string nestedArchive = Path.Combine(outerDestination, outerRoot, "internal", "linux", "install.dat");
+            if (!File.Exists(nestedArchive))
+            {
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.PackageArchiveRejected,
+                    "The installer package is missing its nested Linux payload."
+                );
+            }
             await ManifestPayloadExtractor.ExtractAsync(
                 nestedArchive,
                 payloadDestination,
@@ -154,6 +174,7 @@ public sealed class VerifiedPackageContentFactory
                 limits,
                 cancellationToken
             ).ConfigureAwait(false);
+            this.AfterPayloadExtractedForTesting?.Invoke(payloadDestination);
             PrivatePackageStaging.TryDeleteDirectory(outerDestination);
 
             payload = new LinuxAnchoredFileSystem(payloadDestination);
@@ -167,7 +188,10 @@ public sealed class VerifiedPackageContentFactory
                     || payload.ComputeSha256(verified, cancellationToken) != entry.Sha256.Value
                 )
                 {
-                    throw new PackageSecurityException("The anchored installer payload doesn't match its verified manifest.");
+                    throw new PackageSecurityException(
+                        PackageSecurityFailureKind.PackageArchiveRejected,
+                        "The anchored installer payload doesn't match its verified manifest."
+                    );
                 }
             }
 
@@ -224,10 +248,10 @@ internal static class ManifestPayloadExtractor
                 options: FileOptions.Asynchronous | FileOptions.SequentialScan
             );
             if (!stream.CanSeek || stream.Length <= 0 || stream.Length > limits.MaxArchiveBytes)
-                throw new PackageSecurityException("The nested installer payload has an invalid or excessive size.");
+                throw InvalidArchive("The nested installer payload has an invalid or excessive size.");
             using ZipArchive archive = new(stream, ZipArchiveMode.Read, leaveOpen: true, entryNameEncoding: Encoding.UTF8);
             if (archive.Entries.Count == 0 || archive.Entries.Count > limits.MaxEntries)
-                throw new PackageSecurityException("The nested installer payload has an invalid entry count.");
+                throw InvalidArchive("The nested installer payload has an invalid entry count.");
 
             HashSet<string> observed = new(StringComparer.Ordinal);
             HashSet<string> observedInsensitive = new(StringComparer.OrdinalIgnoreCase);
@@ -239,31 +263,31 @@ internal static class ManifestPayloadExtractor
                 string sourcePath = GetCanonicalPath(archiveEntry.FullName, limits.MaxDepth);
                 AssertOrdinaryEntry(archiveEntry, isDirectory);
                 if (!observed.Add(sourcePath) || !observedInsensitive.Add(sourcePath))
-                    throw new PackageSecurityException("The nested installer payload contains duplicate or case-colliding paths.");
+                    throw InvalidArchive("The nested installer payload contains duplicate or case-colliding paths.");
 
                 totalExpanded = checked(totalExpanded + archiveEntry.Length);
                 if (archiveEntry.Length < 0 || archiveEntry.Length > limits.MaxEntryExpandedBytes || totalExpanded > limits.MaxTotalExpandedBytes)
-                    throw new PackageSecurityException("The nested installer payload exceeds its expanded-size limits.");
+                    throw InvalidArchive("The nested installer payload exceeds its expanded-size limits.");
                 if (archiveEntry.Length > 0)
                 {
                     if (archiveEntry.CompressedLength <= 0 || (double)archiveEntry.Length / archiveEntry.CompressedLength > limits.MaxCompressionRatio)
-                        throw new PackageSecurityException("The nested installer payload exceeds its compression-ratio limit.");
+                        throw InvalidArchive("The nested installer payload exceeds its compression-ratio limit.");
                 }
 
                 if (isDirectory)
                 {
                     if (!expected.Keys.Any(path => path.StartsWith(sourcePath + "/", StringComparison.Ordinal)))
-                        throw new PackageSecurityException("The nested installer payload contains an unexpected directory.");
+                        throw InvalidArchive("The nested installer payload contains an unexpected directory.");
                     continue;
                 }
 
                 if (!expected.TryGetValue(sourcePath, out PackageManifestEntry? manifestEntry))
-                    throw new PackageSecurityException("The nested installer payload contains a file absent from the verified manifest.");
+                    throw InvalidArchive("The nested installer payload contains a file absent from the verified manifest.");
                 if (archiveEntry.Length != manifestEntry.SizeBytes)
-                    throw new PackageSecurityException("A nested payload file doesn't match its verified size.");
+                    throw InvalidArchive("A nested payload file doesn't match its verified size.");
                 int unixMode = (archiveEntry.ExternalAttributes >> 16) & 0x1ff;
                 if (unixMode != manifestEntry.UnixMode)
-                    throw new PackageSecurityException("A nested payload file doesn't match its verified Unix mode.");
+                    throw InvalidArchive("A nested payload file doesn't match its verified Unix mode.");
 
                 string targetPath = Path.Combine(fullDestination, manifestEntry.Path.Value.Replace('/', Path.DirectorySeparatorChar));
                 string parent = Path.GetDirectoryName(targetPath)!;
@@ -293,7 +317,7 @@ internal static class ManifestPayloadExtractor
                             break;
                         written = checked(written + read);
                         if (written > manifestEntry.SizeBytes)
-                            throw new PackageSecurityException("A nested payload file exceeded its verified size.");
+                            throw InvalidArchive("A nested payload file exceeded its verified size.");
                         hasher.AppendData(buffer, 0, read);
                         await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                     }
@@ -303,18 +327,18 @@ internal static class ManifestPayloadExtractor
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
                 if (written != manifestEntry.SizeBytes || Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant() != manifestEntry.Sha256.Value)
-                    throw new PackageSecurityException("A nested payload file doesn't match its verified digest.");
+                    throw InvalidArchive("A nested payload file doesn't match its verified digest.");
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
                 output.Flush(flushToDisk: true);
                 PrivatePackageStaging.SetFileMode(targetPath, manifestEntry.UnixMode);
             }
 
             if (!expected.Keys.All(observed.Contains))
-                throw new PackageSecurityException("The nested installer payload is missing a verified manifest file.");
+                throw InvalidArchive("The nested installer payload is missing a verified manifest file.");
         }
         catch (InvalidDataException ex)
         {
-            throw new PackageSecurityException("The nested installer payload isn't a valid ZIP archive.", ex);
+            throw InvalidArchive("The nested installer payload isn't a valid ZIP archive.", ex);
         }
         catch
         {
@@ -334,7 +358,7 @@ internal static class ManifestPayloadExtractor
             || !rawPath.IsNormalized(NormalizationForm.FormC)
         )
         {
-            throw new PackageSecurityException("The nested installer payload contains an unsafe path.");
+            throw InvalidArchive("The nested installer payload contains an unsafe path.");
         }
         string canonical = rawPath.EndsWith("/", StringComparison.Ordinal) ? rawPath[..^1] : rawPath;
         string[] segments = canonical.Split('/');
@@ -353,7 +377,7 @@ internal static class ManifestPayloadExtractor
             )
         )
         {
-            throw new PackageSecurityException("The nested installer payload contains an ambiguous path.");
+            throw InvalidArchive("The nested installer payload contains an ambiguous path.");
         }
         return canonical;
     }
@@ -364,10 +388,17 @@ internal static class ManifestPayloadExtractor
         int unixType = (int)(attributes >> 16) & UnixTypeMask;
         bool dosDirectory = (attributes & 0x10) != 0;
         if (unixType is not 0 and not UnixRegularFile and not UnixDirectory)
-            throw new PackageSecurityException("The nested installer payload contains a link or special entry.");
+            throw InvalidArchive("The nested installer payload contains a link or special entry.");
         if (isDirectory && (unixType == UnixRegularFile || entry.Length != 0))
-            throw new PackageSecurityException("A nested payload directory has invalid file metadata.");
+            throw InvalidArchive("A nested payload directory has invalid file metadata.");
         if (!isDirectory && (unixType == UnixDirectory || dosDirectory || entry.Name.Length == 0))
-            throw new PackageSecurityException("A nested payload file has invalid directory metadata.");
+            throw InvalidArchive("A nested payload file has invalid directory metadata.");
+    }
+
+    private static PackageSecurityException InvalidArchive(string message, Exception? innerException = null)
+    {
+        return innerException is null
+            ? new PackageSecurityException(PackageSecurityFailureKind.PackageArchiveRejected, message)
+            : new PackageSecurityException(PackageSecurityFailureKind.PackageArchiveRejected, message, innerException);
     }
 }

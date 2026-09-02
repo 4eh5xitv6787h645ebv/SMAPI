@@ -469,7 +469,10 @@ internal sealed class GitHubAttestationProcessRunner : IGitHubAttestationProcess
 
                     cancellationToken.ThrowIfCancellationRequested();
                     if (process.ExitCode != 0)
-                        throw new PackageSecurityException("The GitHub attestation verifier rejected the selected release evidence.");
+                        throw new PackageSecurityException(
+                            PackageSecurityFailureKind.ProvenanceRejected,
+                            "The GitHub attestation verifier rejected the selected release evidence."
+                        );
                     return new GitHubAttestationProcessResult(output);
                 }
                 finally

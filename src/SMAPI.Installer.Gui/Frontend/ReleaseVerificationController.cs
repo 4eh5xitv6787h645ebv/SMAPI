@@ -25,11 +25,89 @@ internal enum ReleaseVerificationError
     None,
     CatalogUnavailable,
     PreparationFailed,
+    TransferUnavailable,
+    TransferTimedOut,
+    TransferInterrupted,
     PackageRejected,
+    PackageIntegrityOrMetadataRejected,
+    PackageProvenanceOrIdentityRejected,
     BackendUnavailable,
     SessionFaulted,
     RetryLimitReached,
     CleanupFailed
+}
+
+internal sealed record ReleaseVerificationFailure
+{
+    public ReleaseVerificationError Error { get; }
+    public ProtocolPrePlanErrorCode? ProtocolCode { get; }
+    public ProtocolNextAction? NextAction { get; }
+    public bool IsTerminal { get; }
+
+    public ReleaseVerificationFailure(
+        ReleaseVerificationError error,
+        ProtocolPrePlanErrorCode? protocolCode,
+        ProtocolNextAction? nextAction,
+        bool isTerminal
+    )
+    {
+        if (error == ReleaseVerificationError.None || !Enum.IsDefined(error))
+            throw new ArgumentOutOfRangeException(nameof(error));
+        if ((protocolCode is null) != (nextAction is null))
+            throw new ArgumentException("Protocol rejection evidence must contain both a code and next action or neither.");
+        if (protocolCode is null && isTerminal)
+            throw new ArgumentException("A non-protocol release failure cannot carry a protocol terminal flag.");
+        if (protocolCode is { } code && (!Enum.IsDefined(code) || !Enum.IsDefined(nextAction!.Value)))
+            throw new ArgumentOutOfRangeException(nameof(protocolCode));
+        if (protocolCode is { } exactCode)
+        {
+            (ProtocolNextAction Action, bool Terminal) expected = exactCode switch
+            {
+                ProtocolPrePlanErrorCode.RequestCancelled => (ProtocolNextAction.RetryRequest, false),
+                ProtocolPrePlanErrorCode.PackageRejected
+                    or ProtocolPrePlanErrorCode.PackageIntegrityRejected
+                    or ProtocolPrePlanErrorCode.PackageMetadataRejected
+                    or ProtocolPrePlanErrorCode.PackageArchiveRejected
+                    or ProtocolPrePlanErrorCode.PackageProvenanceRejected
+                    or ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected => (ProtocolNextAction.ReopenVerifiedPackage, false),
+                ProtocolPrePlanErrorCode.PermissionDenied => (ProtocolNextAction.ReviewFilesystem, false),
+                ProtocolPrePlanErrorCode.InputOutputFailure => (ProtocolNextAction.RetryRequest, false),
+                ProtocolPrePlanErrorCode.UnexpectedFailure => (
+                    nextAction == ProtocolNextAction.ViewPrivateLog
+                        ? ProtocolNextAction.ViewPrivateLog
+                        : ProtocolNextAction.StartNewSession,
+                    true
+                ),
+                _ => throw new ArgumentException("The protocol rejection is not reachable while opening a package.")
+            };
+            if (nextAction != expected.Action || isTerminal != expected.Terminal)
+                throw new ArgumentException("The protocol rejection action and terminal state do not match its exact failure class.");
+        }
+        bool exactTypedCode = error switch
+        {
+            ReleaseVerificationError.PackageIntegrityOrMetadataRejected => protocolCode is
+                ProtocolPrePlanErrorCode.PackageIntegrityRejected
+                or ProtocolPrePlanErrorCode.PackageMetadataRejected
+                or ProtocolPrePlanErrorCode.PackageArchiveRejected,
+            ReleaseVerificationError.PackageProvenanceOrIdentityRejected when protocolCode is not null => protocolCode is
+                ProtocolPrePlanErrorCode.PackageProvenanceRejected
+                or ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected,
+            ReleaseVerificationError.PackageRejected => protocolCode is
+                ProtocolPrePlanErrorCode.RequestCancelled
+                or ProtocolPrePlanErrorCode.PackageRejected
+                or ProtocolPrePlanErrorCode.PermissionDenied
+                or ProtocolPrePlanErrorCode.InputOutputFailure
+                or ProtocolPrePlanErrorCode.UnexpectedFailure,
+            _ => protocolCode is null
+        };
+        if (!exactTypedCode)
+            throw new ArgumentException("The release failure and protocol rejection evidence do not describe one exact outcome.");
+
+        this.Error = error;
+        this.ProtocolCode = protocolCode;
+        this.NextAction = nextAction;
+        this.IsTerminal = isTerminal;
+    }
 }
 
 internal enum ReleasePackageSource
@@ -41,7 +119,7 @@ internal enum ReleasePackageSource
 internal sealed record ReleaseVerificationSnapshot(
     long Generation,
     ReleaseVerificationState State,
-    ReleaseVerificationError Error,
+    ReleaseVerificationFailure? Failure,
     IReadOnlyList<ReviewedReleaseCandidate> Releases,
     ReviewedReleaseCandidate? SelectedRelease,
     ReviewedReleasePreparationProgress? Progress,
@@ -52,11 +130,14 @@ internal sealed record ReleaseVerificationSnapshot(
     bool CanChooseLocal,
     bool CanCancel,
     ReleasePackageSource? Source,
-    ProtocolReleaseIdentity? VerifiedRelease,
-    ProtocolPrePlanErrorCode? RejectionCode,
-    ProtocolNextAction? RejectionNextAction,
-    bool RejectionIsTerminal
-);
+    ProtocolReleaseIdentity? VerifiedRelease
+)
+{
+    public ReleaseVerificationError Error => this.Failure?.Error ?? ReleaseVerificationError.None;
+    public ProtocolPrePlanErrorCode? RejectionCode => this.Failure?.ProtocolCode;
+    public ProtocolNextAction? RejectionNextAction => this.Failure?.NextAction;
+    public bool RejectionIsTerminal => this.Failure?.IsTerminal ?? false;
+}
 
 /// <summary>
 /// Serializes the release-catalog, preparation, and backend package-open authorities without exposing remote text,
@@ -236,8 +317,12 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             if (this.StateValue is not (ReleaseVerificationState.Failed or ReleaseVerificationState.Cancelled))
                 throw new InvalidOperationException("Only a completed failed or cancelled attempt can be retried.");
             bool retryableOutcome = this.StateValue == ReleaseVerificationState.Cancelled
-                || this.ErrorValue == ReleaseVerificationError.PreparationFailed
-                || (this.ErrorValue == ReleaseVerificationError.PackageRejected && !this.RejectionIsTerminalValue);
+                || IsRetryableFailure(
+                    this.ErrorValue,
+                    this.RejectionCodeValue,
+                    this.RejectionNextActionValue,
+                    this.RejectionIsTerminalValue
+                );
             if (!retryableOutcome)
                 throw new InvalidOperationException("This failure requires a new installer session and cannot be retried safely.");
             if (this.SelectedReleaseValue is null || !this.ReleasesValue.Any(value => ReferenceEquals(value, this.SelectedReleaseValue)))
@@ -462,6 +547,13 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         }
         if (this.ErrorValue == ReleaseVerificationError.PackageRejected && this.RejectionIsTerminalValue)
             return false;
+        if (
+            this.SourceValue == ReleasePackageSource.ReviewedDownload
+            && this.ErrorValue == ReleaseVerificationError.PackageProvenanceOrIdentityRejected
+        )
+        {
+            return false;
+        }
         return this.StateValue is ReleaseVerificationState.Idle
             or ReleaseVerificationState.Ready
             or ReleaseVerificationState.NoCompatibleRelease
@@ -685,8 +777,18 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             }
             else if (result is InstallerPackageOpenRejection rejection)
             {
+                if (!IsReachableOpenPackageRejection(rejection))
+                    throw new BackendSessionFaultException();
                 outcomeState = ReleaseVerificationState.Failed;
-                outcomeError = ReleaseVerificationError.PackageRejected;
+                outcomeError = rejection.ErrorCode switch
+                {
+                    ProtocolPrePlanErrorCode.PackageIntegrityRejected
+                        or ProtocolPrePlanErrorCode.PackageMetadataRejected
+                        or ProtocolPrePlanErrorCode.PackageArchiveRejected => ReleaseVerificationError.PackageIntegrityOrMetadataRejected,
+                    ProtocolPrePlanErrorCode.PackageProvenanceRejected
+                        or ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected => ReleaseVerificationError.PackageProvenanceOrIdentityRejected,
+                    _ => ReleaseVerificationError.PackageRejected
+                };
                 lock (this.Sync)
                 {
                     attempt.Operation.Cancellation.Token.ThrowIfCancellationRequested();
@@ -717,6 +819,18 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         {
             outcomeState = ReleaseVerificationState.Cancelled;
             outcomeError = ReleaseVerificationError.None;
+        }
+        catch (PackageSecurityException ex) when (attempt.Stage == ReleaseVerificationState.Preparing)
+        {
+            outcomeState = ReleaseVerificationState.Failed;
+            outcomeError = ex.FailureKind switch
+            {
+                PackageSecurityFailureKind.NetworkUnavailable => ReleaseVerificationError.TransferUnavailable,
+                PackageSecurityFailureKind.NetworkTimeout => ReleaseVerificationError.TransferTimedOut,
+                PackageSecurityFailureKind.IncompleteDownload => ReleaseVerificationError.TransferInterrupted,
+                PackageSecurityFailureKind.ReleaseIdentityRejected => ReleaseVerificationError.PackageProvenanceOrIdentityRejected,
+                _ => ReleaseVerificationError.PreparationFailed
+            };
         }
         catch
         {
@@ -829,8 +943,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                     }
                 }
             }
-            attempt.Operation.Completion.TrySetResult();
             this.PublishChanged();
+            attempt.Operation.Completion.TrySetResult();
             if (watchVerifiedFault)
                 _ = this.WatchVerifiedSessionAsync(attempt);
         }
@@ -1026,9 +1140,11 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         bool retryableOutcome = this.StateValue == ReleaseVerificationState.Cancelled
             || (
                 this.StateValue == ReleaseVerificationState.Failed
-                && (
-                    this.ErrorValue == ReleaseVerificationError.PreparationFailed
-                    || (this.ErrorValue == ReleaseVerificationError.PackageRejected && !this.RejectionIsTerminalValue)
+                && IsRetryableFailure(
+                    this.ErrorValue,
+                    this.RejectionCodeValue,
+                    this.RejectionNextActionValue,
+                    this.RejectionIsTerminalValue
                 )
             );
         bool canRetry = idleAuthority
@@ -1051,10 +1167,23 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 && this.LocalAttemptNumberValue < MaximumAttempts
                 && this.CanBeginLocalAttempt()
             );
+        bool carriesProtocolRejection = (
+                this.ErrorValue is ReleaseVerificationError.PackageRejected
+                    or ReleaseVerificationError.PackageIntegrityOrMetadataRejected
+                    or ReleaseVerificationError.PackageProvenanceOrIdentityRejected
+            )
+            && this.RejectionCodeValue is not null;
         return new ReleaseVerificationSnapshot(
             this.GenerationValue,
             this.StateValue,
-            this.ErrorValue,
+            this.ErrorValue == ReleaseVerificationError.None
+                ? null
+                : new ReleaseVerificationFailure(
+                    this.ErrorValue,
+                    carriesProtocolRejection ? this.RejectionCodeValue : null,
+                    carriesProtocolRejection ? this.RejectionNextActionValue : null,
+                    carriesProtocolRejection && this.RejectionIsTerminalValue
+                ),
             Array.AsReadOnly(this.ReleasesValue.ToArray()),
             this.SelectedReleaseValue,
             this.ProgressValue,
@@ -1065,11 +1194,49 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             canChooseLocal,
             this.ActiveOperation is not null && this.StateValue != ReleaseVerificationState.CleaningUp,
             this.SourceValue,
-            this.VerifiedReleaseValue,
-            this.RejectionCodeValue,
-            this.RejectionNextActionValue,
-            this.RejectionIsTerminalValue
+            this.VerifiedReleaseValue
         );
+    }
+
+    private static bool IsRetryableFailure(
+        ReleaseVerificationError error,
+        ProtocolPrePlanErrorCode? rejectionCode,
+        ProtocolNextAction? rejectionNextAction,
+        bool rejectionIsTerminal
+    )
+    {
+        if (rejectionIsTerminal)
+            return false;
+        if (error == ReleaseVerificationError.PackageRejected)
+        {
+            return (rejectionCode, rejectionNextAction) is
+                (ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest)
+                or (ProtocolPrePlanErrorCode.PackageRejected, ProtocolNextAction.ReopenVerifiedPackage)
+                or (ProtocolPrePlanErrorCode.InputOutputFailure, ProtocolNextAction.RetryRequest);
+        }
+        return error is ReleaseVerificationError.PreparationFailed
+            or ReleaseVerificationError.TransferUnavailable
+            or ReleaseVerificationError.TransferTimedOut
+            or ReleaseVerificationError.TransferInterrupted
+            or ReleaseVerificationError.PackageIntegrityOrMetadataRejected;
+    }
+
+    private static bool IsReachableOpenPackageRejection(InstallerPackageOpenRejection rejection)
+    {
+        return (rejection.ErrorCode, rejection.NextAction, rejection.IsTerminal) switch
+        {
+            (ProtocolPrePlanErrorCode.RequestCancelled, ProtocolNextAction.RetryRequest, false) => true,
+            (ProtocolPrePlanErrorCode.PackageRejected, ProtocolNextAction.ReopenVerifiedPackage, false) => true,
+            (ProtocolPrePlanErrorCode.PackageIntegrityRejected, ProtocolNextAction.ReopenVerifiedPackage, false) => true,
+            (ProtocolPrePlanErrorCode.PackageMetadataRejected, ProtocolNextAction.ReopenVerifiedPackage, false) => true,
+            (ProtocolPrePlanErrorCode.PackageArchiveRejected, ProtocolNextAction.ReopenVerifiedPackage, false) => true,
+            (ProtocolPrePlanErrorCode.PackageProvenanceRejected, ProtocolNextAction.ReopenVerifiedPackage, false) => true,
+            (ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, ProtocolNextAction.ReopenVerifiedPackage, false) => true,
+            (ProtocolPrePlanErrorCode.PermissionDenied, ProtocolNextAction.ReviewFilesystem, false) => true,
+            (ProtocolPrePlanErrorCode.InputOutputFailure, ProtocolNextAction.RetryRequest, false) => true,
+            (ProtocolPrePlanErrorCode.UnexpectedFailure, ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, true) => true,
+            _ => false
+        };
     }
 
     private void AssertNotDisposed()

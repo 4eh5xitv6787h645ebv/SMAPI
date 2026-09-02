@@ -100,6 +100,38 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
     }
 
     [Test]
+    public void Observe_RecordsOnlyStableTypedReleaseFailures()
+    {
+        (ReleaseVerificationError Error, ProtocolPrePlanErrorCode? ProtocolCode, InstallerDiagnosticCode DiagnosticCode)[] cases =
+        [
+            (ReleaseVerificationError.TransferUnavailable, null, InstallerDiagnosticCode.ReleaseNetworkUnavailable),
+            (ReleaseVerificationError.TransferTimedOut, null, InstallerDiagnosticCode.ReleaseNetworkTimedOut),
+            (ReleaseVerificationError.TransferInterrupted, null, InstallerDiagnosticCode.ReleaseDownloadInterrupted),
+            (ReleaseVerificationError.PackageIntegrityOrMetadataRejected, ProtocolPrePlanErrorCode.PackageIntegrityRejected, InstallerDiagnosticCode.ReleaseFailed),
+            (ReleaseVerificationError.PackageIntegrityOrMetadataRejected, ProtocolPrePlanErrorCode.PackageMetadataRejected, InstallerDiagnosticCode.ReleaseFailed),
+            (ReleaseVerificationError.PackageIntegrityOrMetadataRejected, ProtocolPrePlanErrorCode.PackageArchiveRejected, InstallerDiagnosticCode.ReleaseFailed),
+            (ReleaseVerificationError.PackageProvenanceOrIdentityRejected, ProtocolPrePlanErrorCode.PackageProvenanceRejected, InstallerDiagnosticCode.ReleaseFailed),
+            (ReleaseVerificationError.PackageProvenanceOrIdentityRejected, ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, InstallerDiagnosticCode.ReleaseFailed)
+        ];
+
+        foreach ((ReleaseVerificationError error, ProtocolPrePlanErrorCode? protocolCode, InstallerDiagnosticCode diagnosticCode) in cases)
+        {
+            RecordingSink sink = new();
+            ProductionInstallerDiagnosticObserver observer = new(sink);
+            observer.Observe(CreateReleaseFailure(error, protocolCode));
+
+            sink.Calls.Should().Equal(new DiagnosticCall(
+                diagnosticCode,
+                protocolCode?.ToString(),
+                protocolCode is null ? DiagnosticErrorKind.None : DiagnosticErrorKind.PrePlan,
+                null
+            ));
+            string projection = string.Join('|', sink.Calls);
+            projection.Should().NotContain("package.zip").And.NotContain("/home/").And.NotContain("https://");
+        }
+    }
+
+    [Test]
     public void Observe_ProjectsOnlyFixedTypedFactsAndNeverPrivateSnapshotStrings()
     {
         const string hostile = "PRIVATE-/home/alex/Saves/Blossom-https://token.example-deadbeef";
@@ -109,7 +141,7 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         observer.Observe(new ReleaseVerificationSnapshot(
             1,
             ReleaseVerificationState.Verified,
-            ReleaseVerificationError.None,
+            null,
             [],
             null,
             null,
@@ -120,10 +152,7 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
             false,
             false,
             ReleasePackageSource.LocalFolder,
-            new(hostile, hostile, hostile, hostile, hostile, hostile, hostile, 1, hostile, hostile, hostile),
-            null,
-            null,
-            false
+            new(hostile, hostile, hostile, hostile, hostile, hostile, hostile, 1, hostile, hostile, hostile)
         ));
         ProtocolGameCandidate game = new(hostile, LinuxGameFolderStatus.Valid, hostile);
         observer.Observe(new GameDiscoverySnapshot(1, 1, GameDiscoveryState.Ready, [game], game, false, false, false, true));
@@ -174,6 +203,31 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
 
     private static GameDiscoverySnapshot CreateGame(long generation, long revision, GameDiscoveryState state)
         => new(generation, revision, state, [], null, false, false, false, false);
+
+    private static ReleaseVerificationSnapshot CreateReleaseFailure(
+        ReleaseVerificationError error,
+        ProtocolPrePlanErrorCode? protocolCode
+    ) => new(
+        1,
+        ReleaseVerificationState.Failed,
+        new(
+            error,
+            protocolCode,
+            protocolCode is null ? null : ProtocolNextAction.ReopenVerifiedPackage,
+            false
+        ),
+        [],
+        null,
+        null,
+        1,
+        3,
+        false,
+        false,
+        false,
+        false,
+        ReleasePackageSource.ReviewedDownload,
+        null
+    );
 
     private static ExecutionPlanPresentation CreateExecutionPlan()
     {

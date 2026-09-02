@@ -231,6 +231,64 @@ internal sealed class LinuxInstallerProtocolServiceTests
         rejected.IsTerminal.Should().BeTrue();
     }
 
+    [TestCase(PackageSecurityFailureKind.IntegrityRejected, ProtocolPrePlanErrorCode.PackageIntegrityRejected, "The selected release package failed an integrity verification check.")]
+    [TestCase(PackageSecurityFailureKind.MetadataRejected, ProtocolPrePlanErrorCode.PackageMetadataRejected, "The selected release package failed a metadata verification check.")]
+    [TestCase(PackageSecurityFailureKind.PackageArchiveRejected, ProtocolPrePlanErrorCode.PackageArchiveRejected, "The selected release archive failed its strict payload verification.")]
+    [TestCase(PackageSecurityFailureKind.ProvenanceRejected, ProtocolPrePlanErrorCode.PackageProvenanceRejected, "The selected release failed its GitHub provenance verification.")]
+    [TestCase(PackageSecurityFailureKind.ReleaseIdentityRejected, ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, "The selected release failed a release-identity verification check.")]
+    public async Task OpenPackageMapsEachStableVerificationFailureWithoutPrivateExceptionText(
+        PackageSecurityFailureKind failureKind,
+        ProtocolPrePlanErrorCode expectedCode,
+        string expectedMessage
+    )
+    {
+        FakePackageOpener opener = new()
+        {
+            Failure = new PackageSecurityException(failureKind, "private package path /home/alex/secret")
+        };
+        using LinuxInstallerProtocolService service = Create(new FakeEngine(), opener);
+        await Handshake(service);
+        OpenPackageRequest request = new(service.SessionId, CreateRelease().Tag, CreateRelease().SourceCommit, "/tmp/package", "/tmp/checksums", "/tmp/build", "/tmp/manifest", "/tmp/bundle", "/tmp/bundle-checksum");
+
+        PrePlanRejectedEvent rejected = (PrePlanRejectedEvent)await service.HandleAsync(request);
+
+        rejected.CommandId.Should().Be(request.CommandId);
+        rejected.ErrorCode.Should().Be(expectedCode);
+        rejected.NextAction.Should().Be(ProtocolNextAction.ReopenVerifiedPackage);
+        rejected.IsTerminal.Should().BeFalse();
+        rejected.SanitizedLogPath.Should().BeNull();
+        rejected.Message.Should().Be(expectedMessage).And.NotContain("/home/alex/secret");
+        service.State.Should().Be(ProtocolSessionState.Ready);
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(rejected))
+            .Should().BeEquivalentTo(rejected);
+    }
+
+    [TestCase(PackageSecurityFailureKind.IntegrityRejected)]
+    [TestCase(PackageSecurityFailureKind.MetadataRejected)]
+    [TestCase(PackageSecurityFailureKind.PackageArchiveRejected)]
+    [TestCase(PackageSecurityFailureKind.ProvenanceRejected)]
+    [TestCase(PackageSecurityFailureKind.ReleaseIdentityRejected)]
+    public async Task VerificationFailureClassificationIsScopedToOpenPackageRequests(PackageSecurityFailureKind failureKind)
+    {
+        FakeDiscovery discovery = new()
+        {
+            DiscoverFailure = new PackageSecurityException(failureKind, "private discovery detail")
+        };
+        using LinuxInstallerProtocolService service = Create(new FakeEngine(), new FakePackageOpener(), discovery: discovery);
+        await Handshake(service);
+        DiscoverGamesRequest request = new(service.SessionId);
+
+        PrePlanRejectedEvent rejected = (PrePlanRejectedEvent)await service.HandleAsync(request);
+
+        rejected.CommandId.Should().Be(request.CommandId);
+        rejected.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.PackageRejected);
+        rejected.NextAction.Should().Be(ProtocolNextAction.ReopenVerifiedPackage);
+        rejected.IsTerminal.Should().BeFalse();
+        rejected.Message.Should().Be("The selected release asset set failed strict package verification.")
+            .And.NotContain("private discovery detail");
+        service.State.Should().Be(ProtocolSessionState.Ready);
+    }
+
     [Test]
     public async Task DiscoveryUsesExactCoreStatesAndEveryEventIsSerializable()
     {
@@ -1332,10 +1390,17 @@ internal sealed class LinuxInstallerProtocolServiceTests
     private sealed class FakeDiscovery : ILinuxInstallerProtocolDiscovery
     {
         public LinuxGameFolderCandidate ValidationResult { get; set; } = new("/game", LinuxGameFolderStatus.Valid);
+        public Exception? DiscoverFailure { get; set; }
         public List<string> ValidatedPaths { get; } = [];
         public List<CancellationToken> ValidationTokens { get; } = [];
         public int DiscoverCalls { get; private set; }
-        public Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken) { this.DiscoverCalls++; return Task.FromResult<IReadOnlyList<LinuxGameFolderCandidate>>([new("/game", LinuxGameFolderStatus.UnsafeLauncher)]); }
+        public Task<IReadOnlyList<LinuxGameFolderCandidate>> DiscoverAsync(CancellationToken cancellationToken)
+        {
+            this.DiscoverCalls++;
+            return this.DiscoverFailure is { } failure
+                ? Task.FromException<IReadOnlyList<LinuxGameFolderCandidate>>(failure)
+                : Task.FromResult<IReadOnlyList<LinuxGameFolderCandidate>>([new("/game", LinuxGameFolderStatus.UnsafeLauncher)]);
+        }
         public Task<LinuxGameFolderCandidate> ValidateAsync(string gameRoot, CancellationToken cancellationToken) { this.ValidatedPaths.Add(gameRoot); this.ValidationTokens.Add(cancellationToken); return Task.FromResult(this.ValidationResult); }
     }
 
@@ -1345,6 +1410,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public List<FakeOwner> Owners { get; } = [];
         public bool ReturnMismatchedRelease { get; set; }
         public bool ThrowUnexpected { get; set; }
+        public Exception? Failure { get; set; }
         public bool BlockOpen { get; set; }
         public TaskCompletionSource OpenStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ContinueOpen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1352,6 +1418,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public async Task<ProtocolPackageRegistration> OpenAsync(OpenPackageRequest request, CancellationToken cancellationToken)
         {
             if (this.ThrowUnexpected) throw new InvalidOperationException("private-package-opener-detail");
+            if (this.Failure is { } failure) throw failure;
             FakePackageAuthority authority = new(); FakeOwner owner = new(); this.Authorities.Add(authority); this.Owners.Add(owner);
             this.OpenStarted.TrySetResult(); if (this.BlockOpen) await this.ContinueOpen.Task.WaitAsync(cancellationToken);
             InstallationReleaseIdentity release = this.ReturnMismatchedRelease

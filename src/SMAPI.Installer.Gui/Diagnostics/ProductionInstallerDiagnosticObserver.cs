@@ -226,6 +226,8 @@ internal sealed class ProductionInstallerDiagnosticObserver
         {
             if (snapshot.State == ReleaseVerificationState.Failed && snapshot.RejectionCode is { } rejection)
                 this.Sink.Record(stateCode, rejection);
+            else if (snapshot.State == ReleaseVerificationState.Failed)
+                this.Sink.Record(MapReleaseFailureCode(snapshot.Error));
             else
                 this.Sink.Record(stateCode);
         }
@@ -343,7 +345,12 @@ internal sealed class ProductionInstallerDiagnosticObserver
             ReleaseVerificationError.None => true,
             ReleaseVerificationError.CatalogUnavailable => true,
             ReleaseVerificationError.PreparationFailed => true,
+            ReleaseVerificationError.TransferUnavailable => true,
+            ReleaseVerificationError.TransferTimedOut => true,
+            ReleaseVerificationError.TransferInterrupted => true,
             ReleaseVerificationError.PackageRejected => true,
+            ReleaseVerificationError.PackageIntegrityOrMetadataRejected => true,
+            ReleaseVerificationError.PackageProvenanceOrIdentityRejected => true,
             ReleaseVerificationError.BackendUnavailable => true,
             ReleaseVerificationError.SessionFaulted => true,
             ReleaseVerificationError.RetryLimitReached => true,
@@ -351,6 +358,14 @@ internal sealed class ProductionInstallerDiagnosticObserver
             _ => throw new ArgumentOutOfRangeException(nameof(error))
         };
     }
+
+    private static InstallerDiagnosticCode MapReleaseFailureCode(ReleaseVerificationError error) => error switch
+    {
+        ReleaseVerificationError.TransferUnavailable => InstallerDiagnosticCode.ReleaseNetworkUnavailable,
+        ReleaseVerificationError.TransferTimedOut => InstallerDiagnosticCode.ReleaseNetworkTimedOut,
+        ReleaseVerificationError.TransferInterrupted => InstallerDiagnosticCode.ReleaseDownloadInterrupted,
+        _ => InstallerDiagnosticCode.ReleaseFailed
+    };
 
     private struct ReleaseCursor
     {

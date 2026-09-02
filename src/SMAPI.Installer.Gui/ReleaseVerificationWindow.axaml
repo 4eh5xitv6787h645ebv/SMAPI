@@ -88,6 +88,39 @@
                 TextWrapping="Wrap" />
           </Border>
 
+          <Border
+              x:Name="FailureEvidence"
+              Padding="12"
+              IsVisible="{Binding IsFailureEvidenceVisible}"
+              AutomationProperties.Name="Observed release verification evidence"
+              Background="{DynamicResource InstallerInsetBackgroundBrush}"
+              CornerRadius="6">
+            <StackPanel Spacing="8">
+              <TextBlock
+                  AutomationProperties.HeadingLevel="3"
+                  FontWeight="SemiBold"
+                  Text="Observed verification evidence"
+                  TextWrapping="Wrap" />
+              <ItemsControl ItemsSource="{Binding FailureEvidence}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:ReleaseVerificationEvidenceRow">
+                    <Border
+                        Margin="0,0,0,7"
+                        Padding="8"
+                        AutomationProperties.Name="{Binding AccessibleName}"
+                        Background="{DynamicResource InstallerCardBackgroundBrush}"
+                        CornerRadius="4">
+                      <StackPanel Spacing="2">
+                        <TextBlock Classes="muted" FontSize="13" Text="{Binding Label}" TextWrapping="Wrap" />
+                        <TextBlock FontWeight="SemiBold" Text="{Binding Value}" TextWrapping="Wrap" />
+                      </StackPanel>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </Border>
+
           <StackPanel Spacing="8">
             <Label Content="_Experimental release" Target="{Binding #ReleaseSelector}" />
             <ComboBox
@@ -197,15 +230,26 @@
                 Margin="0,0,12,10"
                 TabIndex="4"
                 AutomationProperties.AccessKey="Alt+T"
-                AutomationProperties.Name="Try release action again"
+                AutomationProperties.Name="{Binding RetryAutomationName}"
                 Command="{Binding RetryCommand}"
                 IsVisible="{Binding IsRetryVisible}"
                 Content="_Try again" />
             <Button
-                x:Name="ContinueButton"
+                x:Name="ExitButton"
                 Classes="primary focus-ring"
                 Margin="0,0,12,10"
                 TabIndex="5"
+                AutomationProperties.AccessKey="Alt+X"
+                AutomationProperties.Name="Close installer and end this verification session"
+                AutomationProperties.HelpText="Closes this verification session without changing game files."
+                Click="OnExitClick"
+                IsVisible="{Binding IsExitVisible}"
+                Content="E_xit installer" />
+            <Button
+                x:Name="ContinueButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="6"
                 AutomationProperties.AccessKey="Alt+N"
                 AutomationProperties.Name="Continue to game folder selection"
                 AutomationProperties.HelpText="Continues to game selection; it does not install immediately."
@@ -216,7 +260,7 @@
                 x:Name="CancelButton"
                 Classes="focus-ring"
                 Margin="0,0,12,10"
-                TabIndex="6"
+                TabIndex="7"
                 AutomationProperties.AccessKey="Alt+C"
                 AutomationProperties.Name="Cancel active release action"
                 AutomationProperties.HelpText="Stops the current bounded step and removes retained release files."

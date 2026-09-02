@@ -225,7 +225,7 @@ public static class ReviewedGitHubTagResolver
     )
     {
         ArgumentNullException.ThrowIfNull(candidate);
-        return ParseReferenceCore(document, candidate);
+        return ClassifyIdentityFailure(() => ParseReferenceCore(document, candidate));
     }
 
     /// <summary>
@@ -242,18 +242,40 @@ public static class ReviewedGitHubTagResolver
         ArgumentNullException.ThrowIfNull(candidate);
         ArgumentNullException.ThrowIfNull(initialReference);
         if (!ReferenceEquals(initialReference.Candidate, candidate))
-            throw new PackageSecurityException("The initial Git-reference authority belongs to a different catalog release selection.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The initial Git-reference authority belongs to a different catalog release selection."
+            );
 
-        ReviewedGitHubTagReference refreshed = ParseReferenceCore(refreshedReferenceDocument, candidate);
-        if (!string.Equals(initialReference.TagObjectSha, refreshed.TagObjectSha, StringComparison.Ordinal))
-            throw new PackageSecurityException("The selected release tag moved while its assets were acquired.");
+        return ClassifyIdentityFailure(() =>
+        {
+            ReviewedGitHubTagReference refreshed = ParseReferenceCore(refreshedReferenceDocument, candidate);
+            if (!string.Equals(initialReference.TagObjectSha, refreshed.TagObjectSha, StringComparison.Ordinal))
+                throw new PackageSecurityException("The selected release tag moved while its assets were acquired.");
 
-        string sourceCommit = ParseAnnotatedTagCore(
-            annotatedTagDocument,
-            candidate.Identity,
-            initialReference.TagObjectSha
-        );
-        return new ReviewedGitHubResolvedTag(candidate, sourceCommit);
+            string sourceCommit = ParseAnnotatedTagCore(
+                annotatedTagDocument,
+                candidate.Identity,
+                initialReference.TagObjectSha
+            );
+            return new ReviewedGitHubResolvedTag(candidate, sourceCommit);
+        });
+    }
+
+    private static T ClassifyIdentityFailure<T>(Func<T> action)
+    {
+        try
+        {
+            return action();
+        }
+        catch (PackageSecurityException ex) when (ex.FailureKind == PackageSecurityFailureKind.Unclassified)
+        {
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                ex.Message,
+                ex
+            );
+        }
     }
 
     private static ReviewedGitHubTagReference ParseReferenceCore(

@@ -213,8 +213,63 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
             }
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*length differs*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*length differs*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IncompleteDownload);
         transport.Kinds.Should().ContainSingle().Which.Should().Be(ReviewedReleaseAssetKind.InstallerPackage);
+        Directory.Exists(namedWorkspace).Should().BeFalse();
+        transport.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task AcquireAsync_TransportUnavailable_PreservesTypedFailureAndCleansWorkspace()
+    {
+        RecordingTransport transport = new()
+        {
+            Failure = new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkUnavailable,
+                "Synthetic unavailable transport."
+            )
+        };
+        string? namedWorkspace = null;
+
+        Func<Task> action = async () => await ReviewedReleaseAssetAcquirer.AcquireAsync(
+            Candidate(11),
+            transport,
+            workspaceFactory: () =>
+            {
+                PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
+                namedWorkspace = ResolveProcTarget(workspace.ProcPath);
+                return workspace;
+            }
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkUnavailable);
+        Directory.Exists(namedWorkspace).Should().BeFalse();
+        transport.Disposed.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task AcquireAsync_UnownedTransportCancellationIsPreservedAndCleansWorkspace()
+    {
+        RecordingTransport transport = new() { Failure = new OperationCanceledException("Synthetic transport timeout.") };
+        string? namedWorkspace = null;
+
+        Func<Task> action = async () => await ReviewedReleaseAssetAcquirer.AcquireAsync(
+            Candidate(11),
+            transport,
+            workspaceFactory: () =>
+            {
+                PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
+                namedWorkspace = ResolveProcTarget(workspace.ProcPath);
+                return workspace;
+            }
+        );
+
+        OperationCanceledException exception = (await action.Should().ThrowAsync<OperationCanceledException>()).Which;
+        exception.Should().NotBeOfType<PackageSecurityException>();
         Directory.Exists(namedWorkspace).Should().BeFalse();
         transport.Disposed.Should().BeTrue();
     }
@@ -237,7 +292,10 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
             new DownloadLimits(asset.SizeBytes, TimeSpan.FromSeconds(5), 0)
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*catalog advertisement*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*catalog advertisement*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IncompleteDownload);
         Directory.EnumerateFileSystemEntries(workspace.ProcPath).Should().BeEmpty();
         await workspace.DisposeAsync();
         Directory.Exists(namedWorkspace).Should().BeFalse();
@@ -261,7 +319,66 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
             new DownloadLimits(asset.SizeBytes, TimeSpan.FromSeconds(5), 0)
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*catalog advertisement*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*catalog advertisement*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IncompleteDownload);
+        Directory.EnumerateFileSystemEntries(workspace.ProcPath).Should().BeEmpty();
+        await workspace.DisposeAsync();
+        Directory.Exists(namedWorkspace).Should().BeFalse();
+    }
+
+    [Test]
+    public async Task AnchoredDownloader_TransportUnavailableIsTypedAndLeavesNoTemporary()
+    {
+        ReviewedReleaseAsset asset = Candidate(12).GetAsset(ReviewedReleaseAssetKind.InstallerPackage);
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
+        string namedWorkspace = ResolveProcTarget(workspace.ProcPath);
+        AnchoredDownloadTarget target = workspace.CreateTarget(asset.Name, asset.SizeBytes);
+        using BoundedHttpDownloader downloader = new(
+            new ReviewedGitHubReleaseAssetPolicy(),
+            new DelegateResponseHandler(_ => Task.FromException<HttpResponseMessage>(
+                new HttpRequestException("Synthetic transport failure.")
+            ))
+        );
+
+        Func<Task> action = () => downloader.DownloadAsync(
+            asset.DownloadUri,
+            target,
+            new DownloadLimits(asset.SizeBytes, TimeSpan.FromSeconds(5), 0)
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkUnavailable);
+        Directory.EnumerateFileSystemEntries(workspace.ProcPath).Should().BeEmpty();
+        await workspace.DisposeAsync();
+        Directory.Exists(namedWorkspace).Should().BeFalse();
+    }
+
+    [Test]
+    public async Task AnchoredDownloader_TimeoutIsTypedAndLeavesNoTemporary()
+    {
+        ReviewedReleaseAsset asset = Candidate(12).GetAsset(ReviewedReleaseAssetKind.InstallerPackage);
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
+        string namedWorkspace = ResolveProcTarget(workspace.ProcPath);
+        AnchoredDownloadTarget target = workspace.CreateTarget(asset.Name, asset.SizeBytes);
+        using BoundedHttpDownloader downloader = new(
+            new ReviewedGitHubReleaseAssetPolicy(),
+            new DelegateResponseHandler(async cancellationToken =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return new HttpResponseMessage(HttpStatusCode.OK);
+            })
+        );
+
+        Func<Task> action = () => downloader.DownloadAsync(
+            asset.DownloadUri,
+            target,
+            new DownloadLimits(asset.SizeBytes, TimeSpan.FromMilliseconds(50), 0)
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkTimeout);
         Directory.EnumerateFileSystemEntries(workspace.ProcPath).Should().BeEmpty();
         await workspace.DisposeAsync();
         Directory.Exists(namedWorkspace).Should().BeFalse();
@@ -674,6 +791,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
         public List<long> MaximumBytes { get; } = [];
         public int ConcurrentMaximum { get; private set; }
         public int ResultLengthDelta { get; init; }
+        public Exception? Failure { get; init; }
         public CancellationTokenSource? CancelAfterPublication { get; init; }
         public int CancelOnCall { get; init; } = 1;
         public bool IgnoreCancellationAfterPublication { get; init; }
@@ -694,6 +812,8 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
                 this.Kinds.Add(asset.Kind);
                 this.MaximumBytes.Add(limits.MaxBytes);
                 cancellationToken.ThrowIfCancellationRequested();
+                if (this.Failure is not null)
+                    throw this.Failure;
                 using LinuxAnchoredFile file = destination.FileSystem.CreateNewFile(destination.LeafName, 0x180);
                 byte[] bytes = Enumerable.Repeat((byte)((int)asset.Kind + 1), checked((int)asset.SizeBytes)).ToArray();
                 await RandomAccess.WriteAsync(file.Handle, bytes, 0, cancellationToken);
@@ -733,6 +853,21 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
                 Content = this.Content,
                 RequestMessage = request
             });
+        }
+    }
+
+    private sealed class DelegateResponseHandler(
+        Func<CancellationToken, Task<HttpResponseMessage>> getResponse
+    ) : HttpMessageHandler
+    {
+        private readonly Func<CancellationToken, Task<HttpResponseMessage>> GetResponse = getResponse;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        )
+        {
+            return this.GetResponse(cancellationToken);
         }
     }
 

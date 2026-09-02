@@ -160,31 +160,13 @@ public sealed class VerifiedGitHubAttestationBundleFactory
 
         string checksumDocument;
         using (RetainedReleaseAssetFile checksum = RetainedReleaseAssetFile.Open(checksumPath, "attestation-bundle checksum"))
-        {
-            checksumDocument = await checksum.ReadUtf8TextAsync(MaximumChecksumBytes, cancellationToken).ConfigureAwait(false);
-        }
-
-        string suffix = $"  {expectedBundleName}\n";
-        if (
-            checksumDocument.Length != 64 + suffix.Length
-            || !checksumDocument.EndsWith(suffix, StringComparison.Ordinal)
-        )
-        {
-            throw new PackageSecurityException("The attestation-bundle checksum sidecar isn't canonical.");
-        }
-        Sha256Digest expectedSha256;
-        try
-        {
-            expectedSha256 = Sha256Digest.Parse(checksumDocument[..64]);
-        }
-        catch (ArgumentException ex)
-        {
-            throw new PackageSecurityException("The attestation-bundle checksum sidecar isn't canonical.", ex);
-        }
+            checksumDocument = await ReadChecksumDocumentAsync(checksum, cancellationToken).ConfigureAwait(false);
+        _ = ParseChecksumDocument(checksumDocument, expectedBundleName);
 
         byte[] bytes;
         using (RetainedReleaseAssetFile bundle = RetainedReleaseAssetFile.Open(bundlePath, "local attestation bundle"))
         {
+            AssertBundleSize(bundle.Size);
             bytes = await bundle.ReadAllBytesAsync(MaximumBundleBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
         }
 
@@ -208,10 +190,14 @@ public sealed class VerifiedGitHubAttestationBundleFactory
         string expectedChecksumName = GetChecksumAssetName(package.Release);
         string checksumDocument;
         using (RetainedReleaseAssetFile checksum = source.Open(expectedChecksumName, "attestation-bundle checksum"))
-            checksumDocument = await checksum.ReadUtf8TextAsync(MaximumChecksumBytes, cancellationToken).ConfigureAwait(false);
+            checksumDocument = await ReadChecksumDocumentAsync(checksum, cancellationToken).ConfigureAwait(false);
+        _ = ParseChecksumDocument(checksumDocument, expectedBundleName);
         byte[] bytes;
         using (RetainedReleaseAssetFile bundle = source.Open(expectedBundleName, "local attestation bundle"))
+        {
+            AssertBundleSize(bundle.Size);
             bytes = await bundle.ReadAllBytesAsync(MaximumBundleBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
+        }
         return this.VerifyBytes(package, expectedBundleName, checksumDocument, bytes, cancellationToken);
     }
 
@@ -224,18 +210,7 @@ public sealed class VerifiedGitHubAttestationBundleFactory
     )
     {
         InstallationReleaseIdentity release = package.Release;
-        string suffix = $"  {expectedBundleName}\n";
-        if (checksumDocument.Length != 64 + suffix.Length || !checksumDocument.EndsWith(suffix, StringComparison.Ordinal))
-            throw new PackageSecurityException("The attestation-bundle checksum sidecar isn't canonical.");
-        Sha256Digest expectedSha256;
-        try
-        {
-            expectedSha256 = Sha256Digest.Parse(checksumDocument[..64]);
-        }
-        catch (ArgumentException ex)
-        {
-            throw new PackageSecurityException("The attestation-bundle checksum sidecar isn't canonical.", ex);
-        }
+        Sha256Digest expectedSha256 = ParseChecksumDocument(checksumDocument, expectedBundleName);
 
         SafeFileHandle? retained = null;
         try
@@ -247,12 +222,12 @@ public sealed class VerifiedGitHubAttestationBundleFactory
             }
             catch (DecoderFallbackException ex)
             {
-                throw new PackageSecurityException("The local attestation bundle isn't valid UTF-8.", ex);
+                throw InvalidProvenance("The local attestation bundle isn't valid UTF-8.", ex);
             }
 
             Sha256Digest actualSha256 = Sha256Digest.Hash(bytes);
             if (actualSha256 != expectedSha256)
-                throw new PackageSecurityException("The local attestation bundle doesn't match its checksum sidecar.");
+                throw InvalidProvenance("The local attestation bundle doesn't match its checksum sidecar.");
 
             retained = LinuxSealedFile.CreateAnonymous("smapi-installer-attestation-bundle");
             this.AfterRetainedFileCreatedForTesting?.Invoke(retained);
@@ -294,7 +269,65 @@ public sealed class VerifiedGitHubAttestationBundleFactory
             throw new PackageSecurityException($"The selected {description} path isn't valid.", ex);
         }
         if (!string.Equals(Path.GetFileName(fullPath), expectedName, StringComparison.Ordinal))
-            throw new PackageSecurityException($"The selected {description} filename doesn't match its release identity.");
+            throw InvalidProvenance($"The selected {description} filename doesn't match its release identity.");
+    }
+
+    private static async Task<string> ReadChecksumDocumentAsync(
+        RetainedReleaseAssetFile checksum,
+        CancellationToken cancellationToken
+    )
+    {
+        if (checksum.Size > MaximumChecksumBytes)
+            throw InvalidProvenance("The attestation-bundle checksum sidecar exceeds its configured size limit.");
+
+        byte[] bytes = await checksum.ReadAllBytesAsync(
+            MaximumChecksumBytes,
+            requireNonEmpty: false,
+            cancellationToken
+        ).ConfigureAwait(false);
+        try
+        {
+            try
+            {
+                return StrictUtf8.GetString(bytes);
+            }
+            catch (DecoderFallbackException ex)
+            {
+                throw InvalidProvenance("The attestation-bundle checksum sidecar isn't valid UTF-8.", ex);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
+    private static Sha256Digest ParseChecksumDocument(string checksumDocument, string expectedBundleName)
+    {
+        string suffix = $"  {expectedBundleName}\n";
+        if (checksumDocument.Length != 64 + suffix.Length || !checksumDocument.EndsWith(suffix, StringComparison.Ordinal))
+            throw InvalidProvenance("The attestation-bundle checksum sidecar isn't canonical.");
+        try
+        {
+            return Sha256Digest.Parse(checksumDocument[..64]);
+        }
+        catch (ArgumentException ex)
+        {
+            throw InvalidProvenance("The attestation-bundle checksum sidecar isn't canonical.", ex);
+        }
+    }
+
+    private static void AssertBundleSize(long size)
+    {
+        if (size is <= 0 or > MaximumBundleBytes)
+            throw InvalidProvenance("The local attestation bundle has an invalid or excessive size.");
+    }
+
+    private static PackageSecurityException InvalidProvenance(string message, Exception? innerException = null)
+    {
+        return innerException is null
+            ? new PackageSecurityException(PackageSecurityFailureKind.ProvenanceRejected, message)
+            : new PackageSecurityException(PackageSecurityFailureKind.ProvenanceRejected, message, innerException);
     }
 
     private static void AssertExactRetainedBytes(SafeFileHandle retained, long expectedSize, Sha256Digest expectedSha256)

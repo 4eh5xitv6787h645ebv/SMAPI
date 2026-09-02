@@ -25,6 +25,9 @@ internal enum InstallerDiagnosticCode
     ReleaseVerified,
     ReleaseCancelled,
     ReleaseFailed,
+    ReleaseNetworkUnavailable,
+    ReleaseNetworkTimedOut,
+    ReleaseDownloadInterrupted,
     GameDiscoveryStarted,
     GameDiscoveryReady,
     GameDiscoveryEmpty,
@@ -582,6 +585,11 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         ProtocolPrePlanErrorCode.RequestCancelled => "protocol.preplan.request-cancelled",
         ProtocolPrePlanErrorCode.InvalidGameFolder => "protocol.preplan.invalid-game-folder",
         ProtocolPrePlanErrorCode.PackageRejected => "protocol.preplan.package-rejected",
+        ProtocolPrePlanErrorCode.PackageIntegrityRejected => "protocol.preplan.package-integrity-rejected",
+        ProtocolPrePlanErrorCode.PackageMetadataRejected => "protocol.preplan.package-metadata-rejected",
+        ProtocolPrePlanErrorCode.PackageArchiveRejected => "protocol.preplan.package-archive-rejected",
+        ProtocolPrePlanErrorCode.PackageProvenanceRejected => "protocol.preplan.package-provenance-rejected",
+        ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected => "protocol.preplan.package-release-identity-rejected",
         ProtocolPrePlanErrorCode.RecoveryUnavailable => "protocol.preplan.recovery-unavailable",
         ProtocolPrePlanErrorCode.InspectionFailed => "protocol.preplan.inspection-failed",
         ProtocolPrePlanErrorCode.CandidateApprovalFailed => "protocol.preplan.candidate-approval-failed",
@@ -616,6 +624,9 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         => code is InstallerDiagnosticCode.ReleaseVerified
             or InstallerDiagnosticCode.ReleaseCancelled
             or InstallerDiagnosticCode.ReleaseFailed
+            or InstallerDiagnosticCode.ReleaseNetworkUnavailable
+            or InstallerDiagnosticCode.ReleaseNetworkTimedOut
+            or InstallerDiagnosticCode.ReleaseDownloadInterrupted
             or InstallerDiagnosticCode.GameDiscoveryCancelled
             or InstallerDiagnosticCode.GameDiscoveryFailed
             or InstallerDiagnosticCode.PlanRejected
@@ -653,6 +664,9 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         InstallerDiagnosticCode.ReleaseVerified => new("release.verified", InstallerLogLevel.Information, "The selected release and package were verified."),
         InstallerDiagnosticCode.ReleaseCancelled => new("release.cancelled", InstallerLogLevel.Warning, "Release preparation was cancelled safely."),
         InstallerDiagnosticCode.ReleaseFailed => new("release.failed", InstallerLogLevel.Error, "Release preparation or verification failed safely."),
+        InstallerDiagnosticCode.ReleaseNetworkUnavailable => new("release.network.unavailable", InstallerLogLevel.Error, "A required release network request became unavailable before preparation completed."),
+        InstallerDiagnosticCode.ReleaseNetworkTimedOut => new("release.network.timeout", InstallerLogLevel.Error, "A required release network request exceeded its bounded time limit before preparation completed."),
+        InstallerDiagnosticCode.ReleaseDownloadInterrupted => new("release.download.interrupted", InstallerLogLevel.Error, "A release file transfer did not produce one complete expected file."),
         InstallerDiagnosticCode.GameDiscoveryStarted => new("game.discovery.started", InstallerLogLevel.Information, "Read-only game discovery started."),
         InstallerDiagnosticCode.GameDiscoveryReady => new("game.discovery.ready", InstallerLogLevel.Information, "A validated game selection is ready."),
         InstallerDiagnosticCode.GameDiscoveryEmpty => new("game.discovery.empty", InstallerLogLevel.Warning, "No validated game installation was detected."),

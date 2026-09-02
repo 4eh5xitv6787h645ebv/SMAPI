@@ -127,7 +127,8 @@ internal sealed class VerifiedGitHubAttestationBundleTests
 
         Func<Task> verify = () => new VerifiedGitHubAttestationBundleFactory().VerifyAsync(package, bundlePath, checksumPath);
 
-        await verify.Should().ThrowAsync<PackageSecurityException>();
+        PackageSecurityException exception = (await verify.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ProvenanceRejected);
     }
 
     [TestCase("bundle", "symlink")]
@@ -169,7 +170,8 @@ internal sealed class VerifiedGitHubAttestationBundleTests
             }
 
             Func<Task> verify = () => new VerifiedGitHubAttestationBundleFactory().VerifyAsync(package, bundlePath, checksumPath);
-            await verify.Should().ThrowAsync<PackageSecurityException>();
+            PackageSecurityException exception = (await verify.Should().ThrowAsync<PackageSecurityException>()).Which;
+            exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
         }
         finally
         {
@@ -195,6 +197,23 @@ internal sealed class VerifiedGitHubAttestationBundleTests
         );
 
         await verify.Should().ThrowAsync<OperationCanceledException>();
+        FindBundleDescriptors().Should().BeEquivalentTo(before);
+    }
+
+    [Test]
+    public async Task VerifyAsync_LocalRetainedAuthorityFailureRemainsUnclassifiedAndPublishesNoDescriptor()
+    {
+        using VerifiedInstallerPackage package = await this.CreateVerifiedInstallerPackageAsync();
+        (string bundlePath, string checksumPath) = this.WriteBundleFiles(package, "local evidence"u8.ToArray());
+        HashSet<string> before = FindBundleDescriptors();
+        VerifiedGitHubAttestationBundleFactory factory = new(
+            _ => throw new PackageSecurityException("Synthetic retained-authority failure.")
+        );
+
+        Func<Task> verify = () => factory.VerifyAsync(package, bundlePath, checksumPath);
+
+        PackageSecurityException exception = (await verify.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
         FindBundleDescriptors().Should().BeEquivalentTo(before);
     }
 

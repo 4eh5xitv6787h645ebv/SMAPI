@@ -15,6 +15,11 @@ internal enum ReleaseVerificationFocusTarget
     Continue
 }
 
+internal sealed record ReleaseVerificationEvidenceRow(string Label, string Value)
+{
+    public string AccessibleName => $"{this.Label}: {this.Value}";
+}
+
 /// <summary>Presentation-only adapter for the serialized production release-verification controller.</summary>
 internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDisposable
 {
@@ -169,6 +174,11 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                     this.snapshot.State == ReleaseVerificationState.Failed
                     && (
                         this.snapshot.Error == ReleaseVerificationError.PreparationFailed
+                        || this.snapshot.Error is ReleaseVerificationError.TransferUnavailable
+                            or ReleaseVerificationError.TransferTimedOut
+                            or ReleaseVerificationError.TransferInterrupted
+                            or ReleaseVerificationError.PackageIntegrityOrMetadataRejected
+                            or ReleaseVerificationError.PackageProvenanceOrIdentityRejected
                         || (
                             this.snapshot.Error == ReleaseVerificationError.PackageRejected
                             && !this.snapshot.RejectionIsTerminal
@@ -185,6 +195,23 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         && this.LocalPackageFolderRequestedValue is not null;
 
     public bool IsRetryVisible => this.CanRetry();
+
+    public string RetryAutomationName => this.snapshot.Error switch
+    {
+        ReleaseVerificationError.TransferUnavailable
+            or ReleaseVerificationError.TransferTimedOut
+            or ReleaseVerificationError.TransferInterrupted => "Retry the release download and verification",
+        ReleaseVerificationError.PackageIntegrityOrMetadataRejected => "Download and verify the selected release again",
+        _ => "Try release action again"
+    };
+
+    public bool IsExitVisible => this.snapshot.State == ReleaseVerificationState.Failed
+        && !this.CanRetry()
+        && !this.IsLocalPackageActionVisible;
+
+    public IReadOnlyList<ReleaseVerificationEvidenceRow> FailureEvidence => GetFailureEvidence(this.snapshot);
+
+    public bool IsFailureEvidenceVisible => this.FailureEvidence.Count > 0;
 
     public bool IsContinueVisible => !this.transitionFailed
         && this.snapshot.State == ReleaseVerificationState.Verified
@@ -321,7 +348,11 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
             && (
                 this.snapshot.State == ReleaseVerificationState.Cancelled
                 || this.snapshot.Error is ReleaseVerificationError.PreparationFailed
+                    or ReleaseVerificationError.TransferUnavailable
+                    or ReleaseVerificationError.TransferTimedOut
+                    or ReleaseVerificationError.TransferInterrupted
                     or ReleaseVerificationError.PackageRejected
+                    or ReleaseVerificationError.PackageIntegrityOrMetadataRejected
             );
     }
 
@@ -420,6 +451,10 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         this.OnPropertyChanged(nameof(this.IsDownloadActionVisible));
         this.OnPropertyChanged(nameof(this.IsLocalPackageActionVisible));
         this.OnPropertyChanged(nameof(this.IsRetryVisible));
+        this.OnPropertyChanged(nameof(this.RetryAutomationName));
+        this.OnPropertyChanged(nameof(this.IsExitVisible));
+        this.OnPropertyChanged(nameof(this.FailureEvidence));
+        this.OnPropertyChanged(nameof(this.IsFailureEvidenceVisible));
         this.OnPropertyChanged(nameof(this.IsContinueVisible));
         this.OnPropertyChanged(nameof(this.IsCancelVisible));
         this.OnPropertyChanged(nameof(this.IsProgressVisible));
@@ -532,6 +567,26 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                             ? "No complete package was retained and your game is unchanged. Try the download once more."
                             : "No complete package was retained and your game is unchanged. Close and reopen the installer before trying again."
                 ),
+                ReleaseVerificationError.TransferUnavailable => (
+                    "Couldn’t finish release preparation",
+                    value.CanRetry
+                        ? "A required network request became unavailable before release preparation finished. No package from this attempt was published or retained for use, and no game files changed. Check your connection, then choose Try again."
+                        : "A required network request became unavailable before release preparation finished. No package from this attempt was published or retained for use, and no game files changed. Close and reopen the installer before trying again."
+                ),
+                ReleaseVerificationError.TransferTimedOut => (
+                    "Release preparation timed out",
+                    value.CanRetry
+                        ? "A required network request timed out before release preparation finished. No package from this attempt was published or retained for use, and no game files changed. Check your connection, then choose Try again."
+                        : "A required network request timed out before release preparation finished. No package from this attempt was published or retained for use, and no game files changed. Close and reopen the installer before trying again."
+                ),
+                ReleaseVerificationError.TransferInterrupted => (
+                    "Release file transfer was incomplete",
+                    value.CanRetry
+                        ? "A release file transfer did not produce one complete expected file. No package from this attempt was published or retained for use, and no game files changed. Check your connection, then choose Try again."
+                        : "A release file transfer did not produce one complete expected file. No package from this attempt was published or retained for use, and no game files changed. Close and reopen the installer before trying again."
+                ),
+                ReleaseVerificationError.PackageIntegrityOrMetadataRejected => GetIntegrityFailureCopy(value),
+                ReleaseVerificationError.PackageProvenanceOrIdentityRejected => GetProvenanceFailureCopy(value),
                 ReleaseVerificationError.PackageRejected => (
                     "The release could not be verified",
                     $"Installation is blocked and your game is unchanged. {GetRejectionNextStep(value)}"
@@ -620,7 +675,6 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                 : ReleaseVerificationFocusTarget.Retry,
             ReleaseVerificationState.Cancelled when value.Source == ReleasePackageSource.LocalFolder && this.IsLocalPackageActionVisible => ReleaseVerificationFocusTarget.LocalPackage,
             ReleaseVerificationState.Cancelled => ReleaseVerificationFocusTarget.Retry,
-            ReleaseVerificationState.Failed when value.Source == ReleasePackageSource.LocalFolder && this.IsLocalPackageActionVisible => ReleaseVerificationFocusTarget.LocalPackage,
             ReleaseVerificationState.Verified when this.ContinueCommand.CanExecute(null) => ReleaseVerificationFocusTarget.Continue,
             _ => ReleaseVerificationFocusTarget.Status
         };
@@ -678,6 +732,131 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                 "Review the private local log, then close and reopen the installer.",
             _ => "Close and reopen the installer before trying again."
         };
+    }
+
+    private static (string Heading, string Message) GetIntegrityFailureCopy(ReleaseVerificationSnapshot value)
+    {
+        string heading = value.RejectionCode switch
+        {
+            ProtocolPrePlanErrorCode.PackageIntegrityRejected => "Release checksum or package integrity did not match",
+            ProtocolPrePlanErrorCode.PackageMetadataRejected => "Release metadata did not match",
+            ProtocolPrePlanErrorCode.PackageArchiveRejected => "Release package archive was rejected",
+            _ => "Package integrity or release metadata check failed"
+        };
+        string nextStep = GetEvidenceNextStep(value);
+        return (
+            heading,
+            $"The selected release did not satisfy strict package verification. It was blocked before installation, the rejected package was not retained for use, and no game files changed. {nextStep}"
+        );
+    }
+
+    private static (string Heading, string Message) GetProvenanceFailureCopy(ReleaseVerificationSnapshot value)
+    {
+        string heading = value.RejectionCode switch
+        {
+            ProtocolPrePlanErrorCode.PackageProvenanceRejected => "GitHub provenance was not accepted",
+            ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected => "Release identity did not match",
+            _ => "Release identity changed or did not match"
+        };
+        return (
+            heading,
+            $"The selected release did not satisfy strict release-identity or GitHub provenance verification. It was blocked before installation, and no game files changed. {GetEvidenceNextStep(value)}"
+        );
+    }
+
+    private static IReadOnlyList<ReleaseVerificationEvidenceRow> GetFailureEvidence(
+        ReleaseVerificationSnapshot value
+    )
+    {
+        string nextStep = GetEvidenceNextStep(value).TrimEnd('.');
+        return value.Error switch
+        {
+            ReleaseVerificationError.TransferUnavailable => Rows(
+                ("Observed failure", "A required release network request became unavailable before preparation finished"),
+                ("Installer package availability", "No package from this attempt was published or retained for use"),
+                ("Cleanup boundary", "The failed attempt settled before this result was shown"),
+                ("Game files", "Unchanged"),
+                ("Safe next step", nextStep)
+            ),
+            ReleaseVerificationError.TransferTimedOut => Rows(
+                ("Observed failure", "A required release network request timed out before preparation finished"),
+                ("Installer package availability", "No package from this attempt was published or retained for use"),
+                ("Cleanup boundary", "The failed attempt settled before this result was shown"),
+                ("Game files", "Unchanged"),
+                ("Safe next step", nextStep)
+            ),
+            ReleaseVerificationError.TransferInterrupted => Rows(
+                ("Observed failure", "A release file transfer did not produce one complete expected file"),
+                ("Installer package availability", "No package from this attempt was published or retained for use"),
+                ("Cleanup boundary", "The failed attempt settled before this result was shown"),
+                ("Game files", "Unchanged"),
+                ("Safe next step", nextStep)
+            ),
+            ReleaseVerificationError.PackageIntegrityOrMetadataRejected => Rows(
+                ("Observed check", GetIntegrityEvidence(value.RejectionCode)),
+                ("Installation", "Not started"),
+                ("Installer package availability", "Rejected package was not retained for use"),
+                ("Game files", "Unchanged"),
+                ("Safe next step", nextStep)
+            ),
+            ReleaseVerificationError.PackageProvenanceOrIdentityRejected => GetProvenanceEvidence(value, nextStep),
+            _ => Array.Empty<ReleaseVerificationEvidenceRow>()
+        };
+    }
+
+    private static IReadOnlyList<ReleaseVerificationEvidenceRow> GetProvenanceEvidence(
+        ReleaseVerificationSnapshot value,
+        string nextStep
+    )
+    {
+        if (value.RejectionCode == ProtocolPrePlanErrorCode.PackageProvenanceRejected)
+        {
+            return Rows(
+                ("Package integrity", "Passed before GitHub provenance verification"),
+                ("GitHub provenance", "Evidence did not satisfy strict verification"),
+                ("Package extraction", "Not started"),
+                ("Game files", "Unchanged"),
+                ("Safe next step", nextStep)
+            );
+        }
+        return Rows(
+            ("Observed check", "Selected release identity did not satisfy strict verification"),
+            ("Package extraction", "Not started"),
+            ("Installation", "Blocked"),
+            ("Game files", "Unchanged"),
+            ("Safe next step", nextStep)
+        );
+    }
+
+    private static string GetIntegrityEvidence(ProtocolPrePlanErrorCode? code)
+    {
+        return code switch
+        {
+            ProtocolPrePlanErrorCode.PackageIntegrityRejected => "Package or checksum integrity did not agree",
+            ProtocolPrePlanErrorCode.PackageMetadataRejected => "Release or install metadata did not satisfy strict verification",
+            ProtocolPrePlanErrorCode.PackageArchiveRejected => "Package archive or verified payload did not satisfy strict verification",
+            _ => "Package integrity or release metadata did not satisfy strict verification"
+        };
+    }
+
+    private static string GetEvidenceNextStep(ReleaseVerificationSnapshot value)
+    {
+        if (value.Source == ReleasePackageSource.LocalFolder && value.CanChooseLocal)
+            return "Replace the six files with a fresh complete copy, then choose the folder again.";
+        if (value.CanRetry)
+            return value.Error is ReleaseVerificationError.TransferUnavailable
+                or ReleaseVerificationError.TransferTimedOut
+                or ReleaseVerificationError.TransferInterrupted
+                ? "Check your connection, then retry the download."
+                : "Download and verify the selected release again.";
+        return "Close and reopen the installer to start a fresh verification session.";
+    }
+
+    private static IReadOnlyList<ReleaseVerificationEvidenceRow> Rows(
+        params (string Label, string Value)[] rows
+    )
+    {
+        return Array.AsReadOnly(rows.Select(row => new ReleaseVerificationEvidenceRow(row.Label, row.Value)).ToArray());
     }
 
     private static string GetAssetLabel(ReviewedReleaseAssetKind kind)

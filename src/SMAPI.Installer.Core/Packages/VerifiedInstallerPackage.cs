@@ -72,11 +72,26 @@ public sealed class VerifiedInstallerPackage : IDisposable, IAsyncDisposable
         this.AssertUsable();
         ArgumentNullException.ThrowIfNull(trust);
         if (this.Manifest.SchemaVersion != PackageManifest.CurrentSchemaVersion || this.Manifest.ReleaseAuthorityPolicy is null)
-            throw new PackageSecurityException("Tagged release authority requires a schema-4 install manifest.");
+        {
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.MetadataRejected,
+                "Tagged release authority requires a schema-4 install manifest."
+            );
+        }
         if (!trust.Identity.Equals(this.Release) || !this.Manifest.ReleaseAuthorityPolicy.Matches(trust))
-            throw new PackageSecurityException("Verified release evidence doesn't match the exact manifest authority policy.");
+        {
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ProvenanceRejected,
+                "Verified release evidence doesn't match the exact manifest authority policy."
+            );
+        }
         if (trust.ManifestSubject.Sha256 != this.ManifestSha256 || trust.ManifestSubject.ObservedSizeBytes != this.ManifestSizeBytes)
-            throw new PackageSecurityException("Verified release evidence doesn't bind the exact retained install manifest.");
+        {
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ProvenanceRejected,
+                "Verified release evidence doesn't bind the exact retained install manifest."
+            );
+        }
         if (Interlocked.CompareExchange(ref this.ReleaseTrust, trust, null) is not null)
             throw new InvalidOperationException("Release trust was already bound to this package authority.");
     }
@@ -137,19 +152,19 @@ public sealed class VerifiedInstallerPackageFactory
 
         limits ??= OwnershipPersistenceLimits.Default;
         string expectedName = VerifiedInstallerPackageFactory.GetManifestAssetName(package.Identity);
-        VerifiedReleaseArtifactIdentity expected = package.GetArtifact(expectedName);
+        VerifiedReleaseArtifactIdentity expected = GetManifestArtifact(package, expectedName);
         if (expected.SizeBytes > limits.MaxDocumentBytes)
-            throw new PackageSecurityException("The verified install manifest exceeds its configured size limit.");
+            throw InvalidMetadata("The verified install manifest exceeds its configured size limit.");
 
         string fullPath = Path.GetFullPath(manifestPath);
         if (!string.Equals(Path.GetFileName(fullPath), expectedName, StringComparison.Ordinal))
-            throw new PackageSecurityException("The selected install-manifest filename doesn't match its release identity.");
+            throw InvalidMetadata("The selected install-manifest filename doesn't match its release identity.");
 
         byte[] bytes;
         using (RetainedReleaseAssetFile file = RetainedReleaseAssetFile.Open(fullPath, "install manifest"))
         {
             if (file.Size != expected.SizeBytes || file.Size <= 0 || file.Size > limits.MaxDocumentBytes)
-                throw new PackageSecurityException("The selected install manifest doesn't match its verified size.");
+                throw InvalidMetadata("The selected install manifest doesn't match its verified size.");
             bytes = await file.ReadAllBytesAsync(limits.MaxDocumentBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
         }
 
@@ -168,14 +183,14 @@ public sealed class VerifiedInstallerPackageFactory
         ArgumentNullException.ThrowIfNull(source);
         limits ??= OwnershipPersistenceLimits.Default;
         string expectedName = GetManifestAssetName(package.Identity);
-        VerifiedReleaseArtifactIdentity expected = package.GetArtifact(expectedName);
+        VerifiedReleaseArtifactIdentity expected = GetManifestArtifact(package, expectedName);
         if (expected.SizeBytes > limits.MaxDocumentBytes)
-            throw new PackageSecurityException("The verified install manifest exceeds its configured size limit.");
+            throw InvalidMetadata("The verified install manifest exceeds its configured size limit.");
         byte[] bytes;
         using (RetainedReleaseAssetFile file = source.Open(expectedName, "install manifest"))
         {
             if (file.Size != expected.SizeBytes || file.Size <= 0 || file.Size > limits.MaxDocumentBytes)
-                throw new PackageSecurityException("The selected install manifest doesn't match its verified size.");
+                throw InvalidMetadata("The selected install manifest doesn't match its verified size.");
             bytes = await file.ReadAllBytesAsync(limits.MaxDocumentBytes, requireNonEmpty: true, cancellationToken).ConfigureAwait(false);
         }
         return await this.VerifyBytesAsync(package, expected, expectedName, bytes, limits, cancellationToken).ConfigureAwait(false);
@@ -193,7 +208,7 @@ public sealed class VerifiedInstallerPackageFactory
 
         string actualSha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         if (!string.Equals(actualSha256, expected.Sha256, StringComparison.Ordinal))
-            throw new PackageSecurityException("The selected install manifest doesn't match SHA256SUMS and build-metadata.json.");
+            throw InvalidMetadata("The selected install manifest doesn't match SHA256SUMS and build-metadata.json.");
 
         SafeFileHandle? retainedManifest = null;
         try
@@ -211,7 +226,7 @@ public sealed class VerifiedInstallerPackageFactory
 
             PackageManifest manifest = CanonicalOwnershipDocuments.ParseManifest(bytes, limits);
             if (!manifest.Release.Equals(package.InstallationIdentity))
-                throw new PackageSecurityException("The verified install manifest names a different release package.");
+                throw InvalidMetadata("The verified install manifest names a different release package.");
 
             VerifiedInstallerPackage result = new(
                 package,
@@ -226,12 +241,34 @@ public sealed class VerifiedInstallerPackageFactory
         }
         catch (OwnershipDocumentException ex)
         {
-            throw new PackageSecurityException("The verified install manifest isn't canonical or valid.", ex);
+            throw InvalidMetadata("The verified install manifest isn't canonical or valid.", ex);
         }
         finally
         {
             retainedManifest?.Dispose();
         }
+    }
+
+    private static VerifiedReleaseArtifactIdentity GetManifestArtifact(
+        VerifiedReleasePackage package,
+        string expectedName
+    )
+    {
+        try
+        {
+            return package.GetArtifact(expectedName);
+        }
+        catch (PackageSecurityException ex) when (ex.FailureKind == PackageSecurityFailureKind.Unclassified)
+        {
+            throw InvalidMetadata("The verified release metadata doesn't contain its required install manifest.", ex);
+        }
+    }
+
+    private static PackageSecurityException InvalidMetadata(string message, Exception? innerException = null)
+    {
+        return innerException is null
+            ? new PackageSecurityException(PackageSecurityFailureKind.MetadataRejected, message)
+            : new PackageSecurityException(PackageSecurityFailureKind.MetadataRejected, message, innerException);
     }
 
     private static void AssertRetainedManifest(

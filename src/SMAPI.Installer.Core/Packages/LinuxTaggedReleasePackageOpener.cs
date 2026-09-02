@@ -28,7 +28,10 @@ public sealed class LinuxTaggedReleasePackageOpener
     )
     {
         ArgumentNullException.ThrowIfNull(assets);
-        ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(assets.ReleaseTag);
+        ForkReleaseIdentity identity = Classify(
+            () => ForkReleaseIdentity.Parse(assets.ReleaseTag),
+            PackageSecurityFailureKind.ReleaseIdentityRejected
+        );
         VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyFilesAsync(
             assets.PackagePath,
             assets.ChecksumsPath,
@@ -85,7 +88,10 @@ public sealed class LinuxTaggedReleasePackageOpener
     {
         ArgumentNullException.ThrowIfNull(assets);
         ArgumentNullException.ThrowIfNull(source);
-        ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(assets.ReleaseTag);
+        ForkReleaseIdentity identity = Classify(
+            () => ForkReleaseIdentity.Parse(assets.ReleaseTag),
+            PackageSecurityFailureKind.ReleaseIdentityRejected
+        );
         VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyFilesAsync(
             source,
             identity,
@@ -130,4 +136,20 @@ public sealed class LinuxTaggedReleasePackageOpener
             release?.Dispose();
         }
     }
+
+    private static T Classify<T>(
+        Func<T> action,
+        PackageSecurityFailureKind failureKind
+    )
+    {
+        try
+        {
+            return action();
+        }
+        catch (PackageSecurityException ex) when (ex.FailureKind == PackageSecurityFailureKind.Unclassified)
+        {
+            throw new PackageSecurityException(failureKind, ex.Message, ex);
+        }
+    }
+
 }
