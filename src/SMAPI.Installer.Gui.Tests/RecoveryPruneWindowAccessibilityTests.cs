@@ -454,7 +454,7 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
     private static void Press(RecoveryPruneWindow window, Key key)
     {
         window.KeyPress(key, RawInputModifiers.None, PhysicalKey.None, null);
-        if (window.IsVisible)
+        if (key != Key.Escape && window.IsVisible)
             window.KeyRelease(key, RawInputModifiers.None, PhysicalKey.None, null);
         Dispatcher.UIThread.RunJobs();
     }
