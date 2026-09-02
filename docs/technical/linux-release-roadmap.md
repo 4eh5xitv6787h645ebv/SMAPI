@@ -682,9 +682,9 @@ This slice provides a detailed bounded private event log and a more restricted s
 
 - [x] Resolve the production release-screen Alt+D collision by moving **Download and verify** to Alt+W, include the nested diagnostics action in uniqueness coverage, and verify Alt+D opens the owned viewer and restores focus after keyboard close ([fork PR #245](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/245); implementation commit [`0548c653`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/0548c653)).
 - [x] Document exact private-log location and bounds, viewer/copy privacy semantics, keyboard shortcuts, failure-safe troubleshooting, terminal fallback, and the unreleased/public boundary; correct the screenshot contract and generated next-alpha notes without claiming alpha.1 contains the GUI ([fork PR #245](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/245)).
-- [ ] Pass both required CI workflows for PR #245.
-- [ ] Address every actionable accessibility, documentation, privacy, and final-diff finding and obtain clean exact-head reviews for PR #245.
-- [ ] Merge PR #245 into `develop`, close it, and delete `phase4/gui-diagnostics-docs` locally and on origin.
+- [x] Pass both required CI workflows for PR #245 ([Linux qualification `33628446003`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33628446003); [deterministic performance gates `33628445779`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33628445779)).
+- [x] Address every actionable accessibility, documentation, privacy, and final-diff finding and obtain clean exact-head reviews for PR #245 ([exact-head review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/245#issuecomment-5509308253)).
+- [x] Merge PR #245 into `develop` at [`a0708620`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/a0708620a751999f933d817259658f04ac5fb25d), close it, and delete `phase4/gui-diagnostics-docs` locally and on origin.
 
 This documentation and correction slice does not publish or qualify a GUI release and adds no production screenshot. Public artifact, clean lifecycle, trusted-workload, desktop/AT-SPI, and authentic screenshot evidence remain unchecked.
 
