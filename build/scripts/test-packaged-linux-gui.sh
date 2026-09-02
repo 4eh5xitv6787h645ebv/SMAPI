@@ -288,11 +288,127 @@ run_window_smoke() {
     assert_no_runtime_leak "$state_root" "$output_path"
 }
 
+run_launcher_term_smoke() {
+    local state_root output_path status
+
+    state_root="$(make_state_root launcher-term)"
+    output_path="$test_root/launcher-term.output"
+    set +e
+    (
+        cd "$state_root/work"
+        env -i \
+            PATH="$guarded_path" \
+            HOME="$state_root/home" \
+            XDG_CACHE_HOME="$state_root/cache" \
+            XDG_CONFIG_HOME="$state_root/config" \
+            XDG_DATA_HOME="$state_root/data" \
+            XDG_RUNTIME_DIR="$state_root/runtime" \
+            TMPDIR="$state_root/tmp" \
+            SMAPI_GUI_DOTNET_MARKER="$dotnet_marker" \
+            DOTNET_ROOT="$state_root/no-system-dotnet" \
+            DOTNET_ROOT_X64="$state_root/no-system-dotnet" \
+            DOTNET_MULTILEVEL_LOOKUP=0 \
+            DOTNET_EnableDiagnostics=0 \
+            DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+            DOTNET_NOLOGO=1 \
+            XDG_SESSION_TYPE=x11 \
+            timeout --signal=TERM --kill-after=5s 30s \
+                xvfb-run -a bash -c '
+                    set -euo pipefail
+                    launcher="$1"
+                    gui_apphost="$2"
+                    state_root="$3"
+                    launcher_pid=""
+                    gui_pid=""
+
+                    cleanup_signal_case() {
+                        local current_exe=""
+                        set +e
+                        if [[ -n "$launcher_pid" ]]; then
+                            # The launcher is this shell direct, unreaped child, so its PID cannot
+                            # be reused before wait returns.
+                            kill -TERM "$launcher_pid" 2>/dev/null
+                            wait "$launcher_pid" 2>/dev/null
+                        fi
+                        if [[ -n "$gui_pid" ]]; then
+                            current_exe="$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)"
+                            if [[ "$current_exe" == "$gui_apphost" ]]; then
+                                kill -TERM "$gui_pid" 2>/dev/null
+                            fi
+                        fi
+                    }
+                    trap cleanup_signal_case EXIT
+
+                    "$launcher" --demo &
+                    launcher_pid=$!
+                    for _ in {1..1500}; do
+                        if [[ -r "/proc/$launcher_pid/task/$launcher_pid/children" ]]; then
+                            IFS= read -r children < "/proc/$launcher_pid/task/$launcher_pid/children" || true
+                            for child in $children; do
+                                child_exe="$(readlink -- "/proc/$child/exe" 2>/dev/null || true)"
+                                if [[ "$child_exe" == "$gui_apphost" ]]; then
+                                    gui_pid="$child"
+                                    break 2
+                                fi
+                            done
+                        fi
+                        kill -0 "$launcher_pid" 2>/dev/null || break
+                        sleep 0.01
+                    done
+                    if [[ -z "$gui_pid" ]]; then
+                        exit 1
+                    fi
+
+                    # Require a live exact child before signalling the launcher itself. Since the
+                    # launcher remains an unreaped direct child, this TERM cannot target a reused PID.
+                    for _ in {1..10}; do
+                        kill -0 "$launcher_pid"
+                        [[ "$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)" == "$gui_apphost" ]]
+                        sleep 0.1
+                    done
+                    kill -TERM "$launcher_pid"
+                    set +e
+                    wait "$launcher_pid"
+                    launcher_status=$?
+                    set -e
+                    launcher_pid=""
+                    if [[ "$launcher_status" -ne 143 ]]; then
+                        exit 1
+                    fi
+
+                    # The launcher must settle its exact apphost, not merely remove the bundle path.
+                    for _ in {1..500}; do
+                        current_exe="$(readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)"
+                        if [[ "$current_exe" != "$gui_apphost" ]]; then
+                            gui_pid=""
+                            break
+                        fi
+                        sleep 0.01
+                    done
+                    if [[ -n "$gui_pid" ]]; then
+                        exit 1
+                    fi
+                    if find "$state_root/tmp" -mindepth 1 -maxdepth 1 -name "smapi-installer-gui.*" -print -quit | grep -q .; then
+                        exit 1
+                    fi
+                    trap - EXIT
+                ' signal-supervisor "$launcher" "$gui_apphost" "$state_root"
+    ) > "$output_path" 2>&1
+    status=$?
+    set -e
+    if [[ "$status" -ne 0 ]]; then
+        echo "The packaged graphical launcher did not settle its exact apphost and private bundle after TERM; raw output is withheld from CI logs." >&2
+        exit 1
+    fi
+    assert_no_runtime_leak "$state_root" "$output_path"
+}
+
 # The sealed demo proves that the packaged single-file apphost starts without system dotnet. The
 # production initial window is exercised with remote traffic denied; catalog failure may render, but
 # package download, sibling-backend launch, discovery, logging, and game mutation require user action.
 run_window_smoke demo false --demo
 run_window_smoke production true
+run_launcher_term_smoke
 
 invalid_state="$(make_state_root invalid-arguments)"
 set +e

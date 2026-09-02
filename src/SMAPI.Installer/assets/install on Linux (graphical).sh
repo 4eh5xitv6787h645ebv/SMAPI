@@ -14,21 +14,78 @@ if [[ ! -f "$gui_path" || -L "$gui_path" || ! -x "$gui_path" ]]; then
 fi
 
 bundle_root=""
+child_pid=""
+requested_signal_name=""
+requested_exit_status=""
 cleanup() {
+    if is_active_child_job; then
+        kill -s KILL -- "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+        child_pid=""
+    fi
     if [[ -n "$bundle_root" && -d "$bundle_root" ]]; then
         rm -rf -- "$bundle_root"
     fi
 }
+
+is_active_child_job() {
+    local active_pid=""
+
+    [[ -n "$child_pid" ]] || return 1
+    while IFS= read -r active_pid; do
+        if [[ "$active_pid" == "$child_pid" ]]; then
+            return 0
+        fi
+    done < <(jobs -p)
+    return 1
+}
+
+forward_signal() {
+    local signal_name="$1"
+    local exit_status="$2"
+
+    if [[ -z "$requested_exit_status" ]]; then
+        requested_signal_name="$signal_name"
+        requested_exit_status="$exit_status"
+    fi
+    if is_active_child_job; then
+        kill -s "$signal_name" -- "$child_pid" 2>/dev/null || true
+    fi
+}
+
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'forward_signal HUP 129' HUP
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
 
 bundle_root="$(mktemp -d "${TMPDIR:-/tmp}/smapi-installer-gui.XXXXXXXX")"
 chmod 700 -- "$bundle_root"
 
-set +e
-DOTNET_BUNDLE_EXTRACT_BASE_DIR="$bundle_root" "$gui_path" "$@"
-status=$?
-set -e
+env \
+    --default-signal=HUP \
+    --default-signal=INT \
+    --default-signal=TERM \
+    DOTNET_BUNDLE_EXTRACT_BASE_DIR="$bundle_root" \
+    "$gui_path" "$@" &
+child_pid=$!
+if [[ -n "$requested_signal_name" ]] && is_active_child_job; then
+    kill -s "$requested_signal_name" -- "$child_pid" 2>/dev/null || true
+fi
+
+status=0
+while true; do
+    set +e
+    wait "$child_pid"
+    status=$?
+    set -e
+
+    if ! is_active_child_job; then
+        break
+    fi
+done
+child_pid=""
+
+if [[ -n "$requested_exit_status" ]]; then
+    exit "$requested_exit_status"
+fi
 exit "$status"
