@@ -135,6 +135,23 @@ if (!$version) {
 ##########
 Set-Location "$PSScriptRoot/../.."
 
+function Get-UnixHardLinkCount {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+
+    $count = if ($IsMacOS) {
+        & stat -f '%l' -- $Path
+    }
+    else {
+        & stat -c '%h' -- $Path
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed reading the hard-link count for '$Path'."
+    }
+    return $count
+}
+
 function Assert-PinnedGitHubCliFile {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
@@ -147,8 +164,8 @@ function Assert-PinnedGitHubCliFile {
         throw "The pinned GitHub CLI input '$Path' must be an ordinary non-link file."
     }
     if (!$IsWindows) {
-        $hardLinkCount = & stat -c '%h' -- $item.FullName
-        if ($LASTEXITCODE -ne 0 -or $hardLinkCount -ne "1") {
+        $hardLinkCount = Get-UnixHardLinkCount $item.FullName
+        if ($hardLinkCount -ne "1") {
             throw "The pinned GitHub CLI input '$Path' must have exactly one hard link."
         }
     }
@@ -181,8 +198,8 @@ function Assert-LinuxGuiPublishOutput {
         throw "The Linux graphical-installer publish output must contain exactly one nonempty ordinary 'SMAPI.Installer.Gui' apphost."
     }
     if (!$IsWindows) {
-        $hardLinkCount = & stat -c '%h' -- $entries[0].FullName
-        if ($LASTEXITCODE -ne 0 -or $hardLinkCount -ne "1") {
+        $hardLinkCount = Get-UnixHardLinkCount $entries[0].FullName
+        if ($hardLinkCount -ne "1") {
             throw "The Linux graphical-installer apphost must have exactly one hard link."
         }
     }
@@ -361,8 +378,8 @@ foreach ($folder in $folders) {
             throw "The packaged Linux graphical-installer apphost isn't the exact ordinary published file."
         }
         if (!$IsWindows) {
-            $hardLinkCount = & stat -c '%h' -- $packagedGui.FullName
-            if ($LASTEXITCODE -ne 0 -or $hardLinkCount -ne "1") {
+            $hardLinkCount = Get-UnixHardLinkCount $packagedGui.FullName
+            if ($hardLinkCount -ne "1") {
                 throw "The packaged Linux graphical-installer apphost must have exactly one hard link."
             }
         }
@@ -495,8 +512,8 @@ else {
 
     if (@($folders) -contains "linux") {
         foreach ($path in @("install on Linux.sh", "install on Linux (graphical).sh", "internal/linux/SMAPI.Installer", "internal/linux/SMAPI.Installer.Gui")) {
-            $mode = & stat -c '%a' -- "$packagePath/$path"
-            if ($LASTEXITCODE -ne 0 -or $mode -ne "755") {
+            $mode = [int][System.IO.File]::GetUnixFileMode("$packagePath/$path")
+            if ($mode -ne 493) {
                 throw "The packaged Linux executable '$path' must have exact mode 755."
             }
         }
