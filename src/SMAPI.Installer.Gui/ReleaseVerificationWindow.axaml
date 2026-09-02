@@ -174,12 +174,12 @@
                 Classes="primary focus-ring"
                 Margin="0,0,12,10"
                 TabIndex="2"
-                AutomationProperties.AccessKey="Alt+D"
+                AutomationProperties.AccessKey="Alt+W"
                 AutomationProperties.Name="Download and verify selected release"
                 AutomationProperties.HelpText="Downloads and verifies the selected release without installing it."
                 Command="{Binding DownloadAndVerifyCommand}"
                 IsVisible="{Binding IsDownloadActionVisible}"
-                Content="_Download and verify" />
+                Content="Do_wnload and verify" />
             <Button
                 x:Name="RetryButton"
                 Classes="primary focus-ring"
