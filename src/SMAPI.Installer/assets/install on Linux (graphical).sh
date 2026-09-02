@@ -22,6 +22,7 @@ requested_signal_name=""
 requested_exit_status=""
 signal_forwarded=false
 signal_deadline=0
+handled_signal_count=0
 bundle_cleanup_allowed=true
 settlement_failed=false
 settlement_status=0
@@ -81,38 +82,63 @@ kill_live_direct_job_fallback() {
 }
 
 force_kill_and_settle_child() {
+    # Settlement is terminal. Change later handled signals to SIG_IGN here, outside their trap
+    # handler, so they can't interrupt KILL/reap or trigger Bash's pending-trap warning.
+    trap '' HUP INT TERM
     local settlement_deadline=$((SECONDS + 3))
+    local settlement_stderr_fd=""
+    local process_state=""
+    local ignored_start_time=""
+    local process_state_known=false
+    local reap_ready=false
 
     [[ -n "$child_pid" ]] || return 0
-    # Settlement is terminal. The first requested signal/status was already retained, so later
-    # handled signals must not interrupt wait or reenter forwarding while KILL/reap is in progress.
-    trap '' HUP INT TERM
-    if is_active_child_job; then
-        if ! send_exact_signal KILL; then
-            kill_live_direct_job_fallback || true
-        fi
-    fi
+    exec {settlement_stderr_fd}>&2
+    exec 2>/dev/null
 
     while is_active_child_job; do
-        if is_running_child_job || is_stopped_child_job; then
-            if ! send_exact_signal KILL; then
-                kill_live_direct_job_fallback || true
+        process_state=""
+        ignored_start_time=""
+        process_state_known=false
+        reap_ready=false
+        if read -r process_state ignored_start_time < <(read_process_state_and_start_time "$child_pid"); then
+            process_state_known=true
+            if [[ "$process_state" == "Z" || "$process_state" == "X" ]]; then
+                reap_ready=true
             fi
+        elif ! kill -0 -- "$child_pid" 2>/dev/null; then
+            reap_ready=true
         fi
-        if ! is_running_child_job && ! is_stopped_child_job; then
+
+        if [[ "$reap_ready" == true ]]; then
             set +e
             wait "$child_pid" 2>/dev/null
             settlement_status=$?
             set -e
+            # Bash can retain a completed `jobs -p` bookkeeping entry even after wait. The
+            # terminal/absent kernel state above proves the process is no longer live, so don't
+            # gate successful settlement on that stale shell entry.
+            child_pid=""
+            exec 2>&"$settlement_stderr_fd"
+            exec {settlement_stderr_fd}>&-
+            return 0
+        elif [[ "$process_state_known" == true ]] && { is_running_child_job || is_stopped_child_job; }; then
+            if ! send_exact_signal KILL; then
+                kill_live_direct_job_fallback || true
+            fi
         fi
 
         if ! is_active_child_job; then
             child_pid=""
+            exec 2>&"$settlement_stderr_fd"
+            exec {settlement_stderr_fd}>&-
             return 0
         fi
         if (( SECONDS >= settlement_deadline )); then
             settlement_failed=true
             bundle_cleanup_allowed=false
+            exec 2>&"$settlement_stderr_fd"
+            exec {settlement_stderr_fd}>&-
             printf '%s\n' "The graphical installer couldn't safely settle its child process; temporary runtime files were retained." >&2
             return 1
         fi
@@ -120,6 +146,8 @@ force_kill_and_settle_child() {
     done
 
     child_pid=""
+    exec 2>&"$settlement_stderr_fd"
+    exec {settlement_stderr_fd}>&-
     return 0
 }
 
@@ -145,8 +173,8 @@ capture_exact_child_identity() {
     is_running_child_job || return 1
     read -r process_state start_time < <(read_process_state_and_start_time "$child_pid") || return 1
     [[ "$process_state" != "Z" && "$process_state" != "X" ]] || return 1
-    proc_inode="$(stat -Lc '%i' -- "/proc/$child_pid")" || return 1
-    executable="$(readlink -e -- "/proc/$child_pid/exe")" || return 1
+    proc_inode="$(stat -Lc '%i' -- "/proc/$child_pid" 2>/dev/null)" || return 1
+    executable="$(readlink -e -- "/proc/$child_pid/exe" 2>/dev/null)" || return 1
     [[ "$executable" == "$gui_path" ]] || return 1
 
     child_start_time="$start_time"
@@ -164,8 +192,8 @@ is_exact_child_running() {
     is_running_child_job || return 1
     read -r process_state current_start_time < <(read_process_state_and_start_time "$child_pid") || return 1
     [[ "$process_state" != "Z" && "$process_state" != "X" ]] || return 1
-    current_proc_inode="$(stat -Lc '%i' -- "/proc/$child_pid")" || return 1
-    current_executable="$(readlink -e -- "/proc/$child_pid/exe")" || return 1
+    current_proc_inode="$(stat -Lc '%i' -- "/proc/$child_pid" 2>/dev/null)" || return 1
+    current_executable="$(readlink -e -- "/proc/$child_pid/exe" 2>/dev/null)" || return 1
     [[
         "$current_start_time" == "$child_start_time"
         && "$current_proc_inode" == "$child_proc_inode"
@@ -191,13 +219,14 @@ forward_pending_signal() {
 }
 
 record_signal() {
+    if (( handled_signal_count++ > 0 )); then
+        return 0
+    fi
     local signal_name="$1"
     local exit_status="$2"
 
-    if [[ -z "$requested_exit_status" ]]; then
-        requested_signal_name="$signal_name"
-        requested_exit_status="$exit_status"
-    fi
+    requested_signal_name="$signal_name"
+    requested_exit_status="$exit_status"
     forward_pending_signal
 }
 

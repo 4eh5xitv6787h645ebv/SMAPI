@@ -700,7 +700,8 @@ run_launcher_signal_smoke() {
 run_identity_failure_smoke() {
     local scenario="$1"
     local fail_after expected_status case_name launch_argument read_delay expect_failure_marker
-    local state_root output_path status expected_output identity_failure_marker identity_read_count
+    local state_root output_path launcher_output expected_launcher_output status
+    local identity_failure_marker identity_read_count
 
     case "$scenario" in
         initial)
@@ -735,7 +736,21 @@ run_identity_failure_smoke() {
 
     state_root="$(make_state_root "$case_name")"
     output_path="$test_root/$case_name.output"
-    expected_output="$test_root/$case_name.expected"
+    launcher_output="$state_root/launcher-output"
+    expected_launcher_output="$state_root/expected-launcher-output"
+    case "$scenario" in
+        initial)
+            printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." \
+                > "$expected_launcher_output"
+            ;;
+        post-capture)
+            : > "$expected_launcher_output"
+            ;;
+        completed-job)
+            printf '%s\n' 'The graphical installer accepts either no arguments or exactly --demo.' \
+                > "$expected_launcher_output"
+            ;;
+    esac
     identity_failure_marker="$test_root/$case_name.failure-marker"
     identity_read_count="$test_root/$case_name.read-count"
     set +e
@@ -773,6 +788,8 @@ run_identity_failure_smoke() {
                     read_delay="${11}"
                     launch_argument="${12}"
                     expect_failure_marker="${13}"
+                    launcher_output="${14}"
+                    expected_launcher_output="${15}"
                     launcher_pid=""
                     gui_pid=""
                     gui_start_time=""
@@ -869,7 +886,8 @@ run_identity_failure_smoke() {
                         SMAPI_GUI_EXPECTED_LAUNCHER="$launcher" \
                         SMAPI_GUI_EXPECTED_LAUNCHER_BASH="$launcher_bash" \
                         bash -c "export SMAPI_GUI_EXPECTED_LAUNCHER_PID=\"\$BASHPID\"; exec \"\$1\" \"\$2\"" \
-                            identity-launcher-trampoline "$launcher" "$launch_argument" &
+                            identity-launcher-trampoline "$launcher" "$launch_argument" \
+                            > "$launcher_output" 2>&1 &
                     launcher_pid=$!
                     for _ in {1..1500}; do
                         if [[ -r "/proc/$launcher_pid/task/$launcher_pid/children" ]]; then
@@ -936,6 +954,7 @@ run_identity_failure_smoke() {
                     set -e
                     launcher_pid=""
                     [[ "$launcher_status" -eq "$expected_status" ]] || fail_case LAUNCHER_STATUS_MISMATCH
+                    cmp -s -- "$expected_launcher_output" "$launcher_output" || fail_case LAUNCHER_OUTPUT_MISMATCH
                     if [[ "$expect_failure_marker" == true ]]; then
                         [[ -f "$identity_failure_marker" ]] || fail_case FAILURE_INJECTION_NOT_OBSERVED
                     else
@@ -964,7 +983,7 @@ run_identity_failure_smoke() {
                         fail_case PRIVATE_BUNDLE_REMAINED
                     fi
                     trap - EXIT
-                ' identity-failure-supervisor "$launcher" "$gui_apphost" "$state_root" "$identity_guarded_path" "$identity_failure_marker" "$identity_read_count" "$fail_after" "$scenario" "$expected_status" "$launcher_bash" "$read_delay" "$launch_argument" "$expect_failure_marker"
+                ' identity-failure-supervisor "$launcher" "$gui_apphost" "$state_root" "$identity_guarded_path" "$identity_failure_marker" "$identity_read_count" "$fail_after" "$scenario" "$expected_status" "$launcher_bash" "$read_delay" "$launch_argument" "$expect_failure_marker" "$launcher_output" "$expected_launcher_output"
     ) > "$output_path" 2>&1
     status=$?
     set -e
@@ -979,19 +998,8 @@ run_identity_failure_smoke() {
         echo "The packaged graphical launcher did not fail closed in the $scenario child-identity scenario (code: $failure_code); raw output is withheld from CI logs." >&2
         exit 1
     fi
-    case "$scenario" in
-        initial)
-            printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." > "$expected_output"
-            ;;
-        post-capture)
-            : > "$expected_output"
-            ;;
-        completed-job)
-            printf '%s\n' 'The graphical installer accepts either no arguments or exactly --demo.' > "$expected_output"
-            ;;
-    esac
-    if ! cmp -s -- "$expected_output" "$output_path"; then
-        echo "The packaged graphical launcher emitted an unexpected $scenario child-identity failure diagnostic; raw output is withheld from CI logs." >&2
+    if [[ -s "$output_path" ]]; then
+        echo "The packaged graphical launcher identity-failure supervisor emitted unexpected output in the $scenario scenario; raw output is withheld from CI logs." >&2
         exit 1
     fi
     assert_no_runtime_leak "$state_root" "$output_path"
