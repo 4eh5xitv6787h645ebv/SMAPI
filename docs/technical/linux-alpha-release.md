@@ -58,6 +58,11 @@ directory under the configured temporary root. The supported first desktop path 
 not Avalonia's experimental native Wayland backend; headless and native-Wayland-only sessions can
 use the terminal launcher.
 
+The two launchers share a package, not an installation safety model. The GUI uses the private Core
+protocol with reviewed plans, receipts, journals, recovery, history, and authenticated rollback. The
+console launcher runs the retained legacy `InteractiveInstaller`, which directly supports only
+install and uninstall. Its exact limitations are documented below.
+
 Alpha 2 creates one bounded private graphical-installer diagnostic session before
 Avalonia, release-catalog networking, game discovery, or backend startup. Every production screen
 can open a stable sanitized snapshot through **View diagnostic log**. The graphical workflow can
@@ -170,22 +175,44 @@ confirm it on the separate final screen before using **Run operation**. A succes
 plan does not itself change game files. See the [graphical workflow guide](linux-gui-shell.md) for
 every operation and error state.
 
-For a terminal-only session, use the fallback from that same package:
+For a terminal-only session, use the fallback from that same verified package as the normal desktop
+user. Do not use `sudo`:
 
 ```bash
+cd "/path/to/extracted/SMAPI installer"
 bash "install on Linux.sh"
 ```
 
-Konsole, Alacritty, GNOME Terminal, and xterm are detected by the terminal launcher. A headless or scripted
-installation can call the existing installer behavior directly:
+Konsole, Alacritty, GNOME Terminal, and xterm are detected by the launcher when it was opened outside
+an existing terminal. That launch result is not a reliable automation result. The published alpha 2
+wrapper does not forward command-line options, so a headless or scripted installation must invoke
+the packaged apphost directly with one action and an absolute game path:
 
 ```bash
+cd "/path/to/extracted/SMAPI installer"
 ./internal/linux/SMAPI.Installer \
   --no-prompt --install --game-path "/absolute/path/to/Stardew Valley"
 ```
 
-A successful headless operation exits 0. Invalid arguments exit 2; unexpected filesystem or
-runtime failures exit 1. The installer never needs root for a user-owned game installation.
+For alpha 2, `--no-prompt` is reliably non-interactive only when `--install` or `--uninstall` and a
+valid absolute `--game-path` are supplied. Exit `0` means the requested legacy action reached its
+normal success return. Exit `2` means a known validation path returned false, including root use,
+missing installer files, conflicting install/uninstall flags, a missing required action or option
+value, or an invalid game folder. Unknown or positional arguments are ignored, so use only the exact
+commands shown here. Exit `1` means an unexpected exception, filesystem failure, or runtime failure
+escaped the legacy flow. Shell and signal exits can produce other statuses. Exit `1` or a signal can
+occur after direct mutation began; no exit status alone proves unchanged state or successful
+rollback. Treat every nonzero exit as failure and inspect the game folder before launching or
+retrying. Console output can include the selected game path and full exception text, so review it
+before sharing.
+
+The current unreleased source adds two fail-closed safeguards for the next prerelease: the wrapper
+rejects supplied options with status 2 instead of silently dropping them, and a prompt-free request
+without `--game-path` returns status 2 before game discovery. Those safeguards do not change the
+published alpha 2 package.
+
+The private `--linux-protocol-v1-jsonl` mode is reserved for the graphical frontend. It is not a
+supported manual or scripting interface.
 
 ## Update or repair
 
@@ -205,6 +232,13 @@ saves, current SMAPI logs, and local Mod Health Reports are not uninstall target
 The two bundled mods, Console Commands and Save Backup, are updated in place. An uninstall
 intentionally leaves them in `Mods`, just as the upstream installer does.
 
+The legacy terminal installer has no separate Update or Repair operation. Selecting Install first
+removes its compiled list of known SMAPI files and then copies the new payload. Repeating Install is
+therefore not a receipt-authenticated update or repair: there is no read-only Core plan,
+authenticated current-version relationship, exact per-file approval, transaction journal, or
+automatic rollback. Back up first. If the legacy action fails after mutation begins, do not assume
+either the old or new installation is intact.
+
 ## Uninstall or roll back
 
 Keep the verified alpha installer used for the current installation. To return to vanilla, inspect
@@ -212,12 +246,18 @@ and explicitly confirm **Uninstall** in the GUI. It restores the authenticated l
 removes receipt-owned fork files while preserving unrelated game files, `Mods`, saves, logs, and
 reports.
 
-The terminal fallback can uninstall with:
+The legacy terminal fallback can uninstall with:
 
 ```bash
 ./internal/linux/SMAPI.Installer \
   --no-prompt --uninstall --game-path "/absolute/path/to/Stardew Valley"
 ```
+
+That command removes the legacy installer's hard-coded known-file list and restores
+`StardewValley-original` when that backup exists. It does not authenticate a GUI/Core receipt or
+recovery generation and has no journal, crash recovery, or rollback. It is not equivalent to the
+GUI's reviewed **Uninstall** operation. Preserve custom mods, saves, logs, reports, and backups; on a
+nonzero result, inspect the folder instead of recursively deleting it.
 
 For an authenticated GUI rollback, select **Load or refresh history**, select one generation,
 choose **Inspect rollback**, review the exact restored release/state and downgrade risk, then use
@@ -239,19 +279,36 @@ To roll back to official SMAPI 4.5.2 or an earlier verified fork package:
 
 ## Manual installation path
 
-The supported console installer is strongly preferred because it owns the file list and launcher
-backup rules. If terminal automation cannot run it, `internal/linux/install.dat` is a normal ZIP:
+Raw extraction is an unsupported last resort for a fresh installation when neither packaged launcher
+can run. It is not a manual form of the GUI transaction. It does not verify the release, detect or
+approve modified or unknown files, create a manifest or receipt, journal changes, roll back a
+partial copy, recover after interruption, create authenticated history, or support authenticated
+rollback.
 
-1. Extract `install.dat` into a staging directory.
-2. Back up `StardewValley` as `StardewValley-original` without overwriting an existing backup.
-3. Copy the staged payload into the game directory without deleting unrelated files.
-4. Copy `Stardew Valley.deps.json` to `StardewModdingAPI-net6.deps.json`.
-5. Rename staged `unix-launcher.sh` to `StardewValley`.
-6. Mark `StardewValley`, `StardewModdingAPI`, both `StardewModdingAPI-net*` hosts, and every
+1. Close the game and back up the entire game folder, saves, and `Mods` to a separate location.
+2. Download all six release assets into one new directory and complete
+   [every checksum and attestation check](#verify-before-extracting-or-running). Verify the outer ZIP
+   before extracting any part of it; `install.dat` is not independently authenticated by the legacy
+   installer.
+3. Extract the verified outer installer ZIP into a new staging directory. Do not run or copy from an
+   Actions artifact, pull-request artifact, mirror, or mixed set of files.
+4. Confirm this is a fresh target: no SMAPI host, `smapi-internal`, `unix-launcher.sh`, or
+   `StardewValley-original` may already exist in the game folder. If any does, stop and use a verified
+   installer or restore a known backup; do not overwrite an unknown file or launcher backup.
+5. Treat `internal/linux/install.dat` as a ZIP and extract it into a second staging directory. Do not
+   extract it directly over the game folder.
+6. Copy the staged payload into the game folder without deleting or replacing unrelated files. Treat
+   an existing destination as a collision and stop. The staged `Mods` directory contains only the two
+   bundled mods; copy them only after separately backing up any same-named mod folder.
+7. Copy `Stardew Valley.deps.json` to `StardewModdingAPI-net6.deps.json` without changing its bytes or
+   mode.
+8. Move the original `StardewValley` launcher to `StardewValley-original` without overwriting a
+   destination, then rename the copied `unix-launcher.sh` in the game folder to `StardewValley`.
+9. Mark `StardewValley`, `StardewModdingAPI`, both `StardewModdingAPI-net*` hosts, and every
    private-runtime `createdump` executable as mode 755. The private app-relative runtime contains
    `host/fxr` and `shared/Microsoft.NETCore.App`; it intentionally does not bundle the `dotnet` CLI.
 
-For alpha 2, step 4 must preserve both exact bytes and Unix mode:
+For alpha 2, step 7 must preserve both exact bytes and Unix mode:
 
 ```bash
 cp --preserve=mode -- "Stardew Valley.deps.json" "StardewModdingAPI-net6.deps.json"
@@ -259,8 +316,11 @@ cp --preserve=mode -- "Stardew Valley.deps.json" "StardewModdingAPI-net6.deps.js
 
 The alpha 2 dispatcher validates that file instead of creating or refreshing it at launch.
 
-Manual removal must follow the exact file manifest in the installer source. Do not recursively
-delete the game folder, `Mods`, saves, `ErrorLogs`, or `HealthReports`.
+There is no safe generic raw-extraction update, repair, uninstall, or rollback recipe. Prefer the
+verified GUI; otherwise use the legacy console uninstaller with the limitations above or restore the
+complete backup made before step 1. Never recursively delete the game folder, `Mods`, saves,
+`ErrorLogs`, `HealthReports`, `.smapi-installer`, or other user data. Never use a broad wildcard or
+recursive delete to imitate the legacy installer's known-file list.
 
 ## Diagnostics, privacy, and limitations
 
@@ -300,9 +360,10 @@ of work which was already admitted.
 | Diagnostic log unavailable | Close any other graphical installer session, check free space and normal-user ownership of the XDG state location, then start a fresh session. Do not remove the lock, run as root, or recursively change unrelated permissions. |
 | GUI unavailable in a headless or native-Wayland-only session | Use `bash "install on Linux.sh"` from the same verified package, or the documented direct headless command. |
 
-The retained terminal and headless paths are the supported non-GUI fallback. Last-resort manual
-extraction remains documented separately because it cannot provide the console/Core installer's
-ownership, backup, validation, or rollback decisions automatically.
+The retained terminal and headless paths are the supported non-GUI fallback, but they run the legacy
+install/uninstall implementation rather than the GUI's Core protocol. Last-resort raw extraction is
+narrower still and cannot provide Core ownership, planning, receipts, journaling, recovery, history,
+or authenticated rollback.
 
 The published performance comparison describes one controlled workstation and workload. It is not
 a universal FPS, power, CPU-use, or latency claim. Alpha 2 rechecks path identities to catch ordinary
