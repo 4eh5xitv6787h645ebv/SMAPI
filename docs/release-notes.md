@@ -6,6 +6,25 @@ title: Release notes
 ← [Documentation home](index.md)
 
 # Release notes
+
+## Unreleased Linux graphical installer candidate
+
+This development-only candidate is not part of the published alpha.1 and is not publicly available
+as a tagged graphical release. It keeps the existing terminal launcher in the same candidate ZIP.
+
+* Added one bounded, local-only private diagnostic session before graphical desktop or network
+  startup, with fail-closed startup and pre-mutation readiness checks.
+* Added **View diagnostic log** to all five production workflow screens. The keyboard-accessible
+  viewer shows an immutable sanitized snapshot, supports bounded write-only clipboard copies,
+  and excludes local paths, URLs, credentials, backend prose, operation/release/package/protocol
+  identifiers, digests, and private workload names.
+* Hardened private JSONL permissions, identity checks, byte/count rotation, truncation, concurrency,
+  progress coalescing, and terminal-event retention. No telemetry or automatic upload was added.
+* Documented graphical diagnostics, troubleshooting, X11/XWayland support boundaries, and the
+  retained terminal, headless, and last-resort manual fallback paths in the
+  [graphical installer guide](technical/linux-gui-shell.md) and
+  [Linux alpha guide](technical/linux-alpha-release.md).
+
 ## Linux fork 4.5.3 alpha 1
 
 This is an **unofficial experimental Linux x86_64 fork** based on official SMAPI 4.5.2. Its
