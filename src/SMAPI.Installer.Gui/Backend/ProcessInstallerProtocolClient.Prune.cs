@@ -508,7 +508,6 @@ internal sealed partial class ProcessInstallerProtocolClient
             && plan.GameRoot.DeviceMajor == catalog.GameRoot.DeviceMajor
             && plan.GameRoot.DeviceMinor == catalog.GameRoot.DeviceMinor
             && plan.GameRoot.Inode == catalog.GameRoot.Inode
-            && plan.GameRoot.OperationGeneration == catalog.GameRoot.OperationGeneration
             && plan.HeadSha256 == catalog.HeadSha256
             && plan.RetainNewest == retainNewest
             && plan.RetainedSelectionIds.SequenceEqual(retained)

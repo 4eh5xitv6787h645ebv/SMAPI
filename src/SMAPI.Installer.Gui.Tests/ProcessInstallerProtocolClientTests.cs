@@ -4578,6 +4578,7 @@ public sealed class ProcessInstallerProtocolClientTests
             ProtocolRecoveryGeneration[] removedGenerations = catalog.Generations.Skip(request.RetainNewest).ToArray();
             ProtocolRecoverySelectionId[] retained = retainedGenerations.Select(value => value.SelectionId).ToArray();
             ProtocolRecoverySelectionId[] removed = removedGenerations.Select(value => value.SelectionId).ToArray();
+            ProtocolGameRootIdentity executableRoot = catalog.GameRoot with { OperationGeneration = 7 };
             string[] cleanup = this.SubstituteCleanupGeneration
                 ? ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]
                 : removedGenerations.Select(value => value.GenerationId).ToArray();
@@ -4586,7 +4587,7 @@ public sealed class ProcessInstallerProtocolClientTests
             ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(
                 ExecutionDigest,
                 catalog.CatalogId,
-                catalog.GameRoot,
+                executableRoot,
                 catalog.HeadSha256,
                 request.RetainNewest,
                 retained,
@@ -4603,7 +4604,7 @@ public sealed class ProcessInstallerProtocolClientTests
                 digest,
                 ExecutionDigest,
                 catalog.CatalogId,
-                catalog.GameRoot,
+                executableRoot,
                 catalog.HeadSha256,
                 request.RetainNewest,
                 retained,
