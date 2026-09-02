@@ -702,6 +702,317 @@ internal sealed class VerifiedInstallerSessionTests
     }
 
     [Test]
+    public async Task RecoveryPruneRemintsExactPointAndConfirmationWithoutLeakingClientAuthority()
+    {
+        InstallerRecoveryPoint[] backendPoints = [RecoveryPoint(1, current: true), RecoveryPoint(2, current: false), RecoveryPoint(3, current: false)];
+        InstallerRecoveryPruneConfirmation backendConfirmation = new();
+        InstallerRecoveryPrunePlanSuccess backendPlan = RecoveryPrunePlan() with { Confirmation = backendConfirmation };
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("prune-remint", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess(backendPoints)),
+            PruneInspection = (_, point, _) =>
+            {
+                point.Should().BeSameAs(backendPoints[1]);
+                return Task.FromResult<InstallerRecoveryPrunePlanResult>(backendPlan);
+            }
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints[1];
+        BoundInstallerRecoveryPoint reconstructed = new(
+            point.Ordinal,
+            point.IsCurrent,
+            point.IsUserCheckpoint,
+            point.OriginOperation,
+            point.RestoreTarget
+        );
+
+        await FluentActions.Awaiting(() => bound.InspectRecoveryPruneAsync(reconstructed)).Should().ThrowAsync<ArgumentException>();
+        client.PruneInspections.Should().BeEmpty();
+
+        BoundInstallerRecoveryPrunePlanSuccess plan = (await bound.InspectRecoveryPruneAsync(point))
+            .Should().BeOfType<BoundInstallerRecoveryPrunePlanSuccess>().Subject;
+        plan.Should().BeEquivalentTo(backendPlan, options => options.Excluding(member => member.Name == nameof(InstallerRecoveryPrunePlanSuccess.Confirmation)));
+        plan.Confirmation.Should().NotBeNull().And.NotBeSameAs(backendConfirmation);
+        client.PruneInspections.Should().ContainSingle().Which.Should().Be(("/games/prune-remint", backendPoints[1]));
+
+        foreach (Type projection in new[]
+        {
+            typeof(BoundInstallerRecoveryPrunePlanSuccess),
+            typeof(BoundInstallerRecoveryPrunePlanRejection),
+            typeof(BoundInstallerRecoveryPruneConfirmation)
+        })
+        {
+            projection.GetProperties().Should().NotContain(property =>
+                property.PropertyType == typeof(string)
+                || property.Name.Contains("Digest", StringComparison.OrdinalIgnoreCase)
+                || property.Name.EndsWith("Id", StringComparison.OrdinalIgnoreCase)
+                || property.Name.Contains("Path", StringComparison.OrdinalIgnoreCase)
+                || property.PropertyType == typeof(InstallerRecoveryPruneConfirmation));
+        }
+    }
+
+    [Test]
+    public async Task RecoveryPruneRejectionRequiresFreshCatalogAndExactReselection()
+    {
+        InstallerRecoveryPoint firstPoint = RecoveryPoint(1, current: true);
+        InstallerRecoveryPoint secondPoint = RecoveryPoint(1, current: true);
+        Queue<InstallerRecoveryPoint> catalogs = new([firstPoint, secondPoint]);
+        int inspections = 0;
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("prune-retry", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([catalogs.Dequeue()])),
+            PruneInspection = (_, _, _) => Task.FromResult<InstallerRecoveryPrunePlanResult>(inspections++ == 0
+                ? new InstallerRecoveryPrunePlanRejection(ProtocolPrePlanErrorCode.NothingToPrune, ProtocolNextAction.ListRecoveries, false)
+                : RecoveryPrunePlan(retainNewest: 1, retainedCount: 1, removedCount: 0, auxiliaryCleanupPlanned: true))
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        await using IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint stale = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+
+        BoundInstallerRecoveryPrunePlanRejection rejection = (BoundInstallerRecoveryPrunePlanRejection)await bound.InspectRecoveryPruneAsync(stale);
+        rejection.NextAction.Should().Be(ProtocolNextAction.ListRecoveries);
+        await FluentActions.Awaiting(() => bound.InspectRecoveryPruneAsync(stale)).Should().ThrowAsync<ArgumentException>();
+
+        BoundInstallerRecoveryPoint fresh = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        (await bound.InspectRecoveryPruneAsync(fresh)).Should().BeOfType<BoundInstallerRecoveryPrunePlanSuccess>();
+        client.PruneInspections.Select(call => call.Point).Should().Equal(firstPoint, secondPoint);
+    }
+
+    [TestCase(HostilePrunePlan.NegativeCount)]
+    [TestCase(HostilePrunePlan.WrongRetentionBoundary)]
+    [TestCase(HostilePrunePlan.MissingConfirmation)]
+    [TestCase(HostilePrunePlan.WrongRisk)]
+    [TestCase(HostilePrunePlan.NoConfirmationRequired)]
+    [TestCase(HostilePrunePlan.CleanupSmallerThanRemoved)]
+    [TestCase(HostilePrunePlan.WarningOverflow)]
+    [TestCase(HostilePrunePlan.WrongRecommendedDefault)]
+    [TestCase(HostilePrunePlan.DuplicateRisk)]
+    [TestCase(HostilePrunePlan.TrueNoOp)]
+    public async Task MalformedRecoveryPruneProjectionFailsClosedAndDisposesOnce(HostilePrunePlan hostile)
+    {
+        InstallerRecoveryPrunePlanSuccess malformed = hostile switch
+        {
+            HostilePrunePlan.NegativeCount => RecoveryPrunePlan() with { RemovedCount = -1 },
+            HostilePrunePlan.WrongRetentionBoundary => RecoveryPrunePlan(retainNewest: 1, retainedCount: 1, removedCount: 2),
+            HostilePrunePlan.MissingConfirmation => RecoveryPrunePlan() with { Confirmation = null },
+            HostilePrunePlan.WrongRisk => RecoveryPrunePlan() with { Risks = [ProtocolPlanRisk.Rollback] },
+            HostilePrunePlan.NoConfirmationRequired => RecoveryPrunePlan() with { RequiresConfirmation = false },
+            HostilePrunePlan.CleanupSmallerThanRemoved => RecoveryPrunePlan() with { CleanupGenerationCount = 0 },
+            HostilePrunePlan.WarningOverflow => RecoveryPrunePlan() with { WarningCount = 257 },
+            HostilePrunePlan.WrongRecommendedDefault => RecoveryPrunePlan() with { RecommendedDefault = (ProtocolRecommendedDefault)999 },
+            HostilePrunePlan.DuplicateRisk => RecoveryPrunePlan() with { Risks = [ProtocolPlanRisk.RecoveryPrune, ProtocolPlanRisk.RecoveryPrune] },
+            HostilePrunePlan.TrueNoOp => RecoveryPrunePlan(retainNewest: 3, retainedCount: 3, removedCount: 0),
+            _ => throw new ArgumentOutOfRangeException(nameof(hostile), hostile, null)
+        };
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("prune-malformed", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([
+                RecoveryPoint(1, current: true), RecoveryPoint(2, current: false), RecoveryPoint(3, current: false)
+            ])),
+            PruneInspection = (_, _, _) => Task.FromResult<InstallerRecoveryPrunePlanResult>(malformed)
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints[1];
+
+        await FluentActions.Awaiting(() => bound.InspectRecoveryPruneAsync(point)).Should().ThrowAsync<InstallerProtocolClientException>();
+        client.DisposeCalls.Should().Be(1);
+        await bound.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task AuxiliaryOnlyRecoveryPruneCanConfirmAndExecuteThroughTheReducedOwner()
+    {
+        InstallerRecoveryPoint[] backendPoints = [RecoveryPoint(1, current: true), RecoveryPoint(2, current: false), RecoveryPoint(3, current: false)];
+        InstallerRecoveryPruneConfirmation backendConfirmation = new();
+        InstallerConfirmedRecoveryPruneAuthority backendAuthority = new();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("prune-auxiliary", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess(backendPoints)),
+            PruneInspection = (_, _, _) => Task.FromResult<InstallerRecoveryPrunePlanResult>(
+                RecoveryPrunePlan(retainNewest: 3, retainedCount: 3, removedCount: 0, auxiliaryCleanupPlanned: true) with { Confirmation = backendConfirmation }
+            ),
+            PruneConfirmation = (confirmation, _) =>
+            {
+                confirmation.Should().BeSameAs(backendConfirmation);
+                return Task.FromResult(backendAuthority);
+            }
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints[^1];
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+
+        IConfirmedRecoveryPruneSession confirmed = await bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+        InstallerRecoveryPruneOperation operation = await confirmed.ExecuteAsync();
+        (await operation.Completion).Should().BeOfType<InstallerRecoveryPruneTerminalResult>();
+        client.ConfirmedPrunes.Should().ContainSingle().Which.Should().BeSameAs(backendConfirmation);
+        client.ExecutedPrunes.Should().ContainSingle().Which.Should().BeSameAs(backendAuthority);
+        await confirmed.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ForeignPruneConfirmationFailsLocallyAndPreservesTheExactCurrentCapability()
+    {
+        InstallerRecoveryPruneConfirmation backendConfirmation = new();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("prune-confirm", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([RecoveryPoint(1, current: true)])),
+            PruneInspection = (_, _, _) => Task.FromResult<InstallerRecoveryPrunePlanResult>(
+                RecoveryPrunePlan(retainNewest: 1, retainedCount: 1, removedCount: 0, auxiliaryCleanupPlanned: true) with { Confirmation = backendConfirmation }
+            )
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+
+        await FluentActions.Awaiting(() => bound.ConfirmRecoveryPruneAsync(new BoundInstallerRecoveryPruneConfirmation())).Should().ThrowAsync<ArgumentException>();
+        client.ConfirmedPrunes.Should().BeEmpty();
+
+        await using IConfirmedRecoveryPruneSession confirmed = await bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+        client.ConfirmedPrunes.Should().ContainSingle().Which.Should().BeSameAs(backendConfirmation);
+        await bound.DisposeAsync();
+        await session.DisposeAsync();
+        client.DisposeCalls.Should().Be(0, "only the confirmed prune owner retains cleanup authority");
+    }
+
+    [Test]
+    public async Task ConcurrentPruneConfirmationPublishesExactlyOneConfirmedOwner()
+    {
+        TaskCompletionSource releaseConfirmation = NewCompletion();
+        RecordingClient client = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate("prune-confirm-race", LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([RecoveryPoint(1, current: true)])),
+            PruneInspection = (_, _, _) => Task.FromResult<InstallerRecoveryPrunePlanResult>(
+                RecoveryPrunePlan(retainNewest: 1, retainedCount: 1, removedCount: 0, auxiliaryCleanupPlanned: true)
+            ),
+            PruneConfirmation = async (_, cancellationToken) =>
+            {
+                await releaseConfirmation.Task.WaitAsync(cancellationToken);
+                return new InstallerConfirmedRecoveryPruneAuthority();
+            }
+        };
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+
+        Task<IConfirmedRecoveryPruneSession> winner = bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+        await client.PruneConfirmationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await FluentActions.Awaiting(() => bound.ConfirmRecoveryPruneAsync(plan.Confirmation!)).Should().ThrowAsync<ObjectDisposedException>();
+        releaseConfirmation.SetResult();
+
+        await using IConfirmedRecoveryPruneSession confirmed = await winner;
+        client.ConfirmedPrunes.Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task PreCancelledPruneExecutionPreservesOneExactRetryAndExecutionIsOneShot()
+    {
+        RecordingClient client = PrunePipelineClient("prune-execute-once");
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+        IConfirmedRecoveryPruneSession confirmed = await bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        await FluentActions.Awaiting(() => confirmed.ExecuteAsync(cancelled.Token)).Should().ThrowAsync<OperationCanceledException>();
+        client.ExecutedPrunes.Should().BeEmpty();
+
+        InstallerRecoveryPruneOperation operation = await confirmed.ExecuteAsync();
+        _ = await operation.Completion;
+        await FluentActions.Awaiting(() => confirmed.ExecuteAsync()).Should().ThrowAsync<ObjectDisposedException>();
+        client.ExecutedPrunes.Should().ContainSingle();
+        await confirmed.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ConcurrentPruneExecutionTransfersExactlyOneOperationAndCleansUpOnce()
+    {
+        RecordingClient client = PrunePipelineClient("prune-execute-race");
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+        IConfirmedRecoveryPruneSession confirmed = await bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+
+        async Task<(InstallerRecoveryPruneOperation? Operation, Exception? Error)> AttemptAsync()
+        {
+            try { return (await confirmed.ExecuteAsync(), null); }
+            catch (Exception error) { return (null, error); }
+        }
+
+        (InstallerRecoveryPruneOperation? Operation, Exception? Error)[] results = await Task.WhenAll(AttemptAsync(), AttemptAsync());
+        results.Should().ContainSingle(result => result.Operation != null && result.Error == null);
+        results.Should().ContainSingle(result => result.Operation == null && result.Error is ObjectDisposedException);
+        client.ExecutedPrunes.Should().ContainSingle();
+        await confirmed.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task PruneStartFailurePublishesStateUnknownAndNeverRestoresExecutionAuthority()
+    {
+        RecordingClient client = PrunePipelineClient(
+            "prune-start-unknown",
+            _ => throw new InvalidOperationException("hostile private failure")
+        );
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+        IConfirmedRecoveryPruneSession confirmed = await bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+
+        InstallerRecoveryPruneOperation operation = await confirmed.ExecuteAsync();
+        (await operation.Completion).Should().BeOfType<InstallerRecoveryPruneStateUnknownResult>();
+        await FluentActions.Awaiting(() => confirmed.ExecuteAsync()).Should().ThrowAsync<ObjectDisposedException>();
+        client.ExecutedPrunes.Should().ContainSingle();
+        await confirmed.DisposeAsync();
+    }
+
+    [Test]
+    public async Task DisposeDuringPruneExecutionRequestsCancellationAndWaitsForTerminalBeforeCleanup()
+    {
+        TaskCompletionSource<InstallerRecoveryPruneResult> completion = NewCompletion<InstallerRecoveryPruneResult>();
+        TaskCompletionSource cancellationRequested = NewCompletion();
+        RecordingClient client = PrunePipelineClient(
+            "prune-dispose",
+            _ => Task.FromResult(RecoveryPruneOperation(completion, () =>
+            {
+                cancellationRequested.TrySetResult();
+                return Task.CompletedTask;
+            }))
+        );
+        await using VerifiedInstallerSession session = new(CreateRelease(), client);
+        IPlanInspectionSession bound = session.BindToGame((await session.DiscoverGamesAsync()).Single());
+        BoundInstallerRecoveryPoint point = ((BoundInstallerRecoveryCatalogSuccess)await bound.ListRecoveriesAsync()).RecoveryPoints.Single();
+        BoundInstallerRecoveryPrunePlanSuccess plan = (BoundInstallerRecoveryPrunePlanSuccess)await bound.InspectRecoveryPruneAsync(point);
+        IConfirmedRecoveryPruneSession confirmed = await bound.ConfirmRecoveryPruneAsync(plan.Confirmation!);
+        InstallerRecoveryPruneOperation operation = await confirmed.ExecuteAsync();
+
+        Task disposal = confirmed.DisposeAsync().AsTask();
+        await cancellationRequested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        disposal.IsCompleted.Should().BeFalse();
+        client.DisposeCalls.Should().Be(0);
+
+        completion.SetResult(new InstallerRecoveryPruneStateUnknownResult());
+        await operation.Completion;
+        await disposal.WaitAsync(TimeSpan.FromSeconds(2));
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
     public async Task TerminalPlanRejectionCleansUpBeforePublishingAndRevokesTheChild()
     {
         ProtocolGameCandidate valid = Candidate("terminal", LinuxGameFolderStatus.Valid);
@@ -1941,6 +2252,43 @@ internal sealed class VerifiedInstallerSessionTests
         );
     }
 
+    private static InstallerRecoveryPrunePlanSuccess RecoveryPrunePlan(
+        int retainNewest = 2,
+        int retainedCount = 2,
+        int removedCount = 1,
+        bool auxiliaryCleanupPlanned = false
+    ) => new(
+        retainNewest,
+        retainedCount,
+        removedCount,
+        removedCount,
+        auxiliaryCleanupPlanned,
+        1,
+        [ProtocolPlanRisk.RecoveryPrune],
+        ProtocolRecommendedDefault.Cancel,
+        true
+    )
+    {
+        Confirmation = new InstallerRecoveryPruneConfirmation()
+    };
+
+    private static RecordingClient PrunePipelineClient(
+        string suffix,
+        Func<InstallerConfirmedRecoveryPruneAuthority, Task<InstallerRecoveryPruneOperation>>? execution = null
+    )
+    {
+        InstallerRecoveryPruneConfirmation confirmation = new();
+        return new RecordingClient
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([Candidate(suffix, LinuxGameFolderStatus.Valid)]),
+            RecoveryCatalog = (_, _) => Task.FromResult<InstallerRecoveryCatalogResult>(new InstallerRecoveryCatalogSuccess([RecoveryPoint(1, current: true)])),
+            PruneInspection = (_, _, _) => Task.FromResult<InstallerRecoveryPrunePlanResult>(
+                RecoveryPrunePlan(retainNewest: 1, retainedCount: 1, removedCount: 0, auxiliaryCleanupPlanned: true) with { Confirmation = confirmation }
+            ),
+            PruneExecution = (authority, _) => execution?.Invoke(authority) ?? Task.FromResult(RecoveryPruneOperation())
+        };
+    }
+
     private static TaskCompletionSource NewCompletion()
         => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -1957,6 +2305,28 @@ internal sealed class VerifiedInstallerSessionTests
         return new(
             progress.Reader,
             completion?.Task ?? Task.FromResult<InstallerExecutionResult>(new InstallerExecutionStateUnknownResult()),
+            cancellation ?? (() => Task.CompletedTask)
+        );
+    }
+
+    private static InstallerRecoveryPruneOperation RecoveryPruneOperation(
+        TaskCompletionSource<InstallerRecoveryPruneResult>? completion = null,
+        Func<Task>? cancellation = null
+    )
+    {
+        Channel<InstallerRecoveryPruneProgress> progress = Channel.CreateUnbounded<InstallerRecoveryPruneProgress>();
+        progress.Writer.TryComplete();
+        return new(
+            progress.Reader,
+            completion?.Task ?? Task.FromResult<InstallerRecoveryPruneResult>(new InstallerRecoveryPruneTerminalResult(
+                ProtocolPruneOutcome.Succeeded,
+                ProtocolDurableState.PruneApplied,
+                null,
+                ProtocolRecoveryDisposition.NotRequired,
+                ProtocolNextAction.ListRecoveries,
+                new InstallerRecoveryPruneSummary(0, 0, 0, false),
+                InstallerBackendSettlement.ConfirmedClosed
+            )),
             cancellation ?? (() => Task.CompletedTask)
         );
     }
@@ -1980,6 +2350,20 @@ internal sealed class VerifiedInstallerSessionTests
         ObjectDisposed
     }
 
+    internal enum HostilePrunePlan
+    {
+        NegativeCount,
+        WrongRetentionBoundary,
+        MissingConfirmation,
+        WrongRisk,
+        NoConfirmationRequired,
+        CleanupSmallerThanRemoved,
+        WarningOverflow,
+        WrongRecommendedDefault,
+        DuplicateRisk,
+        TrueNoOp
+    }
+
     private sealed class RecordingClient : IInstallerProtocolClient
     {
         public TaskCompletionSource<InstallerProtocolClientException> Fault { get; } =
@@ -1987,6 +2371,7 @@ internal sealed class VerifiedInstallerSessionTests
         public TaskCompletionSource InspectionStarted { get; } = NewCompletion();
         public TaskCompletionSource ApprovalStarted { get; } = NewCompletion();
         public TaskCompletionSource ConfirmationStarted { get; } = NewCompletion();
+        public TaskCompletionSource PruneConfirmationStarted { get; } = NewCompletion();
         public Func<CancellationToken, Task<IReadOnlyList<ProtocolGameCandidate>>> Discovery { get; init; } =
             _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([]);
         public Func<string, CancellationToken, Task<ProtocolGameCandidate>> Validation { get; init; } =
@@ -1997,19 +2382,28 @@ internal sealed class VerifiedInstallerSessionTests
             (_, _) => throw new AssertionException("Recovery history wasn't expected.");
         public Func<string, InstallerRecoveryPoint, CancellationToken, Task<InstallerReadOnlyPlanResult>> RollbackInspection { get; init; } =
             (_, _, _) => throw new AssertionException("Rollback inspection wasn't expected.");
+        public Func<string, InstallerRecoveryPoint, CancellationToken, Task<InstallerRecoveryPrunePlanResult>> PruneInspection { get; init; } =
+            (_, _, _) => throw new AssertionException("Recovery-prune inspection wasn't expected.");
         public Func<IReadOnlyList<InstallerReadOnlyPlanCandidate>, CancellationToken, Task<InstallerReadOnlyPlanResult>> Approval { get; init; } =
             (_, _) => throw new AssertionException("Candidate approval wasn't expected.");
         public Func<InstallerPlanConfirmation, CancellationToken, Task<InstallerConfirmedPlanAuthority>> Confirmation { get; init; } =
             (_, _) => Task.FromResult(new InstallerConfirmedPlanAuthority());
+        public Func<InstallerRecoveryPruneConfirmation, CancellationToken, Task<InstallerConfirmedRecoveryPruneAuthority>> PruneConfirmation { get; init; } =
+            (_, _) => Task.FromResult(new InstallerConfirmedRecoveryPruneAuthority());
         public Func<InstallerConfirmedPlanAuthority, CancellationToken, Task<InstallerExecutionOperation>> Execution { get; init; } =
             (_, _) => Task.FromResult(ExecutionOperation());
+        public Func<InstallerConfirmedRecoveryPruneAuthority, CancellationToken, Task<InstallerRecoveryPruneOperation>> PruneExecution { get; init; } =
+            (_, _) => Task.FromResult(RecoveryPruneOperation());
         public List<string> InspectedPaths { get; } = [];
         public List<InstallerOperation> InspectedOperations { get; } = [];
         public List<string> RecoveryCatalogPaths { get; } = [];
         public List<(string Path, InstallerRecoveryPoint Point)> RollbackInspections { get; } = [];
+        public List<(string Path, InstallerRecoveryPoint Point)> PruneInspections { get; } = [];
         public List<IReadOnlyList<InstallerReadOnlyPlanCandidate>> ApprovedCandidates { get; } = [];
         public List<InstallerPlanConfirmation> ConfirmedPlans { get; } = [];
+        public List<InstallerRecoveryPruneConfirmation> ConfirmedPrunes { get; } = [];
         public List<InstallerConfirmedPlanAuthority> ExecutedAuthorities { get; } = [];
+        public List<InstallerConfirmedRecoveryPruneAuthority> ExecutedPrunes { get; } = [];
         public int DiscoverCalls { get; private set; }
         public int ValidateCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -2073,6 +2467,16 @@ internal sealed class VerifiedInstallerSessionTests
             return this.RollbackInspection(canonicalGamePath, point, cancellationToken);
         }
 
+        public Task<InstallerRecoveryPrunePlanResult> InspectRecoveryPruneAsync(
+            string canonicalGamePath,
+            InstallerRecoveryPoint oldestPointToKeep,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.PruneInspections.Add((canonicalGamePath, oldestPointToKeep));
+            return this.PruneInspection(canonicalGamePath, oldestPointToKeep, cancellationToken);
+        }
+
         public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(
             IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates,
             CancellationToken cancellationToken = default
@@ -2093,6 +2497,16 @@ internal sealed class VerifiedInstallerSessionTests
             return this.Confirmation(confirmation, cancellationToken);
         }
 
+        public Task<InstallerConfirmedRecoveryPruneAuthority> ConfirmRecoveryPruneAsync(
+            InstallerRecoveryPruneConfirmation confirmation,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.ConfirmedPrunes.Add(confirmation);
+            this.PruneConfirmationStarted.TrySetResult();
+            return this.PruneConfirmation(confirmation, cancellationToken);
+        }
+
         public Task<InstallerExecutionOperation> ExecutePlanAsync(
             InstallerConfirmedPlanAuthority authority,
             CancellationToken cancellationToken = default
@@ -2100,6 +2514,15 @@ internal sealed class VerifiedInstallerSessionTests
         {
             this.ExecutedAuthorities.Add(authority);
             return this.Execution(authority, cancellationToken);
+        }
+
+        public Task<InstallerRecoveryPruneOperation> ExecuteRecoveryPruneAsync(
+            InstallerConfirmedRecoveryPruneAuthority authority,
+            CancellationToken cancellationToken = default
+        )
+        {
+            this.ExecutedPrunes.Add(authority);
+            return this.PruneExecution(authority, cancellationToken);
         }
 
         public ValueTask DisposeAsync()

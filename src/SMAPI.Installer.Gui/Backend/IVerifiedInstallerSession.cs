@@ -32,6 +32,15 @@ internal interface IPlanInspectionSession : IAsyncDisposable
         CancellationToken cancellationToken = default
     ) => throw new NotSupportedException("This restricted session doesn't support rollback inspection.");
 
+    /// <summary>
+    /// Consume one exact current bound-session recovery point as the oldest retained cleanup boundary and inspect a
+    /// destructive recovery-prune plan. Inspection alone performs no filesystem mutation.
+    /// </summary>
+    Task<BoundInstallerRecoveryPrunePlanResult> InspectRecoveryPruneAsync(
+        BoundInstallerRecoveryPoint oldestPointToKeep,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted session doesn't support recovery-cleanup inspection.");
+
     /// <summary>Reinspect the current plan with an additive set of exact backend-issued file candidates.</summary>
     Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted session doesn't support candidate approval.");
@@ -42,6 +51,15 @@ internal interface IPlanInspectionSession : IAsyncDisposable
     /// </summary>
     Task<IConfirmedInstallerSession> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This restricted session doesn't support plan confirmation.");
+
+    /// <summary>
+    /// Consume this layer's exact current recovery-prune confirmation capability and transfer backend cleanup
+    /// ownership to a sealed confirmed-prune session. Confirmation alone performs no filesystem mutation.
+    /// </summary>
+    Task<IConfirmedRecoveryPruneSession> ConfirmRecoveryPruneAsync(
+        BoundInstallerRecoveryPruneConfirmation confirmation,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted session doesn't support recovery-cleanup confirmation.");
 }
 
 /// <summary>
@@ -64,6 +82,41 @@ internal sealed record BoundInstallerRecoveryCatalogRejection(
     ProtocolNextAction NextAction,
     bool IsTerminal
 ) : BoundInstallerRecoveryCatalogResult;
+
+/// <summary>A capability-reduced result from inspecting one exact bound-session recovery-prune boundary.</summary>
+internal abstract record BoundInstallerRecoveryPrunePlanResult;
+
+/// <summary>
+/// Bounded recovery-prune facts with a session-reminted confirmation capability. This excludes canonical paths,
+/// filesystem identity, transport/catalog/selection/generation IDs, digests, raw backend text, and private logs.
+/// </summary>
+internal sealed record BoundInstallerRecoveryPrunePlanSuccess(
+    int RetainNewest,
+    int RetainedCount,
+    int RemovedCount,
+    int CleanupGenerationCount,
+    bool AuxiliaryCleanupPlanned,
+    int WarningCount,
+    IReadOnlyList<ProtocolPlanRisk> Risks,
+    ProtocolRecommendedDefault RecommendedDefault,
+    bool RequiresConfirmation
+) : BoundInstallerRecoveryPrunePlanResult
+{
+    internal BoundInstallerRecoveryPruneConfirmation? Confirmation { get; init; }
+}
+
+/// <summary>A reachable sanitized rejection. Every rejection requires a fresh recovery catalog.</summary>
+internal sealed record BoundInstallerRecoveryPrunePlanRejection(
+    ProtocolPrePlanErrorCode ErrorCode,
+    ProtocolNextAction NextAction,
+    bool IsTerminal
+) : BoundInstallerRecoveryPrunePlanResult;
+
+/// <summary>A property-free exact-reference capability for confirming the current bound recovery-prune plan.</summary>
+internal sealed class BoundInstallerRecoveryPruneConfirmation
+{
+    internal BoundInstallerRecoveryPruneConfirmation() { }
+}
 
 /// <summary>
 /// One sanitized recovery point reminted by the bound session. Its object identity is the only selection capability;
@@ -124,6 +177,19 @@ internal interface IConfirmedInstallerSession : IAsyncDisposable
     /// </summary>
     Task<InstallerPostExecutionRecoveryOwner> TakePostExecutionRecoveryOwnerAsync(CancellationToken cancellationToken = default)
         => throw new NotSupportedException("This confirmed session doesn't support post-execution recovery ownership.");
+}
+
+/// <summary>
+/// A sealed capability-reduced owner for one exact confirmed recovery-prune plan. Execution is explicit and one-shot;
+/// progress and terminal data remain bounded and sanitized by the process client.
+/// </summary>
+internal interface IConfirmedRecoveryPruneSession : IAsyncDisposable
+{
+    ProtocolReleaseIdentity Release { get; }
+    VerifiedGamePresentation Game { get; }
+    Task<InstallerProtocolClientException> SessionFaulted { get; }
+
+    Task<InstallerRecoveryPruneOperation> ExecuteAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>Bounded, non-authoritative display data for an exact valid game-folder selection.</summary>

@@ -1,4 +1,5 @@
 using System.Runtime.ExceptionServices;
+using System.Threading.Channels;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 
@@ -14,6 +15,10 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         Confirming,
         Confirmed,
         Executing,
+        PruneConfirming,
+        PruneConfirmed,
+        PruneExecuting,
+        PruneTerminal,
         BoundTerminal,
         ConfirmedTerminal,
         Disposing,
@@ -31,12 +36,19 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     private readonly Dictionary<BoundInstallerRecoveryPoint, InstallerRecoveryPoint> CurrentRecoveryPoints = new(ReferenceEqualityComparer.Instance);
     private InstallerPlanConfirmation? CurrentPlanConfirmation;
     private InstallerPlanConfirmation? CurrentClientConfirmation;
+    private BoundInstallerRecoveryPruneConfirmation? CurrentPruneConfirmation;
+    private InstallerRecoveryPruneConfirmation? CurrentClientPruneConfirmation;
     private InstallerConfirmedPlanAuthority? CurrentConfirmedAuthority;
     private ConfirmedInstallerSession? CurrentConfirmedOwner;
+    private InstallerConfirmedRecoveryPruneAuthority? CurrentConfirmedPruneAuthority;
+    private ConfirmedRecoveryPruneSession? CurrentConfirmedPruneOwner;
     private InstallerExecutionOperation? CurrentExecution;
     private Task<InstallerExecutionResult>? CurrentExecutionCompletion;
     private CancellationTokenSource? CurrentExecutionLifetime;
     private TaskCompletionSource<InstallerExecutionOperation?>? CurrentExecutionPublication;
+    private InstallerRecoveryPruneOperation? CurrentPruneExecution;
+    private CancellationTokenSource? CurrentPruneExecutionLifetime;
+    private TaskCompletionSource<InstallerRecoveryPruneOperation?>? CurrentPruneExecutionPublication;
     private ProtocolGameCandidate? LatestManualCandidate;
     private Task? DisposalTask;
     private bool ConfirmedOwnershipTransferred;
@@ -48,6 +60,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
     internal Action? BeforePlanAdmissionForTesting { get; set; }
     internal Action? BeforeRecoveryListAdmissionForTesting { get; set; }
     internal Action? BeforeRollbackAdmissionForTesting { get; set; }
+    internal Action? BeforeRecoveryPruneAdmissionForTesting { get; set; }
     internal Action? BeforeCandidateApprovalAdmissionForTesting { get; set; }
 
     public ProtocolReleaseIdentity Release { get; }
@@ -121,7 +134,9 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 return ValueTask.CompletedTask;
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
-            if (this.Stage is SessionStage.Bound or SessionStage.Confirming or SessionStage.Confirmed or SessionStage.Executing or SessionStage.BoundTerminal or SessionStage.ConfirmedTerminal)
+            if (this.Stage is SessionStage.Bound or SessionStage.Confirming or SessionStage.Confirmed or SessionStage.Executing
+                or SessionStage.PruneConfirming or SessionStage.PruneConfirmed or SessionStage.PruneExecuting or SessionStage.PruneTerminal
+                or SessionStage.BoundTerminal or SessionStage.ConfirmedTerminal)
                 return ValueTask.CompletedTask;
             this.Stage = SessionStage.Disposing;
             return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
@@ -191,9 +206,10 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 return ValueTask.CompletedTask;
             if (this.DisposalTask is not null)
                 return new ValueTask(this.DisposalTask);
-            if (this.Stage is SessionStage.Confirmed or SessionStage.Executing or SessionStage.ConfirmedTerminal)
+            if (this.Stage is SessionStage.Confirmed or SessionStage.Executing or SessionStage.ConfirmedTerminal
+                or SessionStage.PruneConfirmed or SessionStage.PruneExecuting or SessionStage.PruneTerminal)
                 return ValueTask.CompletedTask;
-            if (this.Stage is not (SessionStage.Bound or SessionStage.Confirming or SessionStage.BoundTerminal))
+            if (this.Stage is not (SessionStage.Bound or SessionStage.Confirming or SessionStage.PruneConfirming or SessionStage.BoundTerminal))
                 return this.Stage == SessionStage.Disposed
                     ? ValueTask.CompletedTask
                     : throw new InvalidOperationException("The bound installer session no longer owns backend cleanup.");
@@ -226,6 +242,35 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 return this.Stage == SessionStage.Disposed
                     ? ValueTask.CompletedTask
                     : throw new InvalidOperationException("The confirmed installer session no longer owns backend cleanup.");
+            this.Stage = SessionStage.Disposing;
+            return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
+        }
+    }
+
+    private ValueTask DisposeFromConfirmedRecoveryPruneSessionAsync(ConfirmedRecoveryPruneSession owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        lock (this.DisposeLock)
+        {
+            if (this.DisposalTask is not null)
+                return new ValueTask(this.DisposalTask);
+            if (!ReferenceEquals(this.CurrentConfirmedPruneOwner, owner))
+                return this.Stage == SessionStage.Disposed
+                    ? ValueTask.CompletedTask
+                    : throw new InvalidOperationException("The confirmed recovery-cleanup session no longer owns backend cleanup.");
+            if (this.Stage == SessionStage.PruneExecuting && this.CurrentPruneExecutionPublication is { } publication)
+            {
+                this.Stage = SessionStage.Disposing;
+                return new ValueTask(this.DisposalTask = this.DisposePruneExecutingCoreAsync(
+                    publication,
+                    this.CurrentPruneExecutionLifetime
+                        ?? throw new InvalidOperationException("The admitted recovery-cleanup execution had no lifetime owner.")
+                ));
+            }
+            if (this.Stage is not (SessionStage.PruneConfirmed or SessionStage.PruneTerminal))
+                return this.Stage == SessionStage.Disposed
+                    ? ValueTask.CompletedTask
+                    : throw new InvalidOperationException("The confirmed recovery-cleanup session no longer owns backend cleanup.");
             this.Stage = SessionStage.Disposing;
             return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
         }
@@ -598,6 +643,138 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         return result!;
     }
 
+    private async Task<BoundInstallerRecoveryPrunePlanResult> InspectBoundRecoveryPruneAsync(
+        string exactCanonicalPath,
+        BoundInstallerRecoveryPoint oldestPointToKeep,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(oldestPointToKeep);
+        cancellationToken.ThrowIfCancellationRequested();
+        CancellationToken lifetime;
+        lock (this.DisposeLock)
+        {
+            if (this.Stage != SessionStage.Bound)
+                throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+            if (this.RecoveryLookupClosed || !this.CurrentRecoveryPoints.ContainsKey(oldestPointToKeep))
+                throw new ArgumentException("The recovery point must be an exact current capability issued by this bound session.", nameof(oldestPointToKeep));
+            lifetime = this.Lifetime.Token;
+        }
+
+        using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
+        bool gateEntered = false;
+        bool admitted = false;
+        bool preserveSessionOnFailure = false;
+        BoundInstallerRecoveryPrunePlanResult? result = null;
+        InstallerRecoveryPruneConfirmation? clientConfirmation = null;
+        BoundInstallerRecoveryPruneConfirmation? sessionConfirmation = null;
+        Exception? failure = null;
+        try
+        {
+            await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
+            gateEntered = true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        if (failure is not null)
+        {
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        try
+        {
+            this.BeforeRecoveryPruneAdmissionForTesting?.Invoke();
+            InstallerRecoveryPoint backendPoint;
+            int catalogCount;
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Bound)
+                {
+                    if (this.IsAdvancedOwnershipStageUnderLock() && !this.CurrentRecoveryPoints.ContainsKey(oldestPointToKeep))
+                        throw new ArgumentException("The recovery point is stale because another operation already consumed its catalog.", nameof(oldestPointToKeep));
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                }
+                request.Token.ThrowIfCancellationRequested();
+                if (this.RecoveryLookupClosed || !this.CurrentRecoveryPoints.TryGetValue(oldestPointToKeep, out backendPoint!))
+                    throw new ArgumentException("The recovery point must be an exact current capability issued by this bound session.", nameof(oldestPointToKeep));
+
+                // Prune selection is destructive authority and therefore one-shot. Revoke the entire catalog and
+                // every competing plan capability before the process client can write its request.
+                catalogCount = this.CurrentRecoveryPoints.Count;
+                this.RecoveryLookupClosed = true;
+                this.CurrentRecoveryPoints.Clear();
+                this.CurrentPlanCandidates.Clear();
+                this.ClearCurrentPlanConfirmation();
+                admitted = true;
+            }
+
+            InstallerRecoveryPrunePlanResult backend = await this.Client.InspectRecoveryPruneAsync(
+                exactCanonicalPath,
+                backendPoint,
+                request.Token
+            ).ConfigureAwait(false);
+            result = ProjectBoundRecoveryPrunePlan(
+                backend,
+                oldestPointToKeep.Ordinal,
+                catalogCount,
+                out clientConfirmation,
+                out sessionConfirmation
+            );
+
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.Bound)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                if (this.Client.SessionFaulted.IsCompleted)
+                    throw new InstallerProtocolClientException("The verified installer session faulted before the recovery-cleanup plan could be accepted.");
+                request.Token.ThrowIfCancellationRequested();
+                if (result is BoundInstallerRecoveryPrunePlanRejection rejection)
+                {
+                    if (rejection.IsTerminal)
+                        this.Stage = SessionStage.BoundTerminal;
+                    else
+                        this.RecoveryLookupClosed = false;
+                }
+                else
+                {
+                    this.CurrentClientPruneConfirmation = clientConfirmation;
+                    this.CurrentPruneConfirmation = sessionConfirmation;
+                }
+            }
+        }
+        catch (ArgumentException exception) when (!admitted)
+        {
+            failure = exception;
+            preserveSessionOnFailure = true;
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        finally
+        {
+            if (gateEntered)
+                this.CommandGate.Release();
+        }
+
+        if (failure is not null)
+        {
+            if (!preserveSessionOnFailure)
+                await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+        if (result is BoundInstallerRecoveryPrunePlanRejection { IsTerminal: true })
+            await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+        return result!;
+    }
+
     private async Task<InstallerReadOnlyPlanResult> ApproveBoundPlanCandidatesAsync(
         IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates,
         CancellationToken cancellationToken
@@ -772,6 +949,173 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
         ExceptionDispatchInfo.Capture(failure!).Throw();
         throw new InvalidOperationException("The confirmation failure did not propagate.");
+    }
+
+    private async Task<IConfirmedRecoveryPruneSession> ConfirmBoundRecoveryPruneAsync(
+        VerifiedGamePresentation game,
+        BoundInstallerRecoveryPruneConfirmation confirmation,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentNullException.ThrowIfNull(confirmation);
+        CancellationToken lifetime;
+        InstallerRecoveryPruneConfirmation clientConfirmation;
+        lock (this.DisposeLock)
+        {
+            if (this.Stage != SessionStage.Bound)
+                throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+            if (!ReferenceEquals(this.CurrentPruneConfirmation, confirmation) || this.CurrentClientPruneConfirmation is null)
+                throw new ArgumentException("The confirmation must be the exact current recovery-cleanup capability issued by this bound session.", nameof(confirmation));
+            clientConfirmation = this.CurrentClientPruneConfirmation;
+
+            // Consume both confirmation layers before awaiting. A later cancellation, fault, or disposal can never
+            // restore destructive authority or publish an orphan confirmed owner.
+            this.ClearCurrentPlanConfirmation();
+            this.CurrentPlanCandidates.Clear();
+            this.Stage = SessionStage.PruneConfirming;
+            lifetime = this.Lifetime.Token;
+        }
+        using CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
+        bool gateEntered = false;
+        Exception? failure = null;
+        try
+        {
+            await this.CommandGate.WaitAsync(request.Token).ConfigureAwait(false);
+            gateEntered = true;
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.PruneConfirming)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+            }
+
+            InstallerConfirmedRecoveryPruneAuthority authority = await this.Client.ConfirmRecoveryPruneAsync(
+                clientConfirmation,
+                request.Token
+            ).ConfigureAwait(false);
+            if (authority is null)
+                throw new InstallerProtocolClientException("The installer backend returned invalid confirmed recovery-cleanup authority.");
+            lock (this.DisposeLock)
+            {
+                if (this.Stage != SessionStage.PruneConfirming)
+                    throw new ObjectDisposedException(nameof(IPlanInspectionSession));
+                if (this.Client.SessionFaulted.IsCompleted)
+                    throw new InstallerProtocolClientException("The verified installer session faulted before recovery-cleanup ownership could be accepted.");
+                request.Token.ThrowIfCancellationRequested();
+                ConfirmedRecoveryPruneSession confirmed = new(this, this.Release, game);
+                this.CurrentConfirmedPruneAuthority = authority;
+                this.CurrentConfirmedPruneOwner = confirmed;
+                this.ConfirmedOwnershipTransferred = true;
+                this.Stage = SessionStage.PruneConfirmed;
+                return confirmed;
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = this.GetPlanFailure(exception);
+        }
+        finally
+        {
+            if (gateEntered)
+                this.CommandGate.Release();
+        }
+
+        await this.DisposeFromBoundSessionAsync().ConfigureAwait(false);
+        ExceptionDispatchInfo.Capture(failure!).Throw();
+        throw new InvalidOperationException("The recovery-cleanup confirmation failure did not propagate.");
+    }
+
+    private async Task<InstallerRecoveryPruneOperation> ExecuteConfirmedRecoveryPruneAsync(
+        ConfirmedRecoveryPruneSession owner,
+        CancellationToken cancellationToken
+    )
+    {
+        CancellationTokenSource request;
+        TaskCompletionSource<InstallerRecoveryPruneOperation?> publication;
+        InstallerConfirmedRecoveryPruneAuthority authority;
+        lock (this.DisposeLock)
+        {
+            if (
+                this.Stage != SessionStage.PruneConfirmed
+                || !ReferenceEquals(this.CurrentConfirmedPruneOwner, owner)
+                || this.CurrentConfirmedPruneAuthority is not { } current
+            )
+            {
+                throw new ObjectDisposedException(nameof(IConfirmedRecoveryPruneSession));
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+
+            authority = current;
+            this.CurrentConfirmedPruneAuthority = null;
+            this.Stage = SessionStage.PruneExecuting;
+            request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, this.Lifetime.Token);
+            this.CurrentPruneExecutionLifetime = request;
+            publication = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            this.CurrentPruneExecutionPublication = publication;
+        }
+
+        InstallerRecoveryPruneOperation? execution = null;
+        try
+        {
+            execution = await this.Client.ExecuteRecoveryPruneAsync(authority, request.Token).ConfigureAwait(false);
+            if (execution is null || execution.Completion is null || execution.Progress is null)
+                throw new InstallerProtocolClientException("The installer backend returned an invalid recovery-cleanup operation.");
+            lock (this.DisposeLock)
+            {
+                if (!ReferenceEquals(this.CurrentConfirmedPruneOwner, owner) || this.Stage is not (SessionStage.PruneExecuting or SessionStage.Disposing))
+                    throw new ObjectDisposedException(nameof(IConfirmedRecoveryPruneSession));
+                this.CurrentPruneExecution = execution;
+            }
+            publication.TrySetResult(execution);
+            _ = this.TrackPruneExecutionAsync(owner, execution, request);
+            return execution;
+        }
+        catch
+        {
+            // The exact authority was already consumed before the process-client call. Never imply that the same
+            // destructive plan is safely retryable when admission/publication could have crossed that boundary.
+            execution ??= UnknownPruneOperation();
+            publication.TrySetResult(execution);
+            lock (this.DisposeLock)
+            {
+                if (ReferenceEquals(this.CurrentPruneExecutionLifetime, request) && this.DisposalTask is null)
+                {
+                    request.Dispose();
+                    this.CurrentPruneExecutionLifetime = null;
+                }
+                if (this.Stage == SessionStage.PruneExecuting)
+                    this.Stage = SessionStage.PruneTerminal;
+            }
+            return execution;
+        }
+    }
+
+    private async Task TrackPruneExecutionAsync(
+        ConfirmedRecoveryPruneSession owner,
+        InstallerRecoveryPruneOperation execution,
+        CancellationTokenSource request
+    )
+    {
+        try { _ = await execution.Completion.ConfigureAwait(false); }
+        catch { }
+        finally
+        {
+            try { request.Dispose(); }
+            finally
+            {
+                lock (this.DisposeLock)
+                {
+                    if (ReferenceEquals(this.CurrentPruneExecutionLifetime, request))
+                        this.CurrentPruneExecutionLifetime = null;
+                    if (ReferenceEquals(this.CurrentPruneExecution, execution))
+                    {
+                        this.CurrentPruneExecution = null;
+                        this.CurrentPruneExecutionPublication = null;
+                    }
+                    if (ReferenceEquals(this.CurrentConfirmedPruneOwner, owner) && this.Stage == SessionStage.PruneExecuting)
+                        this.Stage = SessionStage.PruneTerminal;
+                }
+            }
+        }
     }
 
     private async Task<InstallerExecutionOperation> ExecuteConfirmedPlanAsync(
@@ -1066,10 +1410,70 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             this.CurrentExecutionLifetime = null;
             this.CurrentConfirmedAuthority = null;
             this.CurrentConfirmedOwner = null;
+            this.CurrentConfirmedPruneAuthority = null;
+            this.CurrentConfirmedPruneOwner = null;
+            this.CurrentPruneExecution = null;
+            this.CurrentPruneExecutionPublication = null;
+            this.CurrentPruneExecutionLifetime = null;
             this.Stage = SessionStage.Disposed;
         }
         if (cleanupFailed)
             throw new InstallerProtocolClientException("The verified installer session could not be cleaned up safely.");
+    }
+
+    private async Task DisposePruneExecutingCoreAsync(
+        TaskCompletionSource<InstallerRecoveryPruneOperation?> publication,
+        CancellationTokenSource request
+    )
+    {
+        bool cleanupFailed = false;
+        try { await request.CancelAsync().ConfigureAwait(false); }
+        catch (ObjectDisposedException) { }
+        catch { cleanupFailed = true; }
+        InstallerRecoveryPruneOperation? execution = null;
+        try { execution = await publication.Task.ConfigureAwait(false); }
+        catch { cleanupFailed = true; }
+        if (execution is not null)
+        {
+            try { await execution.RequestCancellationAsync().ConfigureAwait(false); }
+            catch { cleanupFailed = true; }
+            try { _ = await execution.Completion.ConfigureAwait(false); }
+            catch { cleanupFailed = true; }
+        }
+        try { await this.Client.DisposeAsync().ConfigureAwait(false); }
+        catch { cleanupFailed = true; }
+        try { this.CurrentPruneExecutionLifetime?.Dispose(); }
+        catch { cleanupFailed = true; }
+        try { this.Lifetime.Dispose(); }
+        catch { cleanupFailed = true; }
+        this.CommandGate.Dispose();
+        lock (this.DisposeLock)
+        {
+            this.ClearIssuedCandidates();
+            this.CurrentRecoveryPoints.Clear();
+            this.CurrentPlanCandidates.Clear();
+            this.IssuedPlanCandidates.Clear();
+            this.ClearCurrentPlanConfirmation();
+            this.CurrentPruneExecution = null;
+            this.CurrentPruneExecutionPublication = null;
+            this.CurrentPruneExecutionLifetime = null;
+            this.CurrentConfirmedPruneAuthority = null;
+            this.CurrentConfirmedPruneOwner = null;
+            this.Stage = SessionStage.Disposed;
+        }
+        if (cleanupFailed)
+            throw new InstallerProtocolClientException("The verified recovery-cleanup session could not be cleaned up safely.");
+    }
+
+    private static InstallerRecoveryPruneOperation UnknownPruneOperation()
+    {
+        Channel<InstallerRecoveryPruneProgress> progress = Channel.CreateBounded<InstallerRecoveryPruneProgress>(1);
+        progress.Writer.TryComplete();
+        return new(
+            progress.Reader,
+            Task.FromResult<InstallerRecoveryPruneResult>(new InstallerRecoveryPruneStateUnknownResult()),
+            () => Task.CompletedTask
+        );
     }
 
     private static (InstallerPlanConfirmation? Client, InstallerPlanConfirmation? Session) RemintConfirmation(
@@ -1162,6 +1566,84 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         }
     }
 
+    private static BoundInstallerRecoveryPrunePlanResult ProjectBoundRecoveryPrunePlan(
+        InstallerRecoveryPrunePlanResult backend,
+        int selectedOrdinal,
+        int catalogCount,
+        out InstallerRecoveryPruneConfirmation? clientConfirmation,
+        out BoundInstallerRecoveryPruneConfirmation? sessionConfirmation
+    )
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        clientConfirmation = null;
+        sessionConfirmation = null;
+        switch (backend)
+        {
+            case InstallerRecoveryPrunePlanSuccess success:
+                IReadOnlyList<ProtocolPlanRisk> sourceRisks = success.Risks
+                    ?? throw new InstallerProtocolClientException("The installer backend returned invalid recovery-cleanup risk data.");
+                int riskCount;
+                ProtocolPlanRisk risk;
+                try
+                {
+                    riskCount = sourceRisks.Count;
+                    risk = riskCount == 1 ? sourceRisks[0] : default;
+                }
+                catch
+                {
+                    throw new InstallerProtocolClientException("The installer backend returned invalid recovery-cleanup risk data.");
+                }
+                if (
+                    selectedOrdinal is < 1 or > ProtocolJsonSerializer.MaxRecoveryGenerations
+                    || catalogCount is < 1 or > ProtocolJsonSerializer.MaxRecoveryGenerations
+                    || success.RetainNewest != selectedOrdinal
+                    || success.RetainedCount != selectedOrdinal
+                    || success.RemovedCount != catalogCount - selectedOrdinal
+                    || success.CleanupGenerationCount < success.RemovedCount
+                    || success.CleanupGenerationCount > ProtocolJsonSerializer.MaxRecoveryGenerations
+                    || success.WarningCount is < 0 or > 256
+                    || riskCount != 1
+                    || risk != ProtocolPlanRisk.RecoveryPrune
+                    || success.RecommendedDefault != ProtocolRecommendedDefault.Cancel
+                    || !success.RequiresConfirmation
+                    || success.Confirmation is null
+                    || success.RemovedCount == 0 && success.CleanupGenerationCount == 0 && !success.AuxiliaryCleanupPlanned
+                )
+                {
+                    throw new InstallerProtocolClientException("The installer backend returned invalid recovery-cleanup plan semantics.");
+                }
+
+                clientConfirmation = success.Confirmation;
+                sessionConfirmation = new BoundInstallerRecoveryPruneConfirmation();
+                return new BoundInstallerRecoveryPrunePlanSuccess(
+                    success.RetainNewest,
+                    success.RetainedCount,
+                    success.RemovedCount,
+                    success.CleanupGenerationCount,
+                    success.AuxiliaryCleanupPlanned,
+                    success.WarningCount,
+                    Array.AsReadOnly(new[] { risk }),
+                    success.RecommendedDefault,
+                    success.RequiresConfirmation
+                )
+                {
+                    Confirmation = sessionConfirmation
+                };
+
+            case InstallerRecoveryPrunePlanRejection rejection
+                when IsValidBoundRecoveryPruneRejection(rejection)
+                    && (rejection.ErrorCode != ProtocolPrePlanErrorCode.NothingToPrune || selectedOrdinal == catalogCount):
+                return new BoundInstallerRecoveryPrunePlanRejection(
+                    rejection.ErrorCode,
+                    rejection.NextAction,
+                    rejection.IsTerminal
+                );
+
+            default:
+                throw new InstallerProtocolClientException("The installer backend returned an invalid recovery-cleanup result.");
+        }
+    }
+
     private static BoundInstallerRecoveryReleaseTarget ProjectBoundRecoveryRelease(InstallerRecoveryReleaseTarget release)
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -1186,11 +1668,24 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         _ => false
     };
 
+    private static bool IsValidBoundRecoveryPruneRejection(InstallerRecoveryPrunePlanRejection rejection) => rejection switch
+    {
+        { ErrorCode: ProtocolPrePlanErrorCode.NothingToPrune, NextAction: ProtocolNextAction.ListRecoveries, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.RequestCancelled, NextAction: ProtocolNextAction.RetryRequest, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.InvalidGameFolder, NextAction: ProtocolNextAction.SelectGameFolder, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.InspectionFailed, NextAction: ProtocolNextAction.InspectAgain, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.PermissionDenied, NextAction: ProtocolNextAction.ReviewFilesystem, IsTerminal: false } => true,
+        { ErrorCode: ProtocolPrePlanErrorCode.UnexpectedFailure, NextAction: ProtocolNextAction.StartNewSession or ProtocolNextAction.ViewPrivateLog, IsTerminal: true } => true,
+        _ => false
+    };
+
     /// <remarks>The caller must hold <see cref="DisposeLock"/>.</remarks>
     private void ClearCurrentPlanConfirmation()
     {
         this.CurrentPlanConfirmation = null;
         this.CurrentClientConfirmation = null;
+        this.CurrentPruneConfirmation = null;
+        this.CurrentClientPruneConfirmation = null;
     }
 
     private static InstallerReadOnlyPlanCandidate[] SnapshotBackendResultCandidates(IReadOnlyList<InstallerReadOnlyPlanCandidate>? candidates)
@@ -1253,7 +1748,7 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 return new ObjectDisposedException(nameof(IPlanInspectionSession));
             if (this.Client.SessionFaulted.IsCompleted)
                 return new InstallerProtocolClientException("The verified installer session faulted before the plan result could be accepted.");
-            if (this.Stage is SessionStage.Bound or SessionStage.Confirming)
+            if (this.Stage is SessionStage.Bound or SessionStage.Confirming or SessionStage.PruneConfirming)
                 this.Stage = SessionStage.BoundTerminal;
             return failure;
         }
@@ -1264,7 +1759,11 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
         SessionStage.Confirming
         or SessionStage.Confirmed
         or SessionStage.Executing
-        or SessionStage.ConfirmedTerminal;
+        or SessionStage.ConfirmedTerminal
+        or SessionStage.PruneConfirming
+        or SessionStage.PruneConfirmed
+        or SessionStage.PruneExecuting
+        or SessionStage.PruneTerminal;
 
     private static void AssertSupportedPlanOperation(InstallerOperation operation)
     {
@@ -1323,10 +1822,15 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
                 this.ClearCurrentPlanConfirmation();
                 this.CurrentConfirmedAuthority = null;
                 this.CurrentConfirmedOwner = null;
+                this.CurrentConfirmedPruneAuthority = null;
+                this.CurrentConfirmedPruneOwner = null;
                 this.CurrentExecution = null;
                 this.CurrentExecutionCompletion = null;
                 this.CurrentExecutionPublication = null;
                 this.CurrentExecutionLifetime = null;
+                this.CurrentPruneExecution = null;
+                this.CurrentPruneExecutionPublication = null;
+                this.CurrentPruneExecutionLifetime = null;
                 this.Stage = SessionStage.Disposed;
             }
         }
@@ -1379,11 +1883,21 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             CancellationToken cancellationToken = default
         ) => this.Owner.InspectBoundRollbackAsync(this.ExactCanonicalPath, point, cancellationToken);
 
+        public Task<BoundInstallerRecoveryPrunePlanResult> InspectRecoveryPruneAsync(
+            BoundInstallerRecoveryPoint oldestPointToKeep,
+            CancellationToken cancellationToken = default
+        ) => this.Owner.InspectBoundRecoveryPruneAsync(this.ExactCanonicalPath, oldestPointToKeep, cancellationToken);
+
         public Task<InstallerReadOnlyPlanResult> ApprovePlanCandidatesAsync(IReadOnlyList<InstallerReadOnlyPlanCandidate> candidates, CancellationToken cancellationToken = default)
             => this.Owner.ApproveBoundPlanCandidatesAsync(candidates, cancellationToken);
 
         public Task<IConfirmedInstallerSession> ConfirmPlanAsync(InstallerPlanConfirmation confirmation, CancellationToken cancellationToken = default)
             => this.Owner.ConfirmBoundPlanAsync(this.ExactCanonicalPath, this.Game, confirmation, cancellationToken);
+
+        public Task<IConfirmedRecoveryPruneSession> ConfirmRecoveryPruneAsync(
+            BoundInstallerRecoveryPruneConfirmation confirmation,
+            CancellationToken cancellationToken = default
+        ) => this.Owner.ConfirmBoundRecoveryPruneAsync(this.Game, confirmation, cancellationToken);
     }
 
     private sealed class ConfirmedInstallerSession : IConfirmedInstallerSession
@@ -1415,5 +1929,30 @@ internal sealed class VerifiedInstallerSession : IVerifiedInstallerSession, IVer
             => this.Owner.TakePostExecutionRecoveryOwnerAsync(this, this.ExactCanonicalPath, cancellationToken);
 
         public ValueTask DisposeAsync() => this.Owner.DisposeFromConfirmedSessionAsync(this);
+    }
+
+    private sealed class ConfirmedRecoveryPruneSession : IConfirmedRecoveryPruneSession
+    {
+        private readonly VerifiedInstallerSession Owner;
+
+        public ProtocolReleaseIdentity Release { get; }
+        public VerifiedGamePresentation Game { get; }
+        public Task<InstallerProtocolClientException> SessionFaulted => this.Owner.SessionFaulted;
+
+        public ConfirmedRecoveryPruneSession(
+            VerifiedInstallerSession owner,
+            ProtocolReleaseIdentity release,
+            VerifiedGamePresentation game
+        )
+        {
+            this.Owner = owner;
+            this.Release = release;
+            this.Game = game;
+        }
+
+        public Task<InstallerRecoveryPruneOperation> ExecuteAsync(CancellationToken cancellationToken = default)
+            => this.Owner.ExecuteConfirmedRecoveryPruneAsync(this, cancellationToken);
+
+        public ValueTask DisposeAsync() => this.Owner.DisposeFromConfirmedRecoveryPruneSessionAsync(this);
     }
 }
