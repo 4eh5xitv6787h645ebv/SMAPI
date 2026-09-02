@@ -161,6 +161,33 @@ function Assert-PinnedGitHubCliFile {
     }
 }
 
+function Assert-LinuxGuiPublishOutput {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+
+    $directory = Get-Item -LiteralPath $Path -Force
+    if ($directory -isnot [System.IO.DirectoryInfo] -or ![string]::IsNullOrEmpty($directory.LinkType)) {
+        throw "The Linux graphical-installer publish output must be an ordinary directory."
+    }
+    $entries = @(Get-ChildItem -LiteralPath $directory.FullName -Force)
+    if (
+        $entries.Count -ne 1
+        -or $entries[0].Name -ne "SMAPI.Installer.Gui"
+        -or $entries[0] -isnot [System.IO.FileInfo]
+        -or ![string]::IsNullOrEmpty($entries[0].LinkType)
+        -or $entries[0].Length -le 0
+    ) {
+        throw "The Linux graphical-installer publish output must contain exactly one nonempty ordinary 'SMAPI.Installer.Gui' apphost."
+    }
+    if (!$IsWindows) {
+        $hardLinkCount = & stat -c '%h' -- $entries[0].FullName
+        if ($LASTEXITCODE -ne 0 -or $hardLinkCount -ne "1") {
+            throw "The Linux graphical-installer apphost must have exactly one hard link."
+        }
+    }
+}
+
 if ($githubCliDirectory) {
     $githubCliDirectory = [System.IO.Path]::GetFullPath($githubCliDirectory, (Get-Location).Path)
     $githubCliDirectoryItem = Get-Item -LiteralPath $githubCliDirectory -Force
@@ -242,6 +269,19 @@ foreach ($folder in $folders) {
         throw "Failed publishing the installer for $folder (exit code $LASTEXITCODE)."
     }
 
+    if ($folder -eq "linux") {
+        $linuxGuiPublishPath = "src/SMAPI.Installer.Gui/bin/$buildConfig/net10.0/linux-x64/package-publish"
+        Write-Output "Compiling graphical installer for $folder..."
+        Write-Output "-------------------------------------------------"
+        dotnet publish src/SMAPI.Installer.Gui --configuration $buildConfig -v minimal --runtime "$runtime" --framework "net10.0" --output "$linuxGuiPublishPath" -p:OS="$msbuildPlatformName" -p:CopyToGameFolder="false" --self-contained true -p:PublishSingleFile="true" -p:IncludeNativeLibrariesForSelfExtract="true" -p:PublishTrimmed="false" -p:PublishAot="false" -p:DebugSymbols="false" -p:DebugType="None"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed publishing the graphical installer for $folder (exit code $LASTEXITCODE)."
+        }
+        Assert-LinuxGuiPublishOutput $linuxGuiPublishPath
+        Write-Output ""
+        Write-Output ""
+    }
+
     foreach ($modName in $bundleModNames) {
         Write-Output "Compiling $modName for $folder..."
         Write-Output "-------------------------------------------------"
@@ -282,8 +322,8 @@ foreach ($folder in $folders) {
 }
 
 # copy base installer files
-foreach ($name in @("install on Linux.sh", "install on macOS.command", "install on Windows.bat", "README.txt")) {
-    if ($windowsOnly -and ($name -eq "install on Linux.sh" -or $name -eq "install on macOS.command")) {
+foreach ($name in @("install on Linux.sh", "install on Linux (graphical).sh", "install on macOS.command", "install on Windows.bat", "README.txt")) {
+    if ($windowsOnly -and ($name -eq "install on Linux.sh" -or $name -eq "install on Linux (graphical).sh" -or $name -eq "install on macOS.command")) {
         continue;
     }
     if ($linuxOnly -and ($name -eq "install on macOS.command" -or $name -eq "install on Windows.bat")) {
@@ -307,6 +347,26 @@ foreach ($folder in $folders) {
     # installer files
     Copy-Item "src/SMAPI.Installer/bin/$buildConfig/$runtime/publish/*" "$internalPath" -Recurse
     Remove-Item -Recurse -Force "$internalPath/assets"
+    if ($folder -eq "linux") {
+        $linuxGuiPublishPath = "src/SMAPI.Installer.Gui/bin/$buildConfig/net10.0/linux-x64/package-publish"
+        Assert-LinuxGuiPublishOutput $linuxGuiPublishPath
+        Copy-Item -LiteralPath "$linuxGuiPublishPath/SMAPI.Installer.Gui" -Destination "$internalPath/SMAPI.Installer.Gui"
+        $packagedGui = Get-Item -LiteralPath "$internalPath/SMAPI.Installer.Gui" -Force
+        if (
+            $packagedGui -isnot [System.IO.FileInfo]
+            -or ![string]::IsNullOrEmpty($packagedGui.LinkType)
+            -or $packagedGui.Length -le 0
+            -or (Get-FileHash -LiteralPath $packagedGui.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath "$linuxGuiPublishPath/SMAPI.Installer.Gui" -Algorithm SHA256).Hash
+        ) {
+            throw "The packaged Linux graphical-installer apphost isn't the exact ordinary published file."
+        }
+        if (!$IsWindows) {
+            $hardLinkCount = & stat -c '%h' -- $packagedGui.FullName
+            if ($LASTEXITCODE -ne 0 -or $hardLinkCount -ne "1") {
+                throw "The packaged Linux graphical-installer apphost must have exactly one hard link."
+            }
+        }
+    }
     if ($folder -eq "linux" -and $githubCliDirectory) {
         Copy-Item -LiteralPath "$githubCliDirectory/gh" -Destination "$internalPath/gh"
         Copy-Item -LiteralPath "$githubCliDirectory/gh-LICENSE.txt" -Destination "$internalPath/gh-LICENSE.txt"
@@ -421,7 +481,7 @@ if ($IsWindows) {
     Write-Warning "Can't set Unix file permissions on Windows. This may cause issues for Linux/macOS players."
 }
 else {
-    ForEach ($path in @("install on Linux.sh", "install on macOS.command", "internal/linux/bundle/unix-launcher.sh", "internal/linux/bundle/StardewModdingAPI", "internal/linux/bundle/StardewModdingAPI-net6", "internal/linux/bundle/StardewModdingAPI-net10", "internal/macOS/bundle/unix-launcher.sh")) {
+    ForEach ($path in @("install on Linux.sh", "install on Linux (graphical).sh", "install on macOS.command", "internal/linux/SMAPI.Installer.Gui", "internal/linux/bundle/unix-launcher.sh", "internal/linux/bundle/StardewModdingAPI", "internal/linux/bundle/StardewModdingAPI-net6", "internal/linux/bundle/StardewModdingAPI-net10", "internal/macOS/bundle/unix-launcher.sh")) {
         if (Test-Path "$packagePath/$path" -PathType Leaf) {
             chmod 755 "$packagePath/$path"
             if ($LASTEXITCODE -ne 0) {
@@ -430,6 +490,15 @@ else {
         }
         else {
             Write-Host "Couldn't set permissions for '$packagePath/$path': file does not exist."
+        }
+    }
+
+    if (@($folders) -contains "linux") {
+        foreach ($path in @("install on Linux.sh", "install on Linux (graphical).sh", "internal/linux/SMAPI.Installer", "internal/linux/SMAPI.Installer.Gui")) {
+            $mode = & stat -c '%a' -- "$packagePath/$path"
+            if ($LASTEXITCODE -ne 0 -or $mode -ne "755") {
+                throw "The packaged Linux executable '$path' must have exact mode 755."
+            }
         }
     }
 
