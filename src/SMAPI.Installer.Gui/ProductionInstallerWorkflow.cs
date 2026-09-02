@@ -1,6 +1,7 @@
 using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
@@ -17,6 +18,8 @@ internal sealed class ProductionInstallerWorkflow
     private readonly Func<PlanReviewViewModel, PlanReviewWindow> PlanWindowFactory;
     private readonly Func<ExecutionViewModel, ExecutionWindow> ExecutionWindowFactory;
     private readonly Func<RecoveryPruneViewModel, RecoveryPruneWindow> RecoveryPruneWindowFactory;
+    private readonly InstallerDiagnosticSession? DiagnosticSession;
+    private readonly ProductionInstallerDiagnosticObserver? DiagnosticObserver;
     private ReleaseVerificationController? ReleaseController;
     private ReleaseVerificationViewModel? ReleaseViewModel;
     private ReleaseVerificationWindow? ReleaseWindow;
@@ -26,6 +29,8 @@ internal sealed class ProductionInstallerWorkflow
     private PlanReviewController? PlanController;
     private PlanReviewViewModel? PlanViewModel;
     private PlanReviewWindow? PlanWindow;
+    private ExecutionController? ExecutionController;
+    private RecoveryPruneController? RecoveryPruneController;
     private int TransitionStarted;
     private int SelectedGameTransitionStarted;
     private int PickerActive;
@@ -39,7 +44,8 @@ internal sealed class ProductionInstallerWorkflow
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
         Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
         Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null,
-        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null,
+        InstallerDiagnosticSession? diagnosticSession = null
     )
     {
         this.ReleaseService = releaseService ?? throw new ArgumentNullException(nameof(releaseService));
@@ -50,6 +56,8 @@ internal sealed class ProductionInstallerWorkflow
         this.PlanWindowFactory = planWindowFactory ?? (viewModel => new(viewModel));
         this.ExecutionWindowFactory = executionWindowFactory ?? (viewModel => new(viewModel));
         this.RecoveryPruneWindowFactory = recoveryPruneWindowFactory ?? (viewModel => new(viewModel));
+        this.DiagnosticSession = diagnosticSession;
+        this.DiagnosticObserver = diagnosticSession is null ? null : new(diagnosticSession);
     }
 
     /// <summary>Create the initial window exactly once without starting network or backend work.</summary>
@@ -59,6 +67,8 @@ internal sealed class ProductionInstallerWorkflow
             throw new InvalidOperationException("The production installer workflow already created its initial window.");
 
         this.ReleaseController = new(this.ReleaseService, this.ClientFactory);
+        this.ObserveReleaseController(this.ReleaseController);
+        this.ReleaseController.Changed += this.OnReleaseDiagnosticChanged;
         this.ReleaseViewModel = new(this.ReleaseController);
         this.ReleaseWindow = new(this.ReleaseViewModel);
         this.ReleaseViewModel.ContinueRequested += this.OnContinueRequested;
@@ -78,6 +88,8 @@ internal sealed class ProductionInstallerWorkflow
         {
             session = this.ReleaseController!.TakeVerifiedSession();
             controller = new(session);
+            this.ObserveGameController(controller);
+            controller.Changed += this.OnGameDiagnosticChanged;
             session = null;
             viewModel = new(controller);
             window = this.DiscoveryWindowFactory(viewModel)
@@ -93,6 +105,7 @@ internal sealed class ProductionInstallerWorkflow
 
             this.ActivateNextWindow(transitionedWindow);
             this.ReleaseViewModel!.ContinueRequested -= this.OnContinueRequested;
+            this.ReleaseController!.Changed -= this.OnReleaseDiagnosticChanged;
             this.ReleaseWindow!.Close();
             controller = null;
             viewModel = null;
@@ -100,6 +113,8 @@ internal sealed class ProductionInstallerWorkflow
         }
         catch
         {
+            if (controller is not null)
+                controller.Changed -= this.OnGameDiagnosticChanged;
             this.DiscoveryController = null;
             this.DiscoveryViewModel = null;
             this.DiscoveryWindow = null;
@@ -135,6 +150,8 @@ internal sealed class ProductionInstallerWorkflow
         {
             session = this.DiscoveryController!.TakeSelectedGameSession();
             controller = new(session);
+            this.ObservePlanController(controller);
+            controller.Changed += this.OnPlanDiagnosticChanged;
             session = null;
             viewModel = new(controller);
             viewModel.ConfirmationReady += this.OnConfirmationReady;
@@ -148,6 +165,7 @@ internal sealed class ProductionInstallerWorkflow
             this.ActivateNextWindow(window);
             this.DiscoveryViewModel!.ContinueRequested -= this.OnPlanContinueRequested;
             this.DiscoveryViewModel.RecoveryCleanupRequested -= this.OnRecoveryCleanupRequested;
+            this.DiscoveryController!.Changed -= this.OnGameDiagnosticChanged;
             this.DiscoveryWindow!.Close();
             this.DiscoveryController = null;
             this.DiscoveryViewModel = null;
@@ -158,6 +176,8 @@ internal sealed class ProductionInstallerWorkflow
         }
         catch
         {
+            if (controller is not null)
+                controller.Changed -= this.OnPlanDiagnosticChanged;
             if (viewModel is not null)
                 viewModel.ConfirmationReady -= this.OnConfirmationReady;
             this.PlanController = null;
@@ -195,8 +215,14 @@ internal sealed class ProductionInstallerWorkflow
         {
             session = this.DiscoveryController!.TakeSelectedGameSession();
             controller = new(session);
+            this.ObserveRecoveryPruneController(controller);
+            controller.Changed += this.OnRecoveryPruneDiagnosticChanged;
+            this.RecoveryPruneController = controller;
             session = null;
-            viewModel = new(controller);
+            viewModel = new(
+                controller,
+                ensureDiagnosticLoggingReady: this.DiagnosticSession is null ? null : this.DiagnosticSession.EnsureReadyForMutation
+            );
             controller = null;
             window = this.RecoveryPruneWindowFactory(viewModel)
                 ?? throw new InvalidOperationException("The recovery-history window factory returned null.");
@@ -205,6 +231,7 @@ internal sealed class ProductionInstallerWorkflow
             this.ActivateNextWindow(window);
             this.DiscoveryViewModel!.ContinueRequested -= this.OnPlanContinueRequested;
             this.DiscoveryViewModel.RecoveryCleanupRequested -= this.OnRecoveryCleanupRequested;
+            this.DiscoveryController!.Changed -= this.OnGameDiagnosticChanged;
             this.DiscoveryWindow!.Close();
             this.DiscoveryController = null;
             this.DiscoveryViewModel = null;
@@ -213,6 +240,11 @@ internal sealed class ProductionInstallerWorkflow
         }
         catch
         {
+            if (this.RecoveryPruneController is { } failedController)
+            {
+                failedController.Changed -= this.OnRecoveryPruneDiagnosticChanged;
+                this.RecoveryPruneController = null;
+            }
             try
             {
                 if (window is not null)
@@ -245,8 +277,14 @@ internal sealed class ProductionInstallerWorkflow
         {
             handoff = this.PlanController!.TakeConfirmedHandoff();
             controller = new(handoff.Session, handoff.Presentation);
+            this.ObserveExecutionController(controller);
+            controller.Changed += this.OnExecutionDiagnosticChanged;
+            this.ExecutionController = controller;
             handoff = null;
-            viewModel = new(controller);
+            viewModel = new(
+                controller,
+                ensureDiagnosticLoggingReady: this.DiagnosticSession is null ? null : this.DiagnosticSession.EnsureReadyForMutation
+            );
             controller = null;
             window = this.ExecutionWindowFactory(viewModel)
                 ?? throw new InvalidOperationException("The execution window factory returned null.");
@@ -254,6 +292,7 @@ internal sealed class ProductionInstallerWorkflow
 
             this.ActivateNextWindow(window);
             this.PlanViewModel!.ConfirmationReady -= this.OnConfirmationReady;
+            this.PlanController!.Changed -= this.OnPlanDiagnosticChanged;
             this.PlanWindow!.Close();
             this.PlanController = null;
             this.PlanViewModel = null;
@@ -262,6 +301,11 @@ internal sealed class ProductionInstallerWorkflow
         }
         catch
         {
+            if (this.ExecutionController is { } failedController)
+            {
+                failedController.Changed -= this.OnExecutionDiagnosticChanged;
+                this.ExecutionController = null;
+            }
             try
             {
                 if (window is not null)
@@ -329,4 +373,49 @@ internal sealed class ProductionInstallerWorkflow
         return selected[0].TryGetLocalPath()
             ?? throw new InvalidOperationException("The desktop folder picker did not return a local folder.");
     }
+
+    private void OnReleaseDiagnosticChanged(object? sender, EventArgs eventArgs)
+    {
+        if (this.ReleaseController is { } controller)
+            this.ObserveReleaseController(controller);
+    }
+
+    private void OnGameDiagnosticChanged(object? sender, EventArgs eventArgs)
+    {
+        if (this.DiscoveryController is { } controller)
+            this.ObserveGameController(controller);
+    }
+
+    private void OnPlanDiagnosticChanged(object? sender, EventArgs eventArgs)
+    {
+        if (this.PlanController is { } controller)
+            this.ObservePlanController(controller);
+    }
+
+    private void OnExecutionDiagnosticChanged(object? sender, EventArgs eventArgs)
+    {
+        if (this.ExecutionController is { } controller)
+            this.ObserveExecutionController(controller);
+    }
+
+    private void OnRecoveryPruneDiagnosticChanged(object? sender, EventArgs eventArgs)
+    {
+        if (this.RecoveryPruneController is { } controller)
+            this.ObserveRecoveryPruneController(controller);
+    }
+
+    private void ObserveReleaseController(ReleaseVerificationController controller)
+        => this.DiagnosticObserver?.Observe(controller.Snapshot);
+
+    private void ObserveGameController(GameDiscoveryController controller)
+        => this.DiagnosticObserver?.Observe(controller.Snapshot);
+
+    private void ObservePlanController(PlanReviewController controller)
+        => this.DiagnosticObserver?.Observe(controller.Snapshot);
+
+    private void ObserveExecutionController(ExecutionController controller)
+        => this.DiagnosticObserver?.Observe(controller.Snapshot);
+
+    private void ObserveRecoveryPruneController(RecoveryPruneController controller)
+        => this.DiagnosticObserver?.Observe(controller.Snapshot);
 }

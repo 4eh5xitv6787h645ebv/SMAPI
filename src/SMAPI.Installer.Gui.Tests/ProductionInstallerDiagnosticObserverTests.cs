@@ -1,0 +1,253 @@
+using FluentAssertions;
+using StardewModdingAPI.Installer.Core.Engine;
+using StardewModdingAPI.Installer.Core.Planning;
+using StardewModdingAPI.Installer.Core.Protocol.V1;
+using StardewModdingAPI.Installer.Core.Transactions;
+using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
+using StardewModdingAPI.Installer.Gui.Frontend;
+
+namespace StardewModdingAPI.Installer.Gui.Tests;
+
+[TestFixture]
+internal sealed class ProductionInstallerDiagnosticObserverTests
+{
+    [Test]
+    public void FixedMappings_AreExhaustiveAndRejectUndefinedValues()
+    {
+        foreach (ReleaseVerificationState value in Enum.GetValues<ReleaseVerificationState>())
+            _ = ProductionInstallerDiagnosticObserver.MapReleaseState(value);
+        foreach (ReleaseVerificationError value in Enum.GetValues<ReleaseVerificationError>())
+            ProductionInstallerDiagnosticObserver.ValidateReleaseError(value);
+        foreach (ReviewedReleasePreparationStage value in Enum.GetValues<ReviewedReleasePreparationStage>())
+            _ = ProductionInstallerDiagnosticObserver.MapReleaseProgressStage(value);
+        foreach (GameDiscoveryState value in Enum.GetValues<GameDiscoveryState>())
+            _ = ProductionInstallerDiagnosticObserver.MapGameState(value);
+        foreach (PlanReviewState value in Enum.GetValues<PlanReviewState>())
+            _ = ProductionInstallerDiagnosticObserver.MapPlanState(value);
+        foreach (ExecutionState value in Enum.GetValues<ExecutionState>())
+            _ = ProductionInstallerDiagnosticObserver.MapExecutionState(value);
+        foreach (RecoveryPruneControllerState value in Enum.GetValues<RecoveryPruneControllerState>())
+            _ = ProductionInstallerDiagnosticObserver.MapPruneState(value);
+        foreach (TransactionStage value in Enum.GetValues<TransactionStage>())
+        {
+            _ = ProductionInstallerDiagnosticObserver.MapExecutionProgressStage(value, recovery: false);
+            _ = ProductionInstallerDiagnosticObserver.MapExecutionProgressStage(value, recovery: true);
+            _ = ProductionInstallerDiagnosticObserver.MapPruneProgressStage(value);
+        }
+
+        Action[] invalidMappings =
+        [
+            () => ProductionInstallerDiagnosticObserver.MapReleaseState((ReleaseVerificationState)999),
+            () => ProductionInstallerDiagnosticObserver.ValidateReleaseError((ReleaseVerificationError)999),
+            () => ProductionInstallerDiagnosticObserver.MapReleaseProgressStage((ReviewedReleasePreparationStage)999),
+            () => ProductionInstallerDiagnosticObserver.MapGameState((GameDiscoveryState)999),
+            () => ProductionInstallerDiagnosticObserver.MapPlanState((PlanReviewState)999),
+            () => ProductionInstallerDiagnosticObserver.MapExecutionState((ExecutionState)999),
+            () => ProductionInstallerDiagnosticObserver.MapPruneState((RecoveryPruneControllerState)999),
+            () => ProductionInstallerDiagnosticObserver.MapExecutionProgressStage((TransactionStage)999, recovery: false),
+            () => ProductionInstallerDiagnosticObserver.MapPruneProgressStage((TransactionStage)999)
+        ];
+        foreach (Action mapping in invalidMappings)
+            mapping.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Test]
+    public void Observe_DeduplicatesStateAndProgressAcrossRevisionsAndRecordsExactTerminalsOnce()
+    {
+        RecordingSink sink = new();
+        ProductionInstallerDiagnosticObserver observer = new(sink);
+        ExecutionPlanPresentation plan = CreateExecutionPlan();
+
+        observer.Observe(CreateExecution(1, ExecutionState.Running, plan, TransactionStage.Staging));
+        observer.Observe(CreateExecution(1, ExecutionState.Running, plan, TransactionStage.Staging));
+        observer.Observe(CreateExecution(2, ExecutionState.Running, plan, TransactionStage.Staging));
+        observer.Observe(CreateExecution(3, ExecutionState.Running, plan, TransactionStage.Applying));
+        InstallerExecutionTerminalResult terminal = new(
+            ProtocolExecutionOutcome.FailedBeforeMutation,
+            ProtocolDurableState.Unchanged,
+            ProtocolTerminalErrorCode.PermissionDenied,
+            ProtocolRecoveryDisposition.NotRequired,
+            ProtocolNextAction.ViewPrivateLog,
+            new(null, null, null, null, null, null),
+            InstallerBackendSettlement.ConfirmedClosed
+        );
+        observer.Observe(CreateExecution(4, ExecutionState.Terminal, plan, result: terminal));
+        observer.Observe(CreateExecution(5, ExecutionState.Terminal, plan, result: terminal));
+
+        sink.Calls.Should().Equal(
+            new DiagnosticCall(InstallerDiagnosticCode.ExecutionProgress, null, DiagnosticErrorKind.None, "Staging"),
+            new DiagnosticCall(InstallerDiagnosticCode.ExecutionProgress, null, DiagnosticErrorKind.None, "Applying"),
+            new DiagnosticCall(InstallerDiagnosticCode.ExecutionTerminal, "PermissionDenied", DiagnosticErrorKind.Terminal, null)
+        );
+    }
+
+    [Test]
+    public void Observe_RejectsStaleGenerationsAndRevisions()
+    {
+        RecordingSink sink = new();
+        ProductionInstallerDiagnosticObserver observer = new(sink);
+
+        observer.Observe(CreateGame(2, 2, GameDiscoveryState.Discovering));
+        observer.Observe(CreateGame(1, 99, GameDiscoveryState.Failed));
+        observer.Observe(CreateGame(2, 1, GameDiscoveryState.Failed));
+        observer.Observe(CreateGame(2, 3, GameDiscoveryState.Ready));
+
+        sink.Calls.Select(call => call.Code).Should().Equal(
+            InstallerDiagnosticCode.GameDiscoveryStarted,
+            InstallerDiagnosticCode.GameDiscoveryReady
+        );
+    }
+
+    [Test]
+    public void Observe_ProjectsOnlyFixedTypedFactsAndNeverPrivateSnapshotStrings()
+    {
+        const string hostile = "PRIVATE-/home/alex/Saves/Blossom-https://token.example-deadbeef";
+        RecordingSink sink = new();
+        ProductionInstallerDiagnosticObserver observer = new(sink);
+
+        observer.Observe(new ReleaseVerificationSnapshot(
+            1,
+            ReleaseVerificationState.Verified,
+            ReleaseVerificationError.None,
+            [],
+            null,
+            null,
+            1,
+            3,
+            false,
+            false,
+            false,
+            new(hostile, hostile, hostile, hostile, hostile, hostile, hostile, 1, hostile, hostile, hostile),
+            null,
+            null,
+            false
+        ));
+        ProtocolGameCandidate game = new(hostile, LinuxGameFolderStatus.Valid, hostile);
+        observer.Observe(new GameDiscoverySnapshot(1, 1, GameDiscoveryState.Ready, [game], game, false, false, false, true));
+        observer.Observe(new PlanReviewSnapshot(
+            1,
+            1,
+            PlanReviewState.Rejected,
+            InstallerOperation.Install,
+            new PlanReviewRejection(ProtocolPrePlanErrorCode.PermissionDenied, ProtocolNextAction.ViewPrivateLog, true),
+            false,
+            false,
+            false,
+            false,
+            true
+        )
+        {
+            Candidates = [new PlanReviewCandidate(hostile, FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, false)]
+        });
+        observer.Observe(CreatePrune(
+            1,
+            1,
+            RecoveryPruneControllerState.Failed,
+            hostile,
+            new RecoveryPruneRejection(ProtocolPrePlanErrorCode.InputOutputFailure, ProtocolNextAction.ViewPrivateLog, true)
+        ));
+
+        string projection = string.Join('|', sink.Calls);
+        projection.Should().NotContain(hostile);
+        sink.Calls.Select(call => call.Code).Should().Equal(
+            InstallerDiagnosticCode.ReleaseVerified,
+            InstallerDiagnosticCode.GameDiscoveryReady,
+            InstallerDiagnosticCode.PlanRejected,
+            InstallerDiagnosticCode.RecoveryPruneFailed
+        );
+    }
+
+    [Test]
+    public void Observe_NeverPropagatesMalformedSnapshotOrSinkFailuresToControllerPublisher()
+    {
+        ProductionInstallerDiagnosticObserver throwing = new(new ThrowingSink());
+
+        Action sinkFailure = () => throwing.Observe(CreateGame(1, 1, GameDiscoveryState.Discovering));
+        Action malformedEnum = () => throwing.Observe(CreateGame(1, 2, (GameDiscoveryState)999));
+
+        sinkFailure.Should().NotThrow();
+        malformedEnum.Should().NotThrow();
+    }
+
+    private static GameDiscoverySnapshot CreateGame(long generation, long revision, GameDiscoveryState state)
+        => new(generation, revision, state, [], null, false, false, false, false);
+
+    private static ExecutionPlanPresentation CreateExecutionPlan()
+        => new(InstallerOperation.Install, [], [], 0);
+
+    private static ExecutionSnapshot CreateExecution(
+        long revision,
+        ExecutionState state,
+        ExecutionPlanPresentation plan,
+        TransactionStage? stage = null,
+        InstallerExecutionResult? result = null
+    ) => new(revision, state, plan, stage, 0, null, result, null, false, false, false, false);
+
+    private static RecoveryPruneSnapshot CreatePrune(
+        long generation,
+        long revision,
+        RecoveryPruneControllerState state,
+        string hostile,
+        RecoveryPruneRejection? rejection = null
+    ) => new(
+        generation,
+        revision,
+        state,
+        new RecoveryPruneRelease(hostile, hostile),
+        new RecoveryPruneGame(hostile, hostile),
+        [],
+        null,
+        null,
+        rejection,
+        null,
+        0,
+        null,
+        null,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true
+    );
+
+    private enum DiagnosticErrorKind { None, PrePlan, Terminal }
+
+    private sealed record DiagnosticCall(
+        InstallerDiagnosticCode Code,
+        string? Error,
+        DiagnosticErrorKind ErrorKind,
+        string? ProgressStage
+    );
+
+    private sealed class RecordingSink : IProductionInstallerDiagnosticSink
+    {
+        public List<DiagnosticCall> Calls { get; } = [];
+
+        public void Record(InstallerDiagnosticCode code)
+            => this.Calls.Add(new(code, null, DiagnosticErrorKind.None, null));
+
+        public void Record(InstallerDiagnosticCode code, ProtocolPrePlanErrorCode? error)
+            => this.Calls.Add(new(code, error?.ToString(), DiagnosticErrorKind.PrePlan, null));
+
+        public void Record(InstallerDiagnosticCode code, ProtocolTerminalErrorCode? error)
+            => this.Calls.Add(new(code, error?.ToString(), DiagnosticErrorKind.Terminal, null));
+
+        public void RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage)
+            => this.Calls.Add(new(code, null, DiagnosticErrorKind.None, stage.ToString()));
+
+        public void RecordProgress(InstallerDiagnosticCode code, TransactionStage stage)
+            => this.Calls.Add(new(code, null, DiagnosticErrorKind.None, stage.ToString()));
+    }
+
+    private sealed class ThrowingSink : IProductionInstallerDiagnosticSink
+    {
+        public void Record(InstallerDiagnosticCode code) => throw new InvalidOperationException();
+        public void Record(InstallerDiagnosticCode code, ProtocolPrePlanErrorCode? error) => throw new InvalidOperationException();
+        public void Record(InstallerDiagnosticCode code, ProtocolTerminalErrorCode? error) => throw new InvalidOperationException();
+        public void RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage) => throw new InvalidOperationException();
+        public void RecordProgress(InstallerDiagnosticCode code, TransactionStage stage) => throw new InvalidOperationException();
+    }
+}

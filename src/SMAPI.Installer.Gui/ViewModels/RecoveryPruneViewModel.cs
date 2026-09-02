@@ -5,6 +5,7 @@ using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Transactions;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 
 namespace StardewModdingAPI.Installer.Gui.ViewModels;
@@ -62,6 +63,7 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
     private readonly RecoveryPruneController Controller;
     private readonly Func<bool> HasUiThreadAccess;
     private readonly Action<Action> PostToUiThread;
+    private readonly Action EnsureDiagnosticLoggingReady;
     private readonly object SnapshotDispatchSync = new();
     private RecoveryPruneSnapshot snapshot;
     private RecoveryPruneSnapshot? pendingSnapshot;
@@ -81,12 +83,14 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
     public RecoveryPruneViewModel(
         RecoveryPruneController controller,
         Func<bool>? hasUiThreadAccess = null,
-        Action<Action>? postToUiThread = null
+        Action<Action>? postToUiThread = null,
+        Action? ensureDiagnosticLoggingReady = null
     )
     {
         this.Controller = controller ?? throw new ArgumentNullException(nameof(controller));
         this.HasUiThreadAccess = hasUiThreadAccess ?? Dispatcher.UIThread.CheckAccess;
         this.PostToUiThread = postToUiThread ?? (action => Dispatcher.UIThread.Post(action));
+        this.EnsureDiagnosticLoggingReady = ensureDiagnosticLoggingReady ?? (() => { });
         this.snapshot = controller.Snapshot;
         this.ListCommand = new(() => controller.ListRecoveriesAsync(), () => this.snapshot.CanList, this.HandleActionFailure);
         this.InspectCommand = new(() => controller.InspectAsync(), () => this.snapshot.CanInspect, this.HandleActionFailure);
@@ -95,7 +99,7 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
             () => this.snapshot.CanConfirm && this.IsDestructiveConsentChecked,
             this.HandleActionFailure
         );
-        this.RunCommand = new(controller.RunAsync, () => this.snapshot.CanRun, this.HandleActionFailure);
+        this.RunCommand = new(() => this.StartMutation(controller.RunAsync), () => this.snapshot.CanRun, this.HandleActionFailure);
         this.CancelCommand = new(this.CancelOrCloseAsync, this.CanCancelOrClose, this.HandleCancellationFailure);
         this.ExitCommand = new(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.snapshot.CanExit);
         this.Controller.Changed += this.OnControllerChanged;
@@ -176,6 +180,12 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
             if (value)
                 this.FocusRequested?.Invoke(this, RecoveryPruneFocusTarget.Confirm);
         }
+    }
+
+    private Task StartMutation(Func<Task> start)
+    {
+        this.EnsureDiagnosticLoggingReady();
+        return start();
     }
 
     public bool IsHistoryListVisible => this.snapshot.State == RecoveryPruneControllerState.CatalogReady && this.Choices.Count > 0;
@@ -474,10 +484,15 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
         this.ExitCommand.NotifyCanExecuteChanged();
     }
 
-    private void HandleActionFailure(Exception _)
+    private void HandleActionFailure(Exception error)
     {
-        this.Heading = "The recovery-cleanup action could not be presented safely";
-        this.Message = "No private backend detail is shown. If work may be active, keep this window open until a bounded result appears.";
+        bool diagnosticsUnavailable = error is InstallerDiagnosticsUnavailableException;
+        this.Heading = diagnosticsUnavailable
+            ? "Private diagnostic logging is unavailable"
+            : "The recovery-cleanup action could not be presented safely";
+        this.Message = diagnosticsUnavailable
+            ? "No cleanup was started. Close this installer, make sure another installer is not open, and retry as your normal desktop user."
+            : "No private backend detail is shown. If work may be active, keep this window open until a bounded result appears.";
         this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
         this.FocusRequested?.Invoke(this, RecoveryPruneFocusTarget.Error);
     }

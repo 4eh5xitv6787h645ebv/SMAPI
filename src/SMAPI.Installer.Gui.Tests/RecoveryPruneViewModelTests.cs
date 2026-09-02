@@ -5,6 +5,7 @@ using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Transactions;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
@@ -393,6 +394,50 @@ internal sealed class RecoveryPruneViewModelTests
                     action();
             }
         );
+    }
+
+    [Test]
+    public async Task DiagnosticAdmissionFailure_PreventsRecoveryCleanupMutation()
+    {
+        FakePlanSession session = new();
+        await using RecoveryPruneController controller = new(session);
+        int admissionChecks = 0;
+        await using RecoveryPruneViewModel viewModel = new(
+            controller,
+            () => true,
+            action => action(),
+            () =>
+            {
+                admissionChecks++;
+                throw new InstallerDiagnosticsUnavailableException();
+            }
+        );
+        viewModel.ApplySnapshotForTesting(Snapshot(
+            controller.Snapshot,
+            1,
+            1,
+            RecoveryPruneControllerState.ReadyToRun,
+            plan: new RecoveryPrunePlanPresentation(
+                1,
+                1,
+                1,
+                1,
+                false,
+                1,
+                [ProtocolPlanRisk.RecoveryPrune],
+                ProtocolRecommendedDefault.Cancel,
+                true
+            ),
+            canRun: true,
+            canCancel: true
+        ));
+
+        await viewModel.RunCommand.ExecuteAsync();
+
+        admissionChecks.Should().Be(1);
+        controller.Snapshot.State.Should().Be(RecoveryPruneControllerState.NotLoaded);
+        viewModel.Heading.Should().Be("Private diagnostic logging is unavailable");
+        viewModel.Message.Should().Contain("No cleanup was started");
     }
 
     private static RecoveryPruneSnapshot Snapshot(

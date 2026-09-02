@@ -1,5 +1,6 @@
 using Avalonia.Controls;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
@@ -16,11 +17,21 @@ internal static class GuiComposition
 
     /// <summary>Create the selected top-level window and provide the production next-window activation boundary.</summary>
     internal static Window CreateMainWindow(GuiLaunchMode mode, Action<Window> activateNextWindow)
+        => CreateMainWindow(mode, activateNextWindow, null);
+
+    /// <summary>Create the selected top-level window with the production-only diagnostic owner.</summary>
+    internal static Window CreateMainWindow(
+        GuiLaunchMode mode,
+        Action<Window> activateNextWindow,
+        InstallerDiagnosticSession? diagnosticSession
+    )
     {
         ArgumentNullException.ThrowIfNull(activateNextWindow);
+        if (mode == GuiLaunchMode.Demo && diagnosticSession is not null)
+            throw new ArgumentException("Demo mode must not receive production diagnostics.", nameof(diagnosticSession));
         return CreateMainWindow(
             mode,
-            () => CreateReleaseVerificationWindow(activateNextWindow),
+            () => CreateReleaseVerificationWindow(activateNextWindow, diagnosticSession),
             () => new MainWindow()
         );
     }
@@ -43,12 +54,16 @@ internal static class GuiComposition
         };
     }
 
-    private static ReleaseVerificationWindow CreateReleaseVerificationWindow(Action<Window> activateNextWindow)
+    private static ReleaseVerificationWindow CreateReleaseVerificationWindow(
+        Action<Window> activateNextWindow,
+        InstallerDiagnosticSession? diagnosticSession
+    )
     {
         ProductionInstallerWorkflow workflow = new(
             new ReviewedGitHubReleaseService(),
             ProcessInstallerProtocolClient.CreateForCurrentProcess,
-            activateNextWindow
+            activateNextWindow,
+            diagnosticSession: diagnosticSession
         );
         return workflow.CreateInitialWindow();
     }

@@ -13,6 +13,7 @@ using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
@@ -432,6 +433,33 @@ internal sealed class ExecutionControllerTests
         viewModel.Message.Should().Contain("selected previous managed state was restored and committed");
         controller.Snapshot.State.Should().Be(ExecutionState.Terminal);
         session.ExecuteCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task DiagnosticAdmissionFailure_PreventsExecutionBeforeBackendMutation()
+    {
+        FakeConfirmedSession session = new()
+        {
+            Execute = _ => throw new AssertionException("Execution must not be called when diagnostic admission fails.")
+        };
+        await using ExecutionController controller = new(session, Plan());
+        int admissionChecks = 0;
+        await using ExecutionViewModel viewModel = new(
+            controller,
+            ensureDiagnosticLoggingReady: () =>
+            {
+                admissionChecks++;
+                throw new InstallerDiagnosticsUnavailableException();
+            }
+        );
+
+        await viewModel.RunCommand.ExecuteAsync();
+
+        admissionChecks.Should().Be(1);
+        session.ExecuteCalls.Should().Be(0);
+        controller.Snapshot.State.Should().Be(ExecutionState.Ready);
+        viewModel.Heading.Should().Be("Private diagnostic logging is unavailable");
+        viewModel.Message.Should().Contain("No operation was started");
     }
 
     private static IEnumerable<TestCaseData> InvalidRollbackRiskCases()
