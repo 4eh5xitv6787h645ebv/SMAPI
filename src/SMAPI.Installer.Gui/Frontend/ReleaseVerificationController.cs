@@ -201,7 +201,13 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             if (this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
                 throw new InvalidOperationException("A verified release session already owns the controller.");
             catalogOperation = this.ActiveOperation;
-            if (catalogOperation is not null && catalogOperation.Kind != ControllerOperationKind.Catalog)
+            if (
+                catalogOperation is not null
+                && (
+                    catalogOperation.Kind != ControllerOperationKind.Catalog
+                    || this.StateValue != ReleaseVerificationState.LoadingCatalog
+                )
+            )
                 throw new InvalidOperationException("A local package cannot replace an active verification attempt.");
             if (catalogOperation is not null)
             {
@@ -499,6 +505,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 {
                     this.AttemptNumberValue = attemptNumber;
                     this.SourceValue = ReleasePackageSource.ReviewedDownload;
+                    operation.Kind = ControllerOperationKind.Attempt;
                     this.StateValue = ReleaseVerificationState.Handshaking;
                     this.ErrorValue = ReleaseVerificationError.None;
                 }
@@ -509,8 +516,6 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 await this.CompleteOperationAsync(operation).ConfigureAwait(false);
                 return;
             }
-
-            operation.Kind = ControllerOperationKind.Attempt;
             await this.RunAttemptAsync(
                 new AttemptContext(operation, ReleasePackageSource.ReviewedDownload, attemptNumber),
                 refreshed,

@@ -154,9 +154,16 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     public string DurableState => "Unchanged — nothing has been installed";
 
-    public bool IsReleaseSelectorEnabled => this.snapshot.State == ReleaseVerificationState.Ready
-        && this.snapshot.Source != ReleasePackageSource.LocalFolder
-        && this.snapshot.CanStart;
+    public bool IsReleaseSelectorEnabled => (
+            this.snapshot.State == ReleaseVerificationState.Ready
+            && this.snapshot.Source != ReleasePackageSource.LocalFolder
+            && this.snapshot.CanStart
+        )
+        || (
+            this.snapshot.Source == ReleasePackageSource.LocalFolder
+            && this.snapshot.CanChooseLocal
+            && this.snapshot.Releases.Count > 0
+        );
 
     public bool IsDownloadActionVisible => this.snapshot.State == ReleaseVerificationState.Ready
         && this.snapshot.Source != ReleasePackageSource.LocalFolder;
@@ -211,7 +218,8 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
     public Task ApplyLocalPackageFolderAsync(string? path)
     {
         this.localPackagePickerPending = false;
-        this.UseLocalPackageCommand.NotifyCanExecuteChanged();
+        this.ClearLocalPackagePickerFailure();
+        this.NotifyDerivedProperties();
         if (path is null || this.disposed)
         {
             this.FocusRequested?.Invoke(this, ReleaseVerificationFocusTarget.LocalPackage);
@@ -326,8 +334,9 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
     {
         if (!this.CanUseLocalPackage())
             return;
+        this.ClearLocalPackagePickerFailure();
         this.localPackagePickerPending = true;
-        this.UseLocalPackageCommand.NotifyCanExecuteChanged();
+        this.NotifyDerivedProperties();
         this.LocalPackageFolderRequestedValue?.Invoke(this, EventArgs.Empty);
     }
 
@@ -360,8 +369,8 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
         ReleaseVerificationState previousState = this.snapshot.State;
         long previousGeneration = this.snapshot.Generation;
+        bool preservePickerFailure = this.localPackagePickerFailed;
         this.snapshot = next;
-        this.localPackagePickerFailed = false;
         this.Releases = next.Releases;
         ReviewedReleaseCandidate? visibleSelection = next.Source == ReleasePackageSource.LocalFolder
             ? null
@@ -369,15 +378,25 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         this.SetProperty(ref this.selectedRelease, visibleSelection, nameof(this.SelectedRelease));
         this.ReleaseDetail = FormatReleaseDetail(next);
         this.VerifiedIdentityDetail = FormatVerifiedIdentity(next.VerifiedRelease, next.Source);
-        (this.Heading, this.Message) = GetCopy(next);
+        if (!preservePickerFailure)
+            (this.Heading, this.Message) = GetCopy(next);
         this.ProgressText = GetProgressText(next);
         this.ProgressValue = GetProgressValue(next.Progress);
-        this.UpdateLiveAnnouncement(next);
+        if (!preservePickerFailure)
+            this.UpdateLiveAnnouncement(next);
         this.NotifyDerivedProperties();
 
         bool stateChanged = previousState != next.State || previousGeneration != next.Generation;
-        if (requestFocus && stateChanged)
+        if (requestFocus && stateChanged && !preservePickerFailure)
             this.FocusRequested?.Invoke(this, this.GetFocusTarget(next));
+    }
+
+    private void ClearLocalPackagePickerFailure()
+    {
+        if (!this.localPackagePickerFailed)
+            return;
+        this.localPackagePickerFailed = false;
+        this.ApplySnapshot(this.snapshot, requestFocus: false);
     }
 
     private void NotifyDerivedProperties()

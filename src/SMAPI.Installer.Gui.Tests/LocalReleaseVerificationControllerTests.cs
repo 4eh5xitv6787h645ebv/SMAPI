@@ -331,6 +331,59 @@ internal sealed class LocalReleaseVerificationControllerTests
         await AwaitBounded(controller.DisposeAsync().AsTask());
     }
 
+    [Test]
+    public async Task LocalSelectionCannotReplaceRetryAfterRefreshedCatalogBecomesAttempt()
+    {
+        ReviewedReleaseCandidate initial = Candidate();
+        ReviewedReleaseCandidate refreshed = Candidate();
+        FakeReleaseService reviewed = new();
+        reviewed.Catalogs.Enqueue([initial]);
+        reviewed.Catalogs.Enqueue([refreshed]);
+        reviewed.Prepare = (_, progress, _) =>
+        {
+            EmitValidProgress(progress!);
+            return Task.FromResult<IPreparedReleasePackage>(new FakePreparedPackage());
+        };
+        FakeLocalReleaseService local = new();
+        Queue<FakeClient> clients = new([
+            RejectingClient(),
+            RejectingClient()
+        ]);
+        ReleaseVerificationController controller = new(reviewed, () => clients.Dequeue(), local);
+        await AwaitBounded(controller.LoadCatalogAsync());
+        await AwaitBounded(controller.StartAsync());
+
+        Exception? replacementFailure = null;
+        controller.Changed += (_, _) =>
+        {
+            ReleaseVerificationSnapshot snapshot = controller.Snapshot;
+            if (
+                snapshot.State == ReleaseVerificationState.Handshaking
+                && snapshot.Source == ReleasePackageSource.ReviewedDownload
+                && snapshot.AttemptNumber == 2
+                && replacementFailure is null
+            )
+            {
+                try
+                {
+                    _ = controller.StartLocalAsync("/selected/racing-local-package");
+                }
+                catch (Exception ex)
+                {
+                    replacementFailure = ex;
+                }
+            }
+        };
+
+        await AwaitBounded(controller.RetryAsync());
+
+        replacementFailure.Should().BeOfType<InvalidOperationException>();
+        local.Paths.Should().BeEmpty("an active reviewed retry must never be reclassified as replaceable catalog work");
+        controller.Snapshot.Source.Should().Be(ReleasePackageSource.ReviewedDownload);
+        controller.Snapshot.AttemptNumber.Should().Be(2);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
     private static FakeClient RejectingClient()
     {
         return new FakeClient
