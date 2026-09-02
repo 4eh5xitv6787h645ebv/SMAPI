@@ -699,7 +699,7 @@ run_launcher_signal_smoke() {
 
 run_identity_failure_smoke() {
     local scenario="$1"
-    local fail_after expected_status case_name launch_argument read_delay expect_failure_marker
+    local fail_after expected_status case_name launch_argument read_delay expect_failure_marker stop_before_capture
     local state_root output_path launcher_output expected_launcher_output status
     local identity_failure_marker identity_read_count
 
@@ -711,6 +711,16 @@ run_identity_failure_smoke() {
             launch_argument="--demo"
             read_delay=0
             expect_failure_marker=true
+            stop_before_capture=false
+            ;;
+        initial-stopped)
+            fail_after=0
+            expected_status=1
+            case_name="identity-capture-stopped-child"
+            launch_argument="--demo"
+            read_delay=2
+            expect_failure_marker=true
+            stop_before_capture=true
             ;;
         post-capture)
             fail_after=2
@@ -719,6 +729,7 @@ run_identity_failure_smoke() {
             launch_argument="--demo"
             read_delay=0
             expect_failure_marker=true
+            stop_before_capture=false
             ;;
         completed-job)
             fail_after=999
@@ -727,6 +738,7 @@ run_identity_failure_smoke() {
             launch_argument="--unexpected"
             read_delay=1
             expect_failure_marker=false
+            stop_before_capture=false
             ;;
         *)
             echo "Unknown packaged launcher identity-failure scenario: $scenario" >&2
@@ -739,7 +751,7 @@ run_identity_failure_smoke() {
     launcher_output="$state_root/launcher-output"
     expected_launcher_output="$state_root/expected-launcher-output"
     case "$scenario" in
-        initial)
+        initial | initial-stopped)
             printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." \
                 > "$expected_launcher_output"
             ;;
@@ -790,6 +802,7 @@ run_identity_failure_smoke() {
                     expect_failure_marker="${13}"
                     launcher_output="${14}"
                     expected_launcher_output="${15}"
+                    stop_before_capture="${16}"
                     launcher_pid=""
                     gui_pid=""
                     gui_start_time=""
@@ -910,6 +923,32 @@ run_identity_failure_smoke() {
                         fail_case APPHOST_IDENTITY_NOT_RETAINED
                     fi
 
+                    if [[ "$stop_before_capture" == true ]]; then
+                        read_count=0
+                        for _ in {1..300}; do
+                            if [[ -f "$identity_read_count" ]]; then
+                                IFS= read -r read_count < "$identity_read_count" || [[ -n "$read_count" ]]
+                            fi
+                            [[ "$read_count" =~ ^[0-9]+$ ]] || fail_case INVALID_IDENTITY_READ_COUNT
+                            (( read_count >= 1 )) && break
+                            is_running_direct_launcher_job || fail_case LAUNCHER_EXITED_BEFORE_CAPTURE_READ
+                            is_exact_gui_identity || fail_case APPHOST_IDENTITY_CHANGED_BEFORE_CAPTURE_STOP
+                            sleep 0.01
+                        done
+                        (( read_count >= 1 )) || fail_case CAPTURE_READ_NOT_OBSERVED
+                        signal_exact_gui STOP || fail_case PRE_CAPTURE_APPHOST_STOP_REJECTED
+                        for _ in {1..100}; do
+                            state="$(sed -n "s/^State:[[:space:]]*\([^[:space:]]\).*/\1/p" "/proc/$gui_pid/status" 2>/dev/null || true)"
+                            [[ "$state" == T || "$state" == t ]] && break
+                            is_exact_gui_identity || fail_case APPHOST_IDENTITY_CHANGED_DURING_CAPTURE_STOP
+                            sleep 0.01
+                        done
+                        if [[ "$state" != T && "$state" != t ]]; then
+                            fail_case PRE_CAPTURE_APPHOST_DID_NOT_STOP
+                        fi
+                        is_running_direct_launcher_job || fail_case LAUNCHER_EXITED_BEFORE_CAPTURE_FAILURE
+                    fi
+
                     if [[ "$scenario" == post-capture ]]; then
                         for _ in {1..300}; do
                             read_count=0
@@ -983,7 +1022,7 @@ run_identity_failure_smoke() {
                         fail_case PRIVATE_BUNDLE_REMAINED
                     fi
                     trap - EXIT
-                ' identity-failure-supervisor "$launcher" "$gui_apphost" "$state_root" "$identity_guarded_path" "$identity_failure_marker" "$identity_read_count" "$fail_after" "$scenario" "$expected_status" "$launcher_bash" "$read_delay" "$launch_argument" "$expect_failure_marker" "$launcher_output" "$expected_launcher_output"
+                ' identity-failure-supervisor "$launcher" "$gui_apphost" "$state_root" "$identity_guarded_path" "$identity_failure_marker" "$identity_read_count" "$fail_after" "$scenario" "$expected_status" "$launcher_bash" "$read_delay" "$launch_argument" "$expect_failure_marker" "$launcher_output" "$expected_launcher_output" "$stop_before_capture"
     ) > "$output_path" 2>&1
     status=$?
     set -e
@@ -1016,6 +1055,7 @@ run_launcher_signal_smoke TERM 143 false
 run_launcher_signal_smoke TERM 143 true
 run_launcher_signal_smoke TERM 143 true true
 run_identity_failure_smoke initial
+run_identity_failure_smoke initial-stopped
 run_identity_failure_smoke post-capture
 run_identity_failure_smoke completed-job
 

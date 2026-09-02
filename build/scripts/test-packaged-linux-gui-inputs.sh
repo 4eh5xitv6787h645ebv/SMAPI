@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 qualifier="$script_dir/test-packaged-linux-gui.sh"
+launcher_source="$script_dir/../../src/SMAPI.Installer/assets/install on Linux (graphical).sh"
 for command_name in grep mktemp timeout zip; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         echo "Required packaged-GUI input-test command is unavailable: $command_name" >&2
@@ -16,6 +17,14 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+launcher_source_text="$(<"$launcher_source")"
+settled_diagnostic_guard=$'if force_kill_and_settle_child; then\n        printf \'%s\\n\' "The graphical installer couldn\'t verify its child process safely, so it was stopped." >&2'
+if [[ "$launcher_source_text" != *"$settled_diagnostic_guard"* ]] \
+    || [[ "$(grep -Fc "so it was stopped." "$launcher_source")" -ne 1 ]]; then
+    echo "The launcher must only claim its unverified child stopped after successful bounded settlement." >&2
+    exit 1
+fi
 
 run_expect_status() {
     local expected_status="$1"

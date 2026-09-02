@@ -257,9 +257,10 @@ while is_running_child_job; do
     sleep 0.01 || true
 done
 forward_pending_signal
-if [[ "$child_identity_ready" == false ]] && is_running_child_job; then
-    force_kill_and_settle_child || true
-    printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." >&2
+if [[ "$child_identity_ready" == false ]] && { is_running_child_job || is_stopped_child_job; }; then
+    if force_kill_and_settle_child; then
+        printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." >&2
+    fi
     if [[ -n "$requested_exit_status" ]]; then
         exit "$requested_exit_status"
     fi
