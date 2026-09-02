@@ -2,12 +2,17 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.Styling;
 using StardewModdingAPI.Installer.Gui.Diagnostics;
 
 namespace StardewModdingAPI.Installer.Gui;
 
 public sealed partial class App : Application
 {
+    internal const string HighContrastEnvironmentVariable = "SMAPI_INSTALLER_HIGH_CONTRAST";
+
+    public static ThemeVariant HighContrastTheme { get; } = new("SMAPI installer high contrast", ThemeVariant.Dark);
+
     private readonly GuiLaunchMode LaunchMode;
     private readonly InstallerDiagnosticSession? DiagnosticSession;
     private readonly Func<GuiLaunchMode, InstallerDiagnosticSession?, Action<Window>, Window> CreateMainWindow;
@@ -52,6 +57,16 @@ public sealed partial class App : Application
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
+        this.RequestedThemeVariant = ResolveRequestedThemeVariant(
+            Environment.GetEnvironmentVariable(HighContrastEnvironmentVariable)
+        );
+    }
+
+    internal static ThemeVariant ResolveRequestedThemeVariant(string? highContrastOverride)
+    {
+        return string.Equals(highContrastOverride, "1", StringComparison.Ordinal)
+            ? HighContrastTheme
+            : ThemeVariant.Default;
     }
 
     public override void OnFrameworkInitializationCompleted()

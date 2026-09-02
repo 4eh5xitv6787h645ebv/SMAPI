@@ -13,7 +13,7 @@
     WindowStartupLocation="CenterScreen">
   <Window.Styles>
     <Style Selector="Border.keyboard-focus:focus-visible">
-      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderBrush" Value="{DynamicResource InstallerFocusBrush}" />
       <Setter Property="BorderThickness" Value="3" />
     </Style>
   </Window.Styles>
@@ -70,8 +70,8 @@
               IsVisible="{Binding IsProblemVisible}"
               AutomationProperties.LiveSetting="{Binding ProblemLiveSetting}"
               AutomationProperties.Name="{Binding LiveAnnouncement}"
-              Background="#3B1F26"
-              BorderBrush="#FF8A9A"
+              Background="{DynamicResource InstallerErrorBackgroundBrush}"
+              BorderBrush="{DynamicResource InstallerErrorBorderBrush}"
               BorderThickness="2"
               CornerRadius="6">
             <TextBlock Text="The folder cannot be used yet. Follow the safe next step in the status message; no game files were changed." TextWrapping="Wrap" />
@@ -120,7 +120,7 @@
                 TextWrapping="Wrap" />
           </StackPanel>
 
-          <Border Padding="12" Background="#111923" CornerRadius="6">
+          <Border Padding="12" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="6">
             <StackPanel Spacing="3">
               <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
               <TextBlock

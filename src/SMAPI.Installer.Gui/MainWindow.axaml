@@ -22,11 +22,11 @@
             Grid.Column="1"
             Padding="12,7"
             VerticalAlignment="Center"
-            Background="#184A3B"
-            BorderBrush="#49D49D"
+            Background="{DynamicResource InstallerSuccessBackgroundBrush}"
+            BorderBrush="{DynamicResource InstallerSuccessBorderBrush}"
             BorderThickness="1"
             CornerRadius="20">
-          <TextBlock FontWeight="Bold" Foreground="#A7F3D0" Text="SAFE DEMO" />
+          <TextBlock FontWeight="Bold" Foreground="{DynamicResource InstallerSuccessForegroundBrush}" Text="SAFE DEMO" />
         </Border>
       </Grid>
 
@@ -36,8 +36,8 @@
           Padding="16"
           AutomationProperties.LiveSetting="Polite"
           AutomationProperties.Name="Safe demo mode notice"
-          Background="#352D14"
-          BorderBrush="#E9C46A"
+          Background="{DynamicResource InstallerWarningBackgroundBrush}"
+          BorderBrush="{DynamicResource InstallerWarningBorderBrush}"
           BorderThickness="2"
           CornerRadius="8">
         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
@@ -125,7 +125,7 @@
                 <TextBlock Classes="muted" Text="{Binding PreviewSummary}" TextWrapping="Wrap" />
               </StackPanel>
             </Border>
-            <Border Margin="0,8,0,0" Padding="12" Background="#111923" CornerRadius="6">
+            <Border Margin="0,8,0,0" Padding="12" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="6">
               <StackPanel Spacing="4">
                 <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
                 <TextBlock
@@ -148,7 +148,7 @@
               <TextBlock Text="Connect verified backend to enable" TextAlignment="Center" TextWrapping="Wrap" />
             </Button>
             <TextBlock
-                Foreground="#E9C46A"
+                Foreground="{DynamicResource InstallerWarningBorderBrush}"
                 FontSize="13"
                 Text="Execution is intentionally disabled in this shell preview."
                 TextWrapping="Wrap" />
@@ -169,7 +169,7 @@
               TabIndex="7"
               AutomationProperties.Name="Detailed local demo log"
               AutomationProperties.HelpText="Synthetic in-memory messages for this preview."
-              Background="#0C121A"
+              Background="{DynamicResource InstallerLogBackgroundBrush}"
               ItemsSource="{Binding LogEntries}">
             <ListBox.ItemTemplate>
               <DataTemplate>

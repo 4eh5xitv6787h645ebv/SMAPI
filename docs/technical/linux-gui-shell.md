@@ -22,6 +22,21 @@ dotnet run --project src/SMAPI.Installer.Gui/SMAPI.Installer.Gui.csproj --config
 
 The supported first desktop path is X11, including XWayland on Wayland sessions; Avalonia's experimental native Wayland path isn't advertised as supported yet. The window uses native controls, unique access keys and an explicit forward/reverse tab order, a visible focus ring, automation headings and a concise live result, and device-independent sizing. Selection and state cards stack below 850 device-independent pixels; the page remains vertically scrollable without horizontal page scrolling at the tested 100%, 125%, 150%, and 200% scale models.
 
+The GUI follows the desktop's light or dark theme by default, including live theme changes. For an
+explicit maximum-contrast presentation, launch the same package as your normal desktop user with
+`SMAPI_INSTALLER_HIGH_CONTRAST=1`; for example:
+
+```sh
+SMAPI_INSTALLER_HIGH_CONTRAST=1 bash "install on Linux (graphical).sh"
+```
+
+Only the exact value `1` enables this override. It changes presentation colors and focus/error
+outlines only: it doesn't grant installer authority, bypass verification or confirmation, alter
+diagnostics, or require `sudo`. Remove the variable (or set any other value) to follow the system
+theme again. The light, dark, and explicit high-contrast palettes have automated checks for visible
+keyboard focus, error text/boundaries, and the manual terminal-help card; real X11/XWayland and
+AT-SPI qualification remain part of exact-package desktop testing.
+
 Run the focused tests with:
 
 ```sh
