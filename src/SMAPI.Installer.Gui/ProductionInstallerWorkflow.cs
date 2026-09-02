@@ -11,10 +11,12 @@ namespace StardewModdingAPI.Installer.Gui;
 internal sealed class ProductionInstallerWorkflow
 {
     private readonly IReviewedReleaseService ReleaseService;
+    private readonly ILocalReleasePackageService LocalReleaseService;
     private readonly Func<IInstallerProtocolClient> ClientFactory;
     private readonly Action<Window> ActivateNextWindow;
     private readonly Func<GameDiscoveryViewModel, GameDiscoveryWindow> DiscoveryWindowFactory;
     private readonly Func<GameDiscoveryWindow, Task<string?>> PickFolder;
+    private readonly Func<ReleaseVerificationWindow, Task<string?>> PickLocalReleaseFolder;
     private readonly Func<PlanReviewViewModel, PlanReviewWindow> PlanWindowFactory;
     private readonly Func<ExecutionViewModel, ExecutionWindow> ExecutionWindowFactory;
     private readonly Func<RecoveryPruneViewModel, RecoveryPruneWindow> RecoveryPruneWindowFactory;
@@ -34,6 +36,7 @@ internal sealed class ProductionInstallerWorkflow
     private int TransitionStarted;
     private int SelectedGameTransitionStarted;
     private int PickerActive;
+    private int LocalReleasePickerActive;
     private int ExecutionTransitionStarted;
 
     public ProductionInstallerWorkflow(
@@ -45,7 +48,9 @@ internal sealed class ProductionInstallerWorkflow
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
         Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
         Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null,
-        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null,
+        ILocalReleasePackageService? localReleaseService = null,
+        Func<ReleaseVerificationWindow, Task<string?>>? pickLocalReleaseFolder = null
     )
         : this(
             releaseService,
@@ -56,6 +61,8 @@ internal sealed class ProductionInstallerWorkflow
             planWindowFactory,
             executionWindowFactory,
             recoveryPruneWindowFactory,
+            localReleaseService,
+            pickLocalReleaseFolder,
             diagnosticSession ?? throw new ArgumentNullException(nameof(diagnosticSession)),
             allowMissingDiagnostics: false
         )
@@ -71,7 +78,9 @@ internal sealed class ProductionInstallerWorkflow
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
         Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
         Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null,
-        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null,
+        ILocalReleasePackageService? localReleaseService = null,
+        Func<ReleaseVerificationWindow, Task<string?>>? pickLocalReleaseFolder = null
     ) => new(
         releaseService,
         clientFactory,
@@ -81,6 +90,8 @@ internal sealed class ProductionInstallerWorkflow
         planWindowFactory,
         executionWindowFactory,
         recoveryPruneWindowFactory,
+        localReleaseService,
+        pickLocalReleaseFolder,
         diagnosticSession: null,
         allowMissingDiagnostics: true
     );
@@ -94,6 +105,8 @@ internal sealed class ProductionInstallerWorkflow
         Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory,
         Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory,
         Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory,
+        ILocalReleasePackageService? localReleaseService,
+        Func<ReleaseVerificationWindow, Task<string?>>? pickLocalReleaseFolder,
         InstallerDiagnosticSession? diagnosticSession,
         bool allowMissingDiagnostics
     )
@@ -101,10 +114,12 @@ internal sealed class ProductionInstallerWorkflow
         if (!allowMissingDiagnostics && diagnosticSession is null)
             throw new ArgumentNullException(nameof(diagnosticSession));
         this.ReleaseService = releaseService ?? throw new ArgumentNullException(nameof(releaseService));
+        this.LocalReleaseService = localReleaseService ?? new LocalReleasePackageService();
         this.ClientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
         this.ActivateNextWindow = activateNextWindow ?? throw new ArgumentNullException(nameof(activateNextWindow));
         this.DiscoveryWindowFactory = discoveryWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
         this.PickFolder = pickFolder ?? PickFolderAsync;
+        this.PickLocalReleaseFolder = pickLocalReleaseFolder ?? PickLocalReleaseFolderAsync;
         this.PlanWindowFactory = planWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
         this.ExecutionWindowFactory = executionWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
         this.RecoveryPruneWindowFactory = recoveryPruneWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
@@ -118,11 +133,12 @@ internal sealed class ProductionInstallerWorkflow
         if (this.ReleaseWindow is not null)
             throw new InvalidOperationException("The production installer workflow already created its initial window.");
 
-        this.ReleaseController = new(this.ReleaseService, this.ClientFactory);
+        this.ReleaseController = new(this.ReleaseService, this.ClientFactory, this.LocalReleaseService);
         this.ObserveReleaseController(this.ReleaseController);
         this.ReleaseController.Changed += this.OnReleaseDiagnosticChanged;
         this.ReleaseViewModel = new(this.ReleaseController);
         this.ReleaseWindow = new(this.ReleaseViewModel, this.DiagnosticSession);
+        this.ReleaseWindow.LocalPackageFolderRequested += (_, _) => this.OnLocalReleaseFolderPickerRequested(this.ReleaseWindow);
         this.ReleaseViewModel.ContinueRequested += this.OnContinueRequested;
         return this.ReleaseWindow;
     }
@@ -409,6 +425,55 @@ internal sealed class ProductionInstallerWorkflow
         {
             Volatile.Write(ref this.PickerActive, 0);
         }
+    }
+
+    private async void OnLocalReleaseFolderPickerRequested(ReleaseVerificationWindow window)
+    {
+        if (Interlocked.Exchange(ref this.LocalReleasePickerActive, 1) != 0)
+            return;
+        try
+        {
+            string? selected;
+            try
+            {
+                selected = await this.PickLocalReleaseFolder(window).ConfigureAwait(true);
+            }
+            catch
+            {
+                if (window.DataContext is ReleaseVerificationViewModel pickerViewModel)
+                    pickerViewModel.ReportLocalPackagePickerFailure();
+                return;
+            }
+
+            try
+            {
+                await window.ApplyLocalPackageFolderAsync(selected).ConfigureAwait(true);
+            }
+            catch
+            {
+                if (window.DataContext is ReleaseVerificationViewModel verificationViewModel)
+                    verificationViewModel.ReportLocalPackageStartFailure();
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref this.LocalReleasePickerActive, 0);
+        }
+    }
+
+    private static async Task<string?> PickLocalReleaseFolderAsync(ReleaseVerificationWindow owner)
+    {
+        IReadOnlyList<IStorageFolder> selected = await owner.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            AllowMultiple = false,
+            Title = "Choose the folder containing all six SMAPI release files"
+        });
+        if (selected.Count == 0)
+            return null;
+        if (selected.Count != 1)
+            throw new InvalidOperationException("The desktop folder picker returned an unexpected selection count.");
+        return selected[0].TryGetLocalPath()
+            ?? throw new InvalidOperationException("The desktop folder picker did not return a local folder.");
     }
 
     private static async Task<string?> PickFolderAsync(GameDiscoveryWindow owner)
