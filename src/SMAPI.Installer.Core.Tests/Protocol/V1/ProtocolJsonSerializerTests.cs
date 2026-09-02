@@ -582,6 +582,89 @@ internal sealed class ProtocolJsonSerializerTests
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrunePlanEvent(session, id, digest, ExecutionDigest, catalog, GameRoot, HashA, 1, [only], [], [], "No-op.", [], true))).Should().Throw<ProtocolException>().WithMessage("*no-op*");
     }
 
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.LegacyInstaller, FileReplacementCandidateDisposition.Replace, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.UnknownCollision, FileReplacementCandidateDisposition.Replace, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.OfficialLauncherBackup, FileReplacementCandidateDisposition.TrustRetained, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.LegacyInstaller, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.UnknownCollision, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.OfficialOrLegacyLauncher, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    public void ReservedLauncherPathsRejectEveryOtherCandidateReason(
+        FileReplacementCandidateReason reason,
+        FileReplacementCandidateDisposition disposition,
+        string path
+    )
+    {
+        PlanEvent plan = CreatePlan();
+        string? proposedResult = disposition switch
+        {
+            FileReplacementCandidateDisposition.Remove => null,
+            FileReplacementCandidateDisposition.TrustRetained => plan.Candidates[0].ObservedSha256,
+            _ => plan.Candidates[0].ProposedResultSha256
+        };
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with
+        {
+            Reason = reason,
+            Disposition = disposition,
+            Path = path,
+            ProposedResultSha256 = proposedResult
+        };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+
+        page.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*launcher*");
+    }
+
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace)]
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore)]
+    [TestCase(FileReplacementCandidateReason.OfficialOrLegacyLauncher, FileReplacementCandidateDisposition.Replace)]
+    public void InstalledLauncherPathAcceptsOnlyCoreDefinedLauncherPairs(
+        FileReplacementCandidateReason reason,
+        FileReplacementCandidateDisposition disposition
+    )
+    {
+        PlanEvent plan = CreatePlan();
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with { Reason = reason, Disposition = disposition, Path = "StardewValley" };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(page)).Should().BeEquivalentTo(page);
+    }
+
+    [Test]
+    public void OfficialLauncherBackupPathAcceptsOnlyItsCoreDefinedPair()
+    {
+        PlanEvent plan = CreatePlan();
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with
+        {
+            Reason = FileReplacementCandidateReason.OfficialLauncherBackup,
+            Disposition = FileReplacementCandidateDisposition.TrustRetained,
+            Path = "StardewValley-original",
+            ProposedResultSha256 = plan.Candidates[0].ObservedSha256
+        };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(page)).Should().BeEquivalentTo(page);
+    }
+
+    [Test]
+    public void DeserializationRejectsReceiptOwnedCandidateAtReservedLauncherPath()
+    {
+        PlanEvent plan = CreatePlan();
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with
+        {
+            Reason = FileReplacementCandidateReason.ModifiedReceiptOwned,
+            Disposition = FileReplacementCandidateDisposition.Replace
+        };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+        string line = ProtocolJsonSerializer.SerializeLine(page).Replace("\"path\":\"legacy\"", "\"path\":\"StardewValley\"", StringComparison.Ordinal);
+
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(line)).Should().Throw<ProtocolException>().WithMessage("*installed-launcher candidate reason*");
+    }
+
     [Test]
     public void RecoveryCatalog_RejectsInvalidCurrentAndCheckpointSemantics()
     {

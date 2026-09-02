@@ -8,6 +8,7 @@ using Avalonia.Headless.NUnit;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Engine;
 using StardewModdingAPI.Installer.Core.Planning;
@@ -626,15 +627,74 @@ internal sealed class ExecutionControllerTests
         };
         FakeConfirmedSession session = new();
         await using ExecutionController controller = new(session, plan);
-        await using ExecutionViewModel viewModel = new(controller);
+        await using ExecutionViewModel viewModel = new(controller, () => true, action => action());
 
         viewModel.ApplySnapshotForTesting(Snapshot(10, ExecutionState.Terminal, execution: TerminalForCopy(ProtocolExecutionOutcome.Succeeded), plan: plan));
 
-        viewModel.ResultRows.Should().Contain(new ExecutionFactRow("Newest user checkpoint", "New current user checkpoint; display identity only"));
+        viewModel.ResultRows.Should().Contain(new ExecutionFactRow("Recovery point created", "Current user checkpoint"));
         viewModel.ResultRows.Should().Contain(row => row.Label == "Checkpoint restore target" && row.Value.Contains(session.Release.Tag, StringComparison.Ordinal));
 
         viewModel.ApplySnapshotForTesting(Snapshot(11, ExecutionState.Terminal, execution: TerminalForCopy(ProtocolExecutionOutcome.FailedBeforeMutation), plan: plan));
         viewModel.ResultRows.Should().NotContain(row => row.Label.Contains("checkpoint", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [TestCase(InstallerOperation.Install)]
+    [TestCase(InstallerOperation.Update)]
+    [TestCase(InstallerOperation.Repair)]
+    [TestCase(InstallerOperation.Uninstall)]
+    [TestCase(InstallerOperation.Rollback)]
+    public async Task CommittedLifecycleCountsUseNeutralExactPlanActionLabels(InstallerOperation operation)
+    {
+        PlanReviewOperationCount[] counts = operation switch
+        {
+            InstallerOperation.Install =>
+            [
+                new(PlanOperationKind.Backup, 1),
+                new(PlanOperationKind.Create, 1),
+                new(PlanOperationKind.Replace, 1)
+            ],
+            InstallerOperation.Update or InstallerOperation.Repair =>
+            [
+                new(PlanOperationKind.Restore, 1),
+                new(PlanOperationKind.Replace, 2)
+            ],
+            InstallerOperation.Uninstall =>
+            [
+                new(PlanOperationKind.Remove, 2),
+                new(PlanOperationKind.Restore, 1)
+            ],
+            InstallerOperation.Rollback =>
+            [
+                new(PlanOperationKind.Remove, 1),
+                new(PlanOperationKind.Restore, 2),
+                new(PlanOperationKind.Create, 1)
+            ],
+            _ => throw new AssertionException("Unsupported lifecycle fixture.")
+        };
+        ExecutionPlanPresentation plan = (operation == InstallerOperation.Rollback ? RollbackPlan() : PlanFor(operation)) with
+        {
+            OperationCounts = counts,
+            PathFacts = operation is InstallerOperation.Update or InstallerOperation.Repair
+                ? [new("StardewValley", PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore)]
+                : []
+        };
+        FakeConfirmedSession session = new();
+        await using ExecutionController controller = new(session, plan);
+        await using ExecutionViewModel viewModel = new(controller, () => true, action => action());
+
+        viewModel.ApplySnapshotForTesting(Snapshot(10, ExecutionState.Terminal, execution: TerminalForCopy(ProtocolExecutionOutcome.Succeeded), plan: plan));
+
+        foreach (PlanReviewOperationCount count in counts)
+        {
+            viewModel.ResultRows.Should().Contain(new ExecutionFactRow(
+                $"{count.Kind} actions committed",
+                count.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            ));
+        }
+        viewModel.ResultRows.Should().NotContain(row =>
+            row.Label.Contains("receipt-owned", StringComparison.OrdinalIgnoreCase)
+            || row.Label.Contains("verified managed", StringComparison.OrdinalIgnoreCase)
+        );
     }
 
     [TestCase(ProtocolInterruptedRecoveryOutcome.RecoveryCompleted, ProtocolNextAction.InspectAgain, "inspect again")]
@@ -757,8 +817,29 @@ internal sealed class ExecutionControllerTests
         WrapPanel actions = window.FindControl<WrapPanel>("ActionPanel")!;
         Button exit = window.FindControl<Button>("ExitButton")!;
         TextBlock warning = window.FindControl<TextBlock>("SettlementWarningText")!;
+        Border confirmedPlan = window.FindControl<Border>("ConfirmedPlanRegion")!;
+        Border resultRegion = window.FindControl<Border>("ResultRegion")!;
         scroll.HorizontalScrollBarVisibility.Should().Be(ScrollBarVisibility.Disabled);
         scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        ControlAutomationPeer.CreatePeerForElement(confirmedPlan).GetName().Should().Be("Confirmed plan identity and safety");
+        string[] confirmationPeerNames = confirmedPlan.GetVisualDescendants().OfType<Grid>()
+            .Select(ControlAutomationPeer.CreatePeerForElement)
+            .Where(peer => peer is not null && !string.IsNullOrEmpty(peer.GetName()))
+            .Select(peer => peer!.GetName())
+            .ToArray();
+        confirmationPeerNames.Should().Equal(viewModel.ConfirmationRows.Select(row => row.AccessibleName));
+        string[] resultPeerNames = resultRegion.GetVisualDescendants().OfType<Grid>()
+            .Select(ControlAutomationPeer.CreatePeerForElement)
+            .Where(peer => peer is not null && !string.IsNullOrEmpty(peer.GetName()))
+            .Select(peer => peer!.GetName())
+            .ToArray();
+        resultPeerNames.Should().Equal(viewModel.ResultRows.Select(row => row.AccessibleName));
+        confirmationPeerNames.Concat(resultPeerNames).Should().OnlyContain(name =>
+            !name.Contains("/games/", StringComparison.Ordinal)
+            && !name.Contains("digest", StringComparison.OrdinalIgnoreCase)
+            && !name.Contains("backend", StringComparison.OrdinalIgnoreCase)
+            && !name.Contains(new string('a', 32), StringComparison.Ordinal)
+        );
         viewModel.ResultRows.Should().HaveCount(15);
         viewModel.ResultRows.Should().Contain(row => row.Label == "Resulting managed state" && row.Value.Contains("alpha.2", StringComparison.Ordinal));
         viewModel.ResultRows.Should().Contain(new ExecutionFactRow("Explicit preserve actions committed", "0"));

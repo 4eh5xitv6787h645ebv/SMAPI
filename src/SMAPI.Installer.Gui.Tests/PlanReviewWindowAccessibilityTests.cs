@@ -512,7 +512,7 @@ internal sealed partial class PlanReviewPresentationTests
     [TestCase(2.00)]
     public async Task MaximalPlanRendersAcrossDesktopScaleWithoutHorizontalPageScroll(double scale)
     {
-        const double PhysicalViewportWidth = 1400;
+        const double PhysicalViewportWidth = 840;
         InstallerReadOnlyPlanSuccess maximal = CreateMaximalPlan();
         FakePlanSession session = new() { Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(maximal) };
         PlanReviewViewModel viewModel = CreateViewModel(session);
@@ -530,6 +530,42 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.PathFactRows.Should().HaveCount(ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts);
         viewModel.PathFactSummary.Should().Contain("8 additional detail(s)");
         viewModel.PathFactRows.Should().Contain(row => row.DisplayPath.Contains("\\u202E", StringComparison.Ordinal));
+        StackPanel managedPaths = window.FindControl<StackPanel>("ReceiptOwnedPathRegion")!;
+        Border safety = window.FindControl<Border>("PlanSafetyRegion")!;
+        ControlAutomationPeer.CreatePeerForElement(safety).GetName().Should().Be("Plan safety and recovery");
+        ControlAutomationPeer.CreatePeerForElement(managedPaths).GetName().Should().Be("Managed file details");
+        string[] safetyPeerNames = safety.GetVisualDescendants().OfType<Grid>()
+            .Select(ControlAutomationPeer.CreatePeerForElement)
+            .Where(peer => peer is not null && !string.IsNullOrEmpty(peer.GetName()))
+            .Select(peer => peer!.GetName())
+            .ToArray();
+        safetyPeerNames.Should().Equal(viewModel.SafetyRows.Select(row => row.AccessibleName));
+        string[] pathPeerNames = managedPaths.GetVisualDescendants().OfType<Border>()
+            .Select(ControlAutomationPeer.CreatePeerForElement)
+            .Where(peer => peer is not null && !string.IsNullOrEmpty(peer.GetName()))
+            .Select(peer => peer!.GetName())
+            .ToArray();
+        pathPeerNames.Should().Equal(viewModel.PathFactRows.Select(row => row.AccessibleName));
+        safetyPeerNames.Concat(pathPeerNames).Should().OnlyContain(name =>
+            !name.Contains("/games/", StringComparison.Ordinal)
+            && !name.Contains("digest", StringComparison.OrdinalIgnoreCase)
+            && !name.Contains("backend", StringComparison.OrdinalIgnoreCase)
+            && !name.Contains(new string('a', 32), StringComparison.Ordinal)
+        );
+        TextBlock longPath = managedPaths.GetVisualDescendants().OfType<TextBlock>()
+            .Single(text => text.Text?.Contains("\\u202E", StringComparison.Ordinal) == true);
+        longPath.TextWrapping.Should().Be(TextWrapping.Wrap);
+        longPath.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        longPath.Bounds.Height.Should().BeGreaterThan(24, "the maximal escaped managed path must wrap to multiple readable lines");
+        scroll.Extent.Height.Should().BeGreaterThan(scroll.Viewport.Height);
+        scroll.Offset = new Avalonia.Vector(0, scroll.Extent.Height);
+        Dispatcher.UIThread.RunJobs();
+        AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        Dispatcher.UIThread.RunJobs();
+        scroll.Offset.Y.Should().BeGreaterThan(0);
+        Button finalVisibleAction = window.FindControl<Button>("StartFreshInspectionButton")!;
+        finalVisibleAction.IsEffectivelyVisible.Should().BeTrue();
+        finalVisibleAction.Bounds.Height.Should().BeGreaterThan(0);
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
     }

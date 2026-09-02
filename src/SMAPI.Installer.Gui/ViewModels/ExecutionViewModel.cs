@@ -415,7 +415,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
                 if (value.Plan.Operation == InstallerOperation.Backup
                     && value.Plan.CurrentRelease is { } restoreRelease)
                 {
-                    rows.Add(new("Newest user checkpoint", "New current user checkpoint; display identity only"));
+                    rows.Add(new("Recovery point created", "Current user checkpoint"));
                     rows.Add(new("Checkpoint restore target", FormatRelease(restoreRelease)));
                 }
             }
@@ -494,10 +494,10 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
     private static string GetCommittedOperationLabel(PlanOperationKind kind) => kind switch
     {
         PlanOperationKind.Backup => "Backup actions committed",
-        PlanOperationKind.Remove => "Receipt-owned files removed",
-        PlanOperationKind.Restore => "Receipt-owned files restored",
-        PlanOperationKind.Create => "Verified managed files created",
-        PlanOperationKind.Replace => "Receipt-owned files replaced",
+        PlanOperationKind.Remove => "Remove actions committed",
+        PlanOperationKind.Restore => "Restore actions committed",
+        PlanOperationKind.Create => "Create actions committed",
+        PlanOperationKind.Replace => "Replace actions committed",
         PlanOperationKind.Retain => "Retain actions committed",
         PlanOperationKind.Preserve => "Explicit preserve actions committed",
         _ => throw new ArgumentOutOfRangeException(nameof(kind))

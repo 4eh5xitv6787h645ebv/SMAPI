@@ -372,6 +372,16 @@ public static class ProtocolJsonSerializer
         {
             throw new ProtocolException("An official-launcher backup candidate must target the exact backup path.");
         }
+        if (string.Equals(candidate.Path, "StardewValley", StringComparison.Ordinal)
+            && candidate.Reason is not (FileReplacementCandidateReason.ModifiedInstalledLauncher or FileReplacementCandidateReason.OfficialOrLegacyLauncher))
+        {
+            throw new ProtocolException("The exact installed-launcher path must use an installed-launcher candidate reason.");
+        }
+        if (string.Equals(candidate.Path, "StardewValley-original", StringComparison.Ordinal)
+            && candidate.Reason != FileReplacementCandidateReason.OfficialLauncherBackup)
+        {
+            throw new ProtocolException("The exact official-launcher backup path must use the official-launcher backup candidate reason.");
+        }
         if (candidate.Disposition == FileReplacementCandidateDisposition.Remove != (candidate.ProposedResultSha256 is null))
             throw new ProtocolException("Only removal candidates may omit the proposed result digest.");
         if (candidate.Disposition == FileReplacementCandidateDisposition.TrustRetained && candidate.ProposedResultSha256 != candidate.ObservedSha256)

@@ -3298,6 +3298,32 @@ public sealed class ProcessInstallerProtocolClientTests
         process.Terminated.Should().BeTrue();
     }
 
+    [TestCase("StardewValley")]
+    [TestCase("StardewValley-original")]
+    public async Task InspectPlanFailStopsReceiptOwnedCandidateAtReservedLauncherPath(string reservedPath)
+    {
+        const string OrdinaryPath = "smapi-internal/receipt-owned.dll";
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            Candidates = [CreateCandidate('4', OrdinaryPath, false)]
+        };
+        byte[]? Respond(ProtocolRequest request)
+        {
+            byte[]? response = script.Respond(request);
+            return request is GetPlanPageRequest && response is not null
+                ? Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(response).Replace($"\"path\":\"{OrdinaryPath}\"", $"\"path\":\"{reservedPath}\"", StringComparison.Ordinal))
+                : response;
+        }
+        ScriptedProcess process = new(Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
     [Test]
     public async Task CandidateApprovalUsesExactRetainedBindingAndReplacesEveryCandidateCapability()
     {

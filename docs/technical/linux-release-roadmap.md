@@ -752,17 +752,17 @@ Local-package verification is now production-composed. The exact reviewed merge 
 
 ### Post-alpha.2 authentic-screenshot audit corrections
 
-- [x] Audit the exact public alpha.2 GUI across qualified GNOME and KDE sessions before capture, keep the audit evidence private and sanitized, and group every confirmed visible-evidence gap into bounded corrective slices.
+- [x] Audit the exact public alpha.2 GUI across qualified GNOME and KDE sessions before capture, keep private capture material out of the repository, and record the confirmed gaps and corrective-release boundary in a [sanitized audit](linux-gui-alpha2-visible-evidence-audit.md).
 - [x] Bind exact recovery-capacity facts into Protocol V1 plan digests and reject capacity/conflict disagreement at Core, process, plan-review, and immutable execution boundaries.
 - [x] Show the selected safe game label, current and intended releases, exact operation counts including zero, recovery location/capacity, managed game-file scope, installer-internal state writes, backup exclusions, and bounded typed managed-path evidence before execution.
 - [x] Retain accumulated candidate approvals privately by exact canonical path, type, action, expected hash, and result hash; revalidate the complete tuple against every refreshed exact plan before projecting escaped display text.
 - [x] Distinguish receipt-owned files from the installed launcher, enforce exact launcher reason/path semantics at the protocol boundary, and reject noncanonical or colliding escaped-path presentations.
 - [x] Separate intended-plan facts from exact durable results; show resulting state, committed counts, and an identity-free backup checkpoint only after a successful committed outcome.
 - [x] Wrap section headings and maximal managed-path evidence at 420 DIP and 100–200% scale without horizontal overflow.
-- [x] Pass 1,162/1,162 complete Core tests, 951/951 complete GUI tests, focused hostile refresh/path/count/relationship tests, warning-free affected-project Release builds, changed-file formatting, and diff checks.
-- [x] Obtain independent architecture/correctness and security/privacy reviews and address every actionable finding.
+- [x] Pass 1,162/1,162 complete Core tests, 951/951 complete GUI tests, focused hostile refresh/path/count/relationship tests, warning-free affected-project Release builds, changed-file formatting, and diff checks ([PR #254 local evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254)).
+- [x] Obtain independent architecture/correctness and security/privacy reviews and address every actionable finding ([architecture review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254#issuecomment-5516053241); [security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254#issuecomment-5516053571)).
 - [ ] Obtain independent UX/accessibility and final test-gate reviews of the exact corrective diff.
-- [ ] Open a focused fork pull request for the visible-plan-evidence corrective slice.
+- [x] Open focused fork [PR #254](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254) for the visible-plan-evidence corrective slice at exact reviewed head [`0b7ad92c`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/0b7ad92cfed4c42c450949512d935056cb956fec).
 - [ ] Pass both required hosted workflows on the exact reviewed corrective commit.
 - [ ] Merge the corrective pull request into `develop`, close it, and delete its branch locally and on origin.
 - [ ] Complete the typed release-verification failure, diagnostics-boundary, and expanded manual-help corrective slices through focused reviewed pull requests.
