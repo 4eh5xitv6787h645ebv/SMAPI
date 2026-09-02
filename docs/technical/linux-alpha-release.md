@@ -65,6 +65,12 @@ directory under the configured temporary root. The supported first desktop path 
 not Avalonia's experimental native Wayland backend; headless and native-Wayland-only sessions retain
 the terminal launcher.
 
+Those candidates also create one bounded private graphical-installer diagnostic session before
+Avalonia, release-catalog networking, game discovery, or backend startup. Every production screen
+can open a stable sanitized snapshot through **View diagnostic log**. This is unreleased
+next-alpha/source behavior; the published alpha.1 has neither the graphical launcher nor this
+viewer.
+
 No published release contains that candidate yet. Do not treat a branch artifact as a tagged
 release, substitute it for the alpha.1 instructions below, or use it as production screenshot or
 clean-machine qualification evidence. A future public GUI alpha must be tagged from an exact
@@ -232,6 +238,41 @@ The alpha's `health` and `performance` tools remain local and bounded. Their rep
 names, IDs, versions, dependency IDs, callback identities, filesystem-derived details, and system
 information. Inspect any report before sharing it. The installer and release workflow never upload
 the private benchmark modpack or save.
+
+### Unreleased graphical-installer diagnostics
+
+The graphical candidate stores its local JSONL diagnostics under
+`$XDG_STATE_HOME/smapi-installer/logs` when `XDG_STATE_HOME` is an absolute path, or
+`~/.local/state/smapi-installer/logs` otherwise. On Linux, its directories are mode `0700` and
+its files are mode `0600`. Each file is bounded to 1 MiB and at most five owned log files are
+retained. The session also bounds its queues, displayed entries, progress events, and sanitized
+clipboard projection. It sends no telemetry and never uploads the log.
+
+The GUI-owned session starts before Avalonia or networking and records only fixed typed events,
+stage classifications, and stable error codes from the presentation controllers. It excludes full
+game/home paths, URLs and signed query strings, credentials, cookies, response bodies, raw backend
+messages, package/release identifiers, digests, mod/save identities, and private workload names.
+The viewer captures one immutable snapshot when opened; close and reopen it to refresh. **Copy
+sanitized diagnostics** writes at most 32 KiB from at most 128 recent displayed entries, never reads
+the clipboard, and asks the user to review the result before sharing.
+
+Normal mutation is fail-closed: if the private log cannot be created before startup, the GUI does
+not start Avalonia, network, or game access. If it cannot durably prove readiness immediately before
+a new mutating action, that action is not admitted. A logging failure does not rewrite the outcome
+of work which was already admitted.
+
+| Graphical candidate symptom | Safe next step |
+| --- | --- |
+| Root or `sudo` refusal | Run as the normal desktop user. The refusal happens before logging, networking, discovery, or mutation. |
+| No compatible release | Published alpha.1 does not contain the required six public assets. Use its verified terminal instructions; do not treat a branch artifact as a release. |
+| Catalog, download, checksum, metadata, or provenance failure | Use the visible retry only after checking connectivity and the selected public release. Verification failure blocks mutation. |
+| Backend or protocol failure | Review the bounded diagnostic snapshot, close the GUI, and start a fresh session. Do not infer that files changed unless the typed result says so. |
+| Diagnostic log unavailable | Close any other graphical installer session, check free space and normal-user ownership of the XDG state location, then start a fresh session. Do not remove the lock, run as root, or recursively change unrelated permissions. |
+| GUI unavailable in a headless or native-Wayland-only session | Use `bash "install on Linux.sh"` from the same verified package, or the documented direct headless command. |
+
+The retained terminal and headless paths are the supported non-GUI fallback. Last-resort manual
+extraction remains documented separately because it cannot provide the console/Core installer's
+ownership, backup, validation, or rollback decisions automatically.
 
 The published performance comparison describes one controlled workstation and workload. It is not
 a universal FPS, power, CPU-use, or latency claim. Published alpha.1 has no GUI/updater, and its current

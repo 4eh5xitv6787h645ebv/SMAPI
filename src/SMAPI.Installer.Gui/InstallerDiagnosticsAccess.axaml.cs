@@ -18,6 +18,8 @@ internal sealed partial class InstallerDiagnosticsAccess : UserControl
         this.InitializeComponent();
     }
 
+    internal InstallerDiagnosticsWindow? ActiveWindowForTesting => this.ActiveWindow;
+
     internal void Attach(InstallerDiagnosticSession? session)
     {
         if (this.Attached)

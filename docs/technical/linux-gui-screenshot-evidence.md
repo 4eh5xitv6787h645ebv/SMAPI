@@ -87,8 +87,8 @@ One image may cover adjacent states when every state remains legible and the cap
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| G1 | Detailed local log view with relative installer-owned paths, stable operation/error codes, and rotation/status information | At least one real successful lifecycle log |
-| G2 | Expanded technical error details and Copy sanitized diagnostics | Controlled error fixture |
+| G1 | Bounded local diagnostic snapshot with fixed typed events, stable event/error codes, and visible omission/truncation health; the private raw-log and disk-rotation boundary must remain explicit | At least one real successful lifecycle log |
+| G2 | Safe technical next steps, stable error details, and Copy sanitized diagnostics without raw backend prose or exceptions | Controlled error fixture |
 | G3 | Privacy/redaction behavior for hostile tokens, signed URLs, usernames, and full paths | Controlled hostile-string fixture plus privacy scan |
 | A1 | Readable keyboard focus on the primary action | Controlled fixture using the packaged GUI |
 | A2 | A destructive dialog whose initial visible focus is Cancel | Controlled fixture using the packaged GUI |

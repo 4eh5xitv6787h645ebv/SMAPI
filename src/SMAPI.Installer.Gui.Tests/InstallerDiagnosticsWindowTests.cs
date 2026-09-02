@@ -1,11 +1,16 @@
 using System.Text;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Headless;
 using Avalonia.Headless.NUnit;
+using Avalonia.Input;
 using Avalonia.Threading;
 using FluentAssertions;
+using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Privacy;
 using StardewModdingAPI.Installer.Gui.Diagnostics;
+using StardewModdingAPI.Installer.Gui.Frontend;
+using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui.Tests;
 
@@ -171,6 +176,33 @@ internal sealed class InstallerDiagnosticsWindowTests
         AutomationProperties.GetName(open).Should().Be("View private diagnostic log");
     }
 
+    [AvaloniaTest]
+    public async Task ProductionReleaseScreenOpensDiagnosticsByKeyboardAndRestoresFocus()
+    {
+        InstallerDiagnosticSession session = this.CreateSession();
+        ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
+        ReleaseVerificationViewModel viewModel = new(new ReleaseVerificationController(
+            new ReleaseVerificationViewModelTests.FakeReleaseService([candidate]),
+            () => new ReleaseVerificationViewModelTests.FakeProtocolClient(true, candidate)
+        ));
+        ReleaseVerificationWindow window = new(viewModel, session);
+        window.Show();
+        await WaitUntilAsync(() => viewModel.IsDownloadActionVisible);
+
+        InstallerDiagnosticsAccess access = window.FindControl<InstallerDiagnosticsAccess>("DiagnosticsAccess")!;
+        Button open = access.FindControl<Button>("OpenButton")!;
+        open.IsVisible.Should().BeTrue();
+        PressAccessKey(window, PhysicalKey.D);
+
+        await WaitUntilAsync(() => access.ActiveWindowForTesting is { IsVisible: true });
+        InstallerDiagnosticsWindow viewer = access.ActiveWindowForTesting!;
+        viewer.KeyPressQwerty(PhysicalKey.Escape, RawInputModifiers.None);
+        await WaitUntilAsync(() => access.ActiveWindowForTesting is null && open.IsFocused);
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
     private InstallerDiagnosticSession CreateSession()
     {
         if (this.Session is not null)
@@ -191,8 +223,17 @@ internal sealed class InstallerDiagnosticsWindowTests
         while (!condition())
         {
             if (DateTime.UtcNow >= deadline)
-                throw new TimeoutException("The clipboard authority did not settle within the test bound.");
+                throw new TimeoutException("The expected diagnostics UI or clipboard state did not settle within the test bound.");
             await Task.Delay(10);
         }
+    }
+
+    private static void PressAccessKey(ReleaseVerificationWindow window, PhysicalKey physicalKey)
+    {
+        window.KeyPressQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
+        window.KeyPressQwerty(physicalKey, RawInputModifiers.Alt);
+        window.KeyReleaseQwerty(physicalKey, RawInputModifiers.Alt);
+        window.KeyReleaseQwerty(PhysicalKey.AltLeft, RawInputModifiers.None);
+        Dispatcher.UIThread.RunJobs();
     }
 }

@@ -178,7 +178,8 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
             download,
             window.FindControl<Button>("RetryButton")!,
             window.FindControl<Button>("ContinueButton")!,
-            cancel
+            cancel,
+            window.FindControl<InstallerDiagnosticsAccess>("DiagnosticsAccess")!.FindControl<Button>("OpenButton")!
         ];
 
         actionControls.Select(AutomationProperties.GetAccessKey)
@@ -194,7 +195,7 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         Press(window, Key.Tab, RawInputModifiers.Shift);
         selector.IsFocused.Should().BeTrue("reverse traversal returns to the release selector");
 
-        PressAccessKey(window, PhysicalKey.D);
+        PressAccessKey(window, PhysicalKey.W);
         await service.PreparationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await WaitUntilAsync(() =>
             viewModel.CancelCommand.CanExecute(null)
