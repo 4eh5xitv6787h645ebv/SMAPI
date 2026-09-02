@@ -716,6 +716,17 @@ These labels are exact-plan evidence only. Authenticated local-package selection
 
 This Core slice imports but does not authenticate local bytes by itself: trust is established only by the existing backend `PackageOpened` result. Production folder selection/composition, local-package GUI labels and errors, exact-package qualification, public release publication, and authentic production screenshots remain unchecked.
 
+### Authenticated local-package graphical workflow
+
+- [x] Add a native Linux folder picker for one exact six-file release folder, require a fresh selection for every local attempt, and keep the raw selected path out of snapshots, diagnostics, logs, errors, accessibility text, and retained retry state ([merged PR #249](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/249); exact implementation head [`dbe0ca60`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/dbe0ca60)).
+- [x] Project Core's private retained snapshot into the existing backend package-open request, retain descriptor authority through backend capture, revoke it before publishing success, and display identity only from the authenticated `PackageOpened` result ([architecture and security/privacy review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/249#issuecomment-5512579309)).
+- [x] Keep reviewed downloads and local folders as separate bounded attempt sources, allow safe switching back to an exact retained reviewed candidate even after all local attempts, and block reuse after terminal backend, session, cleanup, or release-rejection outcomes ([resolved exact-head review findings](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/249#issuecomment-5512579309)).
+- [x] Provide path-free local import, cancellation, rejection, picker-failure, and verified-success copy; preserve actionable picker errors across unrelated catalog completion, clear them on deliberate user action, and expose the local action through unique Alt+L, named help, deterministic focus, tab order, and 420-DIP/100–200% layout coverage ([exact-head review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/249#issuecomment-5512579309)).
+- [x] Pass 926/926 complete GUI tests three consecutive times, 30/30 focused cancellation/disposal race repetitions, Release warnings-as-errors, changed-file formatting, diff checks, and independent architecture, security/privacy, UX/accessibility, testing, and final test-gate reviews after every actionable finding was fixed ([review and validation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/249#issuecomment-5512579309)).
+- [x] Pass exact-head deterministic performance and Linux package qualification workflows, merge PR #249 into `develop` at [`3f446765`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/3f44676584c80768cd698c2f8565e53f2d892f38), and delete `phase4/local-package-gui` locally and on origin ([performance `33652819167`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33652819167); [Linux qualification `33652819292`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33652819292)).
+
+Local-package verification is now production-composed, but the next public GUI release, clean-environment lifecycle qualification, trusted-workload smoke test, and authentic screenshot matrix remain unchecked.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
