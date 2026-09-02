@@ -97,7 +97,13 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         AutomationProperties.GetName(install).Should().Be($"Headless install command: {install.Text}");
         AutomationProperties.GetName(uninstall).Should().Be($"Headless uninstall command: {uninstall.Text}");
         exits.Text.Should().Contain("Exit 0: the installer reported completion")
-            .And.Contain("Exit 2: a handled refusal or validation failure, including invalid arguments")
+            .And.Contain("Exit 2: a handled refusal or known validation failure")
+            .And.Contain("root use")
+            .And.Contain("a missing action, game path, option value, or package file")
+            .And.Contain("conflicting action flags")
+            .And.Contain("an invalid game folder")
+            .And.Contain("Unknown or positional apphost arguments are ignored")
+            .And.Contain("use only the exact commands above")
             .And.Contain("Exit 1: an unexpected exception, filesystem failure, or runtime failure")
             .And.Contain("does not prove that files are unchanged or rolled back")
             .And.Contain("Shell or signal statuses are also possible")

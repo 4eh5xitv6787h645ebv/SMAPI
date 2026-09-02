@@ -39,7 +39,7 @@ argument | purpose
 `--install` | Preselects the install action, skipping the prompt asking what the user wants to do.
 `--uninstall` | Preselects the uninstall action, skipping the prompt asking what the user wants to do.
 `--game-path "path"` | Specifies the full path to the folder containing the Stardew Valley executable, skipping automatic detection and any prompt to choose a path. If the path is not valid, the installer displays an error.
-`--no-prompt` | Don't let the installer wait for user input (e.g. for cases where it's being run by a script). On this fork's Linux package, use it only with exactly one action and the separate-token `--game-path "path"`; incomplete non-interactive requests fail with status 2.
+`--no-prompt` | Don't let the installer wait for user input (e.g. for cases where it's being run by a script). On this fork's Linux package, use it only with exactly one action and the separate-token `--game-path "path"`. Current unreleased source for the next prerelease makes incomplete non-interactive requests fail with status 2; public alpha 2 does not have that fail-closed safeguard.
 
 On this fork's Linux package, `install on Linux.sh` is the interactive legacy launcher and accepts no
 options in the next prerelease; invoke `internal/linux/SMAPI.Installer` directly for headless use.

@@ -361,7 +361,7 @@
                 TextWrapping="Wrap" />
             <TextBlock
                 x:Name="ManualExitText"
-                Text="Exit 0: the installer reported completion. Exit 2: a handled refusal or validation failure, including invalid arguments. Exit 1: an unexpected exception, filesystem failure, or runtime failure; it does not prove that files are unchanged or rolled back. Shell or signal statuses are also possible. No exit code alone proves rollback."
+                Text="Exit 0: the installer reported completion. Exit 2: a handled refusal or known validation failure, such as root use, a missing action, game path, option value, or package file, conflicting action flags, or an invalid game folder. Unknown or positional apphost arguments are ignored, so use only the exact commands above. Exit 1: an unexpected exception, filesystem failure, or runtime failure; it does not prove that files are unchanged or rolled back. Shell or signal statuses are also possible. No exit code alone proves rollback."
                 TextWrapping="Wrap" />
           </StackPanel>
 
