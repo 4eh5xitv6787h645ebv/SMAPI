@@ -706,6 +706,16 @@ This documentation and correction slice does not publish or qualify a GUI releas
 
 These labels are exact-plan evidence only. Authenticated local-package selection, the combined current/upgrade/prerelease/downgrade/local-package R1 documentation, clean public-package qualification, and authentic production screenshots remain unchecked.
 
+### Safe local release-package import foundation
+
+- [x] Parse one exact canonical fork Linux package filename, require exactly the corresponding six release assets in a user-owned non-writable selected directory, and fail closed on unsafe owners, modes, links, special files, sizes, names, root replacement, or per-file mutation ([fork PR #248](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/248); exact reviewed head [`25cb6915`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/25cb69158755143d25d3f4d4f4f17a0688ece3f5)).
+- [x] Snapshot the six untrusted inputs through bounded descriptor-relative copies into one private retained workspace, revoke published process-descriptor capabilities synchronously on disposal, and reuse the existing direct-child checksum, metadata, manifest, and GitHub-attestation verifier without changing Protocol V1 or presenting an untrusted source-commit hint as verified ([security/privacy and architecture review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/248#issuecomment-5511658536)).
+- [x] Cover canonical parsing, byte/identity/permission/size bounds, source and destination races, cancellation at every handoff, exact cleanup, descriptor reuse, lease disposal concurrency, and reviewed-download compatibility; pass 85/85 focused and 1,160/1,160 full Core Release tests after every actionable architecture, security/privacy, and testing finding was fixed ([exact-head review and validation record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/248#issuecomment-5511658536)).
+- [x] Pass both required hosted workflows on the exact reviewed commit ([deterministic performance gates `33645864746`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33645864746); [Linux qualification `33645864777`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33645864777)).
+- [x] Merge PR #248 into `develop` at [`b3411ec6`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/b3411ec654829e7fc2f6f6d625ea3986b9c1cc9d), close it, delete `phase4/local-package-import-core` locally and on origin, and verify local `develop` equals `origin/develop`.
+
+This Core slice imports but does not authenticate local bytes by itself: trust is established only by the existing backend `PackageOpened` result. Production folder selection/composition, local-package GUI labels and errors, exact-package qualification, public release publication, and authentic production screenshots remain unchecked.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
