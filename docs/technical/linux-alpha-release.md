@@ -41,7 +41,7 @@ output is not claimed.
 - Download only from this repository's
   [alpha 1 release page](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1).
 
-The alpha has no graphical updater. The console installer changes the `StardewValley` launcher,
+The published alpha.1 has no graphical updater. Its console installer changes the `StardewValley` launcher,
 preserves the vanilla launcher as `StardewValley-original`, and installs two Linux runtime hosts.
 Rollback is a deliberate uninstall-and-reinstall procedure, not an atomic snapshot.
 
@@ -50,6 +50,22 @@ behavior which has not shipped in alpha.1. Builds containing that change additio
 coreutils (`stat` and `timeout`) and GNU diffutils (`cmp`). The published alpha.1 dispatcher does not
 perform those capability checks and still creates or refreshes its net6 dependency metadata at
 launch when needed.
+
+### Unreleased graphical package candidate
+
+Source and Actions candidates built after the reviewed Phase 4 packaging change contain a separate
+`install on Linux (graphical).sh` entry point and the unchanged `install on Linux.sh` terminal
+fallback in the same ZIP. The GUI is a self-contained, untrimmed Linux x86_64 application; its
+single-file native runtime is extracted into a private per-run temporary directory which the
+launcher removes after an ordinary exit or handled HUP, INT, or TERM signal. SIGKILL, power loss,
+or another abrupt stop can leave that private directory under the configured temporary root. The
+supported first desktop path is X11 or XWayland, not Avalonia's experimental native Wayland backend;
+headless and native-Wayland-only sessions retain the terminal launcher.
+
+No published release contains that candidate yet. Do not treat a branch artifact as a tagged
+release, substitute it for the alpha.1 instructions below, or use it as production screenshot or
+clean-machine qualification evidence. A future public GUI alpha must be tagged from an exact
+reviewed commit, publish and attest the complete six-asset set, and pass fresh-download verification.
 
 ## Verify before extracting or running
 
@@ -215,7 +231,7 @@ information. Inspect any report before sharing it. The installer and release wor
 the private benchmark modpack or save.
 
 The published performance comparison describes one controlled workstation and workload. It is not
-a universal FPS, power, CPU-use, or latency claim. There is no GUI/updater yet, and the current
+a universal FPS, power, CPU-use, or latency claim. Published alpha.1 has no GUI/updater, and its current
 rollback flow is not atomic. The published alpha.1 dispatcher is not validation-only: its net6 path
 may create or refresh dependency metadata before launch. The unreleased PR #177 source-build
 dispatcher removes that mutation and rechecks path identities to catch ordinary concurrent changes
