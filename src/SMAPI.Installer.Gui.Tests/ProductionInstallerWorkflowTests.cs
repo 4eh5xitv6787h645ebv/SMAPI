@@ -480,7 +480,7 @@ internal sealed class ProductionInstallerWorkflowTests
         ExecutionViewModel execution = (ExecutionViewModel)context.ExecutionWindow!.DataContext!;
         execution.OperationLabel.Should().Be("Rollback");
         execution.Heading.Should().Be("Ready to run rollback");
-        execution.Message.Should().Contain("No files have changed").And.Contain("Run operation");
+        execution.Message.Should().Contain("No files have changed").And.Contain("Run rollback");
         client.ConfirmCalls.Should().Be(1);
         client.ExecuteCalls.Should().Be(0, "listing, selection, inspection, confirmation, and window activation must not execute rollback");
 

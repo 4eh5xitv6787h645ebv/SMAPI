@@ -126,6 +126,17 @@ jobs:
                     bash -n build/scripts/test-stage-pinned-github-cli.sh
                     bash -n build/scripts/test-pinned-github-cli-callers.sh
                     build/scripts/test-pinned-github-cli-callers.sh
+                    bash -n build/scripts/qualify-published-linux-alpha.sh
+                    bash -n build/scripts/test-qualify-published-linux-alpha.sh
+                    build/scripts/test-qualify-published-linux-alpha.sh
+                    python3 build/scripts/test-linux-gui-screenshot-evidence.py
+                    python3 build/scripts/test-check-linux-gui-screenshot-evidence.py
+                    # CI rechecks generic privacy/path rules with a sentinel. The complete
+                    # capture-specific private denylist remains local and is never committed or uploaded.
+                    private_strings="$RUNNER_TEMP/linux-gui-screenshot-private-strings.txt"
+                    printf '%s\n' 'smapi-evidence-ci-private-sentinel' > "$private_strings"
+                    python3 build/scripts/check-linux-gui-screenshot-evidence.py \
+                        --private-strings-file "$private_strings"
                     bash -n build/scripts/finalize-install-package.sh
                     bash -n build/scripts/test-packaged-linux-gui.sh
                     bash -n build/scripts/test-packaged-linux-gui-inputs.sh
@@ -667,11 +678,11 @@ jobs:
                         echo
                         echo "## Install, upgrade, and rollback"
                         echo
-                        echo "Close the game, back up saves and Mods, verify the download, and extract it. In a desktop session run \`install on Linux (graphical).sh\`; the unchanged terminal fallback is \`install on Linux.sh\`. To upgrade, verify and run the newer package. To roll back, first use this alpha's installer to uninstall its fork-only files, then install a previously verified fork package or official SMAPI 4.5.2. See the [Linux alpha guide](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release.html)."
+                        echo "Close the game, back up saves and Mods, verify all six release files, and extract the installer ZIP. In an X11 or XWayland desktop session run \`install on Linux (graphical).sh\`; the terminal fallback from the same package is \`install on Linux.sh\`. The GUI can acquire a reviewed public release or verify a freshly selected local folder containing the exact six files, then shows a read-only plan before any game file changes. After receipt inspection, use **Update** to change an authenticated managed installation to the verified target, including an explicitly confirmed downgrade; use **Repair** only when the authenticated current and target release match. For rollback, choose **Load or refresh history**, select one authenticated generation, then use **Inspect rollback**, **Confirm reviewed plan**, and **Run rollback**. To leave this fork for an older package or official SMAPI 4.5.2, use **Uninstall** first, verify the older package independently, and then install it. See the [Linux alpha guide](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release.html)."
                         echo
                         echo "## Known limitations"
                         echo
-                        echo "The graphical installer is experimental. Its supported desktop path is X11 or XWayland; the experimental native Wayland backend is not advertised as supported. A bounded private local log and more restricted sanitized viewer are available on every production screen; the local-package picker is not available yet. The installer changes the game launcher and rollback is not atomic. Local-bundle verification avoids GitHub attestation API authentication, but GitHub CLI may still need network access to update Sigstore/GitHub trusted-root metadata. Performance and Mod Health reports can contain mod and system identifiers; graphical-installer viewer/copy text excludes paths and private workload, release, and package identifiers. All diagnostics stay local unless you explicitly copy or share them."
+                        echo "The graphical installer is experimental. Its supported desktop path is X11 or XWayland; the experimental native Wayland backend is not advertised as supported. The local-folder route accepts only one user-owned folder containing the exact six files and requires a fresh selection for every attempt; it never treats the folder path or metadata as verified identity. GitHub CLI may need network access to refresh Sigstore/GitHub trusted-root metadata even though the release bundle itself is downloaded and verified locally. Same-user adversarial process or path replacement remains outside the nonprivileged launcher boundary. A bounded private local log and restricted sanitized viewer are available on every production screen. Performance and Mod Health reports can contain mod and system identifiers; the graphical viewer/copy text deliberately excludes paths, URLs, raw backend prose, private workload names, release/package identifiers, and digests. All diagnostics stay local unless you explicitly copy or share them."
                         echo
                         echo "See the [comparison](https://4eh5xitv6787h645ebv.github.io/SMAPI/upstream-comparison.html), [validation record](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release-validation.html), [documentation](https://4eh5xitv6787h645ebv.github.io/SMAPI/), and [fork issue tracker](https://github.com/$GITHUB_REPOSITORY/issues)."
                     } > "$notes"

@@ -58,10 +58,22 @@ jobs:
                 shell: bash
                 run: |
                     set -euo pipefail
+                    build/scripts/test-linux-release-inputs.sh
                     bash -n build/scripts/stage-pinned-github-cli.sh
                     bash -n build/scripts/test-stage-pinned-github-cli.sh
                     bash -n build/scripts/test-pinned-github-cli-callers.sh
                     build/scripts/test-pinned-github-cli-callers.sh
+                    bash -n build/scripts/qualify-published-linux-alpha.sh
+                    bash -n build/scripts/test-qualify-published-linux-alpha.sh
+                    build/scripts/test-qualify-published-linux-alpha.sh
+                    python3 build/scripts/test-linux-gui-screenshot-evidence.py
+                    python3 build/scripts/test-check-linux-gui-screenshot-evidence.py
+                    # CI rechecks generic privacy/path rules with a sentinel. The complete
+                    # capture-specific private denylist remains local and is never committed or uploaded.
+                    private_strings="$RUNNER_TEMP/linux-gui-screenshot-private-strings.txt"
+                    printf '%s\n' 'smapi-evidence-ci-private-sentinel' > "$private_strings"
+                    python3 build/scripts/check-linux-gui-screenshot-evidence.py \
+                        --private-strings-file "$private_strings"
                     pinned_archive="$RUNNER_TEMP/gh_2.92.0_linux_amd64.tar.gz"
                     pinned_root="$RUNNER_TEMP/pinned-github-cli"
                     curl -fsSL --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
@@ -74,13 +86,22 @@ jobs:
                 shell: bash
                 run: |
                     set -euo pipefail
-                    dotnet restore src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj
+                    dotnet restore src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
                     dotnet build src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
                         --configuration Release \
-                        --no-restore
+                        --no-restore \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
                     dotnet test src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
                         --configuration Release \
                         --no-build \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true \
                         -- RunConfiguration.TreatNoTestsAsError=true
                     build/scripts/test-linux-gui-demo-smoke.sh
 

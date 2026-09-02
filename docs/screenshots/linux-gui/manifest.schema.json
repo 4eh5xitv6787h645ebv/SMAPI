@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://4eh5xitv6787h645ebv.github.io/SMAPI/screenshots/linux-gui/manifest.schema.json",
+  "title": "SMAPI Linux GUI screenshot evidence manifest",
+  "description": "Machine-readable provenance for the complete Phase 4 Linux GUI screenshot evidence matrix.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "screenshot_spec",
+    "production_identity",
+    "captures"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "screenshot_spec": {
+      "const": "docs/technical/linux-gui-screenshot-evidence.md"
+    },
+    "production_identity": {
+      "$ref": "#/$defs/productionIdentity"
+    },
+    "captures": {
+      "type": "array",
+      "minItems": 57,
+      "maxItems": 57,
+      "items": {
+        "$ref": "#/$defs/capture"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitObject": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "nonEmpty": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "actionsRunReference": {
+      "type": "string",
+      "pattern": "^https://github\\.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/[1-9][0-9]*(?:/attempts/[1-9][0-9]*)?$"
+    },
+    "anchoredScreenshotSpecReference": {
+      "type": "string",
+      "pattern": "^docs/technical/linux-gui-screenshot-evidence\\.md#evidence-[a-z][0-9]+$"
+    },
+    "anchoredQualificationRecordReference": {
+      "type": "string",
+      "pattern": "^docs/technical/(?:[a-z0-9._-]*qualification[a-z0-9._-]*|[a-z0-9._-]*validation[a-z0-9._-]*)\\.md#evidence-[a-z][0-9]+$"
+    },
+    "productionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "source_tree", "release_tag", "package_url", "package_sha256", "public_release_url", "gui_binary_sha256", "backend_binary_sha256"],
+      "properties": {
+        "source_commit": { "$ref": "#/$defs/gitObject" },
+        "source_tree": { "$ref": "#/$defs/gitObject" },
+        "release_tag": { "$ref": "#/$defs/nonEmpty" },
+        "package_url": { "$ref": "#/$defs/nonEmpty" },
+        "package_sha256": { "$ref": "#/$defs/sha256" },
+        "public_release_url": { "$ref": "#/$defs/nonEmpty" },
+        "gui_binary_sha256": { "$ref": "#/$defs/sha256" },
+        "backend_binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["distribution", "architecture", "desktop_environment", "session_type", "display_backend", "display_scale_percent", "theme", "resolution"],
+      "properties": {
+        "distribution": { "$ref": "#/$defs/nonEmpty" },
+        "architecture": { "$ref": "#/$defs/nonEmpty" },
+        "desktop_environment": { "$ref": "#/$defs/nonEmpty" },
+        "session_type": { "enum": ["x11", "wayland"] },
+        "display_backend": { "enum": ["x11", "xwayland"] },
+        "display_scale_percent": { "type": "integer", "minimum": 50, "maximum": 400 },
+        "theme": { "enum": ["light", "dark", "high_contrast"] },
+        "resolution": { "type": "string", "pattern": "^[1-9][0-9]{1,4}x[1-9][0-9]{1,4}$" }
+      }
+    },
+    "sourceCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "tool", "command"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "tool": { "$ref": "#/$defs/nonEmpty" },
+        "command": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "privacyReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewer", "inspected_original_resolution", "notes"],
+      "properties": {
+        "status": { "const": "pass" },
+        "reviewer": { "$ref": "#/$defs/nonEmpty" },
+        "inspected_original_resolution": { "const": true },
+        "notes": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "filename",
+        "alt_text",
+        "caption",
+        "evidence_class",
+        "source",
+        "release",
+        "binaries",
+        "fixture_or_injection",
+        "operation",
+        "durable_state",
+        "environment",
+        "runtime",
+        "capture",
+        "editing",
+        "privacy_review",
+        "qualification_reference"
+      ],
+      "properties": {
+        "id": {
+          "description": "Screenshot matrix ID. R1 is limited to bounded public prerelease choices and the local-package route; authenticated current/upgrade/downgrade relationships belong to U1-U2 after receipt inspection.",
+          "enum": [
+            "D1", "D2", "D3", "D4", "D5",
+            "R1", "R2", "R3", "R4", "R5", "R6", "R7",
+            "I1", "I2", "I3", "I4",
+            "U1", "U2", "U3",
+            "P1", "P2", "P3", "P4",
+            "X1",
+            "N1", "N2", "N3",
+            "B1", "B2", "B3", "B4",
+            "L1", "L2", "L3",
+            "C1", "C2", "C3",
+            "E1", "E2", "E3", "E4", "E5", "E6",
+            "G1", "G2", "G3",
+            "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8",
+            "M1", "M2", "M3"
+          ]
+        },
+        "filename": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*\\.png$",
+          "maxLength": 160
+        },
+        "alt_text": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "caption": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "evidence_class": {
+          "enum": [
+            "real_qualification",
+            "controlled_fixture"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["commit", "tree"],
+          "properties": {
+            "commit": {
+              "$ref": "#/$defs/gitObject"
+            },
+            "tree": {
+              "$ref": "#/$defs/gitObject"
+            }
+          }
+        },
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tag", "package_url", "package_sha256", "public_release_url"],
+          "properties": {
+            "tag": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "package_url": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "package_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "public_release_url": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        },
+        "binaries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gui_sha256", "backend_sha256"],
+          "properties": {
+            "gui_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "backend_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "fixture_or_injection": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "operation": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "durable_state": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["before", "after"],
+          "properties": {
+            "before": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "after": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["avalonia", "dotnet_sdk", "dotnet_runtime"],
+          "properties": {
+            "avalonia": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "dotnet_sdk": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "dotnet_runtime": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        },
+        "capture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["timestamp", "tool", "command", "width", "height", "sha256"],
+          "properties": {
+            "timestamp": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "tool": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "command": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32768
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32768
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "editing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lossless_crop",
+            "contact_sheet",
+            "application_pixels_altered",
+            "statement",
+            "original_sources"
+          ],
+          "properties": {
+            "lossless_crop": {
+              "type": "boolean"
+            },
+            "contact_sheet": {
+              "type": "boolean"
+            },
+            "application_pixels_altered": {
+              "const": false
+            },
+            "statement": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "original_sources": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["filename", "sha256", "width", "height", "environment", "capture", "privacy_review"],
+                "properties": {
+                  "filename": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]*\\.png$",
+                    "maxLength": 160
+                  },
+                  "sha256": {
+                    "$ref": "#/$defs/sha256"
+                  },
+                  "width": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 32768
+                  },
+                  "height": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 32768
+                  },
+                  "environment": { "$ref": "#/$defs/environment" },
+                  "capture": { "$ref": "#/$defs/sourceCapture" },
+                  "privacy_review": { "$ref": "#/$defs/privacyReview" }
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "lossless_crop": { "const": false },
+                  "contact_sheet": { "const": false }
+                },
+                "required": ["lossless_crop", "contact_sheet"]
+              },
+              "then": {
+                "properties": {
+                  "original_sources": { "maxItems": 0 }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "lossless_crop": { "const": true }
+                },
+                "required": ["lossless_crop"]
+              },
+              "then": {
+                "properties": {
+                  "original_sources": { "minItems": 1 }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "contact_sheet": { "const": true }
+                },
+                "required": ["contact_sheet"]
+              },
+              "then": {
+                "properties": {
+                  "original_sources": { "minItems": 2 }
+                }
+              }
+            }
+          ]
+        },
+        "privacy_review": {
+          "$ref": "#/$defs/privacyReview"
+        },
+        "qualification_reference": {
+          "oneOf": [
+            { "$ref": "#/$defs/actionsRunReference" },
+            { "$ref": "#/$defs/anchoredScreenshotSpecReference" },
+            { "$ref": "#/$defs/anchoredQualificationRecordReference" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "evidence_class": { "const": "real_qualification" }
+            },
+            "required": ["evidence_class"]
+          },
+          "then": {
+            "properties": {
+              "qualification_reference": {
+                "oneOf": [
+                  { "$ref": "#/$defs/actionsRunReference" },
+                  { "$ref": "#/$defs/anchoredQualificationRecordReference" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": { "const": "A8" }
+            },
+            "required": ["id"]
+          },
+          "then": {
+            "properties": {
+              "qualification_reference": {
+                "oneOf": [
+                  { "$ref": "#/$defs/actionsRunReference" },
+                  { "$ref": "#/$defs/anchoredQualificationRecordReference" }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -14,12 +14,12 @@ want the broadly supported cross-platform release.
 The fork uses identifiers which cannot collide with inherited official SMAPI tags or look like an
 official stable release:
 
-| Item | First alpha |
-| --- | --- |
-| Embedded version | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1` |
-| Git tag | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1` |
-| Release title | `Experimental SMAPI Linux Fork 4.5.3 alpha 1` |
-| Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip` |
+| Item | Published alpha 1 | Planned graphical alpha 2 |
+| --- | --- | --- |
+| Embedded version | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1` | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2` |
+| Git tag | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1` | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2` |
+| Release title | `Experimental SMAPI Linux Fork 4.5.3 alpha 1` | `Experimental SMAPI Linux Fork 4.5.3 alpha 2` |
+| Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip` | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip` |
 
 Later alphas increment the final number. A published tag is never reused or moved. The public
 release assets are built from the exact tag commit by GitHub Actions; the build records its source
@@ -51,9 +51,9 @@ coreutils (`stat` and `timeout`) and GNU diffutils (`cmp`). The published alpha.
 perform those capability checks and still creates or refreshes its net6 dependency metadata at
 launch when needed.
 
-### Unreleased graphical package candidate
+### Planned alpha 2 graphical package
 
-Source and Actions candidates built after the reviewed Phase 4 packaging change contain a separate
+The reviewed alpha 2 source and non-authoritative Actions candidates contain a separate
 `install on Linux (graphical).sh` entry point and the unchanged `install on Linux.sh` terminal
 fallback in the same ZIP. The GUI is a self-contained, untrimmed Linux x86_64 application; its
 single-file native runtime is extracted into a private per-run temporary directory which the
@@ -65,13 +65,13 @@ directory under the configured temporary root. The supported first desktop path 
 not Avalonia's experimental native Wayland backend; headless and native-Wayland-only sessions retain
 the terminal launcher.
 
-Those candidates also create one bounded private graphical-installer diagnostic session before
+Alpha 2 candidates also create one bounded private graphical-installer diagnostic session before
 Avalonia, release-catalog networking, game discovery, or backend startup. Every production screen
 can open a stable sanitized snapshot through **View diagnostic log**. This is unreleased
 next-alpha/source behavior; the published alpha.1 has neither the graphical launcher nor this
 viewer.
 
-No published release contains that candidate yet. Do not treat a branch artifact as a tagged
+Alpha 2 is not published yet. Do not treat a branch artifact as a tagged
 release, substitute it for the alpha.1 instructions below, or use it as production screenshot or
 clean-machine qualification evidence. A future public GUI alpha must be tagged from an exact
 reviewed commit, publish and attest the complete six-asset set, and pass fresh-download verification.
@@ -92,10 +92,10 @@ The checksum command must report `OK`. The attestation must identify this reposi
 `linux-alpha-release.yml` workflow. Inspect `build-metadata.json` and confirm that its package name,
 SHA-256, release tag, and full source commit match the release page.
 
-### Unreleased next-alpha six-asset set
+### Planned alpha 2 six-asset set
 
-The published alpha.1 above has three assets and no install-manifest companion. A future tagged
-next-alpha build from source containing the Phase 4 package-authority work will instead publish an
+The published alpha.1 above has three assets and no install-manifest companion. The tagged alpha 2
+build from the exact reviewed Phase 4 package-authority commit will instead publish an
 exact six-file set. Its four primary package/metadata assets are:
 
 - the finalized installer ZIP;
@@ -150,6 +150,32 @@ successful verification of the GitHub attestation statement, whose subjects are 
 and manifest, against this repository, tagged workflow, and selected commit establishes published
 release authority. Do not substitute an unattested local or candidate four-primary-asset set for the
 published tagged six-asset set.
+
+For the post-publication qualification record, maintainers use the repository wrapper with a
+fine-grained read-only `GH_TOKEN`, the exact tag/commit/tree, a new destination, and the official
+GitHub CLI 2.92.0 Linux x86_64 archive already checked by the staging script:
+
+```bash
+test -n "${GH_TOKEN:-}" # export a fine-grained read-only token without placing it in shell history
+build/scripts/qualify-published-linux-alpha.sh \
+  'COPY THE EXACT RELEASE TAG HERE' \
+  'COPY THE EXACT 40-CHARACTER RELEASE COMMIT HERE' \
+  'COPY THE EXACT 40-CHARACTER SOURCE TREE HERE' \
+  '/new/private/destination' \
+  '/path/to/gh_2.92.0_linux_amd64.tar.gz'
+```
+
+The wrapper refuses root and an existing destination. It pins the public release ID and tag plus each
+asset's ID, name, size, uploaded state, digest when GitHub supplies one, timestamp, and canonical URL
+before downloading, and requires the same normalized inventory after verification. Each download
+must match the pinned public size and supplied digest. The wrapper then applies the strict checksum,
+metadata, manifest-authority, bundle, and two-subject attestation policy before atomically exposing
+only the six verified files. It captures and removes `GH_TOKEN` from the ambient process environment
+before staging or downloading. The token is never placed in a process argument: only the two
+isolated inventory process trees receive it as an environment variable; staging, downloads, hashing,
+and attestation helpers do not. Inventory calls have a 60-second deadline, local-bundle attestation
+calls have a 120-second deadline, and each download has bounded connect, total, and low-speed times.
+The token is never written to the resulting directory.
 
 ## Install
 
@@ -220,7 +246,7 @@ backup rules. If terminal automation cannot run it, `internal/linux/install.dat`
    private-runtime `createdump` executable as mode 755. The private app-relative runtime contains
    `host/fxr` and `shared/Microsoft.NETCore.App`; it intentionally does not bundle the `dotnet` CLI.
 
-For an unreleased next-alpha/source build containing PR #177 only, step 4 must preserve both exact
+For the planned alpha 2 build containing PR #177, step 4 must preserve both exact
 bytes and Unix mode:
 
 ```bash
@@ -239,7 +265,7 @@ names, IDs, versions, dependency IDs, callback identities, filesystem-derived de
 information. Inspect any report before sharing it. The installer and release workflow never upload
 the private benchmark modpack or save.
 
-### Unreleased graphical-installer diagnostics
+### Planned alpha 2 graphical-installer diagnostics
 
 The graphical candidate stores its local JSONL diagnostics under
 `$XDG_STATE_HOME/smapi-installer/logs` when `XDG_STATE_HOME` is an absolute path, or
@@ -277,17 +303,17 @@ ownership, backup, validation, or rollback decisions automatically.
 The published performance comparison describes one controlled workstation and workload. It is not
 a universal FPS, power, CPU-use, or latency claim. Published alpha.1 has no GUI/updater, and its current
 rollback flow is not atomic. The published alpha.1 dispatcher is not validation-only: its net6 path
-may create or refresh dependency metadata before launch. The unreleased PR #177 source-build
-dispatcher removes that mutation and rechecks path identities to catch ordinary concurrent changes
+may create or refresh dependency metadata before launch. The planned alpha 2 dispatcher from PR #177
+removes that mutation and rechecks path identities to catch ordinary concurrent changes
 during validation, but same-user adversarial path replacement between validation and process
 execution remains outside that nonprivileged launcher's threat boundary. Those statements describe
-unreleased next-alpha/source-build behavior, not alpha.1. See the [comparison](../upstream-comparison.md),
+planned alpha 2 behavior, not alpha.1. See the [comparison](../upstream-comparison.md),
 [validation record](linux-alpha-release-validation.md), and
 [issue tracker](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues).
 
 ## Maintainer release process
 
-The Phase 3 pull request must pass `Linux alpha release qualification` and the repository's required
+The alpha 2 release-preparation pull request must pass `Linux alpha release qualification` and the repository's required
 performance gate. Hosted CI compiles the game-bound test assembly against pinned public reference
 assemblies, then executes the fixture-free runtime-dispatcher and analyzer suites with zero-test
 discovery treated as an error. Reference assemblies are deliberately non-executable, so they must
@@ -310,4 +336,4 @@ complete package/manifest authority verification before and after workflow-artif
 attests both subjects, exports the local attestation bundle and its checksum sidecar, and publishes
 the exact six named release files. The downloaded public six-asset set—not a local package or pre-tag
 candidate—is then used for final clean-room verification.
-These next-alpha steps do not retroactively describe the published alpha.1 assets.
+These alpha 2 steps do not retroactively describe the published alpha.1 assets.

@@ -1,17 +1,88 @@
 <Application
     x:Class="StardewModdingAPI.Installer.Gui.App"
     xmlns="https://github.com/avaloniaui"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:StardewModdingAPI.Installer.Gui"
+    xmlns:styling="using:Avalonia.Styling">
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="{x:Static styling:ThemeVariant.Light}">
+          <SolidColorBrush x:Key="InstallerWindowBackgroundBrush">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerForegroundBrush">#111827</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerCardBackgroundBrush">#F1F5F9</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerCardBorderBrush">#64748B</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerMutedForegroundBrush">#334155</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerPrimaryBackgroundBrush">#4C2FB5</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerPrimaryForegroundBrush">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerFocusBrush">#005FCC</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInfoBackgroundBrush">#E0F2FE</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInfoBorderBrush">#075985</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerErrorBackgroundBrush">#FFE4E6</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerErrorBorderBrush">#9F1239</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerWarningBackgroundBrush">#FEF3C7</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerWarningBorderBrush">#92400E</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessBackgroundBrush">#DCFCE7</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessBorderBrush">#166534</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessForegroundBrush">#166534</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInsetBackgroundBrush">#E2E8F0</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerLogBackgroundBrush">#F8FAFC</SolidColorBrush>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="{x:Static styling:ThemeVariant.Dark}">
+          <SolidColorBrush x:Key="InstallerWindowBackgroundBrush">#10151F</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerForegroundBrush">#EDF3FA</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerCardBackgroundBrush">#182230</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerCardBorderBrush">#34465A</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerMutedForegroundBrush">#B6C4D4</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerPrimaryBackgroundBrush">#5940C7</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerPrimaryForegroundBrush">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerFocusBrush">#FFE082</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInfoBackgroundBrush">#192C43</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInfoBorderBrush">#5AA7E8</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerErrorBackgroundBrush">#3B1F26</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerErrorBorderBrush">#FF8A9A</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerWarningBackgroundBrush">#3B3216</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerWarningBorderBrush">#FFD166</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessBackgroundBrush">#17372D</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessBorderBrush">#55C89A</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessForegroundBrush">#A7F3D0</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInsetBackgroundBrush">#111923</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerLogBackgroundBrush">#0C121A</SolidColorBrush>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="{x:Static local:App.HighContrastTheme}">
+          <SolidColorBrush x:Key="InstallerWindowBackgroundBrush">#000000</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerForegroundBrush">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerCardBackgroundBrush">#000000</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerCardBorderBrush">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerMutedForegroundBrush">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerPrimaryBackgroundBrush">#004C8C</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerPrimaryForegroundBrush">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerFocusBrush">#FFFF00</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInfoBackgroundBrush">#000000</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInfoBorderBrush">#00FFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerErrorBackgroundBrush">#000000</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerErrorBorderBrush">#FF6B6B</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerWarningBackgroundBrush">#000000</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerWarningBorderBrush">#FFFF00</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessBackgroundBrush">#000000</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessBorderBrush">#00FF7F</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerSuccessForegroundBrush">#00FF7F</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerInsetBackgroundBrush">#000000</SolidColorBrush>
+          <SolidColorBrush x:Key="InstallerLogBackgroundBrush">#000000</SolidColorBrush>
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
   <Application.Styles>
     <FluentTheme />
     <Style Selector="Window">
       <Setter Property="FontSize" Value="15" />
-      <Setter Property="Background" Value="#10151F" />
-      <Setter Property="Foreground" Value="#EDF3FA" />
+      <Setter Property="Background" Value="{DynamicResource InstallerWindowBackgroundBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource InstallerForegroundBrush}" />
     </Style>
     <Style Selector="Border.card">
-      <Setter Property="Background" Value="#182230" />
-      <Setter Property="BorderBrush" Value="#34465A" />
+      <Setter Property="Background" Value="{DynamicResource InstallerCardBackgroundBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource InstallerCardBorderBrush}" />
       <Setter Property="BorderThickness" Value="1" />
       <Setter Property="CornerRadius" Value="10" />
       <Setter Property="Padding" Value="20" />
@@ -22,16 +93,16 @@
       <Setter Property="Margin" Value="0,0,0,12" />
     </Style>
     <Style Selector="TextBlock.muted">
-      <Setter Property="Foreground" Value="#B6C4D4" />
+      <Setter Property="Foreground" Value="{DynamicResource InstallerMutedForegroundBrush}" />
     </Style>
     <Style Selector="Button.primary">
-      <Setter Property="Background" Value="#5940C7" />
-      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="{DynamicResource InstallerPrimaryBackgroundBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource InstallerPrimaryForegroundBrush}" />
       <Setter Property="FontWeight" Value="SemiBold" />
       <Setter Property="Padding" Value="18,10" />
     </Style>
     <Style Selector="Button.focus-ring:focus-visible, ComboBox.focus-ring:focus-visible, ListBox.focus-ring:focus-visible">
-      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderBrush" Value="{DynamicResource InstallerFocusBrush}" />
       <Setter Property="BorderThickness" Value="3" />
     </Style>
   </Application.Styles>

@@ -358,13 +358,21 @@ internal sealed class GameDiscoveryController : IAsyncDisposable
     private async Task<T> AwaitWithSessionFaultAsync<T>(Task<T> work, ActiveOperation operation)
     {
         Task completed = await Task.WhenAny(work, this.Session.SessionFaulted).ConfigureAwait(false);
-        if (ReferenceEquals(completed, this.Session.SessionFaulted))
+        if (ReferenceEquals(completed, this.Session.SessionFaulted) || this.Session.SessionFaulted.IsCompleted)
         {
             await CancelSafelyAsync(operation.Cancellation).ConfigureAwait(false);
             await ObserveAsync(work).ConfigureAwait(false);
             throw new SessionFaultException();
         }
-        T result = await work.ConfigureAwait(false);
+        T result;
+        try
+        {
+            result = await work.ConfigureAwait(false);
+        }
+        catch when (this.Session.SessionFaulted.IsCompleted)
+        {
+            throw new SessionFaultException();
+        }
         if (this.Session.SessionFaulted.IsCompleted)
             throw new SessionFaultException();
         return result;

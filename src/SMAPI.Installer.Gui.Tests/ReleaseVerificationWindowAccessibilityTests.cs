@@ -50,6 +50,26 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
     }
 
     [AvaloniaTest]
+    public void ManualFallbackHelpNamesTheExactSamePackageCommandAndSafetyLimits()
+    {
+        ReleaseVerificationWindow window = CreateWindow([]);
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        TextBlock help = window.FindControl<TextBlock>("ManualFallbackText")!;
+        AutomationProperties.GetName(help).Should().Be("Manual terminal installation help");
+        help.Text.Should().Contain("all six public release files");
+        help.Text.Should().Contain("bash \"install on Linux.sh\"");
+        help.Text.Should().Contain("normal desktop user");
+        help.Text.Should().Contain("never use sudo");
+        help.Text.Should().Contain("headless commands");
+        help.Text.Should().Contain("rollback");
+        help.Text.Should().Contain("last-resort manual extraction");
+
+        window.Close();
+    }
+
+    [AvaloniaTest]
     [TestCase(1.00)]
     [TestCase(1.25)]
     [TestCase(1.50)]

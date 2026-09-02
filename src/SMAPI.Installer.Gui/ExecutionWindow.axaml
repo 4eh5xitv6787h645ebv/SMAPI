@@ -13,7 +13,7 @@
     WindowStartupLocation="CenterScreen">
   <Window.Styles>
     <Style Selector="Border.keyboard-focus:focus-visible">
-      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderBrush" Value="{DynamicResource InstallerFocusBrush}" />
       <Setter Property="BorderThickness" Value="3" />
     </Style>
   </Window.Styles>
@@ -26,7 +26,7 @@
         <local:InstallerDiagnosticsAccess x:Name="DiagnosticsAccess" />
       </StackPanel>
 
-      <Border Grid.Row="1" Padding="14" Background="#192C43" BorderBrush="#5AA7E8" BorderThickness="1" CornerRadius="8">
+      <Border Grid.Row="1" Padding="14" Background="{DynamicResource InstallerInfoBackgroundBrush}" BorderBrush="{DynamicResource InstallerInfoBorderBrush}" BorderThickness="1" CornerRadius="8">
         <StackPanel Spacing="6">
           <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Safety boundary" />
           <TextBlock Text="{Binding BoundaryDetail}" TextWrapping="Wrap" />
@@ -58,8 +58,8 @@
               AutomationProperties.LiveSetting="Assertive"
               AutomationProperties.Name="{Binding LiveAnnouncement}"
               Padding="12"
-              Background="#3B1F26"
-              BorderBrush="#FF8A9A"
+              Background="{DynamicResource InstallerErrorBackgroundBrush}"
+              BorderBrush="{DynamicResource InstallerErrorBorderBrush}"
               BorderThickness="2"
               CornerRadius="6">
             <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
@@ -154,8 +154,8 @@
           Grid.Row="4"
           Padding="12"
           IsVisible="{Binding IsSettlementWarningVisible}"
-          Background="#3B3216"
-          BorderBrush="#FFD166"
+          Background="{DynamicResource InstallerWarningBackgroundBrush}"
+          BorderBrush="{DynamicResource InstallerWarningBorderBrush}"
           BorderThickness="1"
           CornerRadius="6"
           AutomationProperties.Name="{Binding SettlementWarning}">

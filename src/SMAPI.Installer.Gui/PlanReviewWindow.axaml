@@ -13,7 +13,7 @@
     WindowStartupLocation="CenterScreen">
   <Window.Styles>
     <Style Selector="Border.keyboard-focus:focus-visible">
-      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderBrush" Value="{DynamicResource InstallerFocusBrush}" />
       <Setter Property="BorderThickness" Value="3" />
     </Style>
   </Window.Styles>
@@ -39,8 +39,8 @@
           Grid.Row="1"
           Padding="14"
           AutomationProperties.Name="Review first. Candidate choices can refresh this read-only plan. Confirming prepares a separate final Run screen and changes no files."
-          Background="#192C43"
-          BorderBrush="#5AA7E8"
+          Background="{DynamicResource InstallerInfoBackgroundBrush}"
+          BorderBrush="{DynamicResource InstallerInfoBorderBrush}"
           BorderThickness="1"
           CornerRadius="8">
         <TextBlock
@@ -98,8 +98,8 @@
               IsVisible="{Binding IsErrorVisible}"
               AutomationProperties.LiveSetting="Assertive"
               AutomationProperties.Name="{Binding LiveAnnouncement}"
-              Background="#3B1F26"
-              BorderBrush="#FF8A9A"
+              Background="{DynamicResource InstallerErrorBackgroundBrush}"
+              BorderBrush="{DynamicResource InstallerErrorBorderBrush}"
               BorderThickness="2"
               CornerRadius="6">
             <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
@@ -142,7 +142,7 @@
             </ListBox>
           </StackPanel>
 
-          <Border Padding="12" Background="#111923" CornerRadius="6">
+          <Border Padding="12" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="6">
             <StackPanel Spacing="3">
               <TextBlock Classes="muted" FontSize="13" Text="DURABLE STATE" />
               <TextBlock
@@ -338,7 +338,7 @@
             <Border
                 x:Name="ReleaseRelationshipRegion"
                 Padding="10"
-                Background="#111923"
+                Background="{DynamicResource InstallerInsetBackgroundBrush}"
                 CornerRadius="5">
               <StackPanel Spacing="3">
                 <TextBlock
@@ -352,7 +352,7 @@
             </Border>
           </StackPanel>
 
-          <Border Padding="12" Background="#192C43" BorderBrush="#5AA7E8" BorderThickness="1" CornerRadius="6">
+          <Border Padding="12" Background="{DynamicResource InstallerInfoBackgroundBrush}" BorderBrush="{DynamicResource InstallerInfoBorderBrush}" BorderThickness="1" CornerRadius="6">
             <StackPanel Spacing="5">
               <TextBlock AutomationProperties.HeadingLevel="3" FontSize="18" FontWeight="SemiBold" Text="Inspection safety boundary" />
               <TextBlock Text="{Binding SafetyDetail}" TextWrapping="Wrap" />
@@ -365,7 +365,7 @@
             <ItemsControl IsVisible="{Binding HasRiskRows}" ItemsSource="{Binding RiskRows}">
               <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
-                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#111923" CornerRadius="5">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="5">
                     <StackPanel Spacing="3">
                       <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
                       <TextBlock Classes="muted" Text="{Binding Detail}" TextWrapping="Wrap" />
@@ -382,7 +382,7 @@
             <ItemsControl IsVisible="{Binding HasOperationRows}" ItemsSource="{Binding OperationRows}">
               <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
-                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#111923" CornerRadius="5">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="5">
                     <StackPanel Spacing="3">
                       <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
                       <TextBlock Text="{Binding CountText}" />
@@ -400,7 +400,7 @@
             <ItemsControl IsVisible="{Binding HasConflictRows}" ItemsSource="{Binding ConflictRows}">
               <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
-                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#3B1F26" CornerRadius="5">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="{DynamicResource InstallerErrorBackgroundBrush}" CornerRadius="5">
                     <StackPanel Spacing="3">
                       <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
                       <TextBlock Text="{Binding CountText}" />
@@ -418,7 +418,7 @@
             <ItemsControl IsVisible="{Binding HasCandidateRows}" ItemsSource="{Binding CandidateRows}">
               <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="vm:PlanReviewSummaryRow">
-                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="#111923" CornerRadius="5">
+                  <Border Margin="0,3" Padding="10" AutomationProperties.Name="{Binding AccessibleName}" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="5">
                     <StackPanel Spacing="3">
                       <TextBlock FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
                       <TextBlock Text="{Binding CountText}" />

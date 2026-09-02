@@ -211,7 +211,7 @@ Scope constraints apply throughout:
 - [ ] Capture every production screenshot from the exact reviewed release package and applicable production frontend (GUI or manual console) without private fixture names, paths, or personal data.
 - [ ] Document one automatically detected valid game, no-game and multiple-game detection states, and manual invalid/valid folder selection (D1–D4).
 - [ ] Document packaged effective-UID-0 refusal before discovery, download, logging, or mutation (D5).
-- [ ] Document current, upgrade, prerelease, downgrade, and local-package release-selection labels (R1).
+- [ ] Document bounded public-prerelease and local-package release selection without unauthenticated installed/current, upgrade, or downgrade claims (R1); document authenticated current/upgrade/downgrade relationships only in the later U1–U2 plan evidence.
 - [ ] Document real public-package download progress and controlled cancellation/interruption with retry and incomplete-file cleanup (R2–R3).
 - [ ] Document real checksum/release-metadata verification in progress and successful checksum plus attestation/provenance without conflating integrity and provenance (R4–R5).
 - [ ] Document corrupt checksum/metadata/package and attestation/provenance/release-identity failures blocking mutation with safe next steps (R6–R7).
