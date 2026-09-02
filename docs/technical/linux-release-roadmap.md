@@ -678,6 +678,16 @@ This candidate PR must not publish or tag a release and cannot justify productio
 
 This slice provides a detailed bounded private event log and a more restricted sanitized viewer. The production projection deliberately omits relative installer-owned paths, release/package identifiers, and disk-rotation details; the viewer exposes bounded-health, omission, and coalescing status instead. It does not publish a GUI release or justify a production screenshot. G1–G3 capture, broad error/troubleshooting documentation, release relationship/local-package UX, clean public-artifact qualification, trusted-workload validation, native desktop/AT-SPI checks, and screenshot publication remain unchecked.
 
+### Diagnostics UX correction and user documentation
+
+- [x] Resolve the production release-screen Alt+D collision by moving **Download and verify** to Alt+W, include the nested diagnostics action in uniqueness coverage, and verify Alt+D opens the owned viewer and restores focus after keyboard close ([fork PR #245](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/245); implementation commit [`0548c653`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/0548c653)).
+- [x] Document exact private-log location and bounds, viewer/copy privacy semantics, keyboard shortcuts, failure-safe troubleshooting, terminal fallback, and the unreleased/public boundary; correct the screenshot contract and generated next-alpha notes without claiming alpha.1 contains the GUI ([fork PR #245](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/245)).
+- [ ] Pass both required CI workflows for PR #245.
+- [ ] Address every actionable accessibility, documentation, privacy, and final-diff finding and obtain clean exact-head reviews for PR #245.
+- [ ] Merge PR #245 into `develop`, close it, and delete `phase4/gui-diagnostics-docs` locally and on origin.
+
+This documentation and correction slice does not publish or qualify a GUI release and adds no production screenshot. Public artifact, clean lifecycle, trusted-workload, desktop/AT-SPI, and authentic screenshot evidence remain unchecked.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.

@@ -223,7 +223,7 @@ internal sealed class InstallerDiagnosticsWindowTests
         while (!condition())
         {
             if (DateTime.UtcNow >= deadline)
-                throw new TimeoutException("The clipboard authority did not settle within the test bound.");
+                throw new TimeoutException("The expected diagnostics UI or clipboard state did not settle within the test bound.");
             await Task.Delay(10);
         }
     }
