@@ -11,6 +11,26 @@ internal interface IProductionInstallerDiagnosticSink
     void Record(InstallerDiagnosticCode code);
     void Record(InstallerDiagnosticCode code, ProtocolPrePlanErrorCode? error);
     void Record(InstallerDiagnosticCode code, ProtocolTerminalErrorCode? error);
+    void RecordExecutionTerminal(
+        InstallerOperation operation,
+        ProtocolExecutionOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolTerminalErrorCode? error,
+        ProtocolNextAction nextAction
+    );
+    void RecordRecoveryTerminal(
+        InstallerOperation operation,
+        ProtocolInterruptedRecoveryOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolTerminalErrorCode? error,
+        ProtocolNextAction nextAction
+    );
+    void RecordPruneTerminal(
+        ProtocolPruneOutcome outcome,
+        ProtocolDurableState durableState,
+        ProtocolTerminalErrorCode? error,
+        ProtocolNextAction nextAction
+    );
     void RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage);
     void RecordProgress(InstallerDiagnosticCode code, TransactionStage stage);
 }
@@ -271,7 +291,15 @@ internal sealed class ProductionInstallerDiagnosticObserver
         {
             this.executionResultObserved = true;
             if (executionResult is InstallerExecutionTerminalResult terminal)
-                this.Sink.Record(InstallerDiagnosticCode.ExecutionTerminal, terminal.ErrorCode);
+            {
+                this.Sink.RecordExecutionTerminal(
+                    snapshot.Plan.Operation,
+                    terminal.Outcome,
+                    terminal.DurableState,
+                    terminal.ErrorCode,
+                    terminal.NextAction
+                );
+            }
             else if (executionResult is InstallerExecutionStateUnknownResult)
                 this.Sink.Record(InstallerDiagnosticCode.ExecutionFailed);
             else
@@ -281,7 +309,15 @@ internal sealed class ProductionInstallerDiagnosticObserver
         {
             this.recoveryResultObserved = true;
             if (recoveryResult is InstallerRecoveryTerminalResult terminal)
-                this.Sink.Record(InstallerDiagnosticCode.ExecutionRecoveryTerminal, terminal.ErrorCode);
+            {
+                this.Sink.RecordRecoveryTerminal(
+                    snapshot.Plan.Operation,
+                    terminal.Outcome,
+                    terminal.DurableState,
+                    terminal.ErrorCode,
+                    terminal.NextAction
+                );
+            }
             else if (recoveryResult is InstallerRecoveryStateUnknownResult)
                 this.Sink.Record(InstallerDiagnosticCode.ExecutionFailed);
             else
@@ -315,7 +351,14 @@ internal sealed class ProductionInstallerDiagnosticObserver
         {
             this.pruneResultObserved = true;
             if (result is RecoveryPruneTerminalPresentation terminal)
-                this.Sink.Record(InstallerDiagnosticCode.RecoveryPruneTerminal, terminal.ErrorCode);
+            {
+                this.Sink.RecordPruneTerminal(
+                    terminal.Outcome,
+                    terminal.DurableState,
+                    terminal.ErrorCode,
+                    terminal.NextAction
+                );
+            }
             else if (result is RecoveryPruneStateUnknownPresentation)
                 this.Sink.Record(InstallerDiagnosticCode.RecoveryPruneFailed);
             else

@@ -7,6 +7,23 @@ title: Release notes
 
 # Release notes
 
+## Next Linux alpha — unreleased corrective work
+
+* Replaced the generic graphical-installer terminal diagnostic with stable outcome-specific event
+  codes and truthful severity for install/update/repair/uninstall/backup/rollback, interrupted
+  recovery, and recovery-history cleanup. Fixed messages retain only the typed operation, durable
+  state, safe next action, and applicable stable error code.
+* Expanded the local diagnostic viewer with visible snapshot health and separate display-omission,
+  private-raw-log-omission, and progress-coalescence counts. The product now explicitly distinguishes
+  the sanitized snapshot from the current-user-only rotating JSONL log and states its one-MiB file,
+  five-file/five-MiB aggregate, next-session rotation, no-auto-upload, and review-before-sharing
+  boundaries without showing its path.
+* Restored the missing fixed progress message for local-package import and added bounded rendering,
+  typed terminal-matrix, production observer/session, privacy, and health-accounting coverage.
+
+These changes are in source only until a replacement exact-commit prerelease is published and
+qualified. The alpha 2 package below does not gain them retroactively.
+
 ## Linux fork 4.5.3 alpha 2
 
 This **unofficial experimental Linux x86_64 fork** was published on 2 September 2026 UTC as

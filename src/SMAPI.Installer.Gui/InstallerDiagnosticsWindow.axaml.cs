@@ -3,6 +3,7 @@ using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using System.Globalization;
 using StardewModdingAPI.Installer.Gui.Diagnostics;
 
 namespace StardewModdingAPI.Installer.Gui;
@@ -28,10 +29,20 @@ internal sealed partial class InstallerDiagnosticsWindow : Window
             throw new ArgumentOutOfRangeException(nameof(copyDeadline));
         this.InitializeComponent();
         this.Session = session;
-        this.SnapshotText = session.CreateSanitizedCopyText();
+        InstallerDiagnosticCapture capture = session.CreateSanitizedCapture();
+        this.SnapshotText = capture.Text;
         this.SetClipboardText = setClipboardText ?? this.SetClipboardTextAsync;
         this.CopyDeadline = copyDeadline ?? ClipboardDeadline;
         this.DiagnosticText.Text = this.SnapshotText;
+        this.SnapshotHealthText.Text = capture.HealthLabel;
+        this.SnapshotCountText.Text = string.Format(
+            CultureInfo.InvariantCulture,
+            "{0} displayed entries · {1} omitted from the display window · {2} omitted from the private raw log · {3} intermediate events coalesced",
+            capture.DisplayedEntryCount,
+            capture.DisplayOmittedEntryCount,
+            capture.RawLogOmittedEntryCount,
+            capture.CoalescedEventCount
+        );
         this.Opened += this.OnOpened;
         this.KeyDown += this.OnKeyDown;
         this.SizeChanged += (_, eventArgs) => this.ApplyResponsiveLayout(eventArgs.NewSize.Width);

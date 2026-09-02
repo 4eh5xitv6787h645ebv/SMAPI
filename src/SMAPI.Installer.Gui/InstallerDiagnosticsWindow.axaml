@@ -2,9 +2,9 @@
     x:Class="StardewModdingAPI.Installer.Gui.InstallerDiagnosticsWindow"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="SMAPI Linux Installer — Private diagnostics"
+    Title="SMAPI Linux Installer — Local diagnostics"
     Width="760"
-    Height="620"
+    Height="760"
     MinWidth="420"
     MinHeight="420"
     WindowStartupLocation="CenterOwner">
@@ -14,10 +14,10 @@
       <Setter Property="BorderThickness" Value="3" />
     </Style>
   </Window.Styles>
-  <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,*,Auto,Auto" RowSpacing="16">
+  <ScrollViewer x:Name="PageScrollViewer" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,*,Auto,Auto" RowSpacing="16">
       <StackPanel Grid.Row="0" Spacing="4">
-        <TextBlock AutomationProperties.HeadingLevel="1" FontSize="28" FontWeight="Bold" Text="Private diagnostic log" TextWrapping="Wrap" />
+        <TextBlock AutomationProperties.HeadingLevel="1" FontSize="28" FontWeight="Bold" Text="Sanitized diagnostic snapshot" TextWrapping="Wrap" />
         <TextBlock Classes="muted" Text="Snapshot captured when this window opened. Close and reopen it to refresh." TextWrapping="Wrap" />
       </StackPanel>
 
@@ -28,20 +28,51 @@
           Focusable="True"
           TabIndex="0"
           Padding="14"
-          AutomationProperties.Name="Private diagnostics. Review this snapshot before sharing. Local paths, backend messages, URLs, package and release identifiers, digests, and private workload names are excluded."
+          AutomationProperties.Name="Local diagnostics. Review this snapshot before sharing. It is sanitized: local paths, backend messages, URLs, package and release identifiers, digests, and private workload names are excluded."
           Background="{DynamicResource InstallerWarningBackgroundBrush}"
           BorderBrush="{DynamicResource InstallerWarningBorderBrush}"
           BorderThickness="2"
           CornerRadius="8">
         <StackPanel Spacing="6">
-          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Private — review before sharing" TextWrapping="Wrap" />
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Local and private — review before sharing" TextWrapping="Wrap" />
           <TextBlock Text="This view excludes local paths, backend messages, URLs, package identifiers, digests, and private workload names. Review the copied text yourself before sending it to anyone." TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <Border
+          x:Name="SnapshotHealthRegion"
+          Grid.Row="2"
+          Padding="14"
+          AutomationProperties.Name="Sanitized snapshot health and bounded omission counts"
+          Background="{DynamicResource InstallerCardBackgroundBrush}"
+          BorderBrush="{DynamicResource InstallerCardBorderBrush}"
+          BorderThickness="1"
+          CornerRadius="8">
+        <StackPanel Spacing="6">
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Snapshot health" TextWrapping="Wrap" />
+          <TextBlock x:Name="SnapshotHealthText" TextWrapping="Wrap" />
+          <TextBlock x:Name="SnapshotCountText" Classes="muted" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <Border
+          x:Name="RawLogBoundaryRegion"
+          Grid.Row="3"
+          Padding="14"
+          AutomationProperties.Name="Private raw log boundary. The sanitized snapshot is not the rotating JSONL log. The raw log is current-user-only local storage, never uploaded automatically, bounded to one MiB per file and five owned files or five MiB total, and rotated when the next session starts."
+          Background="{DynamicResource InstallerCardBackgroundBrush}"
+          BorderBrush="{DynamicResource InstallerCardBorderBrush}"
+          BorderThickness="1"
+          CornerRadius="8">
+        <StackPanel Spacing="6">
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Private raw log boundary" TextWrapping="Wrap" />
+          <TextBlock Text="This sanitized snapshot is not the rotating private JSONL log. The raw log stays in current-user-only local storage and is never uploaded automatically. It is bounded to 1 MiB per file, at most five installer-owned files, and 5 MiB total; older owned logs rotate when the next session starts. Review any raw log yourself before sharing it. This viewer never shows or opens its path." TextWrapping="Wrap" />
         </StackPanel>
       </Border>
 
       <TextBox
           x:Name="DiagnosticText"
-          Grid.Row="2"
+          Grid.Row="4"
           AcceptsReturn="True"
           IsReadOnly="True"
           MinHeight="240"
@@ -52,14 +83,14 @@
 
       <Border
           x:Name="CopyStatusRegion"
-          Grid.Row="3"
+          Grid.Row="5"
           MinHeight="24"
           AutomationProperties.LiveSetting="Polite"
           AutomationProperties.Name="{Binding #CopyStatusText.Text}">
         <TextBlock x:Name="CopyStatusText" Classes="muted" TextWrapping="Wrap" />
       </Border>
 
-      <WrapPanel Grid.Row="4" Orientation="Horizontal">
+      <WrapPanel Grid.Row="6" Orientation="Horizontal">
         <Button
             x:Name="CopyButton"
             Classes="primary focus-ring"

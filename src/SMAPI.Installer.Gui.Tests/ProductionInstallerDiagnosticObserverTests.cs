@@ -78,7 +78,62 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         sink.Calls.Should().Equal(
             new DiagnosticCall(InstallerDiagnosticCode.ExecutionProgress, null, DiagnosticErrorKind.None, "Staging"),
             new DiagnosticCall(InstallerDiagnosticCode.ExecutionProgress, null, DiagnosticErrorKind.None, "Applying"),
-            new DiagnosticCall(InstallerDiagnosticCode.ExecutionTerminal, "PermissionDenied", DiagnosticErrorKind.Terminal, null)
+            new DiagnosticCall(
+                InstallerDiagnosticCode.ExecutionTerminal,
+                "PermissionDenied",
+                DiagnosticErrorKind.Terminal,
+                null,
+                "Install|FailedBeforeMutation|Unchanged|ViewPrivateLog"
+            )
+        );
+    }
+
+    [Test]
+    public void Observe_ProjectsSuccessfulExecutionRecoveryAndPruneTerminalFacts()
+    {
+        RecordingSink sink = new();
+        ProductionInstallerDiagnosticObserver observer = new(sink);
+        ExecutionPlanPresentation plan = CreateExecutionPlan();
+        InstallerExecutionTerminalResult execution = new(
+            ProtocolExecutionOutcome.Succeeded,
+            ProtocolDurableState.Committed,
+            null,
+            ProtocolRecoveryDisposition.NotRequired,
+            ProtocolNextAction.InspectAgain,
+            new(1, 0, 1, 0, null, null),
+            InstallerBackendSettlement.ConfirmedClosed
+        );
+        InstallerRecoveryTerminalResult recovery = new(
+            ProtocolInterruptedRecoveryOutcome.RecoveryCompleted,
+            ProtocolDurableState.RecoveryCompleted,
+            null,
+            ProtocolRecoveryDisposition.StateRefreshRequired,
+            ProtocolNextAction.InspectAgain,
+            new(true, true, 1, 1),
+            InstallerBackendSettlement.ConfirmedClosed
+        );
+
+        observer.Observe(CreateExecution(1, ExecutionState.Terminal, plan, result: execution));
+        observer.Observe(CreateExecution(2, ExecutionState.RecoveryCompleted, plan, result: execution, recoveryResult: recovery));
+
+        RecoveryPruneTerminalPresentation prune = new(
+            ProtocolPruneOutcome.Succeeded,
+            ProtocolDurableState.PruneApplied,
+            null,
+            ProtocolRecoveryDisposition.NotRequired,
+            ProtocolNextAction.ListRecoveries,
+            1,
+            1,
+            0,
+            false,
+            InstallerBackendSettlement.ConfirmedClosed
+        );
+        observer.Observe(CreatePrune(1, 1, RecoveryPruneControllerState.Terminal, "PRIVATE", result: prune));
+
+        sink.Calls.Where(call => call.TerminalFacts is not null).Select(call => call.TerminalFacts).Should().Equal(
+            "Install|Succeeded|Committed|InspectAgain",
+            "Install|RecoveryCompleted|RecoveryCompleted|InspectAgain",
+            "Succeeded|PruneApplied|ListRecoveries"
         );
     }
 
@@ -252,15 +307,17 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         ExecutionState state,
         ExecutionPlanPresentation plan,
         TransactionStage? stage = null,
-        InstallerExecutionResult? result = null
-    ) => new(revision, state, plan, stage, 0, null, result, null, false, false, false, false);
+        InstallerExecutionResult? result = null,
+        InstallerRecoveryResult? recoveryResult = null
+    ) => new(revision, state, plan, stage, 0, null, result, recoveryResult, false, false, false, false);
 
     private static RecoveryPruneSnapshot CreatePrune(
         long generation,
         long revision,
         RecoveryPruneControllerState state,
         string hostile,
-        RecoveryPruneRejection? rejection = null
+        RecoveryPruneRejection? rejection = null,
+        RecoveryPruneResultPresentation? result = null
     ) => new(
         generation,
         revision,
@@ -274,7 +331,7 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         null,
         0,
         null,
-        null,
+        result,
         false,
         false,
         false,
@@ -290,7 +347,8 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         InstallerDiagnosticCode Code,
         string? Error,
         DiagnosticErrorKind ErrorKind,
-        string? ProgressStage
+        string? ProgressStage,
+        string? TerminalFacts = null
     );
 
     private sealed class RecordingSink : IProductionInstallerDiagnosticSink
@@ -306,6 +364,47 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         public void Record(InstallerDiagnosticCode code, ProtocolTerminalErrorCode? error)
             => this.Calls.Add(new(code, error?.ToString(), DiagnosticErrorKind.Terminal, null));
 
+        public void RecordExecutionTerminal(
+            InstallerOperation operation,
+            ProtocolExecutionOutcome outcome,
+            ProtocolDurableState durableState,
+            ProtocolTerminalErrorCode? error,
+            ProtocolNextAction nextAction
+        ) => this.Calls.Add(new(
+            InstallerDiagnosticCode.ExecutionTerminal,
+            error?.ToString(),
+            DiagnosticErrorKind.Terminal,
+            null,
+            $"{operation}|{outcome}|{durableState}|{nextAction}"
+        ));
+
+        public void RecordRecoveryTerminal(
+            InstallerOperation operation,
+            ProtocolInterruptedRecoveryOutcome outcome,
+            ProtocolDurableState durableState,
+            ProtocolTerminalErrorCode? error,
+            ProtocolNextAction nextAction
+        ) => this.Calls.Add(new(
+            InstallerDiagnosticCode.ExecutionRecoveryTerminal,
+            error?.ToString(),
+            DiagnosticErrorKind.Terminal,
+            null,
+            $"{operation}|{outcome}|{durableState}|{nextAction}"
+        ));
+
+        public void RecordPruneTerminal(
+            ProtocolPruneOutcome outcome,
+            ProtocolDurableState durableState,
+            ProtocolTerminalErrorCode? error,
+            ProtocolNextAction nextAction
+        ) => this.Calls.Add(new(
+            InstallerDiagnosticCode.RecoveryPruneTerminal,
+            error?.ToString(),
+            DiagnosticErrorKind.Terminal,
+            null,
+            $"{outcome}|{durableState}|{nextAction}"
+        ));
+
         public void RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage)
             => this.Calls.Add(new(code, null, DiagnosticErrorKind.None, stage.ToString()));
 
@@ -318,6 +417,9 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
         public void Record(InstallerDiagnosticCode code) => throw new InvalidOperationException();
         public void Record(InstallerDiagnosticCode code, ProtocolPrePlanErrorCode? error) => throw new InvalidOperationException();
         public void Record(InstallerDiagnosticCode code, ProtocolTerminalErrorCode? error) => throw new InvalidOperationException();
+        public void RecordExecutionTerminal(InstallerOperation operation, ProtocolExecutionOutcome outcome, ProtocolDurableState durableState, ProtocolTerminalErrorCode? error, ProtocolNextAction nextAction) => throw new InvalidOperationException();
+        public void RecordRecoveryTerminal(InstallerOperation operation, ProtocolInterruptedRecoveryOutcome outcome, ProtocolDurableState durableState, ProtocolTerminalErrorCode? error, ProtocolNextAction nextAction) => throw new InvalidOperationException();
+        public void RecordPruneTerminal(ProtocolPruneOutcome outcome, ProtocolDurableState durableState, ProtocolTerminalErrorCode? error, ProtocolNextAction nextAction) => throw new InvalidOperationException();
         public void RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage) => throw new InvalidOperationException();
         public void RecordProgress(InstallerDiagnosticCode code, TransactionStage stage) => throw new InvalidOperationException();
     }

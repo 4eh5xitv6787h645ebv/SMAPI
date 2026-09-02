@@ -1,6 +1,7 @@
 using System.Text;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Headless.NUnit;
 using Avalonia.Input;
@@ -40,10 +41,16 @@ internal sealed class InstallerDiagnosticsWindowTests
         Button close = window.FindControl<Button>("CloseButton")!;
         TextBox text = window.FindControl<TextBox>("DiagnosticText")!;
         Border privacy = window.FindControl<Border>("PrivacyRegion")!;
+        Border health = window.FindControl<Border>("SnapshotHealthRegion")!;
+        Border rawBoundary = window.FindControl<Border>("RawLogBoundaryRegion")!;
 
-        window.Title.Should().Contain("Private diagnostics");
+        window.Title.Should().Contain("Local diagnostics");
         text.IsReadOnly.Should().BeTrue();
         text.Text.Should().Contain("Review this text before sharing it.");
+        text.Text.Should().Contain("Snapshot health:")
+            .And.Contain("Display-window omissions:")
+            .And.Contain("Private raw-log omissions:")
+            .And.Contain("Coalesced intermediate events:");
         AutomationProperties.GetName(text).Should().Be("Sanitized installer diagnostic snapshot");
         AutomationProperties.GetAccessKey(copy).Should().Be("Alt+Y");
         AutomationProperties.GetAccessKey(close).Should().Be("Alt+X");
@@ -53,6 +60,16 @@ internal sealed class InstallerDiagnosticsWindowTests
         copy.TabIndex.Should().Be(2);
         close.TabIndex.Should().Be(3);
         AutomationProperties.GetName(privacy).Should().Contain("Review this snapshot before sharing");
+        AutomationProperties.GetName(health).Should().Contain("bounded omission counts");
+        AutomationProperties.GetName(rawBoundary).Should().Contain("one MiB per file")
+            .And.Contain("five owned files")
+            .And.Contain("never uploaded automatically")
+            .And.NotContain("/home/");
+        window.FindControl<TextBlock>("SnapshotHealthText")!.Text.Should().Be("complete within configured bounds");
+        window.FindControl<TextBlock>("SnapshotCountText")!.Text.Should()
+            .Contain("displayed entries")
+            .And.Contain("omitted from the private raw log")
+            .And.Contain("intermediate events coalesced");
 
         window.Show();
         Dispatcher.UIThread.RunJobs();
@@ -64,6 +81,24 @@ internal sealed class InstallerDiagnosticsWindowTests
         window.ApplyResponsiveLayout(760);
         window.IsNarrowLayout.Should().BeFalse();
         window.Close();
+    }
+
+    [AvaloniaTest]
+    public void VisibleRawLogBoundaryMatchesProductionDefaults()
+    {
+        InstallerLogOptions defaults = new("/tmp/smapi-policy-contract");
+        defaults.MaximumFileBytes.Should().Be(1024 * 1024);
+        defaults.MaximumFileCount.Should().Be(5);
+        defaults.MaximumAggregateBytes.Should().Be(0, "zero selects the validated file-count times file-size aggregate default");
+
+        InstallerDiagnosticsWindow window = new(this.CreateSession(), _ => Task.CompletedTask);
+        string visible = ((StackPanel)window.FindControl<Border>("RawLogBoundaryRegion")!.Child!)
+            .Children.OfType<TextBlock>().Last().Text!;
+        visible.Should().Contain("1 MiB per file")
+            .And.Contain("five installer-owned files")
+            .And.Contain("5 MiB total")
+            .And.Contain("rotate when the next session starts")
+            .And.Contain("never uploaded automatically");
     }
 
     [AvaloniaTest]
@@ -173,7 +208,71 @@ internal sealed class InstallerDiagnosticsWindowTests
         production.IsVisible.Should().BeTrue();
         Button open = production.FindControl<Button>("OpenButton")!;
         AutomationProperties.GetAccessKey(open).Should().Be("Alt+D");
-        AutomationProperties.GetName(open).Should().Be("View private diagnostic log");
+        AutomationProperties.GetName(open).Should().Be("View local diagnostic snapshot");
+    }
+
+    [AvaloniaTest]
+    [TestCase(1.00)]
+    [TestCase(1.25)]
+    [TestCase(1.50)]
+    [TestCase(2.00)]
+    public void ExpandedViewerRendersWithoutHorizontalOverflowAcrossDesktopScales(double scale)
+    {
+        const double PhysicalViewportWidth = 1400;
+        double deviceIndependentWidth = Math.Max(420, PhysicalViewportWidth / scale);
+        InstallerDiagnosticsWindow window = new(this.CreateSession(), _ => Task.CompletedTask)
+        {
+            Width = deviceIndependentWidth,
+            Height = 700
+        };
+        window.ApplyResponsiveLayout(deviceIndependentWidth);
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        Dispatcher.UIThread.RunJobs();
+
+        ScrollViewer scroll = window.FindControl<ScrollViewer>("PageScrollViewer")!;
+        scroll.HorizontalScrollBarVisibility.Should().Be(ScrollBarVisibility.Disabled);
+        scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        window.FindControl<Button>("CopyButton")!.BringIntoView();
+        Dispatcher.UIThread.RunJobs();
+        window.FindControl<Button>("CopyButton")!.IsVisible.Should().BeTrue();
+        window.FindControl<Button>("CloseButton")!.IsVisible.Should().BeTrue();
+        window.CaptureRenderedFrame().Should().NotBeNull();
+
+        window.Close();
+    }
+
+    [AvaloniaTest]
+    public void Narrow420DipViewerAtTwoHundredPercentKeepsActionsReachableWithoutHorizontalOverflow()
+    {
+        InstallerDiagnosticsWindow window = new(this.CreateSession(), _ => Task.CompletedTask)
+        {
+            Width = 420,
+            Height = 420
+        };
+        window.ApplyResponsiveLayout(420);
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        Dispatcher.UIThread.RunJobs();
+
+        ScrollViewer scroll = window.FindControl<ScrollViewer>("PageScrollViewer")!;
+        Button copy = window.FindControl<Button>("CopyButton")!;
+        Button close = window.FindControl<Button>("CloseButton")!;
+        window.IsNarrowLayout.Should().BeTrue();
+        scroll.HorizontalScrollBarVisibility.Should().Be(ScrollBarVisibility.Disabled);
+        scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        foreach (Button action in new[] { copy, close })
+        {
+            action.BringIntoView();
+            action.Focus(NavigationMethod.Tab);
+            Dispatcher.UIThread.RunJobs();
+            action.IsFocused.Should().BeTrue();
+        }
+        window.CaptureRenderedFrame().Should().NotBeNull();
+
+        window.Close();
     }
 
     [AvaloniaTest]

@@ -90,28 +90,43 @@ build/scripts/test-linux-gui-demo-smoke.sh
 
 The tests cover the disconnected view model, synthetic session invariants, fixed display bounds and control/bidirectional-character rejection, exact Core operation coverage, launch argument safety, real access-key and Tab/Shift+Tab invocation, automation names/headings/live status, disabled execution, contrast, and arranged/rendered layouts at the scale models and narrow viewport. The process smoke runs the built shell for five seconds under Xvfb with disposable `HOME` and XDG directories; it isn't a general operating-system sandbox or a substitute for the later installer integration tests.
 
-## Private diagnostics and troubleshooting
+<a id="private-diagnostics-and-troubleshooting"></a>
 
-Every production workflow screen has a **View diagnostic log** action. It opens a bounded,
-read-only snapshot of the current graphical-installer session. The snapshot is captured when the
-window opens, so close and reopen it to include later events. **Copy sanitized diagnostics** writes
-that exact bounded snapshot to the clipboard only after an explicit action; the installer never
-reads clipboard contents. If the desktop has not confirmed the write, the viewer leaves Copy
-disabled after a three-second deadline and reports that the original write may still finish.
-Closing and reopening cannot start another write until that original provider settles; after it
-settles, a fresh explicit Copy attempt is available.
+## Local diagnostics and troubleshooting
+
+Every production workflow screen in the current source has a **View diagnostic snapshot** action.
+It opens one immutable, bounded, read-only sanitized capture of the current graphical-installer
+session. The viewer labels snapshot health and separately reports displayed entries, entries omitted
+from the display window, entries omitted from the private raw log, and intermediate events
+coalesced by the bounded queue. A successful installer terminal is identified by an exact stable
+event such as `execution.terminal.succeeded`; cancellation, rollback, cleanup-warning,
+recovery-required, recovery, and failure outcomes have distinct stable event codes and truthful
+information, warning, or error severity. The fixed message also names the operation, durable state,
+and safe next action without using a path, identifier, backend message, or exception.
+
+The snapshot is captured when the window opens, so close and reopen it to include later events.
+**Copy sanitized diagnostics** writes that exact bounded snapshot to the clipboard only after an
+explicit action; the installer never reads clipboard contents. If the desktop has not confirmed the
+write, the viewer leaves Copy disabled after a three-second deadline and reports that the original
+write may still finish. Closing and reopening cannot start another write until that original
+provider settles; after it settles, a fresh explicit Copy attempt is available.
 
 Keyboard shortcuts are consistent across the production flow: Alt+D opens diagnostics, Alt+Y
 copies the sanitized snapshot, and Alt+X or Escape closes the viewer. On release verification,
-Alt+W starts **Download and verify**. Closing the viewer restores focus to **View diagnostic log**.
+Alt+W starts **Download and verify**. Closing the viewer restores focus to **View diagnostic
+snapshot**.
 
 The production GUI creates its private log before Avalonia, catalog networking, game discovery, or
 backend startup. On Linux it uses `$XDG_STATE_HOME/smapi-installer/logs` when `XDG_STATE_HOME` is an
-absolute path, or `~/.local/state/smapi-installer/logs` otherwise, with private directories and
-files. The on-screen snapshot is intentionally narrower than the local JSONL log:
+absolute path, or `~/.local/state/smapi-installer/logs` otherwise, with mode-`0700` directories and
+mode-`0600` files. Each raw JSONL file is at most 1 MiB; the writer retains no more than five owned
+files or 5 MiB total and rotates older owned logs when the next session starts. The viewer never
+shows or opens the resolved raw-log path. The on-screen snapshot is intentionally narrower than the
+local JSONL log:
 it excludes local paths, URLs, credentials, backend prose, release/package identifiers, digests,
 and private workload names. Review even the sanitized snapshot before sharing it. Neither surface
-is uploaded automatically.
+is uploaded automatically. The raw log is not claimed safe to share merely because the snapshot is
+sanitized; review it separately.
 
 Common safe next steps are:
 
