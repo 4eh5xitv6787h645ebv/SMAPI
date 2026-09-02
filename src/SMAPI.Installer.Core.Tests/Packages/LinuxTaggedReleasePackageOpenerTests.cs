@@ -15,7 +15,7 @@ namespace StardewModdingAPI.Installer.Core.Tests.Packages;
 [SupportedOSPlatform("linux")]
 internal sealed class LinuxTaggedReleasePackageOpenerTests
 {
-    private const string Tag = "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2";
+    private const string Tag = "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1";
     private const string Commit = "1111111111111111111111111111111111111111";
     private const string Tree = "2222222222222222222222222222222222222222";
     private static readonly byte[] PackageBytes = "synthetic package bytes that are deliberately not a ZIP"u8.ToArray();
@@ -122,7 +122,7 @@ internal sealed class LinuxTaggedReleasePackageOpenerTests
     }
 
     [Test]
-    public async Task OpenAsync_AttestationBundleDigestMismatchIsProvenanceRejectedBeforeVerifierOrGameAccess()
+    public async Task OpenAsync_AttestationBundleDigestMismatchIsIntegrityRejectedBeforeVerifierOrGameAccess()
     {
         LinuxTaggedReleaseAssetSet assets = this.CreateAssets(attestationDigestMismatch: true);
         File.Delete(assets.GitHubCliPath);
@@ -130,7 +130,7 @@ internal sealed class LinuxTaggedReleasePackageOpenerTests
 
         PackageSecurityException exception = await CaptureFailureAsync(assets);
 
-        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ProvenanceRejected);
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IntegrityRejected);
         this.AssertNoGameMutationOrRetainedAuthority(descriptorsBefore, exception);
     }
 
@@ -157,6 +157,41 @@ internal sealed class LinuxTaggedReleasePackageOpenerTests
 
         exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
         exception.Message.Should().Contain("pinned byte length");
+        this.AssertNoGameMutationOrRetainedAuthority(descriptorsBefore, exception);
+    }
+
+    [Test]
+    public async Task OpenAsync_ProductionVerifierParserRejectsInvalidAcceptedOutputAsProvenance()
+    {
+        LinuxTaggedReleaseAssetSet assets = this.CreateAssets();
+        LinuxTaggedReleasePackageOpener opener = CreateProcessBackedOpener(assets, "{");
+        HashSet<string> descriptorsBefore = FindRetainedPackageDescriptors();
+
+        Func<Task> open = async () => await opener.OpenAsync(assets);
+        PackageSecurityException exception = (await open.Should().ThrowAsync<PackageSecurityException>()).Which;
+
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ProvenanceRejected);
+        this.AssertNoGameMutationOrRetainedAuthority(descriptorsBefore, exception);
+    }
+
+    [Test]
+    public async Task OpenAsync_ProductionProcessAndVerifierReachArchiveRejectionAfterValidTrust()
+    {
+        LinuxTaggedReleaseAssetSet assets = this.CreateAssets();
+        string validEvidence = GitHubArtifactAttestationVerifierTests.WriteJson(
+            new GitHubArtifactAttestationVerifierTests.FixtureOptions
+            {
+                PackageSubjectSha256 = Hash(PackageBytes),
+                ManifestSubjectSha256 = Hash(File.ReadAllBytes(assets.InstallManifestPath))
+            }
+        );
+        LinuxTaggedReleasePackageOpener opener = CreateProcessBackedOpener(assets, validEvidence);
+        HashSet<string> descriptorsBefore = FindRetainedPackageDescriptors();
+
+        Func<Task> open = async () => await opener.OpenAsync(assets);
+        PackageSecurityException exception = (await open.Should().ThrowAsync<PackageSecurityException>()).Which;
+
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.PackageArchiveRejected);
         this.AssertNoGameMutationOrRetainedAuthority(descriptorsBefore, exception);
     }
 
@@ -309,6 +344,24 @@ internal sealed class LinuxTaggedReleasePackageOpenerTests
     {
         Func<Task> open = async () => await new LinuxTaggedReleasePackageOpener().OpenAsync(assets);
         return (await open.Should().ThrowAsync<PackageSecurityException>()).Which;
+    }
+
+    private static LinuxTaggedReleasePackageOpener CreateProcessBackedOpener(
+        LinuxTaggedReleaseAssetSet assets,
+        string verifierOutput
+    )
+    {
+        string encodedOutput = Convert.ToBase64String(Encoding.UTF8.GetBytes(verifierOutput));
+        byte[] script = Encoding.UTF8.GetBytes(
+            $"#!/bin/sh\n/usr/bin/printf '%s' '{encodedOutput}' | /usr/bin/base64 -d\n"
+        );
+        File.WriteAllBytes(assets.GitHubCliPath, script);
+        File.SetUnixFileMode(assets.GitHubCliPath, (UnixFileMode)493);
+        PinnedGitHubCliTestIdentity identity = new(script.LongLength, Hash(script));
+        return new LinuxTaggedReleasePackageOpener(
+            (path, cancellationToken) => PinnedGitHubCli.OpenForTestingAsync(path, identity, cancellationToken),
+            new GitHubAttestationProcessRunner()
+        );
     }
 
     private void AssertNoGameMutationOrRetainedAuthority(

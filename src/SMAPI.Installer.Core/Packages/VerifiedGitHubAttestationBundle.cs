@@ -227,7 +227,7 @@ public sealed class VerifiedGitHubAttestationBundleFactory
 
             Sha256Digest actualSha256 = Sha256Digest.Hash(bytes);
             if (actualSha256 != expectedSha256)
-                throw InvalidProvenance("The local attestation bundle doesn't match its checksum sidecar.");
+                throw InvalidIntegrity("The local attestation bundle doesn't match its checksum sidecar.");
 
             retained = LinuxSealedFile.CreateAnonymous("smapi-installer-attestation-bundle");
             this.AfterRetainedFileCreatedForTesting?.Invoke(retained);
@@ -269,7 +269,7 @@ public sealed class VerifiedGitHubAttestationBundleFactory
             throw new PackageSecurityException($"The selected {description} path isn't valid.", ex);
         }
         if (!string.Equals(Path.GetFileName(fullPath), expectedName, StringComparison.Ordinal))
-            throw InvalidProvenance($"The selected {description} filename doesn't match its release identity.");
+            throw InvalidReleaseIdentity($"The selected {description} filename doesn't match its release identity.");
     }
 
     private static async Task<string> ReadChecksumDocumentAsync(
@@ -278,7 +278,7 @@ public sealed class VerifiedGitHubAttestationBundleFactory
     )
     {
         if (checksum.Size > MaximumChecksumBytes)
-            throw InvalidProvenance("The attestation-bundle checksum sidecar exceeds its configured size limit.");
+            throw InvalidIntegrity("The attestation-bundle checksum sidecar exceeds its configured size limit.");
 
         byte[] bytes = await checksum.ReadAllBytesAsync(
             MaximumChecksumBytes,
@@ -293,7 +293,7 @@ public sealed class VerifiedGitHubAttestationBundleFactory
             }
             catch (DecoderFallbackException ex)
             {
-                throw InvalidProvenance("The attestation-bundle checksum sidecar isn't valid UTF-8.", ex);
+                throw InvalidIntegrity("The attestation-bundle checksum sidecar isn't valid UTF-8.", ex);
             }
         }
         finally
@@ -306,14 +306,14 @@ public sealed class VerifiedGitHubAttestationBundleFactory
     {
         string suffix = $"  {expectedBundleName}\n";
         if (checksumDocument.Length != 64 + suffix.Length || !checksumDocument.EndsWith(suffix, StringComparison.Ordinal))
-            throw InvalidProvenance("The attestation-bundle checksum sidecar isn't canonical.");
+            throw InvalidIntegrity("The attestation-bundle checksum sidecar isn't canonical.");
         try
         {
             return Sha256Digest.Parse(checksumDocument[..64]);
         }
         catch (ArgumentException ex)
         {
-            throw InvalidProvenance("The attestation-bundle checksum sidecar isn't canonical.", ex);
+            throw InvalidIntegrity("The attestation-bundle checksum sidecar isn't canonical.", ex);
         }
     }
 
@@ -328,6 +328,20 @@ public sealed class VerifiedGitHubAttestationBundleFactory
         return innerException is null
             ? new PackageSecurityException(PackageSecurityFailureKind.ProvenanceRejected, message)
             : new PackageSecurityException(PackageSecurityFailureKind.ProvenanceRejected, message, innerException);
+    }
+
+    private static PackageSecurityException InvalidIntegrity(string message, Exception? innerException = null)
+    {
+        return innerException is null
+            ? new PackageSecurityException(PackageSecurityFailureKind.IntegrityRejected, message)
+            : new PackageSecurityException(PackageSecurityFailureKind.IntegrityRejected, message, innerException);
+    }
+
+    private static PackageSecurityException InvalidReleaseIdentity(string message, Exception? innerException = null)
+    {
+        return innerException is null
+            ? new PackageSecurityException(PackageSecurityFailureKind.ReleaseIdentityRejected, message)
+            : new PackageSecurityException(PackageSecurityFailureKind.ReleaseIdentityRejected, message, innerException);
     }
 
     private static void AssertExactRetainedBytes(SafeFileHandle retained, long expectedSize, Sha256Digest expectedSha256)

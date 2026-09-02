@@ -104,7 +104,10 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                 try
                 {
                     temporaryName = $".smapi-download-{Guid.NewGuid():N}.tmp";
-                    await using Stream input = await response.Content.ReadAsStreamAsync(linkedSource.Token).ConfigureAwait(false);
+                    await using Stream input = await OpenResponseStreamAsync(
+                        response.Content,
+                        linkedSource.Token
+                    ).ConfigureAwait(false);
                     using LinuxAnchoredFile output = destinationFileSystem.CreateNewFile(temporaryName, PrivateFileMode);
                     createdTemporaryIdentity = output.Identity;
 
@@ -217,11 +220,7 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                 temporaryName,
                 createdTemporaryIdentity
             );
-            throw new PackageSecurityException(
-                PackageSecurityFailureKind.NetworkUnavailable,
-                "The release download transport was unavailable.",
-                ex
-            );
+            throw ClassifyTransportFailure(ex, cancellationToken, timeoutSource);
         }
         catch (Exception ex)
         {
@@ -289,7 +288,10 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
                 try
                 {
                     temporaryName = destination.GetFreshTemporaryName();
-                    await using Stream input = await response.Content.ReadAsStreamAsync(linkedSource.Token).ConfigureAwait(false);
+                    await using Stream input = await OpenResponseStreamAsync(
+                        response.Content,
+                        linkedSource.Token
+                    ).ConfigureAwait(false);
                     using LinuxAnchoredFile output = destination.FileSystem.CreateNewFile(temporaryName, PrivateFileMode);
                     temporaryIdentity = output.Identity;
                     while (true)
@@ -395,11 +397,7 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
         catch (HttpRequestException ex)
         {
             CleanupOwnedTemporary(destination.FileSystem, temporaryName, temporaryIdentity);
-            throw new PackageSecurityException(
-                PackageSecurityFailureKind.NetworkUnavailable,
-                "The release download transport was unavailable.",
-                ex
-            );
+            throw ClassifyTransportFailure(ex, cancellationToken, timeoutSource);
         }
         catch (Exception ex)
         {
@@ -467,6 +465,48 @@ public sealed class BoundedHttpDownloader : IReleaseAssetDownloader, IDisposable
 
             currentUri = location.IsAbsoluteUri ? location : new Uri(currentUri, location);
         }
+    }
+
+    private static async Task<Stream> OpenResponseStreamAsync(
+        HttpContent content,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            return await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkUnavailable,
+                "The release download transport was unavailable before its response stream opened.",
+                ex
+            );
+        }
+    }
+
+    private static PackageSecurityException ClassifyTransportFailure(
+        HttpRequestException exception,
+        CancellationToken callerCancellation,
+        CancellationTokenSource timeoutSource
+    )
+    {
+        callerCancellation.ThrowIfCancellationRequested();
+        if (timeoutSource.IsCancellationRequested)
+        {
+            return new PackageSecurityException(
+                PackageSecurityFailureKind.NetworkTimeout,
+                "The release download timed out before it completed.",
+                exception
+            );
+        }
+        return new PackageSecurityException(
+            PackageSecurityFailureKind.NetworkUnavailable,
+            "The release download transport was unavailable.",
+            exception
+        );
     }
 
     private static bool IsRedirect(HttpStatusCode statusCode)

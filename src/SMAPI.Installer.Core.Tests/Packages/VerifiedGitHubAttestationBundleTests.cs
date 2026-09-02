@@ -74,16 +74,19 @@ internal sealed class VerifiedGitHubAttestationBundleTests
         File.Exists(lease.ProcPath).Should().BeFalse();
     }
 
-    [TestCase("wrong-bundle-filename")]
-    [TestCase("wrong-checksum-filename")]
-    [TestCase("wrong-checksum")]
-    [TestCase("noncanonical-checksum")]
-    [TestCase("oversize-bundle")]
-    [TestCase("oversize-checksum")]
-    [TestCase("invalid-bundle-utf8")]
-    [TestCase("invalid-checksum-utf8")]
+    [TestCase("wrong-bundle-filename", PackageSecurityFailureKind.ReleaseIdentityRejected)]
+    [TestCase("wrong-checksum-filename", PackageSecurityFailureKind.ReleaseIdentityRejected)]
+    [TestCase("wrong-checksum", PackageSecurityFailureKind.IntegrityRejected)]
+    [TestCase("noncanonical-checksum", PackageSecurityFailureKind.IntegrityRejected)]
+    [TestCase("oversize-bundle", PackageSecurityFailureKind.ProvenanceRejected)]
+    [TestCase("oversize-checksum", PackageSecurityFailureKind.IntegrityRejected)]
+    [TestCase("invalid-bundle-utf8", PackageSecurityFailureKind.ProvenanceRejected)]
+    [TestCase("invalid-checksum-utf8", PackageSecurityFailureKind.IntegrityRejected)]
     [CancelAfter(5000)]
-    public async Task VerifyAsync_RejectsMalformedMismatchedOrOversizedInputs(string kind)
+    public async Task VerifyAsync_RejectsMalformedMismatchedOrOversizedInputs(
+        string kind,
+        PackageSecurityFailureKind expectedFailureKind
+    )
     {
         using VerifiedInstallerPackage package = await this.CreateVerifiedInstallerPackageAsync();
         byte[] bytes = "local attestation evidence"u8.ToArray();
@@ -128,7 +131,7 @@ internal sealed class VerifiedGitHubAttestationBundleTests
         Func<Task> verify = () => new VerifiedGitHubAttestationBundleFactory().VerifyAsync(package, bundlePath, checksumPath);
 
         PackageSecurityException exception = (await verify.Should().ThrowAsync<PackageSecurityException>()).Which;
-        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ProvenanceRejected);
+        exception.FailureKind.Should().Be(expectedFailureKind);
     }
 
     [TestCase("bundle", "symlink")]
