@@ -127,6 +127,10 @@ jobs:
                     bash -n build/scripts/test-pinned-github-cli-callers.sh
                     build/scripts/test-pinned-github-cli-callers.sh
                     bash -n build/scripts/finalize-install-package.sh
+                    bash -n build/scripts/test-packaged-linux-gui.sh
+                    bash -n build/scripts/test-packaged-linux-gui-inputs.sh
+                    build/scripts/test-packaged-linux-gui-inputs.sh
+                    bash -n "src/SMAPI.Installer/assets/install on Linux (graphical).sh"
                     bash -n src/SMAPI.Installer/assets/smapi-runtime-dispatcher.sh
                     bash -n src/SMAPI.Installer/assets/unix-launcher.sh
                     dotnet restore src/SMAPI.slnx \
@@ -221,6 +225,8 @@ jobs:
                     package_name="SMAPI-$RELEASE_VERSION-linux-x64-installer.zip"
                     package_path="bin/$package_name"
                     build/scripts/test-linux-release-package.sh "$package_path" "$RELEASE_VERSION"
+                    build/scripts/test-packaged-linux-gui-inputs.sh
+                    build/scripts/test-packaged-linux-gui.sh "$package_path" "$RELEASE_VERSION"
                     build/scripts/test-linux-installer-lifecycle.sh "$package_path" "$RELEASE_VERSION" "$RUNNER_TEMP/StardewValley"
                     git diff --exit-code
 
@@ -661,11 +667,11 @@ jobs:
                         echo
                         echo "## Install, upgrade, and rollback"
                         echo
-                        echo "Close the game, back up saves and Mods, verify the download, extract it, and run \`install on Linux.sh\`. To upgrade, verify and run the newer package. To roll back, first use this alpha's installer to uninstall its fork-only files, then install a previously verified fork package or official SMAPI 4.5.2. See the [Linux alpha guide](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release.html)."
+                        echo "Close the game, back up saves and Mods, verify the download, and extract it. In a desktop session run \`install on Linux (graphical).sh\`; the unchanged terminal fallback is \`install on Linux.sh\`. To upgrade, verify and run the newer package. To roll back, first use this alpha's installer to uninstall its fork-only files, then install a previously verified fork package or official SMAPI 4.5.2. See the [Linux alpha guide](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release.html)."
                         echo
                         echo "## Known limitations"
                         echo
-                        echo "There is no graphical updater yet. The installer changes the game launcher and rollback is not atomic. Local-bundle verification avoids GitHub attestation API authentication, but GitHub CLI may still need network access to update Sigstore/GitHub trusted-root metadata. Performance results describe one controlled machine/workload and are not universal FPS, power, or latency claims. Diagnostics can contain mod and system identifiers; reports stay local unless you choose to share them."
+                        echo "The graphical installer is experimental. Its supported desktop path is X11 or XWayland; the experimental native Wayland backend is not advertised as supported. The planned detailed local-log viewer and local-package picker are not available yet. The installer changes the game launcher and rollback is not atomic. Local-bundle verification avoids GitHub attestation API authentication, but GitHub CLI may still need network access to update Sigstore/GitHub trusted-root metadata. Performance results describe one controlled machine/workload and are not universal FPS, power, or latency claims. Diagnostics can contain mod and system identifiers; reports stay local unless you choose to share them."
                         echo
                         echo "See the [comparison](https://4eh5xitv6787h645ebv.github.io/SMAPI/upstream-comparison.html), [validation record](https://4eh5xitv6787h645ebv.github.io/SMAPI/technical/linux-alpha-release-validation.html), [documentation](https://4eh5xitv6787h645ebv.github.io/SMAPI/), and [fork issue tracker](https://github.com/$GITHUB_REPOSITORY/issues)."
                     } > "$notes"

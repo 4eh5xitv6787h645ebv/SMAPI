@@ -45,6 +45,30 @@ assert_exact_line_file() {
     fi
 }
 
+assert_single_link_executable() {
+    local description="$1"
+    local path="$2"
+
+    if [[ ! -f "$path" || -L "$path" ]]; then
+        echo "$description must be one ordinary file: $path" >&2
+        exit 1
+    fi
+    if [[ ! -s "$path" || ! -x "$path" ]]; then
+        echo "$description must be nonempty and executable: $path" >&2
+        exit 1
+    fi
+    if [[ "$(stat -c %F -- "$path")" != "regular file" || "$(stat -c %h -- "$path")" != 1 ]]; then
+        echo "$description must be a single-link regular file: $path" >&2
+        exit 1
+    fi
+    local mode
+    mode="$(stat -c %a -- "$path")"
+    if (( (8#$mode & 07000) != 0 )); then
+        echo "$description must not have set-user-ID, set-group-ID, or sticky permissions: $path" >&2
+        exit 1
+    fi
+}
+
 entries_path="$temp_root/entries.txt"
 zipinfo -1 "$archive_path" > "$entries_path"
 if [[ ! -s "$entries_path" ]]; then
@@ -55,7 +79,14 @@ if grep -Eq '(^/|(^|/)\.\.(/|$)|\\)' "$entries_path"; then
     echo "Installer archive contains an unsafe path." >&2
     exit 1
 fi
-if grep -Evq "^${expected_root//./\\.}(/|$)" "$entries_path"; then
+foreign_entry=false
+while IFS= read -r entry; do
+    if [[ "$entry" != "$expected_root" && "$entry" != "$expected_root/"* ]]; then
+        foreign_entry=true
+        break
+    fi
+done < "$entries_path"
+if [[ "$foreign_entry" == true ]]; then
     echo "Installer archive contains an entry outside '$expected_root'." >&2
     exit 1
 fi
@@ -66,10 +97,23 @@ fi
 
 unzip -q "$archive_path" -d "$temp_root/extracted"
 package_root="$temp_root/extracted/$expected_root"
-test -x "$package_root/install on Linux.sh"
+mapfile -t package_root_entries < <(find "$package_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
+expected_package_root_entries=(
+    README.txt
+    "install on Linux (graphical).sh"
+    "install on Linux.sh"
+    internal
+)
+if [[ "${package_root_entries[*]}" != "${expected_package_root_entries[*]}" ]]; then
+    echo "Linux-only archive has a foreign or unexpected top-level layout." >&2
+    exit 1
+fi
+assert_single_link_executable "The console fallback launcher" "$package_root/install on Linux.sh"
+assert_single_link_executable "The graphical launcher" "$package_root/install on Linux (graphical).sh"
 grep -F 'must not be run as root or with sudo' "$package_root/install on Linux.sh" >/dev/null
 test -f "$package_root/README.txt"
-test -f "$package_root/internal/linux/SMAPI.Installer"
+assert_single_link_executable "The console installer apphost" "$package_root/internal/linux/SMAPI.Installer"
+assert_single_link_executable "The graphical installer apphost" "$package_root/internal/linux/SMAPI.Installer.Gui"
 test -f "$package_root/internal/linux/SMAPI.Installer.Core.dll"
 test -f "$package_root/internal/linux/install.dat"
 test -f "$package_root/internal/linux/gh"
@@ -87,6 +131,20 @@ test "$(stat -c %s -- "$package_root/internal/linux/gh-LICENSE.txt")" = 1068
 test "$(sha256sum -- "$package_root/internal/linux/gh-LICENSE.txt" | cut -d ' ' -f 1)" = 6da4adc42392c8485e40b4251c7e332fc3352df1947c9ffade71dd60b14a7a4f
 test ! -e "$package_root/internal/macOS"
 test ! -e "$package_root/internal/windows"
+
+mapfile -t packaged_gui_entries < <(
+    grep -E '/(install on Linux \(graphical\)\.sh|SMAPI\.Installer\.Gui)/?$' "$entries_path" | LC_ALL=C sort
+)
+if [[ ${#packaged_gui_entries[@]} -ne 2 ]] \
+    || [[ "${packaged_gui_entries[0]}" != "$expected_root/install on Linux (graphical).sh" ]] \
+    || [[ "${packaged_gui_entries[1]}" != "$expected_root/internal/linux/SMAPI.Installer.Gui" ]]; then
+    echo "Linux-only archive has a missing, duplicate, or foreign graphical-installer layout." >&2
+    exit 1
+fi
+if grep -Eq '/SMAPI\.Installer\.Gui\.(dll|deps\.json|runtimeconfig\.json|pdb)$' "$entries_path"; then
+    echo "The graphical installer must be packaged as one self-contained single-file apphost." >&2
+    exit 1
+fi
 
 # The JSONL backend must run directly from the trimmed published installer without inspecting or
 # extracting the legacy install.dat payload. Exercise both a missing and poisoned ambient bundle.
