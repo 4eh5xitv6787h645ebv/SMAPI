@@ -657,7 +657,10 @@ run_launcher_signal_smoke() {
                     set -e
                     launcher_pid=""
                     if [[ "$launcher_status" -ne "$expected_status" ]]; then
-                        fail_case LAUNCHER_STATUS_MISMATCH
+                        if [[ "$launcher_status" =~ ^[0-9]+$ ]] && (( launcher_status >= 0 && launcher_status <= 255 )); then
+                            fail_case "LAUNCHER_STATUS_$launcher_status"
+                        fi
+                        fail_case LAUNCHER_STATUS_INVALID
                     fi
 
                     # The launcher must settle its exact apphost, not merely remove the bundle path.
