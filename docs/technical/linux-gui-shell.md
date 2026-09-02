@@ -47,7 +47,7 @@ deliberately staged; reaching a later screen never means an earlier read-only ac
    choose **Use local package folder…** and freshly select one folder containing the exact six
    release files. Integrity and GitHub provenance are separate visible results. A failed or cancelled
    check authorizes no game discovery or mutation.
-2. **Choose the game.** Review automatically detected folders, or use **Choose game folder…** for a
+2. **Choose the game.** Review automatically detected folders, or use **Browse for game folder** for a
    manual selection. Validation is read-only. Continue with **Review plan** only after the folder is
    reported as valid.
 3. **Inspect one operation.** Select **Install**, **Update**, **Repair**, **Uninstall**, or **Backup**,
@@ -73,8 +73,9 @@ Operation-specific expectations:
 | Rollback | Restore one exact authenticated recovery generation. | Use **Load or refresh history**, select one point, and **Inspect rollback**. No point is selected automatically. Confirm only after reviewing the restored release/state and downgrade risk. |
 
 If startup detects an interrupted mutation, follow the offered authenticated recovery before asking
-for a fresh plan. Recovery admission is explicit and cannot be cancelled after it starts. Recovery
-history cleanup is also a separate reviewed flow: select generations individually, preview cleanup,
+for a fresh plan. Recovery preparation can be cancelled while that action remains visible; after the
+backend admits recovery, it must settle and is no longer cancellable. Recovery history cleanup is
+also a separate reviewed flow: select generations individually, preview cleanup,
 confirm with Cancel focused by default, and then run it. The sanitized diagnostic viewer is useful
 for safe next steps, but the local private log and every displayed path or report should still be
 reviewed before sharing.

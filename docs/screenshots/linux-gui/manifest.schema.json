@@ -44,6 +44,18 @@
       "minLength": 1,
       "maxLength": 4096
     },
+    "actionsRunReference": {
+      "type": "string",
+      "pattern": "^https://github\\.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/[1-9][0-9]*(?:/attempts/[1-9][0-9]*)?$"
+    },
+    "anchoredScreenshotSpecReference": {
+      "type": "string",
+      "pattern": "^docs/technical/linux-gui-screenshot-evidence\\.md#evidence-[a-z][0-9]+$"
+    },
+    "anchoredQualificationRecordReference": {
+      "type": "string",
+      "pattern": "^docs/technical/(?:[a-z0-9._-]*qualification[a-z0-9._-]*|[a-z0-9._-]*validation[a-z0-9._-]*)\\.md#evidence-[a-z][0-9]+$"
+    },
     "productionIdentity": {
       "type": "object",
       "additionalProperties": false,
@@ -370,9 +382,33 @@
           "$ref": "#/$defs/privacyReview"
         },
         "qualification_reference": {
-          "$ref": "#/$defs/nonEmpty"
+          "oneOf": [
+            { "$ref": "#/$defs/actionsRunReference" },
+            { "$ref": "#/$defs/anchoredScreenshotSpecReference" },
+            { "$ref": "#/$defs/anchoredQualificationRecordReference" }
+          ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "evidence_class": { "const": "real_qualification" }
+            },
+            "required": ["evidence_class"]
+          },
+          "then": {
+            "properties": {
+              "qualification_reference": {
+                "oneOf": [
+                  { "$ref": "#/$defs/actionsRunReference" },
+                  { "$ref": "#/$defs/anchoredQualificationRecordReference" }
+                ]
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

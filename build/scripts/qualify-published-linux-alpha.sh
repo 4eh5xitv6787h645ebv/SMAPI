@@ -111,7 +111,7 @@ smapi_download_and_verify_linux_alpha() {
     local inventory_stage inventory_output
     for inventory_stage in before-download; do
         inventory_output="$verification_directory/release-inventory-$inventory_stage.json"
-        timeout --signal=TERM --kill-after=10s 60s env -i \
+        env -i \
             HOME="$private_home" \
             GH_CONFIG_DIR="$private_home" \
             XDG_CONFIG_HOME="$private_home" \
@@ -128,6 +128,8 @@ smapi_download_and_verify_linux_alpha() {
             TERM=dumb \
             LANG=C.UTF-8 \
             LC_ALL=C.UTF-8 \
+            PATH="$PATH" \
+            timeout --signal=TERM --kill-after=10s 60s \
             "$pinned_gh" api \
                 --method GET \
                 --hostname api.github.com \
@@ -146,20 +148,35 @@ smapi_download_and_verify_linux_alpha() {
             --arg bundle "$bundle_name" \
             --arg bundle_checksum "$bundle_checksum_name" '
                 type == "object"
+                and (.id | type == "number" and . > 0 and . == floor)
                 and .tag_name == $tag
                 and .draft == false
                 and .prerelease == true
                 and (.assets | type == "array" and length == 6)
                 and (.assets | map(.name) | sort) == ([$package, $manifest, $checksums, $metadata, $bundle, $bundle_checksum] | sort)
                 and all(.assets[];
-                    (.name | type == "string")
+                    (.id | type == "number" and . > 0 and . == floor)
+                    and (.name | type == "string")
                     and .state == "uploaded"
                     and (.size | type == "number" and . > 0)
+                    and (.digest == null or (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
+                    and (.updated_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
                     and .browser_download_url == ($base + .name))
             ' "$inventory_output" >/dev/null
     done
 
-    local index name path url
+    local expected_public_inventory="$verification_directory/expected-public-inventory.json"
+    jq -cS '
+        {
+            release_id: .id,
+            tag_name: .tag_name,
+            assets: ([.assets[] | {
+                id, name, size, state, digest, updated_at, browser_download_url
+            }] | sort_by(.name))
+        }
+    ' "$inventory_output" > "$expected_public_inventory"
+
+    local index name path url expected_public_size expected_public_digest
     for index in "${!asset_names[@]}"; do
         name="${asset_names[$index]}"
         path="$asset_directory/$name"
@@ -182,6 +199,17 @@ smapi_download_and_verify_linux_alpha() {
             --output "$path" \
             "$url"
         smapi_assert_downloaded_asset "$path" "${maximum_sizes[$index]}" || return
+        expected_public_size="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .size' "$expected_public_inventory")"
+        if [[ "$(stat -c %s -- "$path")" != "$expected_public_size" ]]; then
+            smapi_release_error "A downloaded release asset size does not match the pinned public inventory."
+            return
+        fi
+        expected_public_digest="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .digest // "null"' "$expected_public_inventory")"
+        if [[ "$expected_public_digest" != null \
+            && "sha256:$(sha256sum -- "$path" | cut -d ' ' -f 1)" != "$expected_public_digest" ]]; then
+            smapi_release_error "A downloaded release asset digest does not match the pinned public inventory."
+            return
+        fi
     done
     if [[ "$(find "$asset_directory" -mindepth 1 -maxdepth 1 -printf . | wc -c)" != 6 ]]; then
         smapi_release_error "The downloaded release directory does not contain exactly six entries."
@@ -319,7 +347,7 @@ smapi_download_and_verify_linux_alpha() {
     local subject verification_output
     for subject in "$package_name" "$manifest_name"; do
         verification_output="$verification_directory/$subject.attestation.json"
-        timeout --signal=TERM --kill-after=15s 120s env -i \
+        env -i \
             HOME="$private_home" \
             GH_CONFIG_DIR="$private_home" \
             XDG_CONFIG_HOME="$private_home" \
@@ -337,6 +365,8 @@ smapi_download_and_verify_linux_alpha() {
             TERM=dumb \
             LANG=C.UTF-8 \
             LC_ALL=C.UTF-8 \
+            PATH="$PATH" \
+            timeout --signal=TERM --kill-after=15s 120s \
             "$pinned_gh" attestation verify "$asset_directory/$subject" \
                 "${attestation_policy[@]}" > "$verification_output"
         smapi_assert_downloaded_asset "$verification_output" $((2 * 1024 * 1024)) || return
@@ -356,6 +386,11 @@ smapi_download_and_verify_linux_alpha() {
 
     for index in "${!asset_names[@]}"; do
         smapi_assert_downloaded_asset "$asset_directory/${asset_names[$index]}" "${maximum_sizes[$index]}" || return
+        expected_public_size="$(jq -er --arg name "${asset_names[$index]}" '.assets[] | select(.name == $name) | .size' "$expected_public_inventory")"
+        if [[ "$(stat -c %s -- "$asset_directory/${asset_names[$index]}")" != "$expected_public_size" ]]; then
+            smapi_release_error "A verified release asset size changed from the pinned public inventory."
+            return
+        fi
     done
     if [[ "$(find "$asset_directory" -mindepth 1 -maxdepth 1 -printf . | wc -c)" != 6 ]]; then
         smapi_release_error "The verified release directory changed before qualification completed."
@@ -373,7 +408,7 @@ smapi_download_and_verify_linux_alpha() {
     fi
 
     inventory_output="$verification_directory/release-inventory-after-verification.json"
-    timeout --signal=TERM --kill-after=10s 60s env -i \
+    env -i \
         HOME="$private_home" \
         GH_CONFIG_DIR="$private_home" \
         XDG_CONFIG_HOME="$private_home" \
@@ -390,6 +425,8 @@ smapi_download_and_verify_linux_alpha() {
         TERM=dumb \
         LANG=C.UTF-8 \
         LC_ALL=C.UTF-8 \
+        PATH="$PATH" \
+        timeout --signal=TERM --kill-after=10s 60s \
         "$pinned_gh" api \
             --method GET \
             --hostname api.github.com \
@@ -408,17 +445,33 @@ smapi_download_and_verify_linux_alpha() {
         --arg bundle "$bundle_name" \
         --arg bundle_checksum "$bundle_checksum_name" '
             type == "object"
+            and (.id | type == "number" and . > 0 and . == floor)
             and .tag_name == $tag
             and .draft == false
             and .prerelease == true
             and (.assets | type == "array" and length == 6)
             and (.assets | map(.name) | sort) == ([$package, $manifest, $checksums, $metadata, $bundle, $bundle_checksum] | sort)
             and all(.assets[];
-                (.name | type == "string")
+                (.id | type == "number" and . > 0 and . == floor)
+                and (.name | type == "string")
                 and .state == "uploaded"
                 and (.size | type == "number" and . > 0)
+                and (.digest == null or (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
+                and (.updated_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
                 and .browser_download_url == ($base + .name))
         ' "$inventory_output" >/dev/null
+    local final_public_inventory="$verification_directory/final-public-inventory.json"
+    jq -cS '
+        {
+            release_id: .id,
+            tag_name: .tag_name,
+            assets: ([.assets[] | {
+                id, name, size, state, digest, updated_at, browser_download_url
+            }] | sort_by(.name))
+        }
+    ' "$inventory_output" > "$final_public_inventory"
+    cmp --silent -- "$expected_public_inventory" "$final_public_inventory" \
+        || smapi_release_error "The public release or asset identities changed during qualification." || return
 }
 
 qualify_published_linux_alpha_main() {

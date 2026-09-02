@@ -29,9 +29,14 @@ The validator fails closed on:
 - missing source, binary, environment, runtime, capture, durable-state, editing, privacy-review, qualification, alt-text, or caption provenance, including environment/capture/privacy provenance for retained originals;
 - anything other than the exact A4 100/125/150/200 scale sources, A5 light/dark/high-contrast sources, A6 GNOME+KDE X11/x11 sources, or A7 GNOME+KDE Wayland/xwayland sources;
 - a controlled fixture used for an ID which requires real qualification;
-- unsafe release links, missing repository-relative qualification links, common path/credential/signed-URL patterns, or configured private strings in manifest text or PNG bytes.
+- unsafe release links; unanchored, missing, wrong-ID, generic, or untrusted qualification references; common path/credential/signed-URL patterns; or configured private strings in manifest text or PNG bytes. Real rows accept only an exact fork Actions run URL or an evidence-ID-specific anchor in a dedicated qualification/validation record; controlled rows may also use their anchored row in the screenshot specification.
 
 The automated scan cannot determine what rendered pixels depict. Every image still requires the recorded original-resolution human privacy review mandated by the specification. If that review finds private data, discard and recapture the image; do not redact application pixels.
+
+Hosted CI reruns the validator with a nonprivate sentinel so it can enforce the closed inventory,
+generic path/credential patterns, hashes, PNG structure, identity, and matrix contract. CI cannot
+know private capture-specific names without improperly uploading them. Its sentinel run never
+substitutes for the required local run with the complete uncommitted private-string file above.
 
 Run the validator's fixture-free self-tests with:
 

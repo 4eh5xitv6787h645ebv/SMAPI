@@ -135,7 +135,11 @@ def make_capture(evidence_id: str, filename: str, digest: str) -> dict[str, Any]
             "inspected_original_resolution": True,
             "notes": "Original-resolution fixture inspected; no private data present.",
         },
-        "qualification_reference": "docs/technical/linux-gui-screenshot-evidence.md",
+        "qualification_reference": (
+            "https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/123456789"
+            if real
+            else f"docs/technical/linux-gui-screenshot-evidence.md#evidence-{evidence_id.casefold()}"
+        ),
     }
 
 
@@ -311,11 +315,13 @@ def main() -> int:
         lambda manifest, _assets: manifest["captures"][-1].__setitem__("id", "Z9"),
         "id is unknown",
     )
-    expect_failure(
-        "duplicate ID",
-        lambda manifest, _assets: manifest["captures"][2].__setitem__("id", "D2"),
-        "duplicate screenshot IDs",
-    )
+    def duplicate_id(manifest: dict[str, Any], _assets: Path) -> None:
+        manifest["captures"][2]["id"] = "D2"
+        manifest["captures"][2]["qualification_reference"] = (
+            "https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/123456789"
+        )
+
+    expect_failure("duplicate ID", duplicate_id, "duplicate screenshot IDs")
 
     def duplicate_filename(manifest: dict[str, Any], _assets: Path) -> None:
         first = manifest["captures"][0]
@@ -399,9 +405,44 @@ def main() -> int:
     expect_failure(
         "broken qualification link",
         lambda manifest, _assets: manifest["captures"][1].__setitem__(
-            "qualification_reference", "docs/technical/missing-evidence.md"
+            "qualification_reference", "docs/technical/missing-evidence.md#evidence-d2"
         ),
         "missing repository file",
+    )
+    expect_failure(
+        "generic screenshot plan for real evidence",
+        lambda manifest, _assets: manifest["captures"][0].__setitem__(
+            "qualification_reference", "docs/technical/linux-gui-screenshot-evidence.md#evidence-d1"
+        ),
+        "real evidence requires a dedicated qualification/validation record or Actions run",
+    )
+    expect_failure(
+        "missing qualification anchor",
+        lambda manifest, _assets: manifest["captures"][1].__setitem__(
+            "qualification_reference", "docs/technical/linux-gui-screenshot-evidence.md"
+        ),
+        "must include one non-empty evidence anchor",
+    )
+    expect_failure(
+        "nonexistent local qualification anchor",
+        lambda manifest, _assets: manifest["captures"][1].__setitem__(
+            "qualification_reference", "docs/technical/linux-alpha-release-validation.md#evidence-d2"
+        ),
+        "anchor does not exist",
+    )
+    expect_failure(
+        "arbitrary qualification HTTPS host",
+        lambda manifest, _assets: manifest["captures"][1].__setitem__(
+            "qualification_reference", "https://example.invalid/actions/runs/123456789"
+        ),
+        "must be an exact fork GitHub Actions run URL",
+    )
+    expect_failure(
+        "wrong qualification evidence ID",
+        lambda manifest, _assets: manifest["captures"][1].__setitem__(
+            "qualification_reference", "docs/technical/linux-gui-screenshot-evidence.md#evidence-d3"
+        ),
+        "local anchor must identify evidence-d2",
     )
     expect_failure(
         "edited pixels",
@@ -526,7 +567,7 @@ def main() -> int:
         lambda manifest, _assets: manifest["captures"][52]["editing"]["original_sources"][1]["environment"].__setitem__("display_backend", "x11"),
         "GNOME+KDE wayland/xwayland",
     )
-    print("Linux GUI screenshot evidence validator self-tests passed (3 success and 35 negative cases).")
+    print("Linux GUI screenshot evidence validator self-tests passed (3 success and 40 negative cases).")
     return 0
 
 

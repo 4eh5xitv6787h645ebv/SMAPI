@@ -67,14 +67,13 @@ jobs:
                     bash -n build/scripts/test-qualify-published-linux-alpha.sh
                     build/scripts/test-qualify-published-linux-alpha.sh
                     python3 build/scripts/test-linux-gui-screenshot-evidence.py
-                    if [[ -f docs/screenshots/linux-gui/manifest.json ]]; then
-                        private_strings="$RUNNER_TEMP/linux-gui-screenshot-private-strings.txt"
-                        printf '%s\n' 'smapi-evidence-ci-private-sentinel' > "$private_strings"
-                        python3 build/scripts/validate-linux-gui-screenshot-evidence.py \
-                            --manifest docs/screenshots/linux-gui/manifest.json \
-                            --assets-root docs/screenshots/linux-gui \
-                            --private-strings-file "$private_strings"
-                    fi
+                    python3 build/scripts/test-check-linux-gui-screenshot-evidence.py
+                    # CI rechecks generic privacy/path rules with a sentinel. The complete
+                    # capture-specific private denylist remains local and is never committed or uploaded.
+                    private_strings="$RUNNER_TEMP/linux-gui-screenshot-private-strings.txt"
+                    printf '%s\n' 'smapi-evidence-ci-private-sentinel' > "$private_strings"
+                    python3 build/scripts/check-linux-gui-screenshot-evidence.py \
+                        --private-strings-file "$private_strings"
                     pinned_archive="$RUNNER_TEMP/gh_2.92.0_linux_amd64.tar.gz"
                     pinned_root="$RUNNER_TEMP/pinned-github-cli"
                     curl -fsSL --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \

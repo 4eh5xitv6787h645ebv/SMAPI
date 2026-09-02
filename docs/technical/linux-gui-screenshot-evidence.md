@@ -13,6 +13,8 @@ A controlled fixture is not a mockup. Design renders, AI-generated images, manua
 
 All 57 entries, including controlled fixtures, must run the exact same reviewed production GUI and backend. The manifest has one top-level production identity: source commit and tree, fork-specific release tag, public package URL and SHA-256, and GUI/backend binary SHA-256 values. Every entry repeats and must exactly match that identity; fixture authority is limited to its public/synthetic inputs or injected failure and cannot substitute another build.
 
+Each `qualification_reference` is evidence-ID-specific. A real-qualification row must link either to an exact `https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/<run-id>` URL (optionally with one exact `/attempts/<attempt>` suffix), or to a dedicated repository qualification/validation Markdown record whose `#evidence-<id>` anchor actually exists. Controlled fixtures may additionally link to their anchored row in this specification. Unanchored local paths, nonexistent or wrong-ID anchors, the generic plan for real evidence, and all other HTTPS hosts or URL shapes are invalid.
+
 ## Capture matrix
 
 One image may cover adjacent states when every state remains legible and the caption is exact; shared filenames must have identical pixel, capture, environment, runtime, editing, and privacy provenance. A contact sheet may cover environment or scale variants only when its individual source PNGs are also retained, hashed, and recorded with their own complete environment, capture method/time, and original-resolution privacy review.
@@ -21,88 +23,88 @@ One image may cover adjacent states when every state remains legible and the cap
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| D1 | One valid game automatically detected, with canonical validation status and the appropriate primary action | Real qualification against a clean isolated game copy |
-| D2 | No game detected, with a useful empty state and manual-selection action | Controlled fixture |
-| D3 | Multiple detected game folders and an explicit selected folder | Controlled fixture |
-| D4 | Manual selection first rejecting an invalid folder and then accepting a valid folder | Controlled disposable filesystem fixture |
-| D5 | Effective-UID-0 refusal before discovery, download, logging, or mutation | Real packaged root-refusal qualification |
+| D1 | <a id="evidence-d1"></a>One valid game automatically detected, with canonical validation status and the appropriate primary action | Real qualification against a clean isolated game copy |
+| D2 | <a id="evidence-d2"></a>No game detected, with a useful empty state and manual-selection action | Controlled fixture |
+| D3 | <a id="evidence-d3"></a>Multiple detected game folders and an explicit selected folder | Controlled fixture |
+| D4 | <a id="evidence-d4"></a>Manual selection first rejecting an invalid folder and then accepting a valid folder | Controlled disposable filesystem fixture |
+| D5 | <a id="evidence-d5"></a>Effective-UID-0 refusal before discovery, download, logging, or mutation | Real packaged root-refusal qualification |
 
 ### Release acquisition and verification
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| R1 | Release selection showing bounded public prerelease choices and the local-package route, without claiming an installed/current, upgrade, or downgrade relationship before authenticated game-receipt inspection | Controlled fixture |
-| R2 | Real public-package download in progress, with bounded byte progress and Cancel | Real qualification |
-| R3 | Interrupted or cancelled download with retry guidance and no incomplete published package | Controlled transport failure through the production adapter |
-| R4 | Checksum and release-metadata verification in progress | Real qualification |
-| R5 | Successful checksum and attestation/provenance result which does not conflate transport integrity with provenance | Real public artifact and pinned verifier qualification |
-| R6 | Corrupt checksum, metadata mismatch, or corrupt package blocked before extraction or mutation | Controlled tampered copy of the public artifact |
-| R7 | Attestation, provenance, or release-identity mismatch blocked with one safe next step | Controlled tampered public evidence |
+| R1 | <a id="evidence-r1"></a>Release selection showing bounded public prerelease choices and the local-package route, without claiming an installed/current, upgrade, or downgrade relationship before authenticated game-receipt inspection | Controlled fixture |
+| R2 | <a id="evidence-r2"></a>Real public-package download in progress, with bounded byte progress and Cancel | Real qualification |
+| R3 | <a id="evidence-r3"></a>Interrupted or cancelled download with retry guidance and no incomplete published package | Controlled transport failure through the production adapter |
+| R4 | <a id="evidence-r4"></a>Checksum and release-metadata verification in progress | Real qualification |
+| R5 | <a id="evidence-r5"></a>Successful checksum and attestation/provenance result which does not conflate transport integrity with provenance | Real public artifact and pinned verifier qualification |
+| R6 | <a id="evidence-r6"></a>Corrupt checksum, metadata mismatch, or corrupt package blocked before extraction or mutation | Controlled tampered copy of the public artifact |
+| R7 | <a id="evidence-r7"></a>Attestation, provenance, or release-identity mismatch blocked with one safe next step | Controlled tampered public evidence |
 
 ### Install, update, and repair
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| I1 | Fresh-install plan naming the selected game and release, creates, preserved unrelated files, and recovery capacity | Real lifecycle qualification |
-| I2 | Fresh-install confirmation naming affected counts and the recovery path | Real lifecycle qualification |
-| I3 | Install progress at a meaningful staging, revalidation, apply, or verification boundary | Real lifecycle qualification |
-| I4 | Install success with the exact installed release and safe next step | Real lifecycle qualification |
-| U1 | Update plan naming current and target releases, backup behavior, changes, and preserved files | Real lifecycle qualification after installation |
-| U2 | Update confirmation; a downgrade variant must be explicit and default focus to Cancel | Real lifecycle qualification |
-| U3 | Update success with the exact resulting release | Real lifecycle qualification |
-| P1 | Repair plan for a missing receipt-owned file | Controlled disposable lifecycle state |
-| P2 | Repair plan for a modified receipt-owned file, with an exact replacement candidate and unresolved items still blocked | Controlled disposable lifecycle state |
-| P3 | Modified-file backup-and-replace confirmation with default focus on Cancel | Controlled disposable lifecycle state |
-| P4 | Repair success showing repaired and preserved counts | Real lifecycle qualification using a disposable modified-file state |
+| I1 | <a id="evidence-i1"></a>Fresh-install plan naming the selected game and release, creates, preserved unrelated files, and recovery capacity | Real lifecycle qualification |
+| I2 | <a id="evidence-i2"></a>Fresh-install confirmation naming affected counts and the recovery path | Real lifecycle qualification |
+| I3 | <a id="evidence-i3"></a>Install progress at a meaningful staging, revalidation, apply, or verification boundary | Real lifecycle qualification |
+| I4 | <a id="evidence-i4"></a>Install success with the exact installed release and safe next step | Real lifecycle qualification |
+| U1 | <a id="evidence-u1"></a>Update plan naming current and target releases, backup behavior, changes, and preserved files | Real lifecycle qualification after installation |
+| U2 | <a id="evidence-u2"></a>Update confirmation; a downgrade variant must be explicit and default focus to Cancel | Real lifecycle qualification |
+| U3 | <a id="evidence-u3"></a>Update success with the exact resulting release | Real lifecycle qualification |
+| P1 | <a id="evidence-p1"></a>Repair plan for a missing receipt-owned file | Controlled disposable lifecycle state |
+| P2 | <a id="evidence-p2"></a>Repair plan for a modified receipt-owned file, with an exact replacement candidate and unresolved items still blocked | Controlled disposable lifecycle state |
+| P3 | <a id="evidence-p3"></a>Modified-file backup-and-replace confirmation with default focus on Cancel | Controlled disposable lifecycle state |
+| P4 | <a id="evidence-p4"></a>Repair success showing repaired and preserved counts | Real lifecycle qualification using a disposable modified-file state |
 
 ### Protection, uninstall, backup, and rollback
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| X1 | Unknown, legacy, hard-linked, special-file, or ambiguous-launcher collision blocking mutation | Controlled hostile disposable filesystem gallery |
-| N1 | Uninstall plan showing owned removals and unrelated files preserved | Real lifecycle qualification |
-| N2 | Uninstall confirmation with default focus on Cancel | Real lifecycle qualification |
-| N3 | Uninstall success with the preserved-file result | Real lifecycle qualification |
-| B1 | Create-backup plan with destination, capacity, and affected counts | Real lifecycle qualification |
-| B2 | Backup success with the recovery generation identity | Real lifecycle qualification |
-| B3 | Full recovery store or prune-required state blocking further work | Controlled disposable recovery history |
-| B4 | Destructive backup-prune confirmation naming retained and removed generations, with default focus on Cancel | Controlled disposable recovery history |
-| L1 | Recovery selector showing authenticated generations and the exact release or uninstalled result each would restore | Real lifecycle history |
-| L2 | Rollback confirmation naming current and restored releases and affected counts, with default focus on Cancel | Real lifecycle qualification |
-| L3 | Rollback progress and successful durable result | Real lifecycle qualification |
+| X1 | <a id="evidence-x1"></a>Unknown, legacy, hard-linked, special-file, or ambiguous-launcher collision blocking mutation | Controlled hostile disposable filesystem gallery |
+| N1 | <a id="evidence-n1"></a>Uninstall plan showing owned removals and unrelated files preserved | Real lifecycle qualification |
+| N2 | <a id="evidence-n2"></a>Uninstall confirmation with default focus on Cancel | Real lifecycle qualification |
+| N3 | <a id="evidence-n3"></a>Uninstall success with the preserved-file result | Real lifecycle qualification |
+| B1 | <a id="evidence-b1"></a>Create-backup plan with destination, capacity, and affected counts | Real lifecycle qualification |
+| B2 | <a id="evidence-b2"></a>Backup success with the recovery generation identity | Real lifecycle qualification |
+| B3 | <a id="evidence-b3"></a>Full recovery store or prune-required state blocking further work | Controlled disposable recovery history |
+| B4 | <a id="evidence-b4"></a>Destructive backup-prune confirmation naming retained and removed generations, with default focus on Cancel | Controlled disposable recovery history |
+| L1 | <a id="evidence-l1"></a>Recovery selector showing authenticated generations and the exact release or uninstalled result each would restore | Real lifecycle history |
+| L2 | <a id="evidence-l2"></a>Rollback confirmation naming current and restored releases and affected counts, with default focus on Cancel | Real lifecycle qualification |
+| L3 | <a id="evidence-l3"></a>Rollback progress and successful durable result | Real lifecycle qualification |
 
 ### Cancellation, errors, and recovery
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| C1 | An ordinary cancellable operation with an active Cancel action | Real lifecycle qualification |
-| C2 | Cancel requested, rollback in progress, or Finishing safely where immediate cancellation is no longer promised | Real fault-injected lifecycle qualification |
-| C3 | Cancelled-and-rolled-back terminal state with an exact durable-state explanation | Real fault-injected lifecycle qualification |
-| E1 | Network interruption or timeout with retry and confirmation that no incomplete package was published | Controlled transport failure |
-| E2 | Permission/read-only, disk-full, and cross-device failures, each stating whether files changed and one safe next step | Controlled real-filesystem fault gallery |
-| E3 | Stale plan, selected-root replacement, or concurrent-installer rejection | Controlled adversarial filesystem/concurrency fixture |
-| E4 | Backend, protocol, or writer failure before mutation | Controlled adapter failure |
-| E5 | Interrupted mutation requiring recovery after restart | Real fault-injected lifecycle qualification |
-| E6 | Automatic recovery completed with a fresh inspection required | Real restart/recovery qualification |
+| C1 | <a id="evidence-c1"></a>An ordinary cancellable operation with an active Cancel action | Real lifecycle qualification |
+| C2 | <a id="evidence-c2"></a>Cancel requested, rollback in progress, or Finishing safely where immediate cancellation is no longer promised | Real fault-injected lifecycle qualification |
+| C3 | <a id="evidence-c3"></a>Cancelled-and-rolled-back terminal state with an exact durable-state explanation | Real fault-injected lifecycle qualification |
+| E1 | <a id="evidence-e1"></a>Network interruption or timeout with retry and confirmation that no incomplete package was published | Controlled transport failure |
+| E2 | <a id="evidence-e2"></a>Permission/read-only, disk-full, and cross-device failures, each stating whether files changed and one safe next step | Controlled real-filesystem fault gallery |
+| E3 | <a id="evidence-e3"></a>Stale plan, selected-root replacement, or concurrent-installer rejection | Controlled adversarial filesystem/concurrency fixture |
+| E4 | <a id="evidence-e4"></a>Backend, protocol, or writer failure before mutation | Controlled adapter failure |
+| E5 | <a id="evidence-e5"></a>Interrupted mutation requiring recovery after restart | Real fault-injected lifecycle qualification |
+| E6 | <a id="evidence-e6"></a>Automatic recovery completed with a fresh inspection required | Real restart/recovery qualification |
 
 ### Logs, accessibility, desktop behavior, and fallback
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| G1 | Bounded local diagnostic snapshot with fixed typed events, stable event/error codes, and visible omission/truncation health; the private raw-log and disk-rotation boundary must remain explicit | At least one real successful lifecycle log |
-| G2 | Safe technical next steps, stable error details, and Copy sanitized diagnostics without raw backend prose or exceptions | Controlled error fixture |
-| G3 | Privacy/redaction behavior for hostile tokens, signed URLs, usernames, and full paths | Controlled hostile-string fixture plus privacy scan |
-| A1 | Readable keyboard focus on the primary action | Controlled fixture using the packaged GUI |
-| A2 | A destructive dialog whose initial visible focus is Cancel | Controlled fixture using the packaged GUI |
-| A3 | Narrow 420-DIP layout at 200% scale with every action reachable and no horizontal page scroll | Controlled fixture using the packaged GUI |
-| A4 | Usable 100%, 125%, 150%, and 200% scale variants | Four controlled captures or one contact sheet retaining all sources |
-| A5 | Light, dark, and high-contrast focus and error states | Three controlled captures or one contact sheet retaining all sources |
-| A6 | Packaged GUI on GNOME and KDE under X11 | Real desktop qualification; a contact sheet is acceptable |
-| A7 | Packaged GUI on GNOME and KDE through XWayland in Wayland sessions | Real desktop qualification; a contact sheet is acceptable |
-| A8 | Representative screen-reader/live-status state | Controlled fixture linked to separate AT-SPI/Orca evidence |
-| M1 | GUI manual-installation help with exact non-GUI steps and limitations | Packaged production GUI |
-| M2 | Manual console fallback launched from the same verified public package | Real clean isolated package qualification |
-| M3 | Manual install or rollback completion | Real clean isolated lifecycle qualification |
+| G1 | <a id="evidence-g1"></a>Bounded local diagnostic snapshot with fixed typed events, stable event/error codes, and visible omission/truncation health; the private raw-log and disk-rotation boundary must remain explicit | At least one real successful lifecycle log |
+| G2 | <a id="evidence-g2"></a>Safe technical next steps, stable error details, and Copy sanitized diagnostics without raw backend prose or exceptions | Controlled error fixture |
+| G3 | <a id="evidence-g3"></a>Privacy/redaction behavior for hostile tokens, signed URLs, usernames, and full paths | Controlled hostile-string fixture plus privacy scan |
+| A1 | <a id="evidence-a1"></a>Readable keyboard focus on the primary action | Controlled fixture using the packaged GUI |
+| A2 | <a id="evidence-a2"></a>A destructive dialog whose initial visible focus is Cancel | Controlled fixture using the packaged GUI |
+| A3 | <a id="evidence-a3"></a>Narrow 420-DIP layout at 200% scale with every action reachable and no horizontal page scroll | Controlled fixture using the packaged GUI |
+| A4 | <a id="evidence-a4"></a>Usable 100%, 125%, 150%, and 200% scale variants | Four controlled captures or one contact sheet retaining all sources |
+| A5 | <a id="evidence-a5"></a>Light, dark, and high-contrast focus and error states | Three controlled captures or one contact sheet retaining all sources |
+| A6 | <a id="evidence-a6"></a>Packaged GUI on GNOME and KDE under X11 | Real desktop qualification; a contact sheet is acceptable |
+| A7 | <a id="evidence-a7"></a>Packaged GUI on GNOME and KDE through XWayland in Wayland sessions | Real desktop qualification; a contact sheet is acceptable |
+| A8 | <a id="evidence-a8"></a>Representative screen-reader/live-status state | Controlled fixture linked to separate AT-SPI/Orca evidence |
+| M1 | <a id="evidence-m1"></a>GUI manual-installation help with exact non-GUI steps and limitations | Packaged production GUI |
+| M2 | <a id="evidence-m2"></a>Manual console fallback launched from the same verified public package | Real clean isolated package qualification |
+| M3 | <a id="evidence-m3"></a>Manual install or rollback completion | Real clean isolated lifecycle qualification |
 
 ## Real lifecycle boundary
 
@@ -137,7 +139,7 @@ The manifest or provenance record for every PNG must include:
 - capture timestamp with timezone, capture tool and command, PNG dimensions, and final PNG SHA-256;
 - crop/edit statement and each original source's hash, dimensions, complete environment, capture timestamp/method, and privacy review when a contact sheet or lossless crop is used;
 - original-resolution privacy inspection and the reviewer;
-- qualification run/log reference and public release link where applicable.
+- evidence-ID-specific qualification run/log reference under the trusted anchored-record or exact fork Actions-run policy, and public release link where applicable.
 
 Final and retained-original files must be static, noninterlaced, 8-bit RGB or RGBA PNGs within the documented dimension, pixel, file-size, and decoded-byte bounds. Only the validator's minimal structural/color chunk allowlist is permitted; strip color profiles, text, EXIF, time, custom ancillary metadata, and other incidental chunks before the final hash. The validator bounded-decompresses the complete IDAT stream and verifies its exact scanline size and end-of-stream. If privacy inspection finds personal or private data, discard the image and recapture it; do not commit the unsafe source. Captions and alt text should describe what is visible and avoid claiming that pixels prove filesystem safety, provenance, or accessibility.
 

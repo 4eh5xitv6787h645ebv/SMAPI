@@ -58,6 +58,10 @@ TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
 TAG_RE = re.compile(r"^fork-4eh5xitv6787h645ebv-linux-v\d+\.\d+\.\d+-alpha\.[1-9]\d*$")
+ACTIONS_RUN_RE = re.compile(
+    r"^https://github\.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/[1-9][0-9]*"
+    r"(?:/attempts/[1-9][0-9]*)?$"
+)
 
 FORBIDDEN_TEXT_PATTERNS = (
     (re.compile(r"(?:^|[\s'\"=(])/(?:home|Users)/[^\s'\"<>]+", re.IGNORECASE), "personal absolute path"),
@@ -160,14 +164,43 @@ def validate_package_url(value: Any, context: str, tag: str) -> str:
     return text
 
 
-def validate_reference(value: Any, context: str, repository_root: Path) -> str:
+def markdown_anchor_exists(document: str, anchor: str) -> bool:
+    escaped = re.escape(anchor)
+    if re.search(rf"\bid\s*=\s*(['\"]){escaped}\1", document, flags=re.IGNORECASE):
+        return True
+    if re.search(rf"\{{:?#{escaped}\}}", document, flags=re.IGNORECASE):
+        return True
+    for heading in re.findall(r"^#{1,6}[ \t]+(.+?)\s*#*\s*$", document, flags=re.MULTILINE):
+        heading = re.sub(r"!?\[([^]]*)\]\([^)]*\)", r"\1", heading)
+        heading = re.sub(r"<[^>]+>", "", heading)
+        heading = heading.replace("`", "").replace("*", "").replace("_", "")
+        slug = re.sub(r"[^a-z0-9 -]", "", heading.casefold())
+        slug = re.sub(r"[ \t]+", "-", slug.strip())
+        if slug == anchor:
+            return True
+    return False
+
+
+def validate_reference(
+    value: Any,
+    context: str,
+    repository_root: Path,
+    evidence_id: str,
+    evidence_class: str,
+) -> str:
     text = require_nonempty(value, context)
     if text.startswith("https://"):
-        return validate_https_url(text, context)
-    if "#" in text:
-        path_text, _anchor = text.split("#", 1)
-    else:
-        path_text = text
+        if ACTIONS_RUN_RE.fullmatch(text) is None:
+            fail(f"{context} must be an exact fork GitHub Actions run URL")
+        return text
+    if text.count("#") != 1:
+        fail(f"{context} local reference must include one non-empty evidence anchor")
+    path_text, anchor = text.split("#", 1)
+    if not anchor:
+        fail(f"{context} local reference must include one non-empty evidence anchor")
+    expected_anchor = f"evidence-{evidence_id.casefold()}"
+    if anchor != expected_anchor:
+        fail(f"{context} local anchor must identify {expected_anchor}")
     path = Path(path_text)
     if path.is_absolute() or not path.parts or ".." in path.parts or "." in path.parts:
         fail(f"{context} must be a normalized repository-relative path or HTTPS URL")
@@ -180,6 +213,19 @@ def validate_reference(value: Any, context: str, repository_root: Path) -> str:
         fail(f"{context} points to a missing repository file: {path_text}")
     if not stat.S_ISREG(candidate_stat.st_mode) or resolved != candidate:
         fail(f"{context} must point to a non-symlink repository file: {path_text}")
+    screenshot_spec = Path("docs/technical/linux-gui-screenshot-evidence.md")
+    is_dedicated_record = (
+        path.parent == Path("docs/technical")
+        and path.suffix == ".md"
+        and ("qualification" in path.stem or "validation" in path.stem)
+    )
+    if evidence_class == "real_qualification" and not is_dedicated_record:
+        fail(f"{context} real evidence requires a dedicated qualification/validation record or Actions run")
+    if evidence_class == "controlled_fixture" and path != screenshot_spec and not is_dedicated_record:
+        fail(f"{context} controlled evidence requires the anchored screenshot spec or a dedicated record")
+    document = read_single_link_text(candidate, f"qualification reference {path_text}")
+    if not markdown_anchor_exists(document, anchor):
+        fail(f"{context} anchor does not exist in {path_text}: {anchor}")
     return text
 
 
@@ -429,6 +475,10 @@ def validate_spec_contract(spec_path: Path) -> None:
     ids = tuple(re.findall(r"^\| ([DRIUPXNBLCGEAM]\d+) \|", text, flags=re.MULTILINE))
     if ids != EXPECTED_IDS:
         fail("screenshot evidence specification does not exactly match the ordered 57-ID contract")
+    anchors = tuple(re.findall(r'<a id="evidence-([a-z][0-9]+)"></a>', text))
+    expected_anchors = tuple(evidence_id.casefold() for evidence_id in EXPECTED_IDS)
+    if anchors != expected_anchors:
+        fail("screenshot evidence specification does not expose one ordered anchor for every evidence ID")
     r1_match = re.search(r"^\| R1 \| (.+?) \|", text, flags=re.MULTILINE)
     if r1_match is None:
         fail("screenshot evidence specification is missing R1 semantics")
@@ -668,7 +718,13 @@ def validate_capture(
             )
 
     privacy = validate_privacy_review(capture_item["privacy_review"], f"{context}.privacy_review")
-    validate_reference(capture_item["qualification_reference"], f"{context}.qualification_reference", repository_root)
+    validate_reference(
+        capture_item["qualification_reference"],
+        f"{context}.qualification_reference",
+        repository_root,
+        evidence_id,
+        evidence_class,
+    )
 
     png_path = assets_root / filename
     width, height, actual_sha256 = parse_png(png_path, private_strings)
