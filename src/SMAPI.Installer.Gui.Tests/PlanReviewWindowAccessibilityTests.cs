@@ -8,6 +8,7 @@ using Avalonia.Input;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using FluentAssertions;
+using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Gui.Backend;
@@ -32,6 +33,7 @@ internal sealed partial class PlanReviewPresentationTests
         TextBlock game = window.FindControl<TextBlock>("GameDetail")!;
         Border gameContext = window.FindControl<Border>("GameContextRegion")!;
         Border boundary = window.FindControl<Border>("InspectionBoundary")!;
+        Border relationship = window.FindControl<Border>("ReleaseRelationshipRegion")!;
 
         await WaitUntilAsync(() => operations.IsKeyboardFocusWithin);
         operations.SelectedItem.Should().BeNull();
@@ -44,6 +46,7 @@ internal sealed partial class PlanReviewPresentationTests
         ControlAutomationPeer.CreatePeerForElement(gameContext).GetName().Should().Be("Bound game folder").And.NotContain(privatePath);
         ControlAutomationPeer.CreatePeerForElement(boundary).GetName().Should()
             .Contain("Review first").And.Contain("separate final Run screen").And.Contain("changes no files");
+        relationship.IsEffectivelyVisible.Should().BeFalse();
         viewModel.LiveAnnouncement.Should().NotContain(privatePath);
 
         window.Close();
@@ -237,6 +240,7 @@ internal sealed partial class PlanReviewPresentationTests
         PlanReviewViewModel viewModel = (PlanReviewViewModel)window.DataContext!;
         ListBox operations = window.FindControl<ListBox>("OperationList")!;
         Border result = window.FindControl<Border>("ResultSummaryRegion")!;
+        Border relationship = window.FindControl<Border>("ReleaseRelationshipRegion")!;
         await WaitUntilAsync(() => operations.IsKeyboardFocusWithin);
 
         window.FindControl<Border>("StatusRegion")!.Focus();
@@ -253,6 +257,112 @@ internal sealed partial class PlanReviewPresentationTests
         peer.GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
         peer.GetName().Should().Contain("preview only").And.Contain("no file action ran");
         peer.GetName().Should().NotContain(session.Game.DisplayPath);
+        relationship.IsEffectivelyVisible.Should().BeTrue();
+        relationship.Focusable.Should().BeFalse();
+        ControlAutomationPeer.CreatePeerForElement(relationship).GetLiveSetting().Should().Be(AutomationLiveSetting.Off);
+        TextBlock heading = window.FindControl<TextBlock>("ReleaseRelationshipHeading")!;
+        TextBlock detail = window.FindControl<TextBlock>("ReleaseRelationshipDetail")!;
+        ControlAutomationPeer.CreatePeerForElement(heading).GetName().Should().Be("Observed version relationship");
+        ControlAutomationPeer.CreatePeerForElement(detail).GetName().Should()
+            .StartWith("Fork Linux alpha (experimental).")
+            .And.Contain("Version comparison only")
+            .And.Contain("does not establish identical package bytes or acquisition source");
+        AutomationProperties.GetHeadingLevel(heading).Should().Be(3);
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task AvailableOrdinaryPlansExposeCurrentUpgradeAndTargetlessLabelsToAutomation()
+    {
+        ProtocolReleaseIdentity verified = GameDiscoveryControllerTests.Release();
+        InstallerReadOnlyPlanSuccess upgrade = CreatePlan(InstallerOperation.Update) with
+        {
+            CurrentRelease = new(
+                "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.9",
+                "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.9"
+            ),
+            TargetRelease = new(verified.Tag, verified.EmbeddedVersion)
+        };
+        InstallerReadOnlyPlanSuccess downgrade = CreatePlan(InstallerOperation.Update) with
+        {
+            CurrentRelease = new(
+                "fork-4eh5xitv6787h645ebv-linux-v4.5.5-alpha.1",
+                "4.5.5-unofficial.4eh5xitv6787h645ebv.linux.alpha.1"
+            ),
+            TargetRelease = new(verified.Tag, verified.EmbeddedVersion),
+            Risks = [ProtocolPlanRisk.Downgrade]
+        };
+        (InstallerOperation Operation, InstallerReadOnlyPlanSuccess Plan, string Expected)[] cases =
+        [
+            (InstallerOperation.Update, CreatePlan(InstallerOperation.Update), "Same version as receipt"),
+            (InstallerOperation.Update, upgrade, "Upgrade"),
+            (InstallerOperation.Update, downgrade, "Downgrade"),
+            (InstallerOperation.Uninstall, CreatePlan(InstallerOperation.Uninstall), "No target release is present")
+        ];
+
+        foreach ((InstallerOperation operation, InstallerReadOnlyPlanSuccess plan, string expected) in cases)
+        {
+            FakePlanSession session = new()
+            {
+                Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(plan)
+            };
+            PlanReviewWindow window = CreateWindow(session);
+            window.Show();
+            PlanReviewViewModel viewModel = (PlanReviewViewModel)window.DataContext!;
+            viewModel.SelectedOperation = Choice(viewModel, operation);
+            await viewModel.InspectCommand.ExecuteAsync();
+            await WaitUntilAsync(() => viewModel.IsResultVisible);
+
+            Border relationship = window.FindControl<Border>("ReleaseRelationshipRegion")!;
+            TextBlock heading = window.FindControl<TextBlock>("ReleaseRelationshipHeading")!;
+            TextBlock detail = window.FindControl<TextBlock>("ReleaseRelationshipDetail")!;
+            relationship.IsEffectivelyVisible.Should().BeTrue();
+            ControlAutomationPeer.CreatePeerForElement(heading).GetName().Should().Be("Observed version relationship");
+            ControlAutomationPeer.CreatePeerForElement(detail).GetName().Should()
+                .Contain(expected)
+                .And.Contain("confirm")
+                .And.Contain("run this plan");
+
+            window.Close();
+            await WaitUntilAsync(() => !window.IsVisible);
+        }
+    }
+
+    [AvaloniaTest]
+    public async Task AvailableRollbackPlanExposesValidatedDowngradeLabelToAutomation()
+    {
+        BoundInstallerRecoveryPoint point = new(
+            1,
+            true,
+            false,
+            InstallerOperation.Update,
+            new BoundInstallerRecoveryReleaseTarget(
+                "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.9",
+                "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.9"
+            )
+        );
+        RecoveryWindowSession session = new([point]);
+        PlanReviewViewModel viewModel = new(new PlanReviewController(session));
+        PlanReviewWindow window = new(viewModel);
+        window.Show();
+        await viewModel.LoadRecoveriesCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.SelectedRecoveryChoice = viewModel.RecoveryChoices.Single();
+        await viewModel.InspectRollbackCommand.ExecuteAsync();
+        await WaitUntilAsync(() => viewModel.IsResultVisible);
+
+        Border relationship = window.FindControl<Border>("ReleaseRelationshipRegion")!;
+        TextBlock relationshipHeading = window.FindControl<TextBlock>("ReleaseRelationshipHeading")!;
+        TextBlock relationshipDetail = window.FindControl<TextBlock>("ReleaseRelationshipDetail")!;
+        relationship.IsEffectivelyVisible.Should().BeTrue();
+        ControlAutomationPeer.CreatePeerForElement(relationshipHeading).GetName().Should().Be("Observed version relationship");
+        ControlAutomationPeer.CreatePeerForElement(relationshipDetail).GetName().Should()
+            .Contain("Downgrade")
+            .And.Contain("Fork Linux alpha (experimental)")
+            .And.Contain("does not confirm");
+        AutomationProperties.GetHeadingLevel(relationshipHeading).Should().Be(3);
 
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
@@ -883,13 +993,18 @@ internal sealed partial class PlanReviewPresentationTests
             BoundInstallerRecoveryUninstalledTarget => null,
             _ => throw new AssertionException("Unsupported synthetic recovery target.")
         };
+        bool isDowngrade = target is not null
+            && ForkReleaseIdentity.Compare(
+                ForkReleaseIdentity.Parse(target.Tag),
+                ForkReleaseIdentity.Parse(current.Tag)
+            ) < 0;
         return new(
             InstallerOperation.Rollback,
             ObservedInstallState.KnownUnmodified,
             current,
             target,
             false,
-            [ProtocolPlanRisk.Rollback],
+            isDowngrade ? [ProtocolPlanRisk.Rollback, ProtocolPlanRisk.Downgrade] : [ProtocolPlanRisk.Rollback],
             ProtocolRecommendedDefault.Cancel,
             true,
             [new InstallerPlanOperationCount(PlanOperationKind.Restore, 1)],

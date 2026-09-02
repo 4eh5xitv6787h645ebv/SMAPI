@@ -229,6 +229,7 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.ConflictRows.Should().BeEmpty();
         viewModel.CandidateRows.Should().BeEmpty();
         viewModel.AdditionalNoticeDetail.Should().Be("No plan has been inspected.");
+        viewModel.ReleaseRelationshipDetail.Should().Be("No authenticated target-release labels are available.");
         session.InspectedOperations.Should().Equal(InstallerOperation.Install);
     }
 
@@ -268,6 +269,9 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.AdditionalNoticeDetail.Should().Contain("3").And.Contain("does not expose their text");
         viewModel.SafetyDetail.Should().Contain("Cancel").And.Contain("Confirm plan").And.Contain("does not change files").And.Contain("explicit Run");
         viewModel.DurableState.Should().Contain("no installer action has run");
+        viewModel.ReleaseRelationshipDetail.Should().Be(
+            "Fork Linux alpha (experimental). No receipt-authenticated current release is available for comparison. Version comparison only; this does not establish identical package bytes or acquisition source, and does not confirm, authorize, or run this plan."
+        );
     }
 
     [AvaloniaTest]
@@ -309,6 +313,13 @@ internal sealed partial class PlanReviewPresentationTests
 
         viewModel.ObservedStateDetail.Should().Contain(expected);
         viewModel.ObservedStateDetail.ToLowerInvariant().Should().NotContain("definitely").And.NotContain("safe");
+        if (state is ObservedInstallState.LegacyOrOfficial or ObservedInstallState.Unknown)
+        {
+            viewModel.ReleaseRelationshipDetail.Should()
+                .StartWith("Fork Linux alpha (experimental).")
+                .And.Contain("No receipt-authenticated current release is available for comparison")
+                .And.Contain("Version comparison only");
+        }
     }
 
     [AvaloniaTest]
@@ -336,6 +347,57 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.IsExitVisible.Should().BeFalse();
         viewModel.Message.Should().Contain(expected).And.Contain("No installer action ran");
         viewModel.LiveAnnouncement.Should().Contain(viewModel.Message);
+        viewModel.ReleaseRelationshipDetail.Should().Be("No authenticated target-release labels are available.");
+    }
+
+    [AvaloniaTest]
+    public async Task SessionFaultRevokesAcceptedRelationshipLabels()
+    {
+        FakePlanSession session = new();
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Update);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.ReleaseRelationshipDetail.Should().Contain("Same version as receipt");
+
+        session.Fault.TrySetResult(new InstallerProtocolClientException("synthetic private fault"));
+        await WaitUntilAsync(() => viewModel.IsErrorVisible);
+
+        viewModel.ReleaseRelationshipDetail.Should().Be("No authenticated target-release labels are available.");
+        viewModel.Message.Should().NotContain("synthetic private fault");
+    }
+
+    [AvaloniaTest]
+    public async Task RefreshAndCancellationClearStaleRelationshipLabelsBeforeAwaitingBackend()
+    {
+        TaskCompletionSource started = NewCompletion();
+        TaskCompletionSource<InstallerReadOnlyPlanResult> pending = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0;
+        FakePlanSession session = new()
+        {
+            Inspection = async (operation, token) =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                    return CreatePlan(operation);
+                started.TrySetResult();
+                return await pending.Task.WaitAsync(token);
+            }
+        };
+        await using PlanReviewViewModel viewModel = CreateViewModel(session);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Update);
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        viewModel.ReleaseRelationshipDetail.Should().Contain("Same version as receipt");
+
+        Task refresh = viewModel.InspectCommand.ExecuteAsync();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Dispatcher.UIThread.RunJobs();
+        viewModel.ReleaseRelationshipDetail.Should().Be("No authenticated target-release labels are available.");
+
+        await viewModel.CancelCommand.ExecuteAsync();
+        await refresh;
+        Dispatcher.UIThread.RunJobs();
+        viewModel.ReleaseRelationshipDetail.Should().Be("No authenticated target-release labels are available.");
     }
 
     [AvaloniaTest]
@@ -524,11 +586,18 @@ internal sealed partial class PlanReviewPresentationTests
         viewModel.IsCandidateCapacityDetailVisible.Should().BeFalse();
         viewModel.CandidateCapacityDetail.Should().BeEmpty();
         viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeTrue();
+        List<string> relationshipTransitions = [];
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(PlanReviewViewModel.ReleaseRelationshipDetail))
+                relationshipTransitions.Add(viewModel.ReleaseRelationshipDetail);
+        };
 
         await viewModel.StartFreshInspectionCommand.ExecuteAsync();
         Dispatcher.UIThread.RunJobs();
 
         inspections.Should().Be(2);
+        relationshipTransitions.Should().Contain("No authenticated target-release labels are available.");
         viewModel.CandidateChoices.Should().ContainSingle().Which.IsSelected.Should().BeFalse();
         viewModel.StartFreshInspectionCommand.CanExecute(null).Should().BeFalse();
     }

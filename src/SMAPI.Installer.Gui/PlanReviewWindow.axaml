@@ -335,6 +335,21 @@
             <TextBlock Text="{Binding ObservedStateDetail}" TextWrapping="Wrap" />
             <TextBlock Classes="muted" Text="{Binding CurrentReleaseDetail}" TextWrapping="Wrap" />
             <TextBlock Classes="muted" Text="{Binding TargetReleaseDetail}" TextWrapping="Wrap" />
+            <Border
+                x:Name="ReleaseRelationshipRegion"
+                Padding="10"
+                Background="#111923"
+                CornerRadius="5">
+              <StackPanel Spacing="3">
+                <TextBlock
+                    x:Name="ReleaseRelationshipHeading"
+                    AutomationProperties.HeadingLevel="3"
+                    FontWeight="SemiBold"
+                    Text="Observed version relationship"
+                    TextWrapping="Wrap" />
+                <TextBlock x:Name="ReleaseRelationshipDetail" Text="{Binding ReleaseRelationshipDetail}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
           </StackPanel>
 
           <Border Padding="12" Background="#192C43" BorderBrush="#5AA7E8" BorderThickness="1" CornerRadius="6">

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Threading.Channels;
+using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Security;
@@ -1664,7 +1665,14 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
             risks.Add(ProtocolPlanRisk.Uninstall);
         if (operation == InstallerOperation.Rollback)
             risks.Add(ProtocolPlanRisk.Rollback);
-        if (currentRelease is not null && targetRelease is not null && IsEarlierRelease(targetRelease.Tag, currentRelease.Tag))
+        if (
+            currentRelease is not null
+            && targetRelease is not null
+            && ForkReleaseIdentity.Compare(
+                ForkReleaseIdentity.Parse(targetRelease.Tag),
+                ForkReleaseIdentity.Parse(currentRelease.Tag)
+            ) < 0
+        )
             risks.Add(ProtocolPlanRisk.Downgrade);
         if (candidateCount > 0)
             risks.Add(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
@@ -1780,29 +1788,6 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
             this.CurrentRecoveryCatalogBinding = binding;
             return true;
         }
-    }
-
-    private static bool IsEarlierRelease(string targetTag, string currentTag)
-    {
-        static (Version Version, int Alpha) Parse(string tag)
-        {
-            const string prefix = "fork-4eh5xitv6787h645ebv-linux-v";
-            int separator = tag.LastIndexOf("-alpha.", StringComparison.Ordinal);
-            if (
-                !tag.StartsWith(prefix, StringComparison.Ordinal)
-                || separator <= prefix.Length
-                || !Version.TryParse(tag[prefix.Length..separator], out Version? version)
-                || !int.TryParse(tag[(separator + "-alpha.".Length)..], out int alpha)
-                || alpha < 1
-            )
-                throw new InstallerProtocolClientException("A release tag couldn't be compared safely.");
-            return (version, alpha);
-        }
-
-        (Version targetVersion, int targetAlpha) = Parse(targetTag);
-        (Version currentVersion, int currentAlpha) = Parse(currentTag);
-        int comparison = targetVersion.CompareTo(currentVersion);
-        return comparison < 0 || comparison == 0 && targetAlpha < currentAlpha;
     }
 
     private static bool ValidateCandidateReplacement(RetainedPlanBinding binding, IReadOnlyList<ProtocolPlanCandidate> selected, IReadOnlyList<ProtocolPlanCandidate> replacement)

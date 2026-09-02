@@ -62,6 +62,32 @@ public sealed record ForkReleaseIdentity
         return new ForkReleaseIdentity(candidate, match.Groups["version"].Value, alphaSequence);
     }
 
+    /// <summary>Compare two canonical fork releases in ascending version and alpha order.</summary>
+    /// <remarks>
+    /// Numeric version components are compared without converting them to fixed-width integers, since the canonical
+    /// tag grammar bounds the complete tag length but deliberately doesn't impose an <see cref="int"/> bound on each
+    /// component.
+    /// </remarks>
+    public static int Compare(ForkReleaseIdentity left, ForkReleaseIdentity right)
+    {
+        ArgumentNullException.ThrowIfNull(left);
+        ArgumentNullException.ThrowIfNull(right);
+
+        string[] leftVersion = left.Version.Split('.');
+        string[] rightVersion = right.Version.Split('.');
+        for (int index = 0; index < 3; index++)
+        {
+            int length = leftVersion[index].Length.CompareTo(rightVersion[index].Length);
+            if (length != 0)
+                return length;
+
+            int component = StringComparer.Ordinal.Compare(leftVersion[index], rightVersion[index]);
+            if (component != 0)
+                return component;
+        }
+        return left.AlphaSequence.CompareTo(right.AlphaSequence);
+    }
+
     /// <summary>Require the supplied embedded version and asset name to match this identity.</summary>
     /// <param name="embeddedVersion">The embedded release version.</param>
     /// <param name="assetName">The package asset filename.</param>
