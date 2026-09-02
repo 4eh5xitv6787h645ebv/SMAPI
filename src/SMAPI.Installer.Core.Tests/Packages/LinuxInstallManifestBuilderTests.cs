@@ -105,6 +105,30 @@ public sealed class LinuxInstallManifestBuilderTests
         await action.Should().ThrowAsync<PackageSecurityException>();
     }
 
+    [TestCase(RequiredFileMutation.MissingGraphicalLauncher)]
+    [TestCase(RequiredFileMutation.NonExecutableGraphicalLauncher)]
+    [TestCase(RequiredFileMutation.EmptyGraphicalLauncher)]
+    [TestCase(RequiredFileMutation.LinkedGraphicalLauncher)]
+    [TestCase(RequiredFileMutation.SpecialGraphicalLauncher)]
+    [TestCase(RequiredFileMutation.WrongCaseGraphicalLauncher)]
+    [TestCase(RequiredFileMutation.MissingGraphicalInstaller)]
+    [TestCase(RequiredFileMutation.NonExecutableGraphicalInstaller)]
+    [TestCase(RequiredFileMutation.EmptyGraphicalInstaller)]
+    [TestCase(RequiredFileMutation.LinkedGraphicalInstaller)]
+    [TestCase(RequiredFileMutation.SpecialGraphicalInstaller)]
+    [TestCase(RequiredFileMutation.WrongCaseGraphicalInstaller)]
+    [TestCase(RequiredFileMutation.ExtraOuterRootFile)]
+    public async Task InspectAndBuild_RequireExactOrdinaryExecutableGraphicalPackageFiles(RequiredFileMutation mutation)
+    {
+        string package = this.CreatePackage(requiredFileMutation: mutation);
+
+        Func<Task> inspect = () => new LinuxPackageStructuralInspector().InspectAsync(package, this.Identity);
+        Func<Task> build = () => this.BuildAsync(package);
+
+        await inspect.Should().ThrowAsync<PackageSecurityException>();
+        await build.Should().ThrowAsync<PackageSecurityException>();
+    }
+
     [TestCase("StardewModdingAPI-net6.deps.json", 420, "unexpected")]
     [TestCase("unexpected.dll", 420, "unexpected")]
     [TestCase("smapi-internal/privileged.dll", 2541, "setuid")]
@@ -290,7 +314,8 @@ public sealed class LinuxInstallManifestBuilderTests
         bool corruptInstallDat = false,
         bool compressionBomb = false,
         Func<byte[], byte[]>? mutateNested = null,
-        string suffix = ""
+        string suffix = "",
+        RequiredFileMutation requiredFileMutation = RequiredFileMutation.None
     )
     {
         string directory = suffix.Length == 0 ? this.TempRoot : Path.Combine(this.TempRoot, suffix);
@@ -306,7 +331,37 @@ public sealed class LinuxInstallManifestBuilderTests
         using ZipArchive archive = new(stream, ZipArchiveMode.Create);
         AddFile(archive, $"{root}/README.txt", "README", 420);
         AddFile(archive, $"{root}/install on Linux.sh", "#!/bin/sh", 493);
+        if (requiredFileMutation != RequiredFileMutation.MissingGraphicalLauncher)
+        {
+            string graphicalLauncherPath = requiredFileMutation == RequiredFileMutation.WrongCaseGraphicalLauncher
+                ? $"{root}/Install on Linux (graphical).sh"
+                : $"{root}/install on Linux (graphical).sh";
+            string graphicalLauncherContents = requiredFileMutation == RequiredFileMutation.EmptyGraphicalLauncher ? "" : "#!/bin/sh";
+            int graphicalLauncherMode = requiredFileMutation == RequiredFileMutation.NonExecutableGraphicalLauncher ? 420 : 493;
+            int graphicalLauncherType = requiredFileMutation switch
+            {
+                RequiredFileMutation.LinkedGraphicalLauncher => 0xA000,
+                RequiredFileMutation.SpecialGraphicalLauncher => 0xC000,
+                _ => 0x8000
+            };
+            AddFile(archive, graphicalLauncherPath, graphicalLauncherContents, graphicalLauncherMode, graphicalLauncherType);
+        }
         AddFile(archive, $"{root}/internal/linux/SMAPI.Installer", "installer", 493);
+        if (requiredFileMutation != RequiredFileMutation.MissingGraphicalInstaller)
+        {
+            string graphicalInstallerPath = requiredFileMutation == RequiredFileMutation.WrongCaseGraphicalInstaller
+                ? $"{root}/internal/linux/smapi.installer.gui"
+                : $"{root}/internal/linux/SMAPI.Installer.Gui";
+            string graphicalInstallerContents = requiredFileMutation == RequiredFileMutation.EmptyGraphicalInstaller ? "" : "graphical installer";
+            int graphicalInstallerMode = requiredFileMutation == RequiredFileMutation.NonExecutableGraphicalInstaller ? 420 : 493;
+            int graphicalInstallerType = requiredFileMutation switch
+            {
+                RequiredFileMutation.LinkedGraphicalInstaller => 0xA000,
+                RequiredFileMutation.SpecialGraphicalInstaller => 0xC000,
+                _ => 0x8000
+            };
+            AddFile(archive, graphicalInstallerPath, graphicalInstallerContents, graphicalInstallerMode, graphicalInstallerType);
+        }
         if (!omitInstallDat)
             AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
         if (duplicateInstallDat)
@@ -318,7 +373,7 @@ public sealed class LinuxInstallManifestBuilderTests
         }
         if (extraLinuxSupportDirectory)
             AddFile(archive, $"{root}/internal/linux/support/runtime.dll", "nested support", 420);
-        if (extraOuterFile)
+        if (extraOuterFile || requiredFileMutation == RequiredFileMutation.ExtraOuterRootFile)
             AddFile(archive, $"{root}/unexpected.txt", "unexpected", 420);
         return package;
     }
@@ -381,5 +436,23 @@ public sealed class LinuxInstallManifestBuilderTests
         }
         replacements.Should().BeGreaterThanOrEqualTo(2);
         return result;
+    }
+
+    public enum RequiredFileMutation
+    {
+        None,
+        MissingGraphicalLauncher,
+        NonExecutableGraphicalLauncher,
+        EmptyGraphicalLauncher,
+        LinkedGraphicalLauncher,
+        SpecialGraphicalLauncher,
+        WrongCaseGraphicalLauncher,
+        MissingGraphicalInstaller,
+        NonExecutableGraphicalInstaller,
+        EmptyGraphicalInstaller,
+        LinkedGraphicalInstaller,
+        SpecialGraphicalInstaller,
+        WrongCaseGraphicalInstaller,
+        ExtraOuterRootFile
     }
 }
