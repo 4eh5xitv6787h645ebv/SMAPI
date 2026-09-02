@@ -27,7 +27,11 @@ Do not use unrelated mirrors.
 
 After verifying all six files, use `install on Linux (graphical).sh` in an X11 or XWayland desktop
 session. The same ZIP retains `install on Linux.sh` for terminal-only, headless, or troubleshooting
-use. Run either path as your normal user, never with `sudo` or as root.
+use. That console launcher is a narrower legacy install/uninstall path, not a text version of the
+graphical transaction: it does not repeat release verification or provide reviewed plans, Repair,
+Backup, authenticated Rollback, or interrupted-operation recovery. Headless use must invoke the
+packaged apphost directly with the complete command in the release guide. Run either path as your
+normal user, never with `sudo` or as root, and review unsanitized console output before sharing it.
 
 Contributors who need a source build can clone `develop`:
 

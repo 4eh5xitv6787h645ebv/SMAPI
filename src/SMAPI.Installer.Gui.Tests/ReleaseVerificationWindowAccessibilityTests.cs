@@ -7,6 +7,7 @@ using Avalonia.Headless.NUnit;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Planning;
@@ -53,21 +54,79 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
     }
 
     [AvaloniaTest]
-    public void ManualFallbackHelpNamesTheExactSamePackageCommandAndSafetyLimits()
+    public void ManualFallbackHelpStructuresExactCommandsSafetyExitMeaningsAndLegacyLimits()
     {
         ReleaseVerificationWindow window = CreateWindow([]);
         window.Show();
         Dispatcher.UIThread.RunJobs();
 
-        TextBlock help = window.FindControl<TextBlock>("ManualFallbackText")!;
-        AutomationProperties.GetName(help).Should().Be("Manual terminal installation help");
-        help.Text.Should().Contain("all six public release files");
-        help.Text.Should().Contain("bash \"install on Linux.sh\"");
-        help.Text.Should().Contain("normal desktop user");
-        help.Text.Should().Contain("never use sudo");
-        help.Text.Should().Contain("headless commands");
-        help.Text.Should().Contain("rollback");
-        help.Text.Should().Contain("last-resort manual extraction");
+        Border card = window.FindControl<Border>("ManualFallbackCard")!;
+        TextBlock prerequisites = window.FindControl<TextBlock>("ManualPrerequisitesText")!;
+        TextBlock interactive = window.FindControl<TextBlock>("ManualInteractiveCommand")!;
+        TextBlock fileManager = window.FindControl<TextBlock>("ManualFileManagerFallbackText")!;
+        TextBlock install = window.FindControl<TextBlock>("ManualHeadlessInstallCommand")!;
+        TextBlock uninstall = window.FindControl<TextBlock>("ManualHeadlessUninstallCommand")!;
+        TextBlock exits = window.FindControl<TextBlock>("ManualExitText")!;
+        TextBlock privacy = window.FindControl<TextBlock>("ManualPrivacyText")!;
+        TextBlock limitations = window.FindControl<TextBlock>("ManualLimitationsText")!;
+
+        card.Focusable.Should().BeTrue();
+        card.TabIndex.Should().Be(8);
+        AutomationProperties.GetName(card).Should().Contain("prerequisites, commands, exit meanings, and legacy-path limitations");
+        AutomationProperties.GetHeadingLevel(window.FindControl<TextBlock>("ManualFallbackHeading")!).Should().Be(2);
+        foreach (string name in new[] { "ManualPrerequisitesHeading", "ManualInteractiveHeading", "ManualHeadlessHeading", "ManualExitHeading", "ManualPrivacyHeading", "ManualLimitationsHeading" })
+            AutomationProperties.GetHeadingLevel(window.FindControl<TextBlock>(name)!).Should().Be(3);
+
+        prerequisites.Text.Should().Contain("Back up your saves and Mods")
+            .And.Contain("verify all six public release files before extracting")
+            .And.Contain("extract the ZIP into a new directory")
+            .And.Contain("open a terminal in that extracted installer directory")
+            .And.Contain("every relative command below assumes it is the current directory")
+            .And.Contain("normal desktop user")
+            .And.Contain("never use root or sudo");
+        interactive.Text.Should().Be("bash \"install on Linux.sh\"");
+        AutomationProperties.GetName(interactive).Should().Be($"Interactive command: {interactive.Text}");
+        fileManager.Text.Should().Contain("file manager")
+            .And.Contain("open a terminal in the extracted package folder")
+            .And.Contain("exact command above")
+            .And.Contain("wrapper is interactive")
+            .And.Contain("accepts no options")
+            .And.Contain("rejects headless flags");
+        install.Text.Should().Be("./internal/linux/SMAPI.Installer --no-prompt --install --game-path \"/absolute/path/to/Stardew Valley\"");
+        uninstall.Text.Should().Be("./internal/linux/SMAPI.Installer --no-prompt --uninstall --game-path \"/absolute/path/to/Stardew Valley\"");
+        AutomationProperties.GetName(install).Should().Be($"Headless install command: {install.Text}");
+        AutomationProperties.GetName(uninstall).Should().Be($"Headless uninstall command: {uninstall.Text}");
+        exits.Text.Should().Contain("Exit 0: the installer reported completion")
+            .And.Contain("Exit 2: a handled refusal or known validation failure")
+            .And.Contain("root use")
+            .And.Contain("a missing action, game path, option value, or package file")
+            .And.Contain("conflicting action flags")
+            .And.Contain("an invalid game folder")
+            .And.Contain("Unknown or positional apphost arguments are ignored")
+            .And.Contain("use only the exact commands above")
+            .And.Contain("Exit 1: an unexpected exception, filesystem failure, or runtime failure")
+            .And.Contain("does not prove that files are unchanged or rolled back")
+            .And.Contain("Shell or signal statuses are also possible")
+            .And.Contain("No exit code alone proves rollback");
+        privacy.Text.Should().Contain("game paths")
+            .And.Contain("full exception text")
+            .And.Contain("Review it before sharing")
+            .And.Contain("not the sanitized graphical diagnostic snapshot");
+        limitations.Text.Should().Contain("supports install and uninstall only")
+            .And.Contain("does not download or verify the release")
+            .And.Contain("reviewed plan")
+            .And.Contain("receipt-authenticated Update or Repair")
+            .And.Contain("Backup operation")
+            .And.Contain("journal and interrupted recovery")
+            .And.Contain("recovery-history pruning")
+            .And.Contain("authenticated Rollback")
+            .And.Contain("Running Install again is not an authenticated Update")
+            .And.Contain("raw install.dat extraction")
+            .And.Contain("fresh-install-only")
+            .And.Contain("Never recursively delete the game folder, Mods, saves, or logs");
+        card.GetVisualDescendants().OfType<Button>().Should().BeEmpty("manual help is passive inline content");
+        card.Focus(NavigationMethod.Tab);
+        card.IsFocused.Should().BeTrue("keyboard users can reach the complete manual-help region");
 
         window.Close();
     }
@@ -97,6 +156,20 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         heading.TextWrapping.Should().Be(TextWrapping.Wrap);
         heading.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
         heading.Bounds.Height.Should().BeGreaterThan(24, "the long section heading must wrap at 420 DIP / 200% instead of clipping");
+        Border manual = window.FindControl<Border>("ManualFallbackCard")!;
+        manual.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        foreach (string name in new[] { "ManualInteractiveCommand", "ManualHeadlessInstallCommand", "ManualHeadlessUninstallCommand", "ManualLimitationsText" })
+        {
+            TextBlock content = window.FindControl<TextBlock>(name)!;
+            content.TextWrapping.Should().Be(TextWrapping.Wrap);
+            content.Bounds.Width.Should().BeLessThanOrEqualTo(manual.Bounds.Width);
+        }
+        scroll.Offset = new Avalonia.Vector(0, Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height));
+        Dispatcher.UIThread.RunJobs();
+        manual.Focus(NavigationMethod.Tab);
+        Dispatcher.UIThread.RunJobs();
+        manual.IsFocused.Should().BeTrue();
+        window.CaptureRenderedFrame().Should().NotBeNull();
 
         window.Close();
     }

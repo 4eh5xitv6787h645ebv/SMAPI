@@ -1,6 +1,10 @@
 # Linux graphical installer shell
 
-The Linux desktop frontend is an Avalonia application around the shared installer behavior; it does not copy filesystem ownership or mutation rules into the UI. The repository now contains both the original sealed safe-demo mode and the separately reviewed production workflow for release verification, game discovery, plan review, execution, rollback, interrupted recovery, and recovery-history cleanup.
+The Linux desktop frontend is an Avalonia application around the shared Core protocol behavior; it
+does not copy filesystem ownership or mutation rules into the UI. The repository now contains both
+the original sealed safe-demo mode and the separately reviewed production workflow for release
+verification, game discovery, plan review, execution, rollback, interrupted recovery, and
+recovery-history cleanup.
 
 The screenshot below is **historical safe-demo evidence**, not the production installer. Exact `--demo` still uses deterministic synthetic folder and release options, holds its app log in memory, does not connect the production backend, and performs no installer-controlled game/package discovery or mutation and no app-initiated download or network request. Its execute control is intentionally disabled; previewing an operation never claims it completed.
 
@@ -139,18 +143,79 @@ Common safe next steps are:
 | Diagnostic logging cannot start or cannot prove readiness | Close any other graphical installer session. Do not remove its lock, use root, or loosen file permissions broadly. Check free space and that the normal user owns the XDG state location, then start a fresh session. New mutating work remains blocked when readiness cannot be recorded. |
 | The native Wayland path does not start reliably | Use an X11 or XWayland session, or use the retained terminal launcher. Native Wayland remains experimental. |
 
-The same published alpha 2 package retains `install on Linux.sh` as the non-GUI terminal fallback. Close
-the game, verify the complete public release set, extract the installer ZIP, and run
-`bash "install on Linux.sh"` as the normal desktop user from that same package. Never use `sudo`.
-The current published alpha 2 and its exact verification, terminal, headless, rollback, limitations,
-and last-resort manual extraction instructions remain in the
-[Linux alpha release guide](linux-alpha-release.md).
+## Console and headless fallback
+
+The same published alpha 2 package retains the legacy `install on Linux.sh` console launcher. It is
+useful in a terminal, headless environment, or native-Wayland-only session, but it is not a text
+version of the graphical Core workflow.
+
+Before either console route, close the game, back up saves and `Mods`, download the complete six-file
+release set into one new directory, and complete the checksum and GitHub-attestation procedure in the
+[Linux alpha release guide](linux-alpha-release.md#verify-before-extracting-or-running). Verify the
+outer installer ZIP before extracting it. The console installer does not repeat those release checks.
+After verification, extract the ZIP into a new directory and run this as the normal desktop user:
+
+```bash
+cd "/path/to/extracted/SMAPI installer"
+bash "install on Linux.sh"
+```
+
+Never use `sudo`. In an existing terminal the script runs the packaged installer and returns its exit
+status. In the published alpha 2, the wrapper does not forward command-line options; the current
+unreleased source instead rejects any supplied option with status 2. In either version, use the
+direct apphost commands below for headless operation. When opened through a file manager it may
+only report whether a supported terminal emulator was launched, so automation should invoke the
+apphost directly. In the interactive flow, choose readable terminal colors, select or enter the
+folder containing `Stardew Valley.dll`, choose only **Install** or **Uninstall**, and wait for the
+explicit success message. Do not treat folder detection or the start of copying as success.
+
+A genuinely prompt-free install or uninstall needs one action and an absolute validated game path:
+
+```bash
+cd "/path/to/extracted/SMAPI installer"
+./internal/linux/SMAPI.Installer \
+  --no-prompt --install --game-path "/absolute/path/to/Stardew Valley"
+
+# Or remove the legacy install:
+./internal/linux/SMAPI.Installer \
+  --no-prompt --uninstall --game-path "/absolute/path/to/Stardew Valley"
+```
+
+Exit `0` means the requested legacy install or uninstall reached its normal success return. Exit `2`
+means a known validation path returned false, including root use, missing package files, conflicting
+install/uninstall flags, a missing required action or option value, or an invalid game folder. The
+current unreleased source also fails closed with status 2 when `--no-prompt` has no `--game-path`;
+that safeguard is not retroactive to alpha 2, so always use the complete commands above. Unknown or
+positional arguments are ignored by the direct apphost.
+Exit `1` means an unexpected exception, filesystem failure, or runtime failure escaped the legacy
+flow. Shell and signal exits can produce other statuses. Exit `1` or a signal can occur after direct
+mutation began; no exit status alone proves unchanged state or successful rollback. Treat every
+nonzero result as failure and inspect the folder before launching or retrying. Console output can
+contain the selected game path and full exception text, so review it before sharing.
+
+The legacy path supports only install and uninstall. Install first removes its hard-coded list of
+known SMAPI files and then copies the new payload; running Install again is not a receipt-authenticated
+**Update** or **Repair**. It has no GUI/Core read-only plan, per-file conflict approval, installed
+receipt, transaction journal, automatic rollback, interrupted-operation recovery, authenticated
+history, backup operation, or authenticated rollback. A failure after mutation begins can leave a
+partial installation. Preserve `StardewValley-original` and your backups, avoid ad-hoc deletion, and
+inspect or restore the folder before retrying.
+
+Raw extraction of `internal/linux/install.dat` is a last-resort fresh-install procedure, not a third
+equivalent frontend. It offers none of the transactional protections above. Never recursively delete
+the game directory, `Mods`, saves, `ErrorLogs`, `HealthReports`, or other user data. Follow the
+version-specific steps and collision stops in the
+[manual installation section](linux-alpha-release.md#manual-installation-path).
 
 ## Current boundary and packaging status
 
 The view model accepts only the exact internal sealed `DemoInstallerFrontendSession` type. Its fixed constants are bounded and validated against control, bidirectional-format, and surrogate characters. It returns only synthetic choices and an unchanged durable state without touching operating-system services. There is no public extension point which can be mistaken for a reviewed production authority boundary.
 
-Production composition now connects reviewed release acquisition to the exact packaged sibling backend and transfers single-owner authorities through discovery, plan review, explicit confirmation, execution, rollback, interrupted recovery, and recovery-history cleanup. Those routes still leave path ownership, trust, confirmation, transactions, backup, rollback, and recovery policy in Core.
+Production GUI composition connects reviewed release acquisition to the exact packaged sibling
+backend's private protocol mode and transfers single-owner authorities through discovery, plan
+review, explicit confirmation, execution, rollback, interrupted recovery, and recovery-history
+cleanup. That route leaves path ownership, trust, confirmation, transactions, backup, rollback, and
+recovery policy in Core. The console/headless and raw-extraction fallbacks described above do not.
 
 The published alpha 2 adds the self-contained GUI while retaining the existing console launcher in
 the same exact verified ZIP. Production creates a bounded private

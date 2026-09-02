@@ -1,18 +1,23 @@
 # Linux GUI installer architecture
 
-This document defines the Phase 4 safety boundary for the fork's Linux desktop installer. It is deliberately narrower than the user interface: both the existing console installer and the graphical frontend must call the same installer core, and neither frontend may implement file ownership or mutation rules itself.
+This document defines the Phase 4 safety boundary for the fork's Linux desktop installer. The
+graphical frontend reaches the shared installer core only through the private protocol-host mode.
+The retained interactive console/headless installer is a separate legacy install/uninstall fallback;
+it is not transactionally equivalent to the GUI and must not be described as another Core frontend.
 
 ## Scope and compatibility
 
 - Linux desktop only. Android and other mobile targets are out of scope.
 - Normal installs run entirely as the current user. Every entry point refuses effective UID 0 before networking, logging, extraction, game discovery, or mutation; there is no `sudo`, polkit, privileged helper, or ownership-changing flow.
-- The existing console and manual installation paths remain supported and documented.
+- The existing console/headless install-or-uninstall fallback and last-resort raw installation path
+  remain documented with their narrower safety boundary and limitations.
 - The GUI is a portable, self-contained `linux-x64` application. It does not change the game's runtime target or include the unrelated .NET 10 menu-click work.
 - The first supported desktop path is X11 and XWayland on Wayland sessions. Avalonia's native Wayland backend is experimental and is not advertised as supported until it passes the same qualification matrix.
 
 ## Project boundaries
 
-`SMAPI.Installer.Core` is the implemented UI-independent `net6.0` safety library. The console installer and graphical frontend both use it through their integrated adapters; neither frontend owns game-file mutation rules. The core owns:
+`SMAPI.Installer.Core` is the implemented UI-independent `net6.0` safety library used by the
+graphical workflow and its machine-readable protocol host. For that workflow, Core owns:
 
 - game discovery and validation;
 - release identity, package metadata, download, checksum validation, and bounded extraction;
@@ -20,7 +25,34 @@ This document defines the Phase 4 safety boundary for the fork's Linux desktop i
 - operation locks, recovery backups, journals, apply/recovery/rollback, and post-verification;
 - structured progress, stable error codes, and bounded private logs.
 
-`SMAPI.Installer` remains the console adapter and is the only backend process allowed to mutate a game directory. Its prompts describe a core-generated plan and invoke the core; the old independent Linux mutation path was removed. It also exposes the core's versioned, session-scoped JSONL protocol for the GUI. One backend process owns the complete handshake, inspect/plan, confirmation, revalidation, apply, and result session. Standard output contains protocol JSON only, standard error is diagnostic, communication uses inherited stdin/stdout with no listener or socket, and the GUI launches it with an argument list rather than a shell.
+`SMAPI.Installer` contains two intentionally distinct modes. With exactly
+`--linux-protocol-v1-jsonl`, it exposes Core's versioned, session-scoped JSONL backend exclusively
+for the GUI. One such backend process owns the complete handshake, inspect/plan, confirmation,
+revalidation, apply, and result session. Standard output contains protocol JSON only, standard error
+is diagnostic, communication uses inherited stdin/stdout with no listener or socket, and the GUI
+launches it with an argument list rather than a shell.
+
+Without that private flag, the same apphost runs the retained `InteractiveInstaller`. That legacy
+path directly detects a game folder, offers **Install** or **Uninstall**, removes its compiled list of
+known SMAPI files, copies the bundled payload, backs up or restores the Unix launcher, and manages
+the two bundled mods. It does not request a Core plan and does not create or authenticate a Core
+manifest, receipt, journal, recovery generation, recovery-history catalog, or rollback authority.
+The private JSONL flag is not a supported manual command-line interface.
+
+The interactive console wrapper accepts no options and rejects any supplied argument with status 2.
+Headless callers invoke the apphost directly with `--no-prompt`, exactly one of `--install` or
+`--uninstall`, and an absolute
+`--game-path`; incomplete non-interactive requests are rejected before game-folder discovery. The
+legacy apphost returns 0 after its normal success path, 2 from known validation paths, and 1 when
+an unexpected exception escapes; the shell or a signal can produce another status. A nonzero status
+can occur after direct mutation began and never establishes unchanged or rolled-back state. Its
+human-readable output can contain game paths and full exception text and must be reviewed before
+sharing.
+
+Raw `install.dat` extraction has no automatic conflict, ownership, transaction, or recovery safety.
+It is documented only as a last-resort fresh install after verifying the outer six-asset release and
+making a complete backup. It must never recommend recursive deletion of the game directory, `Mods`,
+saves, logs, reports, or `.smapi-installer` state.
 
 `SMAPI.Installer.Gui` is a Linux-only `net10.0` Avalonia 12.1.1 adapter. It selects and verifies releases, stages the matching package/backend, and drives only the structured backend protocol; it never writes the game directory directly. View models are toolkit-independent where practical. The published package is self-contained, untrimmed, and not Native AOT so correctness and accessibility remain observable. Avalonia is pinned because its Linux support includes X11, XWayland, an opt-in experimental native Wayland backend, and AT-SPI2 exposure. X11 and XWayland are the advertised paths; native Wayland remains experimental pending the same desktop evidence matrix.
 
@@ -36,7 +68,11 @@ The downloader writes a unique mode-0600 sibling staging file, enforces cancella
 
 Core provides a separate acquisition-only authority which accepts only a reviewed catalog candidate and downloads its exact six assets sequentially into a fresh retained same-user mode-0700 Linux workspace. It publishes only exact-size mode-0600 single-link files through anchored no-follow/no-replace handles, retains an opaque lease, and cleans only exact owned identities without recursive or pathname-fallback deletion. The production controller fetches the refreshed tag reference after all six downloads, resolves that exact candidate, and keeps the lease alive until package-open settles. Process-descriptor projections stay inside the reviewed acquisition/backend boundary.
 
-Networking stays in the GUI service boundary behind an injectable transport. The core supplies the release-identity, digest, metadata-agreement, and bounded-extraction policies so protocol and console/package tests cannot disagree with the GUI.
+Networking stays in the GUI service boundary behind an injectable transport. Core supplies the
+release-identity, digest, metadata-agreement, and bounded-extraction policies so the GUI and its
+protocol/package tests cannot disagree. The legacy console installer performs no release download,
+checksum, metadata, or attestation verification itself, so users must verify the complete release set
+before extracting or running it.
 
 The bounded extractor rejects absolute paths, traversal, links, devices, FIFOs, duplicate or case-colliding entries, excess entry count/depth/expanded size/compression ratio, and unexpected package layout.
 
@@ -123,7 +159,7 @@ The release workflow builds an exact reviewed commit, retains the console fallba
 
 ## Delivery record
 
-The Core, console/protocol integration, GUI workflow, recovery, diagnostics, local-package import,
+The Core protocol-host integration, GUI workflow, recovery, diagnostics, local-package import,
 and release-preparation slices were independently reviewed and merged into `develop`. Alpha 2 was
 then published from exact reviewed commit
 [`052699e8`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/052699e8ccba0d13f9d4f02e0bb199aa04cec605)

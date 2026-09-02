@@ -20,9 +20,20 @@ title: Release notes
   boundaries without showing its path.
 * Restored the missing fixed progress message for local-package import and added bounded rendering,
   typed terminal-matrix, production observer/session, privacy, and health-accounting coverage.
+* Corrected the Linux manual-install documentation to distinguish the legacy console/headless
+  install-or-uninstall path from the graphical Core transaction. The guide now gives exact
+  normal-user commands and exit semantics, requires release verification before extraction, and
+  states the missing plan, receipt, journal, recovery, history, and authenticated-rollback
+  guarantees. Raw extraction is explicitly limited to a last-resort fresh install, with an explicit
+  prohibition on recursive deletion.
+* Made the interactive Linux console wrapper reject supplied options with status 2 instead of
+  silently dropping them, and made prompt-free requests without `--game-path` fail before game
+  discovery. Headless use still requires the exact direct-apphost command documented in the guide.
 
 These changes are in source only until a replacement exact-commit prerelease is published and
-qualified. The alpha 2 package below does not gain them retroactively.
+qualified. The alpha 2 package below does not gain them retroactively. The corrected description of
+its legacy console boundary distinguishes alpha 2's behavior from the new safeguards above; it does
+not claim that package was changed after publication.
 
 ## Linux fork 4.5.3 alpha 2
 
@@ -57,8 +68,9 @@ The existing terminal launcher remains in the same ZIP as the graphical installe
   startup, with fail-closed startup and pre-mutation readiness checks. **View diagnostic log** is
   available on every production screen and exposes only a bounded sanitized snapshot; no telemetry
   or automatic upload was added.
-* Kept the console, headless, and last-resort manual paths documented. The graphical and console
-  launchers ship from the same exact verified package.
+* Kept the legacy console/headless install-or-uninstall and last-resort raw-install paths documented.
+  The graphical and console launchers ship from the same exact verified package, but the legacy
+  console path is not transactionally equivalent to the GUI Core workflow.
 * Added exact-package, protocol, filesystem, failure, cancellation, recovery, accessibility,
   privacy, and launcher qualification. The freshly downloaded six-asset public set passed exact
   inventory, checksum, metadata, manifest-authority, and two-subject local-bundle attestation

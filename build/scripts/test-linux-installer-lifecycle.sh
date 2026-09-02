@@ -28,7 +28,9 @@ trap cleanup EXIT
 unzip -q "$archive_path" -d "$test_root/package"
 installer_root="$test_root/package/$package_root_name/internal/linux"
 installer="$installer_root/SMAPI.Installer"
+console_launcher="$test_root/package/$package_root_name/install on Linux.sh"
 test -x "$installer"
+test -x "$console_launcher"
 test -f "$installer_root/install.dat"
 
 isolated_home="$test_root/home"
@@ -65,9 +67,19 @@ expect_exit() {
 }
 
 # Headless validation failures must be prompt-free and machine-detectable.
+expect_exit 2 --no-prompt
+expect_exit 2 --no-prompt --install
+expect_exit 2 --no-prompt --uninstall
 expect_exit 2 --no-prompt --install --game-path
 expect_exit 2 --no-prompt --install --uninstall --game-path "$test_root/missing-game"
 expect_exit 2 --no-prompt --install --game-path "$test_root/missing-game"
+
+set +e
+timeout 20 bash "$console_launcher" --no-prompt --install >"$test_root/launcher-options.stdout" 2>"$test_root/launcher-options.stderr"
+launcher_options_exit=$?
+set -e
+test "$launcher_options_exit" = 2
+grep -F "does not accept command-line options" "$test_root/launcher-options.stderr" >/dev/null
 
 game_path="$test_root/game with spaces"
 external_initial="$test_root/external-initial-smapi-internal"
@@ -233,11 +245,10 @@ chmod 755 "$failure_game"
 # GitHub-hosted Linux runners provide passwordless sudo. Verify both the normal launcher and the
 # directly invoked binary refuse effective UID 0 before extracting or mutating anything.
 if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
-    launcher="$test_root/package/$package_root_name/install on Linux.sh"
     for root_command in \
         "'$installer' --no-prompt --install --game-path '$game_path'" \
         "'$installer' --linux-protocol-v1-jsonl" \
-        "bash '$launcher'"; do
+        "bash '$console_launcher'"; do
         set +e
         sudo -n env \
             HOME="$isolated_home" \

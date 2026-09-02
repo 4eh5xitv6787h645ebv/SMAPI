@@ -271,14 +271,127 @@
         </StackPanel>
       </Border>
 
-      <Border x:Name="ManualFallbackCard" Grid.Row="3" Classes="card">
-        <StackPanel Spacing="8">
-          <TextBlock x:Name="ManualFallbackHeading" AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Manual installation remains available" />
-          <TextBlock
-              x:Name="ManualFallbackText"
-              AutomationProperties.Name="Manual terminal installation help"
-              Text="Close the game and verify all six public release files before extracting the installer ZIP. From that same package, run bash &quot;install on Linux.sh&quot; as your normal desktop user; never use sudo. The terminal path supports the same install and uninstall rules, and the release guide documents headless commands, rollback, and last-resort manual extraction. The graphical installer does not inspect your game during this release-verification step."
-              TextWrapping="Wrap" />
+      <Border
+          x:Name="ManualFallbackCard"
+          Grid.Row="3"
+          Classes="card keyboard-focus"
+          Focusable="True"
+          TabIndex="8"
+          AutomationProperties.Name="Manual terminal and headless installation help. Review the prerequisites, commands, exit meanings, and legacy-path limitations shown in this section.">
+        <StackPanel Spacing="14">
+          <StackPanel Spacing="4">
+            <TextBlock
+                x:Name="ManualFallbackHeading"
+                AutomationProperties.HeadingLevel="2"
+                Classes="section-title"
+                Text="Manual terminal and headless installation"
+                TextWrapping="Wrap" />
+            <TextBlock
+                x:Name="ManualFallbackIntroduction"
+                Text="These passive instructions do not start a process, open another app, read or write the clipboard, or change game files. Use only files from the same verified release package."
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Spacing="5">
+            <TextBlock
+                x:Name="ManualPrerequisitesHeading"
+                AutomationProperties.HeadingLevel="3"
+                FontWeight="SemiBold"
+                Text="Before extracting"
+                TextWrapping="Wrap" />
+            <TextBlock
+                x:Name="ManualPrerequisitesText"
+                Text="Close Stardew Valley. Back up your saves and Mods. Download and verify all six public release files before extracting the installer ZIP. After verification, extract the ZIP into a new directory and open a terminal in that extracted installer directory; every relative command below assumes it is the current directory. Run every command as your normal desktop user; never use root or sudo."
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Spacing="5">
+            <TextBlock
+                x:Name="ManualInteractiveHeading"
+                AutomationProperties.HeadingLevel="3"
+                FontWeight="SemiBold"
+                Text="Interactive terminal path"
+                TextWrapping="Wrap" />
+            <Border x:Name="ManualInteractiveCommandCard" Padding="10" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="4">
+              <TextBlock
+                  x:Name="ManualInteractiveCommand"
+                  AutomationProperties.Name="Interactive command: bash &quot;install on Linux.sh&quot;"
+                  FontFamily="monospace"
+                  Text="bash &quot;install on Linux.sh&quot;"
+                  TextWrapping="Wrap" />
+            </Border>
+            <TextBlock
+                x:Name="ManualFileManagerFallbackText"
+                Text="If opening install on Linux.sh from your file manager cannot start a supported terminal, open a terminal in the extracted package folder and run the exact command above. This wrapper is interactive, accepts no options, and rejects headless flags."
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Spacing="5">
+            <TextBlock
+                x:Name="ManualHeadlessHeading"
+                AutomationProperties.HeadingLevel="3"
+                FontWeight="SemiBold"
+                Text="Headless install or uninstall"
+                TextWrapping="Wrap" />
+            <TextBlock Text="Call the installer executable directly as shown; do not append flags to the interactive wrapper. Replace the quoted absolute placeholder with the game folder containing the Stardew Valley executable." TextWrapping="Wrap" />
+            <Border x:Name="ManualHeadlessCommandCard" Padding="10" Background="{DynamicResource InstallerInsetBackgroundBrush}" CornerRadius="4">
+              <StackPanel Spacing="8">
+                <TextBlock
+                    x:Name="ManualHeadlessInstallCommand"
+                    AutomationProperties.Name="Headless install command: ./internal/linux/SMAPI.Installer --no-prompt --install --game-path &quot;/absolute/path/to/Stardew Valley&quot;"
+                    FontFamily="monospace"
+                    Text="./internal/linux/SMAPI.Installer --no-prompt --install --game-path &quot;/absolute/path/to/Stardew Valley&quot;"
+                    TextWrapping="Wrap" />
+                <TextBlock
+                    x:Name="ManualHeadlessUninstallCommand"
+                    AutomationProperties.Name="Headless uninstall command: ./internal/linux/SMAPI.Installer --no-prompt --uninstall --game-path &quot;/absolute/path/to/Stardew Valley&quot;"
+                    FontFamily="monospace"
+                    Text="./internal/linux/SMAPI.Installer --no-prompt --uninstall --game-path &quot;/absolute/path/to/Stardew Valley&quot;"
+                    TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <StackPanel Spacing="5">
+            <TextBlock
+                x:Name="ManualExitHeading"
+                AutomationProperties.HeadingLevel="3"
+                FontWeight="SemiBold"
+                Text="Headless exit meanings"
+                TextWrapping="Wrap" />
+            <TextBlock
+                x:Name="ManualExitText"
+                Text="Exit 0: the installer reported completion. Exit 2: a handled refusal or known validation failure, such as root use, a missing action, game path, option value, or package file, conflicting action flags, or an invalid game folder. Unknown or positional apphost arguments are ignored, so use only the exact commands above. Exit 1: an unexpected exception, filesystem failure, or runtime failure; it does not prove that files are unchanged or rolled back. Shell or signal statuses are also possible. No exit code alone proves rollback."
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Spacing="5">
+            <TextBlock
+                x:Name="ManualPrivacyHeading"
+                AutomationProperties.HeadingLevel="3"
+                FontWeight="SemiBold"
+                Text="Terminal-output privacy"
+                TextWrapping="Wrap" />
+            <TextBlock
+                x:Name="ManualPrivacyText"
+                Text="Terminal and headless output can include game paths and full exception text. Review it before sharing; it is not the sanitized graphical diagnostic snapshot."
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border x:Name="ManualLimitationsCard" Padding="12" Background="{DynamicResource InstallerWarningBackgroundBrush}" BorderBrush="{DynamicResource InstallerWarningBorderBrush}" BorderThickness="1" CornerRadius="6">
+            <StackPanel Spacing="5">
+              <TextBlock
+                  x:Name="ManualLimitationsHeading"
+                  AutomationProperties.HeadingLevel="3"
+                  FontWeight="SemiBold"
+                  Text="Legacy-path limitations"
+                  TextWrapping="Wrap" />
+              <TextBlock
+                  x:Name="ManualLimitationsText"
+                  Text="The terminal and headless legacy path supports install and uninstall only. It does not download or verify the release, or provide the GUI's reviewed plan, receipt-authenticated Update or Repair, Backup operation, journal and interrupted recovery, recovery-history pruning, or authenticated Rollback. Running Install again is not an authenticated Update. Last-resort raw install.dat extraction is a separate fresh-install-only procedure in the release guide; it has none of these safety checks. Never recursively delete the game folder, Mods, saves, or logs. Use the graphical workflow when you need its reviewed capabilities."
+                  TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
         </StackPanel>
       </Border>
     </Grid>

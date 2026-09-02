@@ -32,14 +32,21 @@ You can customise some SMAPI behaviour by editing the `smapi-internal/config.jso
 game folder. See documentation in the file for more info.
 
 ### Command-line arguments
-The SMAPI installer recognises three command-line arguments:
+The legacy SMAPI installer apphost recognises four command-line arguments:
 
 argument | purpose
 -------- | -------
 `--install` | Preselects the install action, skipping the prompt asking what the user wants to do.
 `--uninstall` | Preselects the uninstall action, skipping the prompt asking what the user wants to do.
 `--game-path "path"` | Specifies the full path to the folder containing the Stardew Valley executable, skipping automatic detection and any prompt to choose a path. If the path is not valid, the installer displays an error.
-`--no-prompt` | Don't let the installer wait for user input (e.g. for cases where it's being run by a script). If the installer is unable to continue without user input, it'll fail instead.
+`--no-prompt` | Don't let the installer wait for user input (e.g. for cases where it's being run by a script). On this fork's Linux package, use it only with exactly one action and the separate-token `--game-path "path"`. Current unreleased source for the next prerelease additionally makes a `--no-prompt` request without `--game-path` fail with status 2; public alpha 2 does not have that missing-path safeguard.
+
+On this fork's Linux package, `install on Linux.sh` is the interactive legacy launcher and accepts no
+options in the next prerelease; invoke `internal/linux/SMAPI.Installer` directly for headless use.
+This legacy path performs install or uninstall only and does not provide the graphical installer's
+release verification, reviewed transaction, Repair, Backup, authenticated Rollback, or recovery.
+See the [Linux release guide](linux-alpha-release.md#install) for exact commands, exit semantics,
+privacy limits, and the current-public-package boundary.
 
 SMAPI itself recognises five arguments, but these are meant for internal use or testing, and might
 change without warning. **On Linux/macOS**, command-line arguments won't work; see _environment
