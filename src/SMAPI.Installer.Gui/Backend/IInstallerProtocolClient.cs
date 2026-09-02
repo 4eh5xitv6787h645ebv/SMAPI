@@ -44,6 +44,29 @@ internal interface IInstallerProtocolClient : IAsyncDisposable
         CancellationToken cancellationToken = default
     ) => throw new NotSupportedException("This restricted client doesn't support rollback plan inspection.");
 
+    /// <summary>
+    /// Consume the exact current recovery catalog through one of its issued point references and inspect a prune
+    /// which retains that point and every newer point. The point ordinal is the retention count; no caller-supplied
+    /// numeric or protocol authority is accepted.
+    /// </summary>
+    Task<InstallerRecoveryPrunePlanResult> InspectRecoveryPruneAsync(
+        string canonicalGamePath,
+        InstallerRecoveryPoint oldestPointToKeep,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted client doesn't support recovery-prune inspection.");
+
+    /// <summary>Consume and confirm the exact current prune plan without executing it.</summary>
+    Task<InstallerConfirmedRecoveryPruneAuthority> ConfirmRecoveryPruneAsync(
+        InstallerRecoveryPruneConfirmation confirmation,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted client doesn't support recovery-prune confirmation.");
+
+    /// <summary>Consume the exact confirmed prune authority and execute it once with bounded progress.</summary>
+    Task<InstallerRecoveryPruneOperation> ExecuteRecoveryPruneAsync(
+        InstallerConfirmedRecoveryPruneAuthority authority,
+        CancellationToken cancellationToken = default
+    ) => throw new NotSupportedException("This restricted client doesn't support recovery-prune execution.");
+
     /// <summary>Inspect one non-rollback operation and return a sanitized projection whose candidate references carry only scoped approval authority.</summary>
     Task<InstallerReadOnlyPlanResult> InspectPlanAsync(string canonicalGamePath, InstallerOperation operation, CancellationToken cancellationToken = default);
 

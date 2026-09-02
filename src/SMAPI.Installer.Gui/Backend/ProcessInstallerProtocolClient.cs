@@ -8,7 +8,7 @@ using StardewModdingAPI.Installer.Core.Security;
 namespace StardewModdingAPI.Installer.Gui.Backend;
 
 /// <summary>Owns one fail-stop JSONL session with the packaged sibling installer.</summary>
-internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
+internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtocolClient
 {
     internal const string ProtocolFlag = "--linux-protocol-v1-jsonl";
     internal const string PackageVerificationCapability = "verified-local-package";
@@ -29,6 +29,9 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     internal const int MaximumExecutionProgressUnits = 640_000;
     internal const int MaximumRecoveryTransactions = 32;
     internal const int MaximumRecoveryPathsPerTransaction = 20_000;
+    internal const int MaximumPruneProgressEvents = 256;
+    internal const int MaximumPruneProgressUnits = ProtocolJsonSerializer.MaxRecoveryGenerations;
+    internal const long MaximumPruneProgressUtf8Bytes = 4L * 1024 * 1024;
     internal const long MaximumExecutionProgressUtf8Bytes = 256L * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
@@ -242,7 +245,10 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.AssertUsable();
             Volatile.Write(ref this.RecoveryEligibilityLost, 1);
             lock (this.ResponseLock)
+            {
+                this.RequireReadyClientState();
                 this.CurrentRecoveryCatalogBinding = null;
+            }
             ProtocolSessionId session = this.SessionId
                 ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
             if (this.HasRetainedPackageAuthority)
@@ -293,6 +299,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         try
         {
             this.AssertUsable();
+            lock (this.ResponseLock)
+                this.RequireReadyClientState();
             ProtocolSessionId session = this.SessionId
                 ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
             GameDiscoveryEvent response = await this.ExchangeAsync<GameDiscoveryEvent>(
@@ -330,6 +338,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         try
         {
             this.AssertUsable();
+            lock (this.ResponseLock)
+                this.RequireReadyClientState();
             ProtocolSessionId session = this.SessionId
                 ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
             GameValidationEvent response = await this.ExchangeAsync<GameValidationEvent>(
@@ -366,10 +376,9 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             ProtocolSessionId session;
             lock (this.ResponseLock)
             {
+                this.RequireReadyClientState();
                 session = this.SessionId
                     ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
-                if (this.CurrentPlanBinding is not null || this.CurrentConfirmedPlanBinding is not null)
-                    throw new InvalidOperationException("Recovery history must be listed before a plan is inspected or confirmed.");
 
                 // Refresh revokes every previously issued point before any request byte can be written. A failed,
                 // cancelled, or rejected refresh can never make an older exact-reference capability current again.
@@ -462,7 +471,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             {
                 session = this.SessionId
                     ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
-                if (this.CurrentConfirmedPlanBinding is not null)
+                if (this.CurrentConfirmedPlanBinding is not null || this.CurrentConfirmedPruneBinding is not null)
                     throw new InvalidOperationException("The confirmed backend session can no longer inspect a plan.");
                 catalog = this.CurrentRecoveryCatalogBinding
                     ?? throw new InvalidOperationException("A current recovery catalog is required before inspecting rollback.");
@@ -477,6 +486,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 // cancelled, or rejected inspection can never make this or another point current again.
                 this.CurrentRecoveryCatalogBinding = null;
                 this.CurrentPlanBinding = null;
+                this.CurrentPrunePlanBinding = null;
             }
 
             using CancellationTokenSource aggregateTimeout = new(this.OperationTimeout);
@@ -559,12 +569,13 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             {
                 session = this.SessionId
                     ?? throw new InstallerProtocolClientException("The installer backend handshake hasn't completed.");
-                if (this.CurrentConfirmedPlanBinding is not null)
+                if (this.CurrentConfirmedPlanBinding is not null || this.CurrentConfirmedPruneBinding is not null)
                     throw new InvalidOperationException("The confirmed backend session can no longer inspect a plan.");
                 this.CurrentRecoveryCatalogBinding = null;
                 packageId = this.VerifiedPackageId;
                 verifiedRelease = this.VerifiedRelease;
                 this.CurrentPlanBinding = null;
+                this.CurrentPrunePlanBinding = null;
             }
 
             if (packageId is null || verifiedRelease is null)
@@ -646,6 +657,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             lock (this.ResponseLock)
             {
                 this.CurrentRecoveryCatalogBinding = null;
+                this.CurrentPrunePlanBinding = null;
                 binding = this.CurrentPlanBinding
                     ?? throw new InvalidOperationException("A current inspected plan is required before approving candidates.");
                 if (binding.Operation is not (InstallerOperation.Install or InstallerOperation.Update or InstallerOperation.Repair or InstallerOperation.Uninstall))
@@ -747,6 +759,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             lock (this.ResponseLock)
             {
                 this.CurrentRecoveryCatalogBinding = null;
+                if (this.CurrentPrunePlanBinding is not null || this.CurrentConfirmedPruneBinding is not null)
+                    throw new InvalidOperationException("An ordinary plan can't be confirmed while recovery cleanup authority is current.");
                 binding = this.CurrentPlanBinding
                     ?? throw new InvalidOperationException("A current executable inspected plan is required before confirmation.");
                 if (binding.Confirmation is null || !ReferenceEquals(binding.Confirmation, confirmation))
@@ -849,7 +863,15 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                     ?? throw new InvalidOperationException("A current confirmed plan is required before execution.");
                 if (!ReferenceEquals(binding.Authority, authority))
                     throw new ArgumentException("Execution requires the exact current confirmed-plan authority.", nameof(authority));
-                if (this.ActiveExecution is not null)
+                if (
+                    this.PendingResponse is not null
+                    || this.ActiveExecution is not null
+                    || this.SettlingExecution is not null
+                    || this.ActiveRecovery is not null
+                    || this.SettlingRecovery is not null
+                    || this.ActivePrune is not null
+                    || this.SettlingPrune is not null
+                )
                     throw new InvalidOperationException("The confirmed plan is already executing.");
                 if (
                     this.ExecutionProgressCapacityForTesting is < 1 or > MaximumExecutionProgressEvents
@@ -1148,7 +1170,15 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                     throw new ArgumentException("Recovery requires the exact current valid game-folder candidate issued by this client.", nameof(candidate));
                 if (Volatile.Read(ref this.RecoveryEligibilityLost) != 0)
                     throw new InvalidOperationException("Recovery requires a fresh backend used only to discover or validate its exact game folder.");
-                if (this.PendingResponse is not null || this.ActiveExecution is not null || this.SettlingExecution is not null || this.ActiveRecovery is not null || this.SettlingRecovery is not null)
+                if (
+                    this.PendingResponse is not null
+                    || this.ActiveExecution is not null
+                    || this.SettlingExecution is not null
+                    || this.ActiveRecovery is not null
+                    || this.SettlingRecovery is not null
+                    || this.ActivePrune is not null
+                    || this.SettlingPrune is not null
+                )
                     throw new InvalidOperationException("The installer backend already has an active or settling command.");
                 if (
                     this.RecoveryProgressCapacityForTesting is < 1 or > MaximumExecutionProgressEvents
@@ -1174,6 +1204,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 this.CurrentRecoveryCatalogBinding = null;
                 this.CurrentPlanBinding = null;
                 this.CurrentConfirmedPlanBinding = null;
+                this.CurrentPrunePlanBinding = null;
+                this.CurrentConfirmedPruneBinding = null;
                 this.IssuedCandidateIds.Clear();
                 this.DiscoveredGameCandidates.Clear();
                 this.LatestValidatedGameCandidate = null;
@@ -1717,7 +1749,12 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
     {
         lock (this.ResponseLock)
         {
-            if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
+            if (
+                this.SessionFaultRaised
+                || Volatile.Read(ref this.CleanupStarted) != 0
+                || this.CurrentPrunePlanBinding is not null
+                || this.CurrentConfirmedPruneBinding is not null
+            )
                 return false;
             int capacity = this.IssuedCandidateCapacityForTesting;
             ProtocolCandidateId[] issued = binding.Candidates.Values.Select(candidate => candidate.CandidateId).ToArray();
@@ -2223,6 +2260,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 this.SettlingExecution?.MarkSettlementUnconfirmed();
                 this.ActiveRecovery?.MarkSettlementUnconfirmed();
                 this.SettlingRecovery?.MarkSettlementUnconfirmed();
+                this.ActivePrune?.MarkSettlementUnconfirmed();
+                this.SettlingPrune?.MarkSettlementUnconfirmed();
             }
             return new ValueTask(this.DisposalTask = this.DisposeCoreAsync());
         }
@@ -2426,9 +2465,12 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 PendingProtocolResponse? pending = null;
                 ActiveExecutionRoute? terminalRoute = null;
                 ActiveRecoveryRoute? recoveryTerminalRoute = null;
+                ActivePruneRoute? pruneTerminalRoute = null;
                 bool progressFrame = false;
                 bool recoveryProgressFrame = false;
+                bool pruneProgressFrame = false;
                 bool cancellationAcknowledgement = false;
+                bool pruneCancellationAcknowledgement = false;
                 bool invalid = false;
                 lock (this.ResponseLock)
                 {
@@ -2453,41 +2495,72 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                     }
                     else
                     {
-                        ActiveExecutionRoute? active = this.ActiveExecution;
-                        if (active is not null && response.CommandId == active.CommandId)
+                        ActivePruneRoute? prune = this.ActivePrune;
+                        if (prune is not null && response.CommandId == prune.CommandId)
                         {
-                            if (active.Terminal.Task.IsCompleted)
+                            if (prune.Terminal.Task.IsCompleted)
                                 invalid = true;
-                            else if (response is ProgressEvent progress)
+                            else if (response is PruneProgressEvent progress)
                             {
-                                progressFrame = active.TryAcceptProgress(progress, frameUtf8Bytes);
-                                invalid = !progressFrame;
+                                pruneProgressFrame = prune.TryAcceptProgress(progress, frameUtf8Bytes);
+                                invalid = !pruneProgressFrame;
                             }
-                            else if (active.IsExactTerminal(response) && active.TryCountFrameBytes(frameUtf8Bytes))
+                            else if (prune.IsExactTerminal(response) && prune.TryCountFrameBytes(frameUtf8Bytes))
                             {
-                                terminalRoute = active;
-                                this.SettlingExecution = active;
-                                if (!active.HasPendingCancellation)
-                                    this.ActiveExecution = null;
+                                pruneTerminalRoute = prune;
+                                this.SettlingPrune = prune;
+                                if (!prune.HasPendingCancellation)
+                                    this.ActivePrune = null;
                             }
                             else
                                 invalid = true;
                         }
-                        else if (active is not null && active.IsCancellationCommand(response.CommandId))
+                        else if (prune is not null && prune.IsCancellationCommand(response.CommandId))
                         {
-                            cancellationAcknowledgement = response is CommandAcknowledgedEvent acknowledged
-                                && active.TryAcceptCancellationAcknowledgement(acknowledged, frameUtf8Bytes);
-                            invalid = !cancellationAcknowledgement;
-                            if (cancellationAcknowledgement && active.Terminal.Task.IsCompleted)
-                                this.ActiveExecution = null;
-                        }
-                        else if (this.PendingResponse is { } current && response.CommandId == current.CommandId)
-                        {
-                            pending = current;
-                            this.PendingResponse = null;
+                            pruneCancellationAcknowledgement = response is CommandAcknowledgedEvent acknowledged
+                                && prune.TryAcceptCancellationAcknowledgement(acknowledged, frameUtf8Bytes);
+                            invalid = !pruneCancellationAcknowledgement;
+                            if (pruneCancellationAcknowledgement && prune.Terminal.Task.IsCompleted)
+                                this.ActivePrune = null;
                         }
                         else
-                            invalid = true;
+                        {
+                            ActiveExecutionRoute? active = this.ActiveExecution;
+                            if (active is not null && response.CommandId == active.CommandId)
+                            {
+                                if (active.Terminal.Task.IsCompleted)
+                                    invalid = true;
+                                else if (response is ProgressEvent progress)
+                                {
+                                    progressFrame = active.TryAcceptProgress(progress, frameUtf8Bytes);
+                                    invalid = !progressFrame;
+                                }
+                                else if (active.IsExactTerminal(response) && active.TryCountFrameBytes(frameUtf8Bytes))
+                                {
+                                    terminalRoute = active;
+                                    this.SettlingExecution = active;
+                                    if (!active.HasPendingCancellation)
+                                        this.ActiveExecution = null;
+                                }
+                                else
+                                    invalid = true;
+                            }
+                            else if (active is not null && active.IsCancellationCommand(response.CommandId))
+                            {
+                                cancellationAcknowledgement = response is CommandAcknowledgedEvent acknowledged
+                                    && active.TryAcceptCancellationAcknowledgement(acknowledged, frameUtf8Bytes);
+                                invalid = !cancellationAcknowledgement;
+                                if (cancellationAcknowledgement && active.Terminal.Task.IsCompleted)
+                                    this.ActiveExecution = null;
+                            }
+                            else if (this.PendingResponse is { } current && response.CommandId == current.CommandId)
+                            {
+                                pending = current;
+                                this.PendingResponse = null;
+                            }
+                            else
+                                invalid = true;
+                        }
                     }
                 }
                 if (invalid)
@@ -2495,7 +2568,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                     this.FaultSession("The installer backend emitted an unsolicited or incorrectly correlated response.");
                     return;
                 }
-                if (progressFrame || recoveryProgressFrame || cancellationAcknowledgement)
+                if (progressFrame || recoveryProgressFrame || pruneProgressFrame || cancellationAcknowledgement || pruneCancellationAcknowledgement)
                     continue;
                 if (recoveryTerminalRoute is not null)
                 {
@@ -2509,6 +2582,21 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                     }
                     recoveryTerminalRoute.CompleteTerminal(response);
                     this.RecoveryTerminalRoutedForTesting?.Invoke();
+                    continue;
+                }
+                if (pruneTerminalRoute is not null)
+                {
+                    bool cancellationAckPending = pruneTerminalRoute.HasPendingCancellation;
+                    if (this.Reader.HasBufferedFrameData && !cancellationAckPending)
+                    {
+                        pruneTerminalRoute.MarkSettlementUnconfirmed();
+                        pruneTerminalRoute.CompleteTerminal(response);
+                        this.PruneTerminalRoutedForTesting?.Invoke();
+                        this.FaultSession("The installer backend emitted output after a recovery-cleanup terminal.");
+                        return;
+                    }
+                    pruneTerminalRoute.CompleteTerminal(response);
+                    this.PruneTerminalRoutedForTesting?.Invoke();
                     continue;
                 }
                 if (terminalRoute is not null)
@@ -2558,6 +2646,7 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         PendingProtocolResponse? pending;
         ActiveExecutionRoute? execution;
         ActiveRecoveryRoute? recovery;
+        ActivePruneRoute? prune;
         lock (this.ResponseLock)
         {
             if (this.SessionFaultRaised)
@@ -2568,6 +2657,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             this.CurrentRecoveryCatalogBinding = null;
             this.CurrentPlanBinding = null;
             this.CurrentConfirmedPlanBinding = null;
+            this.CurrentPrunePlanBinding = null;
+            this.CurrentConfirmedPruneBinding = null;
             this.IssuedCandidateIds.Clear();
             this.DiscoveredGameCandidates.Clear();
             this.LatestValidatedGameCandidate = null;
@@ -2579,12 +2670,17 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             recovery = this.ActiveRecovery ?? this.SettlingRecovery;
             this.ActiveRecovery = null;
             this.SettlingRecovery = null;
+            prune = this.ActivePrune ?? this.SettlingPrune;
+            this.ActivePrune = null;
+            this.SettlingPrune = null;
         }
         pending?.Completion.TrySetException(fault);
         execution?.MarkSettlementUnconfirmed();
         execution?.Fail(fault);
         recovery?.MarkSettlementUnconfirmed();
         recovery?.Fail(fault);
+        prune?.MarkSettlementUnconfirmed();
+        prune?.Fail(fault);
         this.SessionFault.TrySetResult(fault);
         _ = this.CleanupAsync(allowCleanExit: false);
     }
@@ -2596,6 +2692,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             if (this.SessionFaultRaised || Volatile.Read(ref this.CleanupStarted) != 0)
                 return false;
             this.CurrentRecoveryCatalogBinding = null;
+            this.CurrentPlanBinding = null;
+            this.CurrentPrunePlanBinding = null;
             this.VerifiedPackageId = opened.PackageId;
             this.VerifiedRelease = opened.Release;
             return true;
@@ -2692,6 +2790,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             ActiveExecutionRoute? settling;
             ActiveRecoveryRoute? recovery;
             ActiveRecoveryRoute? settlingRecovery;
+            ActivePruneRoute? prune;
+            ActivePruneRoute? settlingPrune;
             lock (this.ResponseLock)
             {
                 this.VerifiedPackageId = null;
@@ -2699,6 +2799,8 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 this.CurrentRecoveryCatalogBinding = null;
                 this.CurrentPlanBinding = null;
                 this.CurrentConfirmedPlanBinding = null;
+                this.CurrentPrunePlanBinding = null;
+                this.CurrentConfirmedPruneBinding = null;
                 this.IssuedCandidateIds.Clear();
                 this.DiscoveredGameCandidates.Clear();
                 this.LatestValidatedGameCandidate = null;
@@ -2712,21 +2814,30 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 settlingRecovery = this.SettlingRecovery;
                 if (!allowCleanExit)
                     this.SettlingRecovery = null;
+                prune = this.ActivePrune;
+                this.ActivePrune = null;
+                settlingPrune = this.SettlingPrune;
+                if (!allowCleanExit)
+                    this.SettlingPrune = null;
             }
             execution?.Fail(new InstallerProtocolClientException("The installer backend execution transport stopped."));
             recovery?.Fail(new InstallerProtocolClientException("The installer backend recovery transport stopped."));
+            prune?.Fail(new InstallerProtocolClientException("The installer backend recovery-cleanup transport stopped."));
             if (!allowCleanExit)
             {
                 settling?.MarkSettlementUnconfirmed();
                 settlingRecovery?.MarkSettlementUnconfirmed();
+                settlingPrune?.MarkSettlementUnconfirmed();
                 settling?.CompleteProgress();
                 settlingRecovery?.CompleteProgress();
+                settlingPrune?.CompleteProgress();
             }
             IInstallerProtocolProcess? process = this.Process;
             if (process is null)
             {
                 this.ClearSettlingExecution(settling);
                 this.ClearSettlingRecovery(settlingRecovery);
+                this.ClearSettlingPrune(settlingPrune);
                 return;
             }
 
@@ -2737,10 +2848,12 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
                 {
                     settling?.MarkSettlementUnconfirmed();
                     settlingRecovery?.MarkSettlementUnconfirmed();
+                    settlingPrune?.MarkSettlementUnconfirmed();
                     Volatile.Write(ref this.CleanupUnconfirmed, 1);
                 }
                 this.ClearSettlingExecution(settling);
                 this.ClearSettlingRecovery(settlingRecovery);
+                this.ClearSettlingPrune(settlingPrune);
                 this.CancelLifetimeWithoutThrowing();
                 await this.FinishCleanupAsync(process).ConfigureAwait(false);
                 return;
@@ -2750,9 +2863,11 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             {
                 settling?.MarkSettlementUnconfirmed();
                 settlingRecovery?.MarkSettlementUnconfirmed();
+                settlingPrune?.MarkSettlementUnconfirmed();
             }
             this.ClearSettlingExecution(settling);
             this.ClearSettlingRecovery(settlingRecovery);
+            this.ClearSettlingPrune(settlingPrune);
             this.CancelLifetimeWithoutThrowing();
             try { process.Terminate(); } catch { }
             Task reap = GetWaitTask(process);
@@ -2804,6 +2919,18 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
         {
             if (ReferenceEquals(this.SettlingRecovery, route))
                 this.SettlingRecovery = null;
+        }
+        route.CompleteProgress();
+    }
+
+    private void ClearSettlingPrune(ActivePruneRoute? route)
+    {
+        if (route is null)
+            return;
+        lock (this.ResponseLock)
+        {
+            if (ReferenceEquals(this.SettlingPrune, route))
+                this.SettlingPrune = null;
         }
         route.CompleteProgress();
     }
@@ -2918,6 +3045,21 @@ internal sealed class ProcessInstallerProtocolClient : IInstallerProtocolClient
             throw new InvalidOperationException("No ordinary command can be admitted after plan execution begins.");
         if (Volatile.Read(ref this.RecoveryAdmitted) != 0)
             throw new InvalidOperationException("No ordinary command can be admitted after interrupted recovery begins.");
+        if (Volatile.Read(ref this.PruneAdmitted) != 0)
+            throw new InvalidOperationException("No ordinary command can be admitted after recovery cleanup begins.");
+    }
+
+    /// <summary>Require a backend state in which protocol lookups and package opening are legal.</summary>
+    /// <remarks>The caller must hold <see cref="ResponseLock"/>.</remarks>
+    private void RequireReadyClientState()
+    {
+        if (
+            this.CurrentPlanBinding is not null
+            || this.CurrentConfirmedPlanBinding is not null
+            || this.CurrentPrunePlanBinding is not null
+            || this.CurrentConfirmedPruneBinding is not null
+        )
+            throw new InvalidOperationException("The installer backend must be in its ready state for this command.");
     }
 }
 
