@@ -39,6 +39,7 @@ find "$folderName" -type f -exec chmod 644 {} \;
 find "$folderName" -name "*.sh" -exec chmod 755 {} \;
 find "$folderName" -name "*.command" -exec chmod 755 {} \;
 find "$folderName" -name "SMAPI.Installer" -exec chmod 755 {} \;
+find "$folderName" -name "SMAPI.Installer.Gui" -exec chmod 755 {} \;
 find "$folderName" -name "StardewModdingAPI" -exec chmod 755 {} \;
 
 # convert bundle folder into final 'install.dat' files

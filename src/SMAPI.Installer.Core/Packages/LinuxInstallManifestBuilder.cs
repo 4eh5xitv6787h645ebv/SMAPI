@@ -155,6 +155,7 @@ public sealed class LinuxInstallManifestBuilder
             ).ConfigureAwait(false);
 
             string outerRootName = $"SMAPI {identity.EmbeddedVersion} Linux installer";
+            AssertExpectedOuterArchiveMetadata(stagedPackage, outerRootName, limits);
             string outerDestination = Path.Combine(stagingRoot, "outer");
             await new BoundedZipPackage().InspectAndExtractAsync(
                 stagedPackage,
@@ -228,12 +229,13 @@ public sealed class LinuxInstallManifestBuilder
         Dictionary<string, FileSystemInfo> rootEntries = new DirectoryInfo(outerRoot)
             .EnumerateFileSystemInfos()
             .ToDictionary(entry => entry.Name, StringComparer.Ordinal);
-        string[] expectedRootEntries = ["README.txt", "install on Linux.sh", "internal"];
+        string[] expectedRootEntries = ["README.txt", "install on Linux.sh", "install on Linux (graphical).sh", "internal"];
         if (
             rootEntries.Count != expectedRootEntries.Length
             || expectedRootEntries.Any(name => !rootEntries.ContainsKey(name))
             || rootEntries["README.txt"] is not FileInfo
             || rootEntries["install on Linux.sh"] is not FileInfo
+            || rootEntries["install on Linux (graphical).sh"] is not FileInfo
             || rootEntries["internal"] is not DirectoryInfo internalDirectory
         )
         {
@@ -246,19 +248,79 @@ public sealed class LinuxInstallManifestBuilder
 
         string nestedArchive = Path.Combine(linuxDirectory.FullName, "install.dat");
         string installer = Path.Combine(linuxDirectory.FullName, "SMAPI.Installer");
+        string graphicalInstaller = Path.Combine(linuxDirectory.FullName, "SMAPI.Installer.Gui");
         FileSystemInfo[] linuxEntries = linuxDirectory.EnumerateFileSystemInfos().ToArray();
         if (
-            linuxEntries.Length < 2
+            linuxEntries.Length < 3
             || linuxEntries.Any(entry => entry is not FileInfo)
             || linuxEntries.Count(entry => entry.Name == "install.dat") != 1
             || linuxEntries.Count(entry => entry.Name == "SMAPI.Installer") != 1
+            || linuxEntries.Count(entry => entry.Name == "SMAPI.Installer.Gui") != 1
             || new FileInfo(nestedArchive).Length <= 0
             || new FileInfo(installer).Length <= 0
+            || new FileInfo(graphicalInstaller).Length <= 0
         )
         {
             throw new PackageSecurityException("The finalized package is missing its Linux installer or nested payload.");
         }
         return nestedArchive;
+    }
+
+    private static void AssertExpectedOuterArchiveMetadata(
+        string archivePath,
+        string outerRootName,
+        ZipPackageLimits limits
+    )
+    {
+        using FileStream stream = new(
+            archivePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            64 * 1024,
+            FileOptions.SequentialScan
+        );
+        using ZipArchive archive = new(stream, ZipArchiveMode.Read, leaveOpen: false, entryNameEncoding: Encoding.UTF8);
+        if (archive.Entries.Count == 0)
+            throw new PackageSecurityException("The installer package archive is empty.");
+        if (archive.Entries.Count > limits.MaxEntries)
+            throw new PackageSecurityException("The installer package contains too many entries.");
+
+        AssertRequiredOuterFile(archive, $"{outerRootName}/README.txt", executable: false);
+        AssertRequiredOuterFile(archive, $"{outerRootName}/install on Linux.sh", executable: true);
+        AssertRequiredOuterFile(archive, $"{outerRootName}/install on Linux (graphical).sh", executable: true);
+        AssertRequiredOuterFile(archive, $"{outerRootName}/internal/linux/SMAPI.Installer", executable: true);
+        AssertRequiredOuterFile(archive, $"{outerRootName}/internal/linux/SMAPI.Installer.Gui", executable: true);
+        AssertRequiredOuterFile(archive, $"{outerRootName}/internal/linux/install.dat", executable: false);
+    }
+
+    private static void AssertRequiredOuterFile(ZipArchive archive, string expectedPath, bool executable)
+    {
+        ZipArchiveEntry[] matches = archive.Entries
+            .Where(entry => string.Equals(entry.FullName, expectedPath, StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length != 1)
+            throw new PackageSecurityException("The finalized package is missing a required Linux graphical-installer file.");
+
+        ZipArchiveEntry entry = matches[0];
+        uint attributes = unchecked((uint)entry.ExternalAttributes);
+        int unixAttributes = (int)(attributes >> 16);
+        int unixType = unixAttributes & LinuxInstallManifestBuilder.UnixTypeMask;
+        int unixMode = unixAttributes & 0x1ff;
+        int unixSpecialMode = unixAttributes & LinuxInstallManifestBuilder.UnixSpecialModeMask;
+        bool dosDirectory = (attributes & 0x10) != 0;
+        if (
+            unixType != LinuxInstallManifestBuilder.UnixRegularFile
+            || unixSpecialMode != 0
+            || dosDirectory
+            || entry.Name.Length == 0
+            || entry.Length <= 0
+        )
+        {
+            throw new PackageSecurityException("A required Linux graphical-installer file must be one nonempty ordinary file.");
+        }
+        if (executable && (unixMode & LinuxInstallManifestBuilder.UnixExecutableModeMask) == 0)
+            throw new PackageSecurityException("A required Linux graphical-installer launcher or executable is not executable.");
     }
 
     private static async Task<InspectedNestedPayload> InspectNestedPayloadAsync(

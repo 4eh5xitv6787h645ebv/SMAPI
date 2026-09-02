@@ -653,6 +653,19 @@ These merged ownership/controller slices deliberately add no visible recovery-pr
 
 This visible fixture-free cleanup slice is not yet a packaged public GUI artifact and does not justify a production screenshot. Exact reviewed-package capture, clean-isolated qualification, trusted-workload validation, native AT-SPI/X11/Wayland checks, documentation/gallery publication, and public download verification remain unchecked above and below. No private workload or live game data was accessed or included.
 
+### Self-contained GUI package candidate
+
+- [ ] Publish the untrimmed self-contained Linux x86_64 GUI as one single-file apphost beside its exact console/backend sibling without mixing the .NET 10 GUI and .NET 6 backend runtime files.
+- [ ] Add a separate graphical launcher which refuses effective UID 0 before runtime extraction, uses a private per-run bundle-extraction directory, normally cleans it after ordinary exit or successfully settled HUP/INT/TERM, retains private runtime files instead of deleting them if bounded settlement expires (with manual cleanup only after confirming no installer process remains), keeps abrupt-stop leftovers private, and leaves the existing terminal launcher unchanged.
+- [ ] Extend structural inspection to require the exact graphical launcher and apphost as ordinary, nonempty, executable entries while preserving the strict Linux-only outer layout and nested game-payload authority.
+- [ ] Qualify the exact GUI bytes extracted from the produced ZIP under Xvfb in both sealed demo and production-initial-window modes with disposable HOME/XDG/TMP state, bounded process health, invalid-argument/root refusal, exact sibling-backend co-location, mode/link, and no-game-shaped-state checks; retain actual backend interaction for the packaged lifecycle qualification.
+- [ ] Run the packaged GUI qualifier in both ordinary build artifacts and exact-commit Linux release qualification; keep the same six-asset release authority and console fallback rather than adding an unauthenticated second archive.
+- [ ] Update package/help/architecture/release documentation with the candidate-vs-public boundary, graphical launch, terminal fallback, supported X11/XWayland path, extraction behavior, and remaining diagnostics/release-label/public-qualification limitations.
+- [ ] Pass existing console package/protocol/lifecycle checks, focused manifest/package/GUI smoke tests, full Core and GUI suites, Release warnings-as-errors, formatting/shell/action checks, and both required CI workflows; address every actionable independent packaging, security/privacy, UX/accessibility, testing, and final-diff finding.
+- [ ] Merge the focused package-candidate PR into `develop` and delete its feature branch locally and on origin.
+
+This candidate PR must not publish or tag a release and cannot justify production screenshots. Detailed local diagnostics, release relationship/local-package UX, clean public-artifact lifecycle qualification, the authorized private-workload smoke, desktop/AT-SPI checks, and exact reviewed-package screenshots remain separate dependent work.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.

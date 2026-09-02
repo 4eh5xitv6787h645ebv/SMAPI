@@ -104,6 +104,10 @@ jobs:
                     build/scripts/test-linux-release-package.sh \
                         "bin/SMAPI-$VERSION-linux-x64-installer.zip" \
                         "$VERSION"
+                    build/scripts/test-packaged-linux-gui-inputs.sh
+                    build/scripts/test-packaged-linux-gui.sh \
+                        "bin/SMAPI-$VERSION-linux-x64-installer.zip" \
+                        "$VERSION"
                     build/scripts/test-linux-installer-lifecycle.sh \
                         "bin/SMAPI-$VERSION-linux-x64-installer.zip" \
                         "$VERSION" \

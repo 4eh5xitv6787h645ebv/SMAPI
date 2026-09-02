@@ -314,7 +314,9 @@ public sealed class ReleaseAssetSetTests
         using ZipArchive archive = new(stream, ZipArchiveMode.Create);
         AddFile(archive, $"{root}/README.txt", "README", 420);
         AddFile(archive, $"{root}/install on Linux.sh", "#!/bin/sh", 493);
+        AddFile(archive, $"{root}/install on Linux (graphical).sh", "#!/bin/sh", 493);
         AddFile(archive, $"{root}/internal/linux/SMAPI.Installer", "installer", 493);
+        AddFile(archive, $"{root}/internal/linux/SMAPI.Installer.Gui", "graphical installer", 493);
         AddFile(archive, $"{root}/internal/linux/install.dat", nested, 420);
         if (extraLinuxSupportFiles)
         {
