@@ -182,14 +182,13 @@ capture_exact_child_identity() {
     child_identity_ready=true
 }
 
-is_exact_child_running() {
+is_retained_child_process_live() {
     local process_state=""
     local current_start_time=""
     local current_proc_inode=""
     local current_executable=""
 
     [[ "$child_identity_ready" == true ]] || return 1
-    is_running_child_job || return 1
     read -r process_state current_start_time < <(read_process_state_and_start_time "$child_pid") || return 1
     [[ "$process_state" != "Z" && "$process_state" != "X" ]] || return 1
     current_proc_inode="$(stat -Lc '%i' -- "/proc/$child_pid" 2>/dev/null)" || return 1
@@ -201,17 +200,25 @@ is_exact_child_running() {
     ]]
 }
 
+is_exact_child_live_job() {
+    { is_running_child_job || is_stopped_child_job; } || return 1
+    is_retained_child_process_live
+}
+
 send_exact_signal() {
     local signal_name="$1"
 
     # This closes PID reuse and stale-job windows. A same-UID process can still race Linux /proc
     # inspection and signaling; normal desktop-user isolation is the launcher security boundary.
-    is_exact_child_running || return 1
+    is_exact_child_live_job || return 1
     kill -s "$signal_name" -- "$child_pid" 2>/dev/null
 }
 
-forward_pending_signal() {
+begin_signal_settlement() {
     [[ -n "$requested_signal_name" && "$signal_forwarded" == false ]] || return 0
+    # Enter settlement on the normal execution path. Mask all later handled signals before
+    # checking or forwarding the exact child identity so traps can't interrupt this sequence.
+    trap '' HUP INT TERM
     if send_exact_signal "$requested_signal_name"; then
         signal_forwarded=true
         signal_deadline=$((SECONDS + 3))
@@ -219,15 +226,20 @@ forward_pending_signal() {
 }
 
 record_signal() {
-    if (( handled_signal_count++ > 0 )); then
+    if (( handled_signal_count > 0 )); then
         return 0
     fi
-    local signal_name="$1"
-    local exit_status="$2"
+    handled_signal_count=1
+    requested_signal_name="$1"
+    requested_exit_status="$2"
+}
 
-    requested_signal_name="$signal_name"
-    requested_exit_status="$exit_status"
-    forward_pending_signal
+abort_before_launch_if_requested() {
+    [[ -n "$requested_exit_status" ]] || return 0
+    # A signal can arrive after traps are installed but before the apphost is a retainable child.
+    # Settle that request on the normal path without creating or launching any further state.
+    trap '' HUP INT TERM
+    exit "$requested_exit_status"
 }
 
 trap cleanup EXIT
@@ -235,8 +247,10 @@ trap 'record_signal HUP 129' HUP
 trap 'record_signal INT 130' INT
 trap 'record_signal TERM 143' TERM
 
+abort_before_launch_if_requested
 bundle_root="$(mktemp -d "${TMPDIR:-/tmp}/smapi-installer-gui.XXXXXXXX")"
 chmod 700 -- "$bundle_root"
+abort_before_launch_if_requested
 
 /usr/bin/env \
     --default-signal=HUP \
@@ -256,7 +270,7 @@ while is_running_child_job; do
     fi
     sleep 0.01 || true
 done
-forward_pending_signal
+begin_signal_settlement
 if [[ "$child_identity_ready" == false ]] && { is_running_child_job || is_stopped_child_job; }; then
     if force_kill_and_settle_child; then
         printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." >&2
@@ -270,8 +284,14 @@ fi
 status=0
 kill_sent=false
 while true; do
+    begin_signal_settlement
+    if [[ -n "$requested_signal_name" && "$signal_forwarded" == false ]]; then
+        force_kill_and_settle_child || true
+        status=$settlement_status
+        break
+    fi
     if [[ "$signal_forwarded" == true ]]; then
-        if ! is_exact_child_running; then
+        if ! is_exact_child_live_job; then
             force_kill_and_settle_child || true
             status=$settlement_status
             break
@@ -286,22 +306,63 @@ while true; do
         continue
     fi
 
-    set +e
-    wait "$child_pid" 2>/dev/null
-    status=$?
-    set -e
-    if ! is_active_child_job; then
-        break
+    child_appears_live=false
+    if is_running_child_job || is_stopped_child_job || is_retained_child_process_live; then
+        child_appears_live=true
     fi
-    forward_pending_signal
-    if [[ -n "$requested_signal_name" && "$signal_forwarded" == false ]] && is_running_child_job; then
+    # A retained signal may interrupt any of the job or /proc checks above. Observe and mask it
+    # before deciding that wait is safe; never treat an interrupted check as terminal proof.
+    begin_signal_settlement
+    if [[ -n "$requested_signal_name" ]]; then
+        continue
+    fi
+    if [[ "$child_appears_live" == true ]]; then
+        sleep 0.05 || true
+        continue
+    fi
+
+    child_job_active=false
+    if is_active_child_job; then
+        child_job_active=true
+    fi
+    begin_signal_settlement
+    if [[ -n "$requested_signal_name" ]]; then
+        continue
+    fi
+    if [[ "$child_job_active" == true ]]; then
+        # A job which is still active but no longer has a verifiable live identity is terminal or
+        # unsafe. Reap it or fail closed through the bounded settlement path instead of blocking.
         force_kill_and_settle_child || true
         status=$settlement_status
         break
     fi
-    if [[ -z "$requested_signal_name" ]] && is_stopped_child_job; then
-        sleep 0.05 || true
+
+    set +e
+    wait "$child_pid" 2>/dev/null
+    status=$?
+    set -e
+    # `wait` itself is an interruptible boundary. Settle a request before clearing the retained
+    # PID, then prove the shell no longer owns an active job before accepting normal completion.
+    begin_signal_settlement
+    if [[ -n "$requested_signal_name" ]]; then
+        if [[ "$signal_forwarded" == false ]]; then
+            force_kill_and_settle_child || true
+            status=$settlement_status
+            break
+        fi
+        continue
     fi
+    child_appears_live=false
+    if is_running_child_job || is_stopped_child_job || is_retained_child_process_live; then
+        child_appears_live=true
+    fi
+    begin_signal_settlement
+    if [[ -n "$requested_signal_name" || "$child_appears_live" == true ]]; then
+        continue
+    fi
+    # `wait` is the authoritative reap. Bash may retain a completed `jobs -p` bookkeeping entry,
+    # so only actual live job/kernel evidence can reject the captured child status here.
+    break
 done
 if [[ "$settlement_failed" == false ]]; then
     child_pid=""
