@@ -800,6 +800,7 @@ internal sealed class LinuxInstallerProtocolServiceTests
     [TestCase(RecoveryPruneOutcomeStatus.FailedBeforePublication, typeof(PruneFailureEvent), ProtocolPruneOutcome.FailedBeforePublication, ProtocolRecoveryDisposition.NotRequired)]
     [TestCase(RecoveryPruneOutcomeStatus.Interrupted, typeof(PruneInterruptionEvent), ProtocolPruneOutcome.Interrupted, ProtocolRecoveryDisposition.CleanupPending)]
     [TestCase(RecoveryPruneOutcomeStatus.FailedWithCleanupPending, typeof(PruneFailureEvent), ProtocolPruneOutcome.FailedWithCleanupPending, ProtocolRecoveryDisposition.CleanupPending)]
+    [TestCase(RecoveryPruneOutcomeStatus.FailedAfterApply, typeof(PruneFailureEvent), ProtocolPruneOutcome.FailedAfterApply, ProtocolRecoveryDisposition.StateRefreshRequired)]
     public async Task PruneTerminalMappingsPreserveLogicalPhysicalAndPendingTruth(RecoveryPruneOutcomeStatus status, Type expectedType, ProtocolPruneOutcome expectedOutcome, ProtocolRecoveryDisposition recovery)
     {
         FakeEngine engine = new() { NextPruneStatus = status };
@@ -809,6 +810,94 @@ internal sealed class LinuxInstallerProtocolServiceTests
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         ProtocolEvent terminal = (await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)))!;
         terminal.Should().BeOfType(expectedType); GetPruneOutcome(terminal).Should().Be(expectedOutcome); GetTerminalState(terminal).RecoveryDisposition.Should().Be(recovery);
+    }
+
+    [TestCase(true, false)]
+    [TestCase(false, true)]
+    public async Task FailedAfterApplyRejectsIncompleteConfirmedWorkCounts(bool omitLogical, bool omitPhysical)
+    {
+        FakeEngine engine = new() { NextPruneStatus = RecoveryPruneOutcomeStatus.FailedAfterApply, OmitPruneLogicalWork = omitLogical, OmitPrunePhysicalWork = omitPhysical };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1));
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        Func<Task> execute = async () => await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        await execute.Should().ThrowAsync<ProtocolException>().WithMessage("*core prune outcome*");
+    }
+
+    [TestCase("foreign-logical", RecoveryPruneOutcomeStatus.Succeeded)]
+    [TestCase("duplicate-logical", RecoveryPruneOutcomeStatus.Succeeded)]
+    [TestCase("foreign-physical", RecoveryPruneOutcomeStatus.Succeeded)]
+    [TestCase("duplicate-physical", RecoveryPruneOutcomeStatus.Succeeded)]
+    [TestCase("foreign-pending", RecoveryPruneOutcomeStatus.FailedWithCleanupPending)]
+    [TestCase("duplicate-pending", RecoveryPruneOutcomeStatus.FailedWithCleanupPending)]
+    [TestCase("oversized-foreign-pending", RecoveryPruneOutcomeStatus.FailedWithCleanupPending)]
+    [TestCase("cleaned-and-pending", RecoveryPruneOutcomeStatus.FailedWithCleanupPending)]
+    public async Task CorePruneOutcomeGenerationIdentitiesMustMatchTheConfirmedPlan(string mutation, RecoveryPruneOutcomeStatus status)
+    {
+        FakeEngine engine = new() { NextPruneStatus = status, PruneIdentityMutation = mutation };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1));
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        Func<Task> execute = async () => await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        await execute.Should().ThrowAsync<ProtocolException>().WithMessage("*core prune outcome*");
+    }
+
+    [TestCase("impossible-auxiliary")]
+    [TestCase("cleaned-without-logical-publication")]
+    [TestCase("removed-pending-without-logical-publication")]
+    [TestCase("logical-published-impossible-auxiliary")]
+    [TestCase("underreported-generation-with-auxiliary")]
+    public async Task CorePruneOutcomeCrossFieldClaimsMustBePlausibleForTheConfirmedPlan(string mutation)
+    {
+        FakeEngine engine = new()
+        {
+            NextPruneStatus = RecoveryPruneOutcomeStatus.FailedWithCleanupPending,
+            CleanupOnlyPrune = mutation == "impossible-auxiliary",
+            OmitPruneLogicalWork = mutation is "cleaned-without-logical-publication" or "removed-pending-without-logical-publication",
+            OmitPendingPruneCleanup = mutation == "underreported-generation-with-auxiliary",
+            NextPruneAuxiliaryCleanupPending = mutation is not "removed-pending-without-logical-publication",
+            LogicalPruneHasAuxiliaryCleanup = mutation == "underreported-generation-with-auxiliary",
+            PruneIdentityMutation = mutation
+        };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, engine.CleanupOnlyPrune ? 2 : 1));
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        Func<Task> execute = async () => await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        await execute.Should().ThrowAsync<ProtocolException>().WithMessage("*core prune outcome*");
+    }
+
+    [Test]
+    public async Task BeforePublicationCleanupPendingMustAccountForEveryPreexistingConfirmedGeneration()
+    {
+        FakeEngine engine = new()
+        {
+            CleanupOnlyPrune = true,
+            CleanupOnlyPruneHasAuxiliaryCleanup = true,
+            NextPruneStatus = RecoveryPruneOutcomeStatus.CancelledBeforePublication,
+            OmitPendingPruneCleanup = true,
+            NextPruneAuxiliaryCleanupPending = true
+        };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 2));
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        Func<Task> execute = async () => await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        await execute.Should().ThrowAsync<ProtocolException>().WithMessage("*account for every confirmed generation cleanup*");
     }
 
     [TestCase(false, false, ProtocolDurableState.PruneApplied, ProtocolRecoveryDisposition.CleanupPending)]
@@ -843,6 +932,47 @@ internal sealed class LinuxInstallerProtocolServiceTests
         terminal.Summary.Should().Contain("physical generation cleanup");
         if (status == RecoveryPruneOutcomeStatus.CancelledWithCleanupPending)
             terminal.Summary.Should().Contain("No logical generations were removed");
+    }
+
+    [Test]
+    public async Task TrueNoOpPruneReturnsTypedNonterminalRejectionAndKeepsSessionReusable()
+    {
+        FakeEngine engine = new() { NoWorkPrune = true };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+        InspectPruneRequest request = new(service.SessionId, catalog.CatalogId, 2);
+
+        PrePlanRejectedEvent rejected = (PrePlanRejectedEvent)await service.HandleAsync(request);
+
+        rejected.CommandId.Should().Be(request.CommandId);
+        rejected.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.NothingToPrune);
+        rejected.NextAction.Should().Be(ProtocolNextAction.ListRecoveries);
+        rejected.IsTerminal.Should().BeFalse();
+        rejected.SanitizedLogPath.Should().BeNull();
+        service.State.Should().Be(ProtocolSessionState.Ready);
+        (await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"))).Should().BeOfType<RecoveryCatalogEvent>();
+    }
+
+    [Test]
+    public async Task AuxiliaryOnlyPruneIsDigestBoundConfirmableAndExecutable()
+    {
+        FakeEngine engine = new() { AuxiliaryOnlyPrune = true };
+        using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game"));
+
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 2));
+
+        plan.RetainedSelectionIds.Should().HaveCount(2);
+        plan.RemovedSelectionIds.Should().BeEmpty();
+        plan.CleanupGenerationIds.Should().BeEmpty();
+        plan.AuxiliaryCleanupPlanned.Should().BeTrue();
+        ProtocolPlanDigest.ComputePrune(plan.ExecutionBindingDigest, plan.CatalogId, plan.GameRoot, plan.HeadSha256, plan.RetainNewest, plan.RetainedSelectionIds, plan.RemovedSelectionIds, plan.CleanupGenerationIds, true, plan.Summary, plan.Warnings, true).Should().Be(plan.PruneDigest);
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        PruneSuccessEvent terminal = (PruneSuccessEvent)await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        terminal.PruneSummary.Should().Be(new ProtocolPruneSummary(0, 0, 0, false));
+        terminal.TerminalState.DurableState.Should().Be(ProtocolDurableState.PruneApplied);
     }
 
     [TestCase(false)]
@@ -897,10 +1027,10 @@ internal sealed class LinuxInstallerProtocolServiceTests
     [Test]
     public async Task AuxiliaryPruneCleanupPendingIsPresentedWithoutInventingGenerationWork()
     {
-        FakeEngine engine = new() { NextPruneStatus = RecoveryPruneOutcomeStatus.FailedWithCleanupPending, NextPruneAuxiliaryCleanupPending = true, OmitPendingPruneCleanup = true };
+        FakeEngine engine = new() { AuxiliaryOnlyPrune = true, NextPruneStatus = RecoveryPruneOutcomeStatus.FailedWithCleanupPending, NextPruneAuxiliaryCleanupPending = true, OmitPendingPruneCleanup = true };
         using LinuxInstallerProtocolService service = Create(engine, new FakePackageOpener());
         await Handshake(service); RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)(await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, "/game")))!;
-        PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1)))!;
+        PrunePlanEvent plan = (PrunePlanEvent)(await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 2)))!;
         await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
         PruneFailureEvent terminal = (PruneFailureEvent)(await service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest)))!;
         terminal.Message.Should().Contain("auxiliary recovery metadata cleanup"); terminal.PruneSummary.PhysicallyCleanedGenerationCount.Should().Be(0); terminal.TerminalState.RecoveryDisposition.Should().Be(ProtocolRecoveryDisposition.CleanupPending);
@@ -1256,6 +1386,10 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public RecoveryPruneOutcomeStatus NextPruneStatus { get; set; } = RecoveryPruneOutcomeStatus.Succeeded;
         public bool NextPruneAuxiliaryCleanupPending { get; set; }
         public bool CleanupOnlyPrune { get; set; }
+        public bool CleanupOnlyPruneHasAuxiliaryCleanup { get; set; }
+        public bool AuxiliaryOnlyPrune { get; set; }
+        public bool LogicalPruneHasAuxiliaryCleanup { get; set; }
+        public bool NoWorkPrune { get; set; }
         public bool BlockPruneUntilCancellation { get; set; }
         public bool ThrowPruneBeforeProgress { get; set; }
         public bool ThrowPruneAfterProgress { get; set; }
@@ -1276,6 +1410,9 @@ internal sealed class LinuxInstallerProtocolServiceTests
         public bool BlockExecutionInitiation { get; set; }
         public bool OmitPendingPruneCleanup { get; set; }
         public bool SuppressPruneWork { get; set; }
+        public bool OmitPruneLogicalWork { get; set; }
+        public bool OmitPrunePhysicalWork { get; set; }
+        public string? PruneIdentityMutation { get; set; }
         public Exception? ListRecoveriesFailure { get; set; }
         public TaskCompletionSource RecoveryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ExecutionInitiationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1365,9 +1502,17 @@ internal sealed class LinuxInstallerProtocolServiceTests
             ? Task.FromException<RecoveryHistory>(failure)
             : Task.FromResult(new RecoveryHistory(Sha256Digest.Parse(HashA), [new(this.First, InstallationAction.Backup, true, true, this.RecoveryRelease), new(this.Second, InstallationAction.Update, false, false, this.RecoveryRelease)]));
         public Task<ICommittedRecoveryContentAuthority> OpenRecoveryAsync(string gameRoot, Guid generationId, CancellationToken cancellationToken) { FakeRecoveryAuthority result = new(generationId, generationId == this.First ? InstallationAction.Backup : InstallationAction.Update, this.RecoveryRelease); this.OpenedRecoveries.Add(result); return Task.FromResult<ICommittedRecoveryContentAuthority>(result); }
-        public Task<RecoveryPrunePlan> InspectRecoveryPruneAsync(string gameRoot, int retainNewest, CancellationToken cancellationToken) => Task.FromResult(this.CleanupOnlyPrune
-            ? new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First, this.Second], [], [this.Pending], [], null)
-            : new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First], [this.Second], [this.Second], [], null));
+        public Task<RecoveryPrunePlan> InspectRecoveryPruneAsync(string gameRoot, int retainNewest, CancellationToken cancellationToken)
+        {
+            RecoveryPrunePlan result = this.NoWorkPrune
+                ? new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First, this.Second], [], [], [], null)
+                : this.AuxiliaryOnlyPrune
+                    ? new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First, this.Second], [], [], [], null, true)
+                    : this.CleanupOnlyPrune
+                        ? new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First, this.Second], [], [this.Pending], [], null, this.CleanupOnlyPruneHasAuxiliaryCleanup)
+                        : new RecoveryPrunePlan(Root, 7, Sha256Digest.Parse(HashA), retainNewest, [this.First, this.Second], [this.First], [this.Second], [this.Second], [], null, this.LogicalPruneHasAuxiliaryCleanup);
+            return Task.FromResult(result);
+        }
         public async Task<RecoveryPruneOutcome> ExecuteRecoveryPruneAsync(RecoveryPrunePlan plan, Sha256Digest confirmedDigest, CancellationToken cancellationToken)
         {
             this.ObservedPruneDigests.Add(confirmedDigest);
@@ -1385,11 +1530,27 @@ internal sealed class LinuxInstallerProtocolServiceTests
             }
             bool pending = this.NextPruneStatus is RecoveryPruneOutcomeStatus.Interrupted or RecoveryPruneOutcomeStatus.CancelledWithCleanupPending or RecoveryPruneOutcomeStatus.FailedWithCleanupPending
                 || (this.CleanupOnlyPrune && (this.NextPruneStatus == RecoveryPruneOutcomeStatus.FailedBeforePublication || this.NextPruneStatus == RecoveryPruneOutcomeStatus.CancelledBeforePublication));
-            IReadOnlyList<Guid> logical = this.SuppressPruneWork || this.NextPruneStatus is RecoveryPruneOutcomeStatus.FailedBeforePublication or RecoveryPruneOutcomeStatus.CancelledBeforePublication ? [] : plan.RemovedGenerationIds;
-            IReadOnlyList<Guid> physical = this.NextPruneStatus == RecoveryPruneOutcomeStatus.Succeeded ? plan.CleanupGenerationIds : [];
-            IReadOnlyList<Guid> pendingIds = pending && !this.OmitPendingPruneCleanup ? plan.CleanupGenerationIds : [];
-            TransactionErrorCode? error = this.NextPruneStatus is RecoveryPruneOutcomeStatus.Succeeded or RecoveryPruneOutcomeStatus.CancelledBeforePublication or RecoveryPruneOutcomeStatus.CancelledWithCleanupPending ? null : TransactionErrorCode.IoFailure;
-            return new(this.NextPruneStatus, logical, physical, pendingIds, this.NextPruneAuxiliaryCleanupPending, error, this.NextPruneStatus.ToString());
+            IReadOnlyList<Guid> logical = this.SuppressPruneWork || this.OmitPruneLogicalWork || this.NextPruneStatus is RecoveryPruneOutcomeStatus.FailedBeforePublication or RecoveryPruneOutcomeStatus.CancelledBeforePublication ? [] : plan.RemovedGenerationIds;
+            bool allCleanupObserved = this.NextPruneStatus is RecoveryPruneOutcomeStatus.Succeeded or RecoveryPruneOutcomeStatus.CancelledAfterApply or RecoveryPruneOutcomeStatus.FailedAfterApply
+                || this.NextPruneStatus == RecoveryPruneOutcomeStatus.Interrupted && this.OmitPendingPruneCleanup && !this.SuppressPruneWork;
+            IReadOnlyList<Guid> physical = !this.OmitPrunePhysicalWork && allCleanupObserved ? plan.CleanupGenerationIds : [];
+            IReadOnlyList<Guid> pendingIds = pending && !this.OmitPendingPruneCleanup && !this.SuppressPruneWork ? plan.CleanupGenerationIds : [];
+            Guid foreign = Guid.ParseExact("ffffffffffffffffffffffffffffffff", "N");
+            switch (this.PruneIdentityMutation)
+            {
+                case "foreign-logical": logical = [foreign]; break;
+                case "duplicate-logical": logical = [plan.RemovedGenerationIds[0], plan.RemovedGenerationIds[0]]; break;
+                case "foreign-physical": physical = [foreign]; break;
+                case "duplicate-physical": physical = [plan.CleanupGenerationIds[0], plan.CleanupGenerationIds[0]]; break;
+                case "foreign-pending": pendingIds = [foreign]; break;
+                case "duplicate-pending": pendingIds = [plan.CleanupGenerationIds[0], plan.CleanupGenerationIds[0]]; break;
+                case "oversized-foreign-pending": pendingIds = [.. plan.CleanupGenerationIds, foreign]; break;
+                case "cleaned-and-pending": physical = [plan.CleanupGenerationIds[0]]; pendingIds = [plan.CleanupGenerationIds[0]]; break;
+                case "cleaned-without-logical-publication": physical = [plan.CleanupGenerationIds[0]]; pendingIds = []; break;
+            }
+            TransactionErrorCode? error = this.NextPruneStatus is RecoveryPruneOutcomeStatus.Succeeded or RecoveryPruneOutcomeStatus.CancelledBeforePublication or RecoveryPruneOutcomeStatus.CancelledWithCleanupPending or RecoveryPruneOutcomeStatus.CancelledAfterApply ? null : TransactionErrorCode.IoFailure;
+            bool auxiliaryPending = this.NextPruneAuxiliaryCleanupPending || pending && this.SuppressPruneWork;
+            return new(this.NextPruneStatus, logical, physical, pendingIds, auxiliaryPending, error, this.NextPruneStatus.ToString());
         }
 
         private static ModifiedFileReplacementCandidate[] CreateCandidates(object authority) =>

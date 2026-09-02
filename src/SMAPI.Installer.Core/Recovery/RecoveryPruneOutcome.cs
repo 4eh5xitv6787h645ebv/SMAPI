@@ -11,7 +11,9 @@ public enum RecoveryPruneOutcomeStatus
     CancelledBeforePublication,
     Interrupted,
     CancelledWithCleanupPending,
-    FailedWithCleanupPending
+    FailedWithCleanupPending,
+    CancelledAfterApply,
+    FailedAfterApply
 }
 
 /// <summary>A truthful result captured at recovery-retention publication and physical-cleanup boundaries.</summary>
@@ -30,6 +32,12 @@ public sealed record RecoveryPruneOutcome
         ArgumentNullException.ThrowIfNull(logicallyRemovedGenerationIds);
         ArgumentNullException.ThrowIfNull(physicallyCleanedGenerationIds);
         ArgumentNullException.ThrowIfNull(pendingCleanupGenerationIds);
+        if (status == RecoveryPruneOutcomeStatus.Succeeded && (pendingCleanupGenerationIds.Count > 0 || auxiliaryCleanupPending))
+            throw new ArgumentException("A successful recovery prune can't report pending cleanup.", nameof(status));
+        if (status is RecoveryPruneOutcomeStatus.FailedBeforePublication or RecoveryPruneOutcomeStatus.CancelledBeforePublication && (logicallyRemovedGenerationIds.Count > 0 || physicallyCleanedGenerationIds.Count > 0))
+            throw new ArgumentException("A recovery prune which stopped before publication can't report applied work.", nameof(status));
+        if (status is RecoveryPruneOutcomeStatus.CancelledAfterApply or RecoveryPruneOutcomeStatus.FailedAfterApply && (pendingCleanupGenerationIds.Count > 0 || auxiliaryCleanupPending || logicallyRemovedGenerationIds.Count == 0 && physicallyCleanedGenerationIds.Count == 0))
+            throw new ArgumentException("An after-apply recovery prune outcome requires applied work and no known pending cleanup.", nameof(status));
         this.Status = status;
         this.LogicallyRemovedGenerationIds = new ReadOnlyCollection<Guid>(logicallyRemovedGenerationIds.ToArray());
         this.PhysicallyCleanedGenerationIds = new ReadOnlyCollection<Guid>(physicallyCleanedGenerationIds.ToArray());

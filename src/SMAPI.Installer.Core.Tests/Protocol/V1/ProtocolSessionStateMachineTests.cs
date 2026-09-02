@@ -421,6 +421,82 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void NoPruneWork_RequiresExactCatalogBindingAndReturnsToReusableReadyState()
+    {
+        static (ProtocolSessionStateMachine Machine, RecoveryCatalogEvent Catalog, FakeRecoveryAuthority First, FakeRecoveryAuthority Second) Context()
+        {
+            ProtocolSessionStateMachine machine = Ready();
+            FakeRecoveryAuthority first = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+            FakeRecoveryAuthority second = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, Root);
+            return (machine, Catalog(machine, [first, second]), first, second);
+        }
+
+        (ProtocolSessionStateMachine machine, RecoveryCatalogEvent catalog, FakeRecoveryAuthority first, FakeRecoveryAuthority second) = Context();
+        PlanEvent prior = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall));
+        machine.ConfirmPlan(new(machine.SessionId, prior.PlanId, prior.PlanDigest));
+        InspectPruneRequest request = new(machine.SessionId, catalog.CatalogId, 2);
+        RecoveryPrunePlan exact = Prune([first.GenerationId, second.GenerationId], 2, [first.GenerationId, second.GenerationId], []);
+        PrePlanRejectedEvent noWork = machine.RecordNoPruneWork(request, exact);
+        noWork.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.NothingToPrune);
+        noWork.CommandId.Should().Be(request.CommandId);
+        machine.State.Should().Be(ProtocolSessionState.Ready);
+        Catalog(machine, [Recovery(first.GenerationId, HashA, Root), Recovery(second.GenerationId, HashA, Root)]).Should().NotBeNull();
+        FluentActions.Invoking(() => machine.ConfirmPlan(new(machine.SessionId, prior.PlanId, prior.PlanDigest))).Should().Throw<ProtocolException>();
+
+        (ProtocolSessionStateMachine wrongHeadMachine, RecoveryCatalogEvent wrongHeadCatalog, FakeRecoveryAuthority wrongHeadFirst, FakeRecoveryAuthority wrongHeadSecond) = Context();
+        RecoveryPrunePlan wrongHead = new(Root, 7, Sha256Digest.Parse(HashB), 2, [wrongHeadFirst.GenerationId, wrongHeadSecond.GenerationId], [wrongHeadFirst.GenerationId, wrongHeadSecond.GenerationId], [], [], [], null);
+        FluentActions.Invoking(() => wrongHeadMachine.RecordNoPruneWork(new(wrongHeadMachine.SessionId, wrongHeadCatalog.CatalogId, 2), wrongHead)).Should().Throw<ProtocolException>().WithMessage("*root, head, and retention*");
+
+        (ProtocolSessionStateMachine wrongRootMachine, RecoveryCatalogEvent wrongRootCatalog, FakeRecoveryAuthority wrongRootFirst, FakeRecoveryAuthority wrongRootSecond) = Context();
+        RecoveryPrunePlan wrongRoot = new(new("/other", 4, 5, 6), 7, Sha256Digest.Parse(HashA), 2, [wrongRootFirst.GenerationId, wrongRootSecond.GenerationId], [wrongRootFirst.GenerationId, wrongRootSecond.GenerationId], [], [], [], null);
+        FluentActions.Invoking(() => wrongRootMachine.RecordNoPruneWork(new(wrongRootMachine.SessionId, wrongRootCatalog.CatalogId, 2), wrongRoot)).Should().Throw<ProtocolException>().WithMessage("*root, head, and retention*");
+
+        (ProtocolSessionStateMachine wrongRetainMachine, RecoveryCatalogEvent wrongRetainCatalog, FakeRecoveryAuthority wrongRetainFirst, FakeRecoveryAuthority wrongRetainSecond) = Context();
+        RecoveryPrunePlan wrongRetain = Prune([wrongRetainFirst.GenerationId, wrongRetainSecond.GenerationId], 2, [wrongRetainFirst.GenerationId, wrongRetainSecond.GenerationId], []);
+        FluentActions.Invoking(() => wrongRetainMachine.RecordNoPruneWork(new(wrongRetainMachine.SessionId, wrongRetainCatalog.CatalogId, 1), wrongRetain)).Should().Throw<ProtocolException>().WithMessage("*retention request*");
+
+        (ProtocolSessionStateMachine wrongOrderMachine, RecoveryCatalogEvent wrongOrderCatalog, FakeRecoveryAuthority wrongOrderFirst, FakeRecoveryAuthority wrongOrderSecond) = Context();
+        RecoveryPrunePlan wrongOrder = Prune([wrongOrderSecond.GenerationId, wrongOrderFirst.GenerationId], 2, [wrongOrderSecond.GenerationId, wrongOrderFirst.GenerationId], []);
+        FluentActions.Invoking(() => wrongOrderMachine.RecordNoPruneWork(new(wrongOrderMachine.SessionId, wrongOrderCatalog.CatalogId, 2), wrongOrder)).Should().Throw<ProtocolException>().WithMessage("*exact stored catalog order*");
+    }
+
+    [TestCase("plan-issued")]
+    [TestCase("plan-confirmed")]
+    [TestCase("prune-issued")]
+    [TestCase("prune-confirmed")]
+    public void NoPruneWork_ReplacesEveryReviewablePlanStateAndRevokesPriorAuthority(string priorState)
+    {
+        ProtocolSessionStateMachine machine = Ready();
+        FakeRecoveryAuthority first = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+        FakeRecoveryAuthority second = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, Root);
+        RecoveryCatalogEvent catalog = Catalog(machine, [first, second]);
+        PlanEvent? ordinary = null;
+        PrunePlanEvent? prune = null;
+        if (priorState.StartsWith("plan", StringComparison.Ordinal))
+        {
+            ordinary = machine.IssuePlan(new(machine.SessionId, "/game", InstallerOperation.Uninstall, null, null), Inspection(InstallationAction.Uninstall));
+            if (priorState == "plan-confirmed")
+                machine.ConfirmPlan(new(machine.SessionId, ordinary.PlanId, ordinary.PlanDigest));
+        }
+        else
+        {
+            prune = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 1), Prune([first.GenerationId, second.GenerationId], 1, [first.GenerationId], [second.GenerationId]));
+            if (priorState == "prune-confirmed")
+                machine.ConfirmPrune(new(machine.SessionId, prune.PrunePlanId, prune.PruneDigest));
+        }
+
+        RecoveryPrunePlan noWork = Prune([first.GenerationId, second.GenerationId], 2, [first.GenerationId, second.GenerationId], []);
+        machine.RecordNoPruneWork(new(machine.SessionId, catalog.CatalogId, 2), noWork);
+
+        machine.State.Should().Be(ProtocolSessionState.Ready);
+        Catalog(machine, [Recovery(first.GenerationId, HashA, Root), Recovery(second.GenerationId, HashA, Root)]).Should().NotBeNull();
+        if (ordinary is not null)
+            FluentActions.Invoking(() => machine.ConfirmPlan(new(machine.SessionId, ordinary.PlanId, ordinary.PlanDigest))).Should().Throw<ProtocolException>();
+        if (prune is not null)
+            FluentActions.Invoking(() => machine.ConfirmPrune(new(machine.SessionId, prune.PrunePlanId, prune.PruneDigest))).Should().Throw<ProtocolException>();
+    }
+
+    [Test]
     public void PrunePlan_CleanupOnlyIsExecutableAndReportsPhysicalWorkHonestly()
     {
         ProtocolSessionStateMachine machine = Ready(); FakeRecoveryAuthority first = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root); FakeRecoveryAuthority second = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, Root); RecoveryCatalogEvent catalog = Catalog(machine, [first, second]);
@@ -432,6 +508,59 @@ internal sealed class ProtocolSessionStateMachineTests
         retained.ConfirmationDigest.Value.Should().Be(plan.ExecutionBindingDigest.Value);
         FluentActions.Invoking(() => machine.Complete(PruneSuccess(machine, plan.PrunePlanId, plan.PruneDigest, execute.CommandId, 0, 0))).Should().Throw<ProtocolException>().WithMessage("*physical-cleanup count*");
         machine.Complete(PruneSuccess(machine, plan.PrunePlanId, plan.PruneDigest, execute.CommandId, 0, 1));
+    }
+
+    [Test]
+    public void AfterApplyPruneTerminalsRequireEveryConfirmedLogicalAndPhysicalCount()
+    {
+        static (ProtocolSessionStateMachine Machine, PrunePlanEvent Plan, ExecutePruneRequest Execute) Started()
+        {
+            ProtocolSessionStateMachine machine = Ready();
+            FakeRecoveryAuthority first = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+            FakeRecoveryAuthority second = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, Root);
+            RecoveryCatalogEvent catalog = Catalog(machine, [first, second]);
+            PrunePlanEvent plan = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 1), Prune([first.GenerationId, second.GenerationId], 1, [first.GenerationId], [second.GenerationId]));
+            machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest));
+            ExecutePruneRequest execute = new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest);
+            machine.BeginPrune(execute);
+            return (machine, plan, execute);
+        }
+
+        (ProtocolSessionStateMachine failedMachine, PrunePlanEvent failedPlan, ExecutePruneRequest failedExecute) = Started();
+        ProtocolTerminalState failedState = new(ProtocolDurableState.PruneApplied, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries);
+        PruneFailureEvent MissingFailureCount(int logical, int physical) => new(failedMachine.SessionId, failedPlan.PrunePlanId, failedPlan.PruneDigest, ProtocolPruneOutcome.FailedAfterApply, failedState, new(logical, physical, 0, false), "Failed.", null) { CommandId = failedExecute.CommandId };
+        FluentActions.Invoking(() => failedMachine.Complete(MissingFailureCount(0, 1))).Should().Throw<ProtocolException>().WithMessage("*exactly match the confirmed plan*");
+        FluentActions.Invoking(() => failedMachine.Complete(MissingFailureCount(1, 0))).Should().Throw<ProtocolException>().WithMessage("*exactly match the confirmed plan*");
+        failedMachine.Complete(MissingFailureCount(1, 1));
+
+        (ProtocolSessionStateMachine cancelledMachine, PrunePlanEvent cancelledPlan, ExecutePruneRequest cancelledExecute) = Started();
+        cancelledMachine.RequestPruneCancellation(new(cancelledMachine.SessionId, cancelledPlan.PrunePlanId, cancelledPlan.PruneDigest));
+        ProtocolTerminalState cancelledState = new(ProtocolDurableState.PruneApplied, null, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries);
+        PruneCancelledEvent MissingCancellationCount(int logical, int physical) => new(cancelledMachine.SessionId, cancelledPlan.PrunePlanId, cancelledPlan.PruneDigest, ProtocolPruneOutcome.CancelledAfterApply, cancelledState, new(logical, physical, 0, false), "Cancelled.", null) { CommandId = cancelledExecute.CommandId };
+        FluentActions.Invoking(() => cancelledMachine.Complete(MissingCancellationCount(0, 1))).Should().Throw<ProtocolException>().WithMessage("*exactly match the confirmed plan*");
+        FluentActions.Invoking(() => cancelledMachine.Complete(MissingCancellationCount(1, 0))).Should().Throw<ProtocolException>().WithMessage("*exactly match the confirmed plan*");
+        cancelledMachine.Complete(MissingCancellationCount(1, 1));
+    }
+
+    [Test]
+    public void PrunePlan_AuxiliaryOnlyIsExplicitlyDigestBoundAndExecutable()
+    {
+        ProtocolSessionStateMachine machine = Ready();
+        FakeRecoveryAuthority first = Recovery(Guid.ParseExact("11111111111111111111111111111111", "N"), HashA, Root);
+        FakeRecoveryAuthority second = Recovery(Guid.ParseExact("22222222222222222222222222222222", "N"), HashA, Root);
+        RecoveryCatalogEvent catalog = Catalog(machine, [first, second]);
+        RecoveryPrunePlan core = Prune([first.GenerationId, second.GenerationId], 2, [first.GenerationId, second.GenerationId], [], [], hasAuxiliaryCleanup: true);
+
+        PrunePlanEvent plan = machine.IssuePrunePlan(new(machine.SessionId, catalog.CatalogId, 2), core);
+
+        plan.RemovedSelectionIds.Should().BeEmpty();
+        plan.CleanupGenerationIds.Should().BeEmpty();
+        plan.AuxiliaryCleanupPlanned.Should().BeTrue();
+        machine.ConfirmPrune(new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        ExecutePruneRequest execute = new(machine.SessionId, plan.PrunePlanId, plan.PruneDigest);
+        machine.BeginPrune(execute).Should().BeSameAs(core);
+        machine.Complete(PruneSuccess(machine, plan.PrunePlanId, plan.PruneDigest, execute.CommandId, 0, 0));
+        machine.State.Should().Be(ProtocolSessionState.Completed);
     }
 
     [Test]
@@ -541,7 +670,7 @@ internal sealed class ProtocolSessionStateMachineTests
         return new(plan, binding, package, recovery, repairAuthority ?? new object(), action == InstallationAction.Install ? null : CreateRelease(), action is InstallationAction.Uninstall or InstallationAction.Backup ? null : CreateRelease(), ObservedInstallationState.KnownModified, new RecoveryCapacityState(0, 64), candidates, approvals);
     }
 
-    private static RecoveryPrunePlan Prune(Guid[] catalog, int retain, Guid[] retained, Guid[] removed, Guid[]? cleanup = null) => new(Root, 7, Sha256Digest.Parse(HashA), retain, catalog, retained, removed, cleanup ?? removed, [], null);
+    private static RecoveryPrunePlan Prune(Guid[] catalog, int retain, Guid[] retained, Guid[] removed, Guid[]? cleanup = null, bool hasAuxiliaryCleanup = false) => new(Root, 7, Sha256Digest.Parse(HashA), retain, catalog, retained, removed, cleanup ?? removed, [], null, hasAuxiliaryCleanup);
     private static FakeRecoveryAuthority Recovery(Guid id, string head, GameRootIdentity root) => new(id, InstallationAction.Backup, root, Sha256Digest.Parse(head), CreateRelease());
     private static InstallationReleaseIdentity CreateRelease() => CreateReleaseWithPackage(Sha256Digest.Parse(HashA), 123);
     private static InstallationReleaseIdentity CreateReleaseWithPackage(Sha256Digest packageSha256, long packageSize) => new("https://github.com/4eh5xitv6787h645ebv/SMAPI", "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2", "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", packageSha256, packageSize, "4eh5xitv6787h645ebv/SMAPI/.github/workflows/linux-alpha-release.yml@refs/tags/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "Release", "linux-x64");

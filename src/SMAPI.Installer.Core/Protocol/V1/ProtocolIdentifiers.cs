@@ -162,6 +162,7 @@ public sealed record ProtocolPlanDigest
         IReadOnlyList<ProtocolRecoverySelectionId> retained,
         IReadOnlyList<ProtocolRecoverySelectionId> removed,
         IReadOnlyList<string> cleanupGenerationIds,
+        bool auxiliaryCleanupPlanned,
         string summary,
         IReadOnlyList<string> warnings,
         bool requiresConfirmation
@@ -175,10 +176,38 @@ public sealed record ProtocolPlanDigest
         WriteIds(writer, "retained_selection_ids", retained.Select(p => p.Value));
         WriteIds(writer, "removed_selection_ids", removed.Select(p => p.Value));
         WriteStrings(writer, "cleanup_generation_ids", cleanupGenerationIds);
+        writer.WriteBoolean("auxiliary_cleanup_planned", auxiliaryCleanupPlanned);
         writer.WriteString("summary", summary);
         WriteStrings(writer, "warnings", warnings);
         writer.WriteBoolean("requires_confirmation", requiresConfirmation);
     });
+
+    public static ProtocolPlanDigest ComputePrune(
+        ProtocolPlanDigest executionBindingDigest,
+        ProtocolRecoveryCatalogId catalogId,
+        ProtocolGameRootIdentity gameRoot,
+        string headSha256,
+        int retainNewest,
+        IReadOnlyList<ProtocolRecoverySelectionId> retained,
+        IReadOnlyList<ProtocolRecoverySelectionId> removed,
+        IReadOnlyList<string> cleanupGenerationIds,
+        string summary,
+        IReadOnlyList<string> warnings,
+        bool requiresConfirmation
+    ) => ComputePrune(
+        executionBindingDigest,
+        catalogId,
+        gameRoot,
+        headSha256,
+        retainNewest,
+        retained,
+        removed,
+        cleanupGenerationIds,
+        false,
+        summary,
+        warnings,
+        requiresConfirmation
+    );
 
     public override string ToString() => this.Value;
 

@@ -121,7 +121,7 @@ public static class ProtocolJsonSerializer
         [ProtocolMessageKind.NoRecoveryHistoryEvent] = C("no-recovery-history.event", typeof(NoRecoveryHistoryEvent), false, "sessionId"),
         [ProtocolMessageKind.PlanEvent] = C("plan.event", typeof(PlanEvent), false, "sessionId", "planId", "planDigest", "executionBindingDigest", "operation", "packageId", "recoveryAuthority", "gameRoot", "currentRelease", "targetRelease", "observedState", "operationCount", "conflictCount", "candidateCount", "warningCount", "canExecute", "risks", "recommendedDefault", "summary", "requiresConfirmation"),
         [ProtocolMessageKind.PlanPageEvent] = C("plan-page.event", typeof(PlanPageEvent), false, "sessionId", "planId", "planDigest", "pageKind", "offset", "totalCount", "nextOffset", "operations", "conflicts", "candidates", "warnings"),
-        [ProtocolMessageKind.PrunePlanEvent] = C("prune-plan.event", typeof(PrunePlanEvent), false, "sessionId", "prunePlanId", "pruneDigest", "executionBindingDigest", "catalogId", "gameRoot", "headSha256", "retainNewest", "retainedSelectionIds", "removedSelectionIds", "cleanupGenerationIds", "summary", "warnings", "risks", "recommendedDefault", "requiresConfirmation"),
+        [ProtocolMessageKind.PrunePlanEvent] = C("prune-plan.event", typeof(PrunePlanEvent), false, "sessionId", "prunePlanId", "pruneDigest", "executionBindingDigest", "catalogId", "gameRoot", "headSha256", "retainNewest", "retainedSelectionIds", "removedSelectionIds", "cleanupGenerationIds", "auxiliaryCleanupPlanned", "summary", "warnings", "risks", "recommendedDefault", "requiresConfirmation"),
         [ProtocolMessageKind.ProgressEvent] = C("progress.event", typeof(ProgressEvent), false, "sessionId", "planId", "planDigest", "sequence", "stage", "completedUnits", "totalUnits", "message"),
         [ProtocolMessageKind.PruneProgressEvent] = C("prune-progress.event", typeof(PruneProgressEvent), false, "sessionId", "prunePlanId", "pruneDigest", "sequence", "stage", "completedUnits", "totalUnits", "message"),
         [ProtocolMessageKind.SuccessEvent] = C("success.event", typeof(SuccessEvent), false, "sessionId", "planId", "planDigest", "operation", "outcome", "terminalState", "executionSummary", "summary", "sanitizedLogPath"),
@@ -227,9 +227,9 @@ public static class ProtocolJsonSerializer
             case RecoverableInterruptionEvent v: ValidateExecutionTerminal(v.SessionId, v.PlanId, v.PlanDigest, v.Outcome, v.TerminalState, v.ExecutionSummary, v.Summary, v.Message, v.SanitizedLogPath, ProtocolExecutionOutcome.InterruptedRecoveryRequired, ProtocolExecutionOutcome.UnexpectedCoreFailure); break;
             case CancelledEvent v: ValidateExecutionTerminal(v.SessionId, v.PlanId, v.PlanDigest, v.Outcome, v.TerminalState, v.ExecutionSummary, v.Summary, null, v.SanitizedLogPath, ProtocolExecutionOutcome.CancelledBeforeMutation, ProtocolExecutionOutcome.CancelledAndRolledBack); break;
             case PruneSuccessEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, v.Summary, null, v.SanitizedLogPath, ProtocolPruneOutcome.Succeeded); break;
-            case PruneFailureEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, null, v.Message, v.SanitizedLogPath, ProtocolPruneOutcome.FailedBeforePublication, ProtocolPruneOutcome.FailedWithCleanupPending); break;
+            case PruneFailureEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, null, v.Message, v.SanitizedLogPath, ProtocolPruneOutcome.FailedBeforePublication, ProtocolPruneOutcome.FailedWithCleanupPending, ProtocolPruneOutcome.FailedAfterApply); break;
             case PruneInterruptionEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, null, v.Message, v.SanitizedLogPath, ProtocolPruneOutcome.Interrupted, ProtocolPruneOutcome.UnexpectedCoreFailure); break;
-            case PruneCancelledEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, v.Summary, null, v.SanitizedLogPath, ProtocolPruneOutcome.CancelledBeforePublication, ProtocolPruneOutcome.CancelledWithCleanupPending); break;
+            case PruneCancelledEvent v: ValidatePruneTerminal(v.SessionId, v.PrunePlanId, v.PruneDigest, v.Outcome, v.TerminalState, v.PruneSummary, v.Summary, null, v.SanitizedLogPath, ProtocolPruneOutcome.CancelledBeforePublication, ProtocolPruneOutcome.CancelledWithCleanupPending, ProtocolPruneOutcome.CancelledAfterApply); break;
             case PrePlanRejectedEvent v: ValidatePrePlanRejection(v); break;
             default: throw new ProtocolException("The message isn't part of the version 1 protocol.");
         }
@@ -315,10 +315,15 @@ public static class ProtocolJsonSerializer
         Strings(v.CleanupGenerationIds, "cleanupGenerationIds", MaxRecoveryGenerations);
         foreach (string generationId in v.CleanupGenerationIds) RequireGenerationId(generationId, "cleanupGenerationIds");
         int catalogCount = v.RetainedSelectionIds.Length + v.RemovedSelectionIds.Length;
-        if (catalogCount is <= 0 or > MaxRecoveryGenerations || v.RetainedSelectionIds.Length != Math.Min(v.RetainNewest, catalogCount) || v.CleanupGenerationIds.Length < v.RemovedSelectionIds.Length || v.CleanupGenerationIds.Length == 0)
+        if (
+            catalogCount is <= 0 or > MaxRecoveryGenerations
+            || v.RetainedSelectionIds.Length != Math.Min(v.RetainNewest, catalogCount)
+            || v.CleanupGenerationIds.Length < v.RemovedSelectionIds.Length
+            || v.RemovedSelectionIds.Length == 0 && v.CleanupGenerationIds.Length == 0 && !v.AuxiliaryCleanupPlanned
+        )
             throw new ProtocolException("The prune plan is a no-op or isn't a sensible bounded exact catalog partition and cleanup set.");
         Text(v.Summary, "summary"); Strings(v.Warnings, "warnings", 256); Objects(v.Risks, "risks", 8); foreach (ProtocolPlanRisk risk in v.Risks) Defined(risk, "risk"); if (!v.Risks.Contains(ProtocolPlanRisk.RecoveryPrune) || v.Risks.Distinct().Count() != v.Risks.Length) throw new ProtocolException("A destructive prune plan must carry its unique typed risk."); Defined(v.RecommendedDefault, "recommendedDefault"); if (!v.RequiresConfirmation) throw new ProtocolException("Every prune plan must require explicit confirmation.");
-        ProtocolPlanDigest expected = ProtocolPlanDigest.ComputePrune(v.ExecutionBindingDigest, v.CatalogId, v.GameRoot, v.HeadSha256, v.RetainNewest, v.RetainedSelectionIds, v.RemovedSelectionIds, v.CleanupGenerationIds, v.Summary, v.Warnings, true);
+        ProtocolPlanDigest expected = ProtocolPlanDigest.ComputePrune(v.ExecutionBindingDigest, v.CatalogId, v.GameRoot, v.HeadSha256, v.RetainNewest, v.RetainedSelectionIds, v.RemovedSelectionIds, v.CleanupGenerationIds, v.AuxiliaryCleanupPlanned, v.Summary, v.Warnings, true);
         if (v.PruneDigest != expected) throw new ProtocolException("The protocol prune digest doesn't match the exact catalog selection and display data.");
     }
 
@@ -418,6 +423,7 @@ public static class ProtocolJsonSerializer
             ProtocolPrePlanErrorCode.InvalidGameFolder => (ProtocolNextAction.SelectGameFolder, false),
             ProtocolPrePlanErrorCode.PackageRejected => (ProtocolNextAction.ReopenVerifiedPackage, false),
             ProtocolPrePlanErrorCode.RecoveryUnavailable => (ProtocolNextAction.ListRecoveries, false),
+            ProtocolPrePlanErrorCode.NothingToPrune => (ProtocolNextAction.ListRecoveries, false),
             ProtocolPrePlanErrorCode.InspectionFailed => (ProtocolNextAction.InspectAgain, false),
             ProtocolPrePlanErrorCode.CandidateApprovalFailed => (ProtocolNextAction.InspectAgain, false),
             ProtocolPrePlanErrorCode.PermissionDenied => (ProtocolNextAction.ReviewFilesystem, false),
@@ -512,10 +518,15 @@ public static class ProtocolJsonSerializer
             ProtocolPruneOutcome.Interrupted => (observedState, true, pending ? ProtocolRecoveryDisposition.CleanupPending : ProtocolRecoveryDisposition.StateRefreshRequired, null),
             ProtocolPruneOutcome.CancelledWithCleanupPending => (observedState, false, ProtocolRecoveryDisposition.CleanupPending, null),
             ProtocolPruneOutcome.FailedWithCleanupPending => (observedState, true, ProtocolRecoveryDisposition.CleanupPending, null),
+            ProtocolPruneOutcome.CancelledAfterApply => (ProtocolDurableState.PruneApplied, false, ProtocolRecoveryDisposition.StateRefreshRequired, null),
+            ProtocolPruneOutcome.FailedAfterApply => (ProtocolDurableState.PruneApplied, true, ProtocolRecoveryDisposition.StateRefreshRequired, null),
             ProtocolPruneOutcome.UnexpectedCoreFailure => (ProtocolDurableState.Unknown, false, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolTerminalErrorCode.UnexpectedCoreFailure),
             _ => throw new ProtocolException("The prune outcome isn't defined by version 1.")
         };
         ValidateTerminalState(state, durable, error, recovery, ProtocolNextAction.ListRecoveries, exactError);
+        if (outcome == ProtocolPruneOutcome.Succeeded && pending) throw new ProtocolException("A successful prune can't report pending cleanup.");
+        if (outcome is ProtocolPruneOutcome.FailedBeforePublication or ProtocolPruneOutcome.CancelledBeforePublication && (summary.LogicallyRemovedGenerationCount != 0 || summary.PhysicallyCleanedGenerationCount != 0)) throw new ProtocolException("A prune which stopped before publication can't report applied work.");
+        if (outcome is ProtocolPruneOutcome.CancelledAfterApply or ProtocolPruneOutcome.FailedAfterApply && (pending || observedState != ProtocolDurableState.PruneApplied)) throw new ProtocolException("An after-apply prune outcome requires applied work and no known pending cleanup.");
         if (!pending && (outcome is ProtocolPruneOutcome.CancelledWithCleanupPending or ProtocolPruneOutcome.FailedWithCleanupPending)) throw new ProtocolException("A pending prune outcome must report pending cleanup.");
     }
 

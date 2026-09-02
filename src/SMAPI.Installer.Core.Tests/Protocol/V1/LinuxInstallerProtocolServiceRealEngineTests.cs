@@ -167,10 +167,64 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         (await new LinuxInstallerEngine().ListRecoveriesAsync(game)).Generations.Should().ContainSingle();
     }
 
+    [TestCase(false, typeof(PruneFailureEvent), ProtocolPruneOutcome.FailedAfterApply)]
+    [TestCase(true, typeof(PruneCancelledEvent), ProtocolPruneOutcome.CancelledAfterApply)]
+    public async Task AfterLastCleanupFaultReturnsAppliedRefreshRequiredTerminal(bool cancelled, Type expectedType, ProtocolPruneOutcome expectedOutcome)
+    {
+        string game = await this.CreateTwoGenerationRecoveryHistory();
+        Exception failure = cancelled
+            ? new OperationCanceledException("Simulated cancellation after the last cleanup.")
+            : new IOException("Simulated failure after the last cleanup.");
+        AfterFirstCleanupFaultInjector fault = new(failure);
+        using LinuxInstallerProtocolService service = CreateRealService(fault);
+        await Handshake(service);
+        RecoveryCatalogEvent catalog = (RecoveryCatalogEvent)await service.HandleAsync(new ListRecoveriesRequest(service.SessionId, game));
+        PrunePlanEvent plan = (PrunePlanEvent)await service.HandleAsync(new InspectPruneRequest(service.SessionId, catalog.CatalogId, 1));
+        plan.CleanupGenerationIds.Should().ContainSingle();
+        await service.HandleAsync(new ConfirmPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        await fault.Reached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (cancelled)
+            await service.HandleAsync(new CancelPruneRequest(service.SessionId, plan.PrunePlanId, plan.PruneDigest));
+        fault.Release.TrySetResult();
+        ProtocolEvent terminal = await execution;
+
+        terminal.Should().BeOfType(expectedType);
+        ProtocolTerminalState state;
+        ProtocolPruneSummary summary;
+        ProtocolPruneOutcome outcome;
+        if (terminal is PruneFailureEvent failed)
+            (state, summary, outcome) = (failed.TerminalState, failed.PruneSummary, failed.Outcome);
+        else
+        {
+            PruneCancelledEvent stopped = (PruneCancelledEvent)terminal;
+            (state, summary, outcome) = (stopped.TerminalState, stopped.PruneSummary, stopped.Outcome);
+        }
+        outcome.Should().Be(expectedOutcome);
+        state.DurableState.Should().Be(ProtocolDurableState.PruneApplied);
+        state.RecoveryDisposition.Should().Be(ProtocolRecoveryDisposition.StateRefreshRequired);
+        summary.Should().Be(new ProtocolPruneSummary(1, 1, 0, false));
+        service.State.Should().Be(ProtocolSessionState.Completed);
+        (await new LinuxInstallerEngine().ListRecoveriesAsync(game)).Generations.Should().ContainSingle();
+    }
+
     private static LinuxInstallerProtocolService CreateRealService(ITransactionProgressSink? observedProgress = null)
         => new(
             "test",
             progress => new LinuxInstallerProtocolEngine(new LinuxInstallerEngine(new CompositeProgress(progress, observedProgress))),
+            new UnusedDiscovery(),
+            new UnusedPackageOpener()
+        );
+
+    private static LinuxInstallerProtocolService CreateRealService(IRecoveryPruneFaultInjector faultInjector)
+        => new(
+            "test",
+            progress =>
+            {
+                CompositeProgress combined = new(progress, null);
+                return new LinuxInstallerProtocolEngine(new LinuxInstallerEngine(new InstallerTransactionExecutor(combined), faultInjector, combined));
+            },
             new UnusedDiscovery(),
             new UnusedPackageOpener()
         );
@@ -184,6 +238,33 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         LinuxGameTestFolder.MakeValid(path);
         this.TemporaryDirectories.Add(path);
         return path;
+    }
+
+    private async Task<string> CreateTwoGenerationRecoveryHistory()
+    {
+        string game = this.CreateDirectory();
+        string payload = this.CreateDirectory();
+        Write(game, "StardewValley", "vanilla launcher", 0x1ed);
+        Write(payload, "StardewValley", "smapi launcher", 0x1ed);
+        Write(payload, "StardewModdingAPI.dll", "runtime", 0x1a4);
+        PackageManifest manifest = new(
+            OwnershipTestData.Release(),
+            [
+                Entry("StardewValley", "smapi launcher", 0x1ed, OwnedEntryKind.Launcher),
+                Entry("StardewModdingAPI.dll", "runtime", 0x1a4, OwnedEntryKind.RuntimeFile)
+            ]
+        );
+        using FilePackageAuthority package = new(manifest, payload);
+        LinuxInstallerEngine engine = new();
+        InspectedInstallationState install;
+        using (InstallerOperationLease lease = InstallerOperationLease.Acquire(game))
+            install = engine.InspectLocked(lease, InstallationAction.Install, package, null);
+        using (install)
+            (await engine.ExecuteAsync(install, install.ConfirmationDigest)).Status.Should().Be(TransactionStatus.Committed);
+        using (InspectedInstallationState backup = await engine.InspectAsync(game, InstallationAction.Backup))
+            (await engine.ExecuteAsync(backup, backup.ConfirmationDigest)).Status.Should().Be(TransactionStatus.Committed);
+        (await engine.ListRecoveriesAsync(game)).Generations.Should().HaveCount(2);
+        return game;
     }
 
     private static PackageManifestEntry Entry(string path, string contents, int mode, OwnedEntryKind kind)
@@ -230,6 +311,23 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         {
             protocol.Report(progress);
             observed?.Report(progress);
+        }
+    }
+
+    private sealed class AfterFirstCleanupFaultInjector(Exception failure) : IRecoveryPruneFaultInjector
+    {
+        private bool Thrown;
+        public TaskCompletionSource Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void AtBoundary(RecoveryPruneBoundary boundary, Guid? generationId = null)
+        {
+            if (boundary == RecoveryPruneBoundary.AfterGenerationCleanup && !this.Thrown)
+            {
+                this.Thrown = true;
+                this.Reached.TrySetResult();
+                this.Release.Task.GetAwaiter().GetResult();
+                throw failure;
+            }
         }
     }
 

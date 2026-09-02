@@ -299,6 +299,38 @@ public sealed class TransactionOutcomeTests
     }
 
     [Test]
+    public void RecoveryPruneOutcomeRejectsContradictoryTerminalCounts()
+    {
+        Guid generation = Guid.NewGuid();
+
+        FluentActions.Invoking(() => new RecoveryPruneOutcome(RecoveryPruneOutcomeStatus.Succeeded, [generation], [], [generation], false, null, "Done."))
+            .Should().Throw<ArgumentException>().WithMessage("*successful recovery prune*pending cleanup*");
+        FluentActions.Invoking(() => new RecoveryPruneOutcome(RecoveryPruneOutcomeStatus.Succeeded, [generation], [], [], true, null, "Done."))
+            .Should().Throw<ArgumentException>().WithMessage("*successful recovery prune*pending cleanup*");
+        FluentActions.Invoking(() => new RecoveryPruneOutcome(RecoveryPruneOutcomeStatus.FailedBeforePublication, [generation], [], [], false, TransactionErrorCode.IoFailure, "Failed."))
+            .Should().Throw<ArgumentException>().WithMessage("*before publication*applied work*");
+        FluentActions.Invoking(() => new RecoveryPruneOutcome(RecoveryPruneOutcomeStatus.CancelledBeforePublication, [], [generation], [], false, null, "Cancelled."))
+            .Should().Throw<ArgumentException>().WithMessage("*before publication*applied work*");
+        FluentActions.Invoking(() => new RecoveryPruneOutcome(RecoveryPruneOutcomeStatus.FailedAfterApply, [generation], [], [generation], false, TransactionErrorCode.IoFailure, "Failed."))
+            .Should().Throw<ArgumentException>().WithMessage("*after-apply*no known pending cleanup*");
+        FluentActions.Invoking(() => new RecoveryPruneOutcome(RecoveryPruneOutcomeStatus.CancelledAfterApply, [], [], [], false, null, "Cancelled."))
+            .Should().Throw<ArgumentException>().WithMessage("*after-apply*applied work*");
+    }
+
+    [Test]
+    public void RecoveryPruneOutcomeStatus_AdditionsPreserveExistingNumericValues()
+    {
+        ((int)RecoveryPruneOutcomeStatus.Succeeded).Should().Be(0);
+        ((int)RecoveryPruneOutcomeStatus.FailedBeforePublication).Should().Be(1);
+        ((int)RecoveryPruneOutcomeStatus.CancelledBeforePublication).Should().Be(2);
+        ((int)RecoveryPruneOutcomeStatus.Interrupted).Should().Be(3);
+        ((int)RecoveryPruneOutcomeStatus.CancelledWithCleanupPending).Should().Be(4);
+        ((int)RecoveryPruneOutcomeStatus.FailedWithCleanupPending).Should().Be(5);
+        ((int)RecoveryPruneOutcomeStatus.CancelledAfterApply).Should().Be(6);
+        ((int)RecoveryPruneOutcomeStatus.FailedAfterApply).Should().Be(7);
+    }
+
+    [Test]
     public void DetailedOutcome_PreCancelledHasNoMutationOrTransactionStatus()
     {
         string game = this.Directory();

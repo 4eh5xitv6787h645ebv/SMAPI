@@ -129,7 +129,9 @@ public enum ProtocolPruneOutcome
     Interrupted,
     CancelledWithCleanupPending,
     FailedWithCleanupPending,
-    UnexpectedCoreFailure
+    UnexpectedCoreFailure,
+    CancelledAfterApply,
+    FailedAfterApply
 }
 
 public enum ProtocolInterruptedRecoveryOutcome
@@ -188,7 +190,8 @@ public enum ProtocolPrePlanErrorCode
     CandidateApprovalFailed,
     PermissionDenied,
     InputOutputFailure,
-    UnexpectedFailure
+    UnexpectedFailure,
+    NothingToPrune
 }
 
 public enum ProtocolAcknowledgementKind
@@ -799,6 +802,7 @@ public sealed record PrunePlanEvent : ProtocolEvent
     public ProtocolRecoverySelectionId[] RetainedSelectionIds => this.RetainedValues.ToArray();
     public ProtocolRecoverySelectionId[] RemovedSelectionIds => this.RemovedValues.ToArray();
     public string[] CleanupGenerationIds => this.CleanupGenerationValues.ToArray();
+    public bool AuxiliaryCleanupPlanned { get; }
     public string Summary { get; }
     public string[] Warnings => this.WarningValues.ToArray();
     public ProtocolPlanRisk[] Risks => this.RiskValues.ToArray();
@@ -818,6 +822,7 @@ public sealed record PrunePlanEvent : ProtocolEvent
         ProtocolRecoverySelectionId[] retainedSelectionIds,
         ProtocolRecoverySelectionId[] removedSelectionIds,
         string[] cleanupGenerationIds,
+        bool auxiliaryCleanupPlanned,
         string summary,
         string[] warnings,
         ProtocolPlanRisk[] risks,
@@ -839,6 +844,7 @@ public sealed record PrunePlanEvent : ProtocolEvent
             ?? throw new ProtocolException("The protocol 'removedSelectionIds' collection can't be null.");
         this.CleanupGenerationValues = cleanupGenerationIds?.ToArray()
             ?? throw new ProtocolException("The protocol 'cleanupGenerationIds' collection can't be null.");
+        this.AuxiliaryCleanupPlanned = auxiliaryCleanupPlanned;
         this.Summary = summary;
         this.WarningValues = warnings?.ToArray() ?? throw new ProtocolException("The protocol 'warnings' collection can't be null.");
         this.RiskValues = risks?.ToArray() ?? throw new ProtocolException("The protocol 'risks' collection can't be null.");
@@ -846,8 +852,50 @@ public sealed record PrunePlanEvent : ProtocolEvent
         this.RequiresConfirmation = requiresConfirmation;
     }
 
+    public PrunePlanEvent(
+        ProtocolSessionId sessionId,
+        ProtocolPrunePlanId prunePlanId,
+        ProtocolPlanDigest pruneDigest,
+        ProtocolPlanDigest executionBindingDigest,
+        ProtocolRecoveryCatalogId catalogId,
+        ProtocolGameRootIdentity gameRoot,
+        string headSha256,
+        int retainNewest,
+        ProtocolRecoverySelectionId[] retainedSelectionIds,
+        ProtocolRecoverySelectionId[] removedSelectionIds,
+        string[] cleanupGenerationIds,
+        string summary,
+        string[] warnings,
+        ProtocolPlanRisk[] risks,
+        ProtocolRecommendedDefault recommendedDefault,
+        bool requiresConfirmation
+    ) : this(
+        sessionId,
+        prunePlanId,
+        pruneDigest,
+        executionBindingDigest,
+        catalogId,
+        gameRoot,
+        headSha256,
+        retainNewest,
+        retainedSelectionIds,
+        removedSelectionIds,
+        cleanupGenerationIds,
+        false,
+        summary,
+        warnings,
+        risks,
+        recommendedDefault,
+        requiresConfirmation
+    )
+    {
+    }
+
+    internal PrunePlanEvent(ProtocolSessionId sessionId, ProtocolPrunePlanId prunePlanId, ProtocolPlanDigest pruneDigest, ProtocolPlanDigest executionBindingDigest, ProtocolRecoveryCatalogId catalogId, ProtocolGameRootIdentity gameRoot, string headSha256, int retainNewest, ProtocolRecoverySelectionId[] retainedSelectionIds, ProtocolRecoverySelectionId[] removedSelectionIds, string[] cleanupGenerationIds, bool auxiliaryCleanupPlanned, string summary, string[] warnings, bool requiresConfirmation)
+        : this(sessionId, prunePlanId, pruneDigest, executionBindingDigest, catalogId, gameRoot, headSha256, retainNewest, retainedSelectionIds, removedSelectionIds, cleanupGenerationIds, auxiliaryCleanupPlanned, summary, warnings, [ProtocolPlanRisk.RecoveryPrune], ProtocolRecommendedDefault.Cancel, requiresConfirmation) { }
+
     internal PrunePlanEvent(ProtocolSessionId sessionId, ProtocolPrunePlanId prunePlanId, ProtocolPlanDigest pruneDigest, ProtocolPlanDigest executionBindingDigest, ProtocolRecoveryCatalogId catalogId, ProtocolGameRootIdentity gameRoot, string headSha256, int retainNewest, ProtocolRecoverySelectionId[] retainedSelectionIds, ProtocolRecoverySelectionId[] removedSelectionIds, string[] cleanupGenerationIds, string summary, string[] warnings, bool requiresConfirmation)
-        : this(sessionId, prunePlanId, pruneDigest, executionBindingDigest, catalogId, gameRoot, headSha256, retainNewest, retainedSelectionIds, removedSelectionIds, cleanupGenerationIds, summary, warnings, [ProtocolPlanRisk.RecoveryPrune], ProtocolRecommendedDefault.Cancel, requiresConfirmation) { }
+        : this(sessionId, prunePlanId, pruneDigest, executionBindingDigest, catalogId, gameRoot, headSha256, retainNewest, retainedSelectionIds, removedSelectionIds, cleanupGenerationIds, false, summary, warnings, requiresConfirmation) { }
 
     [JsonIgnore]
     public override ProtocolMessageKind Kind => ProtocolMessageKind.PrunePlanEvent;
