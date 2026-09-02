@@ -2,7 +2,7 @@
 layout: default
 title: Official SMAPI vs this fork
 description: A direct, evidence-based comparison of support, features, performance, and tradeoffs.
-kicker: Comparison snapshot · 28 August 2026
+kicker: Comparison snapshot · 3 September 2026
 ---
 
 ## The short answer
@@ -29,7 +29,7 @@ the exact B build used for the current benchmark. Both identify as SMAPI 4.5.2.
 | Project role | Official mod loader and API | Unofficial performance/diagnostics development fork |
 | Supported audience | General players and mod authors | Linux desktop testers, especially large modpacks |
 | Platforms | Windows, macOS, Linux | Linux desktop focus; no Android/mobile work |
-| Release delivery | Tagged 4.5.2 player release | [Unofficial experimental Linux alpha](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1) |
+| Release delivery | Tagged 4.5.2 player release | [Unofficial experimental Linux alpha 2 with graphical and terminal installers](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2) |
 | Existing mods | Canonical compatibility target | Derived from 4.5.2 and intended to retain compatibility, but not an upstream guarantee |
 | Performance approach | General-purpose upstream behavior | 95-item Linux large-pack audit plus targeted fixes |
 | Mod diagnosis | Console and normal SMAPI log | Same foundation plus private `health` report/viewer |
@@ -180,7 +180,7 @@ The complete scenarios, correctness checks, risks, and rejected ideas are preser
 
 The historical benchmark build identified as 4.5.2 so it could be compared directly with official
 4.5.2. The public alpha instead uses the distinct prerelease identity
-`4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1`. The fork is designed around existing SMAPI
+`4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2`. The fork is designed around existing SMAPI
 mods, but it changes many internal hot paths and does not publish a stable release. Keep backups,
 evaluate it against a disposable game/save copy, and reproduce problems on official SMAPI before
 reporting an upstream regression.

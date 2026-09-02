@@ -5,7 +5,7 @@ description: Verify, install, upgrade, remove, or roll back the experimental SMA
 kicker: Experimental Linux x86_64 prerelease
 ---
 
-This guide is for the first **unofficial experimental Linux desktop alpha**. It is not an official
+This guide is for the current **unofficial experimental Linux desktop alpha 2**. It is not an official
 SMAPI release and is not the default recommendation for most players. Use official SMAPI if you
 want the broadly supported cross-platform release.
 
@@ -14,12 +14,15 @@ want the broadly supported cross-platform release.
 The fork uses identifiers which cannot collide with inherited official SMAPI tags or look like an
 official stable release:
 
-| Item | Published alpha 1 | Planned graphical alpha 2 |
-| --- | --- | --- |
-| Embedded version | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1` | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2` |
-| Git tag | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1` | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2` |
-| Release title | `Experimental SMAPI Linux Fork 4.5.3 alpha 1` | `Experimental SMAPI Linux Fork 4.5.3 alpha 2` |
-| Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip` | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip` |
+| Item | Published alpha 2 |
+| --- | --- |
+| Embedded version | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2` |
+| Git tag | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2` |
+| Annotated tag object | `782ae58170f4399947e03455e968775cc090666a` |
+| Exact source commit | `052699e8ccba0d13f9d4f02e0bb199aa04cec605` |
+| Exact source tree | `95bfb5cf8744daf15d59f4799a593fd8be7bca8d` |
+| Release title | `Experimental SMAPI Linux Fork 4.5.3 alpha 2` |
+| Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip` |
 
 Later alphas increment the final number. A published tag is never reused or moved. The public
 release assets are built from the exact tag commit by GitHub Actions; the build records its source
@@ -35,25 +38,15 @@ output is not claimed.
 
 - Native Linux x86_64 Stardew Valley 1.6.14 or later. Android/mobile is not supported.
 - A normal desktop user account. **Never run the installer with `sudo` or as root.**
-- GNU Bash; the published alpha.1 launcher and runtime dispatcher are Bash scripts.
+- GNU Bash, GNU coreutils (`stat` and `timeout`), and GNU diffutils (`cmp`).
 - The game must be closed.
 - Back up saves, `Mods`, and any existing `smapi-internal/config.user.json` before changing loaders.
-- Download only from this repository's
-  [alpha 1 release page](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1).
+- Download all six files only from this repository's
+  [alpha 2 release page](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2).
 
-The published alpha.1 has no graphical updater. Its console installer changes the `StardewValley` launcher,
-preserves the vanilla launcher as `StardewValley-original`, and installs two Linux runtime hosts.
-Rollback is a deliberate uninstall-and-reinstall procedure, not an atomic snapshot.
+### Graphical package and terminal fallback
 
-**Unreleased next-alpha/source-build note:** PR #177 changes the runtime dispatcher to validation-only
-behavior which has not shipped in alpha.1. Builds containing that change additionally require GNU
-coreutils (`stat` and `timeout`) and GNU diffutils (`cmp`). The published alpha.1 dispatcher does not
-perform those capability checks and still creates or refreshes its net6 dependency metadata at
-launch when needed.
-
-### Planned alpha 2 graphical package
-
-The reviewed alpha 2 source and non-authoritative Actions candidates contain a separate
+The published alpha 2 package contains a separate
 `install on Linux (graphical).sh` entry point and the unchanged `install on Linux.sh` terminal
 fallback in the same ZIP. The GUI is a self-contained, untrimmed Linux x86_64 application; its
 single-file native runtime is extracted into a private per-run temporary directory which the
@@ -62,62 +55,39 @@ If the bounded child-settlement deadline expires, the launcher retains those pri
 to avoid unsafe deletion; after confirming no installer process remains, remove the leftover
 directory manually. SIGKILL, power loss, or another abrupt stop can also leave that private
 directory under the configured temporary root. The supported first desktop path is X11 or XWayland,
-not Avalonia's experimental native Wayland backend; headless and native-Wayland-only sessions retain
-the terminal launcher.
+not Avalonia's experimental native Wayland backend; headless and native-Wayland-only sessions can
+use the terminal launcher.
 
-Alpha 2 candidates also create one bounded private graphical-installer diagnostic session before
+Alpha 2 creates one bounded private graphical-installer diagnostic session before
 Avalonia, release-catalog networking, game discovery, or backend startup. Every production screen
-can open a stable sanitized snapshot through **View diagnostic log**. This is unreleased
-next-alpha/source behavior; the published alpha.1 has neither the graphical launcher nor this
-viewer.
-
-Alpha 2 is not published yet. Do not treat a branch artifact as a tagged
-release, substitute it for the alpha.1 instructions below, or use it as production screenshot or
-clean-machine qualification evidence. A future public GUI alpha must be tagged from an exact
-reviewed commit, publish and attest the complete six-asset set, and pass fresh-download verification.
+can open a stable sanitized snapshot through **View diagnostic log**. The graphical workflow can
+download a reviewed public release or verify one freshly selected local folder containing the exact
+six assets. It does not infer authority from a folder path or metadata alone.
 
 ## Verify before extracting or running
 
-Download the installer ZIP, `SHA256SUMS`, and `build-metadata.json` from the same prerelease into an
-empty directory. Do not use a mirror and never pipe a download into a shell.
+Download all six alpha 2 assets into one empty directory. Do not use a mirror and never pipe a
+download into a shell:
+
+- `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip`;
+- `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-install-manifest.json`;
+- `SHA256SUMS`;
+- `build-metadata.json`;
+- `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-attestation-bundle.jsonl`;
+  and
+- `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-attestation-bundle.jsonl.sha256`.
+
+`SHA256SUMS` has exactly two sorted subjects: the canonical install manifest followed by the
+installer ZIP. `build-metadata.json` records those same two subjects. The bundle sidecar detects
+transport corruption of the local bundle; only successful verification of the signed bundle under
+the policy below establishes provenance. Verify the exact bytes with GitHub CLI 2.92.0:
 
 ```bash
-sha256sum --check SHA256SUMS
-gh attestation verify \
-  SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip \
-  -R 4eh5xitv6787h645ebv/SMAPI
-```
-
-The checksum command must report `OK`. The attestation must identify this repository and the
-`linux-alpha-release.yml` workflow. Inspect `build-metadata.json` and confirm that its package name,
-SHA-256, release tag, and full source commit match the release page.
-
-### Planned alpha 2 six-asset set
-
-The published alpha.1 above has three assets and no install-manifest companion. The tagged alpha 2
-build from the exact reviewed Phase 4 package-authority commit will instead publish an
-exact six-file set. Its four primary package/metadata assets are:
-
-- the finalized installer ZIP;
-- `SMAPI-<embedded-version>-linux-x64-install-manifest.json`, a canonical external companion which
-  records the exact installer-owned files, hashes, sizes, Unix modes, and release identity;
-- `SHA256SUMS`, with exactly two sorted subjects: the manifest followed by the installer ZIP; and
-- `build-metadata.json`, whose plural `artifacts` array records those same two subjects.
-
-The other two public assets are the GitHub attestation bundle
-`SMAPI-<embedded-version>-linux-x64-attestation-bundle.jsonl` and its `.sha256` sidecar. The sidecar
-detects transport corruption of the local bundle; only successful verification of the signed bundle
-under the pinned policy establishes provenance.
-
-The ZIP and manifest are both GitHub-attested. After a future release actually publishes that set,
-copy the exact names, tag, and commit from its release page and verify them with GitHub CLI 2.92.0:
-
-```bash
-package_name='COPY THE EXACT INSTALLER ZIP NAME HERE'
-manifest_name='COPY THE EXACT INSTALL MANIFEST NAME HERE'
-bundle_name='COPY THE EXACT ATTESTATION BUNDLE NAME HERE'
-release_tag='COPY THE EXACT RELEASE TAG HERE'
-release_commit='COPY THE EXACT 40-CHARACTER RELEASE COMMIT HERE'
+package_name='SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip'
+manifest_name='SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-install-manifest.json'
+bundle_name='SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-attestation-bundle.jsonl'
+release_tag='fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2'
+release_commit='052699e8ccba0d13f9d4f02e0bb199aa04cec605'
 sha256sum --check --strict SHA256SUMS
 sha256sum --check --strict "$bundle_name.sha256"
 attestation_policy=(
@@ -138,6 +108,10 @@ gh attestation verify "$package_name" "${attestation_policy[@]}"
 gh attestation verify "$manifest_name" "${attestation_policy[@]}"
 ```
 
+The expected installer SHA-256 is
+`a1d8669881b8ba87c3511689b810211148430798f30bc7a42e3fd74bc5630dfd`; the expected manifest
+SHA-256 is `eac8e97fbfdd437e9e165ab72ce55d782ea28449798414c8bf3e704c7a8de5a3`; and the expected
+bundle SHA-256 is `7b468ab561513c2c3042ec0c9725b1522090b4483049b4d8933fe4f8b5291a4b`.
 Both package/manifest checksum subjects and the bundle checksum must report `OK`, and both
 attestation-verification commands must succeed against the same downloaded bundle. The successful
 statement must identify this repository, the tagged `linux-alpha-release.yml` workflow, and the
@@ -151,42 +125,58 @@ and manifest, against this repository, tagged workflow, and selected commit esta
 release authority. Do not substitute an unattested local or candidate four-primary-asset set for the
 published tagged six-asset set.
 
-For the post-publication qualification record, maintainers use the repository wrapper with a
-fine-grained read-only `GH_TOKEN`, the exact tag/commit/tree, a new destination, and the official
-GitHub CLI 2.92.0 Linux x86_64 archive already checked by the staging script:
+For repeatable post-publication qualification, maintainers invoke the repository wrapper with a
+`GH_TOKEN` (prefer a fine-grained read-only token), the exact tag/commit/tree, a new destination,
+and the official GitHub CLI 2.92.0 Linux x86_64 archive checked by the staging script:
 
 ```bash
-test -n "${GH_TOKEN:-}" # export a fine-grained read-only token without placing it in shell history
+test -n "${GH_TOKEN:-}" # export the token without placing it in shell history
 build/scripts/qualify-published-linux-alpha.sh \
-  'COPY THE EXACT RELEASE TAG HERE' \
-  'COPY THE EXACT 40-CHARACTER RELEASE COMMIT HERE' \
-  'COPY THE EXACT 40-CHARACTER SOURCE TREE HERE' \
+  'fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2' \
+  '052699e8ccba0d13f9d4f02e0bb199aa04cec605' \
+  '95bfb5cf8744daf15d59f4799a593fd8be7bca8d' \
   '/new/private/destination' \
   '/path/to/gh_2.92.0_linux_amd64.tar.gz'
 ```
 
-The wrapper refuses root and an existing destination. It pins the public release ID and tag plus each
+The fresh alpha 2 qualification passed; its
+[sanitized public evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5515036792)
+records the exact inventory, identity, checks, and disposable lifecycle results. The wrapper refuses
+root and an existing destination. It pins the public release ID and tag plus each
 asset's ID, name, size, uploaded state, digest when GitHub supplies one, timestamp, and canonical URL
 before downloading, and requires the same normalized inventory after verification. Each download
 must match the pinned public size and supplied digest. The wrapper then applies the strict checksum,
 metadata, manifest-authority, bundle, and two-subject attestation policy before atomically exposing
 only the six verified files. It captures and removes `GH_TOKEN` from the ambient process environment
 before staging or downloading. The token is never placed in a process argument: only the two
-isolated inventory process trees receive it as an environment variable; staging, downloads, hashing,
-and attestation helpers do not. Inventory calls have a 60-second deadline, local-bundle attestation
+isolated, fixed-GET inventory process trees receive it as an environment variable; staging,
+downloads, hashing, and attestation helpers do not. Unused token capabilities are not part of the
+qualification claim. Inventory calls have a 60-second deadline, local-bundle attestation
 calls have a 120-second deadline, and each download has bounded connect, total, and low-speed times.
 The token is never written to the resulting directory.
 
 ## Install
 
-Extract the verified ZIP. In a desktop session, run `install on Linux.sh`. If the file manager does
-not open a terminal, open a terminal in the extracted folder and run:
+Extract the verified ZIP. In an X11 or XWayland desktop session, start the graphical installer as
+your normal user:
+
+```bash
+bash "install on Linux (graphical).sh"
+```
+
+Choose the reviewed alpha 2 release or freshly select the folder containing the same six verified
+files. Select a detected game folder or browse to one, review the read-only **Install** plan, then
+confirm it on the separate final screen before using **Run operation**. A successful verification or
+plan does not itself change game files. See the [graphical workflow guide](linux-gui-shell.md) for
+every operation and error state.
+
+For a terminal-only session, use the fallback from that same package:
 
 ```bash
 bash "install on Linux.sh"
 ```
 
-Konsole, Alacritty, GNOME Terminal, and xterm are detected by the launcher. A headless or scripted
+Konsole, Alacritty, GNOME Terminal, and xterm are detected by the terminal launcher. A headless or scripted
 installation can call the existing installer behavior directly:
 
 ```bash
@@ -197,27 +187,42 @@ installation can call the existing installer behavior directly:
 A successful headless operation exits 0. Invalid arguments exit 2; unexpected filesystem or
 runtime failures exit 1. The installer never needs root for a user-owned game installation.
 
-## Upgrade or repair this alpha
+## Update or repair
 
-Close the game, verify the newer package independently, back up the current user configuration,
-then run its installer against the same game folder. Installation first removes known SMAPI files,
-restores and re-backs up the vanilla launcher, and installs the new payload. Custom mods, saves,
-current SMAPI logs, and local Mod Health Reports are not uninstall targets.
+Close the game, back up saves and `Mods`, and verify the selected release. In the GUI, choose the
+same game folder and inspect the operation before confirming:
+
+- use **Update** when a receipt-authenticated managed installation should move to a different
+  verified release. An older target is labelled as a downgrade and needs explicit confirmation;
+- use **Repair** only when the authenticated current and target releases match. Missing managed
+  files can be restored, while modified managed files stay blocked unless each eligible replacement
+  is explicitly selected.
+
+Modified, legacy, unknown, linked, special, and ambiguous launcher entries are never silently
+replaced. The plan names preserved unrelated files and blocks unresolved conflicts. Custom mods,
+saves, current SMAPI logs, and local Mod Health Reports are not uninstall targets.
 
 The two bundled mods, Console Commands and Save Backup, are updated in place. An uninstall
 intentionally leaves them in `Mods`, just as the upstream installer does.
 
 ## Uninstall or roll back
 
-Keep the verified alpha installer used for the current installation. To return to vanilla:
+Keep the verified alpha installer used for the current installation. To return to vanilla, inspect
+and explicitly confirm **Uninstall** in the GUI. It restores the authenticated launcher state and
+removes receipt-owned fork files while preserving unrelated game files, `Mods`, saves, logs, and
+reports.
+
+The terminal fallback can uninstall with:
 
 ```bash
 ./internal/linux/SMAPI.Installer \
   --no-prompt --uninstall --game-path "/absolute/path/to/Stardew Valley"
 ```
 
-This restores the exact vanilla launcher backup and removes the fork-only net6/net10 hosts and
-SMAPI internal files. It leaves the bundled and custom mods in `Mods`; vanilla ignores them.
+For an authenticated GUI rollback, select **Load or refresh history**, select one generation,
+choose **Inspect rollback**, review the exact restored release/state and downgrade risk, then use
+**Confirm reviewed plan** and **Run rollback**. No recovery point is selected automatically. These
+recovery generations contain installer-managed state, not backups of `Mods` or saves.
 
 To roll back to official SMAPI 4.5.2 or an earlier verified fork package:
 
@@ -246,14 +251,13 @@ backup rules. If terminal automation cannot run it, `internal/linux/install.dat`
    private-runtime `createdump` executable as mode 755. The private app-relative runtime contains
    `host/fxr` and `shared/Microsoft.NETCore.App`; it intentionally does not bundle the `dotnet` CLI.
 
-For the planned alpha 2 build containing PR #177, step 4 must preserve both exact
-bytes and Unix mode:
+For alpha 2, step 4 must preserve both exact bytes and Unix mode:
 
 ```bash
 cp --preserve=mode -- "Stardew Valley.deps.json" "StardewModdingAPI-net6.deps.json"
 ```
 
-That stricter validation-only behavior is not part of the published alpha.1 artifact.
+The alpha 2 dispatcher validates that file instead of creating or refreshing it at launch.
 
 Manual removal must follow the exact file manifest in the installer source. Do not recursively
 delete the game folder, `Mods`, saves, `ErrorLogs`, or `HealthReports`.
@@ -265,9 +269,9 @@ names, IDs, versions, dependency IDs, callback identities, filesystem-derived de
 information. Inspect any report before sharing it. The installer and release workflow never upload
 the private benchmark modpack or save.
 
-### Planned alpha 2 graphical-installer diagnostics
+### Graphical-installer diagnostics
 
-The graphical candidate stores its local JSONL diagnostics under
+The graphical installer stores its local JSONL diagnostics under
 `$XDG_STATE_HOME/smapi-installer/logs` when `XDG_STATE_HOME` is an absolute path, or
 `~/.local/state/smapi-installer/logs` otherwise. On Linux, its directories are mode `0700` and
 its files are mode `0600`. Each file is bounded to 1 MiB and at most five owned log files are
@@ -287,10 +291,10 @@ not start Avalonia, network, or game access. If it cannot durably prove readines
 a new mutating action, that action is not admitted. A logging failure does not rewrite the outcome
 of work which was already admitted.
 
-| Graphical candidate symptom | Safe next step |
+| Graphical installer symptom | Safe next step |
 | --- | --- |
 | Root or `sudo` refusal | Run as the normal desktop user. The refusal happens before logging, networking, discovery, or mutation. |
-| No compatible release | Published alpha.1 does not contain the required six public assets. Use its verified terminal instructions; do not treat a branch artifact as a release. |
+| No compatible release | Check connectivity and confirm the catalog is showing this repository's alpha 2. Do not substitute an Actions or pull-request artifact. The verified local-folder route and terminal fallback remain available. |
 | Catalog, download, checksum, metadata, or provenance failure | Use the visible retry only after checking connectivity and the selected public release. Verification failure blocks mutation. |
 | Backend or protocol failure | Review the bounded diagnostic snapshot, close the GUI, and start a fresh session. Do not infer that files changed unless the typed result says so. |
 | Diagnostic log unavailable | Close any other graphical installer session, check free space and normal-user ownership of the XDG state location, then start a fresh session. Do not remove the lock, run as root, or recursively change unrelated permissions. |
@@ -301,39 +305,39 @@ extraction remains documented separately because it cannot provide the console/C
 ownership, backup, validation, or rollback decisions automatically.
 
 The published performance comparison describes one controlled workstation and workload. It is not
-a universal FPS, power, CPU-use, or latency claim. Published alpha.1 has no GUI/updater, and its current
-rollback flow is not atomic. The published alpha.1 dispatcher is not validation-only: its net6 path
-may create or refresh dependency metadata before launch. The planned alpha 2 dispatcher from PR #177
-removes that mutation and rechecks path identities to catch ordinary concurrent changes
-during validation, but same-user adversarial path replacement between validation and process
-execution remains outside that nonprivileged launcher's threat boundary. Those statements describe
-planned alpha 2 behavior, not alpha.1. See the [comparison](../upstream-comparison.md),
+a universal FPS, power, CPU-use, or latency claim. Alpha 2 rechecks path identities to catch ordinary
+concurrent changes during dispatcher validation, but same-user adversarial path replacement between
+validation and process execution remains outside the nonprivileged launcher's threat boundary.
+Native Wayland is experimental; the advertised GUI path is X11 or XWayland. Authentic GNOME/KDE,
+desktop-session, AT-SPI, scaling, and complete production-workflow screenshot evidence is still being
+captured and must not be inferred from the historical safe-demo screenshot. See the
+[comparison](../upstream-comparison.md),
 [validation record](linux-alpha-release-validation.md), and
 [issue tracker](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues).
 
 ## Maintainer release process
 
-The alpha 2 release-preparation pull request must pass `Linux alpha release qualification` and the repository's required
-performance gate. Hosted CI compiles the game-bound test assembly against pinned public reference
+The alpha 2 release-preparation pull request passed `Linux alpha release qualification` and the
+repository's required performance gate. Hosted CI compiles the game-bound test assembly against pinned public reference
 assemblies, then executes the fixture-free runtime-dispatcher and analyzer suites with zero-test
 discovery treated as an error. Reference assemblies are deliberately non-executable, so they must
 not be presented as a full game-bound test run. The complete `SMAPI.Tests` suite is run separately
 against executable game assemblies in the authorized disposable environment, with only sanitized
 counts and pass/fail evidence published.
 
-After independent release, security/privacy, testing, and final-diff reviews, the pull request is
-merged to `develop`. A non-authoritative candidate is built by dispatching
+After independent release, security/privacy, testing, and final-diff reviews, the pull request was
+merged to `develop`. A non-authoritative candidate was built by dispatching
 `linux-alpha-release.yml` with the exact 40-character merge commit, embedded version, and reserved
 tag. Its metadata records the actual pre-tag workflow ref; it does not mint a companion manifest
 which the installer can accept as release authority. Only after the full test suite, isolated
-lifecycle, and trusted-workload qualifications pass for that exact commit is the annotated tag
+lifecycle, and trusted-workload qualifications passed for that exact commit was the annotated tag
 created at the same commit.
 
-For a source revision containing the Phase 4 release-authority work, the tag-triggered workflow then
-rebuilds and qualifies the finalized ZIP, creates its canonical external install manifest, emits
-`SHA256SUMS` with exactly those two sorted subjects and plural-artifact build metadata, runs the
-complete package/manifest authority verification before and after workflow-artifact transfer,
-attests both subjects, exports the local attestation bundle and its checksum sidecar, and publishes
+The [tag-triggered alpha 2 workflow](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33669816773)
+then rebuilt and qualified the finalized ZIP, created its canonical external install manifest,
+emitted `SHA256SUMS` with exactly those two sorted subjects and plural-artifact build metadata, ran
+the complete package/manifest authority verification before and after workflow-artifact transfer,
+attested both subjects, exported the local attestation bundle and its checksum sidecar, and published
 the exact six named release files. The downloaded public six-asset set—not a local package or pre-tag
-candidate—is then used for final clean-room verification.
-These alpha 2 steps do not retroactively describe the published alpha.1 assets.
+candidate—then passed final clean-isolated verification and disposable lifecycle tests. These alpha
+2 steps do not retroactively describe the historical alpha 1 assets.

@@ -18,7 +18,7 @@ This directory contains the source for the
 ### Players and testers
 
 - [Release notes](release-notes.md)
-- [Linux graphical installer candidate, diagnostics, and troubleshooting](technical/linux-gui-shell.md)
+- [Published Linux graphical installer, diagnostics, and troubleshooting](technical/linux-gui-shell.md)
 - [Mod Health Report validation](technical/mod-health-report-validation.md)
 - [Linux menu-click compatibility notes](technical/linux-net10-menu-click-fix.md)
 

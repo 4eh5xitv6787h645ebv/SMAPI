@@ -7,12 +7,15 @@ title: Release notes
 
 # Release notes
 
-## Planned Linux fork 4.5.3 alpha 2
+## Linux fork 4.5.3 alpha 2
 
-This exact `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2` candidate is not public until its
-reviewed commit is qualified, tagged, and published by the release workflow. Do not substitute a
-pull-request or Actions artifact for the eventual six-file public release set. The existing
-terminal launcher remains in the same candidate ZIP as the graphical installer.
+This **unofficial experimental Linux x86_64 fork** was published on 2 September 2026 UTC as
+[`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2).
+Its embedded version is `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2`, and its six public
+assets were built from exact reviewed commit
+[`052699e8`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/052699e8ccba0d13f9d4f02e0bb199aa04cec605).
+Download all six assets from that release; do not substitute a pull-request or Actions artifact.
+The existing terminal launcher remains in the same ZIP as the graphical installer.
 
 * Added a maintainable Avalonia Linux desktop frontend around the shared transactional installer
   Core and strict out-of-process protocol. The GUI never implements its own game-file mutation
@@ -39,9 +42,12 @@ terminal launcher remains in the same candidate ZIP as the graphical installer.
   or automatic upload was added.
 * Kept the console, headless, and last-resort manual paths documented. The graphical and console
   launchers ship from the same exact verified package.
-* Added exact-package, protocol, filesystem, failure, cancellation, recovery, accessibility, privacy,
-  and launcher qualification. Authentic production screenshots and clean public-artifact results
-  remain pending until the tagged alpha 2 package exists.
+* Added exact-package, protocol, filesystem, failure, cancellation, recovery, accessibility,
+  privacy, and launcher qualification. The freshly downloaded six-asset public set passed exact
+  inventory, checksum, metadata, manifest-authority, and two-subject local-bundle attestation
+  verification; its exact ZIP then passed structural, packaged-GUI, and disposable
+  install/update/uninstall/failure lifecycle checks. Authentic GNOME/KDE, X11/XWayland, AT-SPI,
+  scaling, and production-workflow screenshots remain pending.
 
 See the [graphical installer guide](technical/linux-gui-shell.md),
 [Linux alpha guide](technical/linux-alpha-release.md), and
