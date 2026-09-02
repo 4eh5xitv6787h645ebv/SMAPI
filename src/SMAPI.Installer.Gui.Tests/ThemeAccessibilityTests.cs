@@ -1,6 +1,7 @@
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Headless.NUnit;
+using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Styling;
 using Avalonia.Threading;
@@ -60,10 +61,23 @@ internal sealed class ThemeAccessibilityTests
             Contrast(focus, card).Should().BeGreaterThanOrEqualTo(3, $"keyboard focus must remain distinguishable in {theme}");
             Contrast(foreground, card).Should().BeGreaterThanOrEqualTo(4.5, $"manual help must remain readable in {theme}");
 
-            TextBlock manualHelp = window.FindControl<TextBlock>("ManualFallbackText")!;
+            Border manualHelp = window.FindControl<Border>("ManualFallbackCard")!;
             manualHelp.IsEffectivelyVisible.Should().BeTrue();
-            AutomationProperties.GetName(manualHelp).Should().Be("Manual terminal installation help");
-            Solid(manualHelp.Foreground, "manual-help foreground").Should().Be(foreground);
+            AutomationProperties.GetName(manualHelp).Should().Contain("Manual terminal and headless installation help");
+            manualHelp.Focus(NavigationMethod.Tab);
+            manualHelp.IsFocused.Should().BeTrue($"manual help must be keyboard-reachable in {theme}");
+            Color manualFocus = Solid(manualHelp.BorderBrush, "manual-help focus ring");
+            Contrast(manualFocus, card).Should().BeGreaterThanOrEqualTo(3, $"manual-help focus must remain distinguishable in {theme}");
+            Color commandBackground = Solid(window.FindControl<Border>("ManualHeadlessCommandCard")!.Background, "manual command background");
+            Color limitationBackground = Solid(window.FindControl<Border>("ManualLimitationsCard")!.Background, "manual limitation background");
+            Contrast(foreground, commandBackground).Should().BeGreaterThanOrEqualTo(4.5, $"manual commands must remain readable in {theme}");
+            Contrast(foreground, limitationBackground).Should().BeGreaterThanOrEqualTo(4.5, $"manual limitations must remain readable in {theme}");
+            foreach (string name in new[] { "ManualFallbackIntroduction", "ManualPrerequisitesText", "ManualInteractiveCommand", "ManualFileManagerFallbackText", "ManualHeadlessInstallCommand", "ManualHeadlessUninstallCommand", "ManualExitText", "ManualPrivacyText", "ManualLimitationsText" })
+            {
+                TextBlock content = window.FindControl<TextBlock>(name)!;
+                content.IsEffectivelyVisible.Should().BeTrue($"{name} must remain reachable in {theme}");
+                Solid(content.Foreground, $"{name} foreground").Should().Be(foreground);
+            }
 
             await viewModel.DownloadAndVerifyCommand.ExecuteAsync();
             await WaitUntilAsync(() => viewModel.IsErrorVisible);
