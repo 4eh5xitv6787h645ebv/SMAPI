@@ -93,6 +93,12 @@ internal sealed partial class ReleaseVerificationWindow : Window, IAsyncDisposab
         }
     }
 
+    private void OnExitClick(object? sender, RoutedEventArgs e)
+    {
+        this.Close();
+        e.Handled = true;
+    }
+
     private void OnFocusRequested(object? sender, ReleaseVerificationFocusTarget target)
     {
         Dispatcher.UIThread.Post(

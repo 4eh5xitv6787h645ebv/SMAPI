@@ -164,19 +164,34 @@ public sealed class VerifiedReleasePackage : IDisposable, IAsyncDisposable
             if (this.Disposed)
                 throw new ObjectDisposedException(nameof(VerifiedReleasePackage));
             if (!this.Stream.CanRead || !this.Stream.CanSeek || this.Stream.Length != this.SizeBytes)
-                throw new PackageSecurityException("The private verified package handle changed before use.");
+            {
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.IntegrityRejected,
+                    "The private verified package handle changed before use."
+                );
+            }
 
             this.Stream.Position = 0;
             using SHA256 hasher = SHA256.Create();
             byte[] hash = await hasher.ComputeHashAsync(this.Stream, cancellationToken).ConfigureAwait(false);
             string actualHash = Convert.ToHexString(hash).ToLowerInvariant();
             if (this.Stream.Position != this.SizeBytes || !string.Equals(actualHash, this.Sha256, StringComparison.Ordinal))
-                throw new PackageSecurityException("The private staged package no longer matches its verified identity.");
+            {
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.IntegrityRejected,
+                    "The private staged package no longer matches its verified identity."
+                );
+            }
 
             this.Stream.Position = 0;
             this.AfterPreUseHash?.Invoke(this.Stream, this.SealedWriteAlias);
             if (!this.Stream.CanRead || this.Stream.CanWrite || !this.Stream.CanSeek || this.Stream.Length != this.SizeBytes)
-                throw new PackageSecurityException("The private verified package authority changed before consumption.");
+            {
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.IntegrityRejected,
+                    "The private verified package authority changed before consumption."
+                );
+            }
             this.Stream.Position = 0;
             return await action(this.Stream, cancellationToken).ConfigureAwait(false);
         }
@@ -352,7 +367,10 @@ public sealed class ReleasePackageVerifier
 
         string fullPackagePath = Path.GetFullPath(packagePath);
         if (!string.Equals(Path.GetFileName(fullPackagePath), identity.PackageAssetName, StringComparison.Ordinal))
-            throw new PackageSecurityException("The selected installer filename doesn't match its release identity.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The selected installer filename doesn't match its release identity."
+            );
         using RetainedReleaseAssetFile source = RetainedReleaseAssetFile.Open(fullPackagePath, "installer package");
         return await this.VerifyRetainedAsync(
             source,
@@ -384,11 +402,30 @@ public sealed class ReleasePackageVerifier
             throw new ArgumentException("The expected source commit must be a full lowercase Git commit.", nameof(expectedSourceCommit));
         ArgumentNullException.ThrowIfNull(limits);
 
-        this.AssertTextBound(checksumDocument, limits.MaxChecksumBytes, "checksum document");
-        this.AssertTextBound(metadataDocument, limits.MaxMetadataBytes, "build metadata");
-        IReadOnlyDictionary<string, string> checksumHashes = this.ParseChecksumDocument(checksumDocument);
-        ReleaseBuildMetadata metadata = this.ParseMetadata(metadataDocument, identity.PackageAssetName);
-        this.AssertArtifactSetsAgree(checksumHashes, metadata.Artifacts);
+        IReadOnlyDictionary<string, string> checksumHashes = Classify(
+            () =>
+            {
+                this.AssertTextBound(checksumDocument, limits.MaxChecksumBytes, "checksum document");
+                return this.ParseChecksumDocument(checksumDocument);
+            },
+            PackageSecurityFailureKind.IntegrityRejected
+        );
+        ReleaseBuildMetadata metadata = Classify(
+            () =>
+            {
+                this.AssertTextBound(metadataDocument, limits.MaxMetadataBytes, "build metadata");
+                return this.ParseMetadata(metadataDocument, identity.PackageAssetName);
+            },
+            PackageSecurityFailureKind.MetadataRejected
+        );
+        Classify(
+            () =>
+            {
+                this.AssertArtifactSetsAgree(checksumHashes, metadata.Artifacts);
+                return true;
+            },
+            PackageSecurityFailureKind.MetadataRejected
+        );
         string checksumHash = checksumHashes[identity.PackageAssetName];
 
         string? stagingDirectory = null;
@@ -438,11 +475,24 @@ public sealed class ReleasePackageVerifier
             await stagingStream.FlushAsync(cancellationToken).ConfigureAwait(false);
             stagingStream.Flush(flushToDisk: true);
 
-            this.AssertMetadata(metadata, identity, size, expectedSourceCommit);
+            Classify(
+                () =>
+                {
+                    this.AssertMetadata(metadata, identity, size, expectedSourceCommit);
+                    return true;
+                },
+                PackageSecurityFailureKind.MetadataRejected
+            );
             if (!string.Equals(packageHash, checksumHash, StringComparison.OrdinalIgnoreCase))
-                throw new PackageSecurityException("The installer package doesn't match SHA256SUMS.");
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.IntegrityRejected,
+                    "The installer package doesn't match SHA256SUMS."
+                );
             if (!string.Equals(packageHash, metadata.Artifact.Sha256, StringComparison.Ordinal))
-                throw new PackageSecurityException("The installer package doesn't match build-metadata.json.");
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.IntegrityRejected,
+                    "The installer package doesn't match build-metadata.json."
+                );
 
             if (OperatingSystem.IsLinux())
             {
@@ -667,15 +717,24 @@ public sealed class ReleasePackageVerifier
 
         identity.AssertMatches(metadata.Release.Version, metadata.Artifact.Name);
         if (!string.Equals(metadata.Release.Tag, identity.Tag, StringComparison.Ordinal))
-            throw new PackageSecurityException("The metadata release tag doesn't match the selected release.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The metadata release tag doesn't match the selected release."
+            );
         if (!string.Equals(metadata.Source.Repository, ForkReleaseIdentity.RepositoryUrl, StringComparison.Ordinal))
-            throw new PackageSecurityException("The metadata source repository isn't the reviewed SMAPI fork.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The metadata source repository isn't the reviewed SMAPI fork."
+            );
         if (!ReleasePackageVerifier.CommitPattern.IsMatch(metadata.Source.Commit))
             throw new PackageSecurityException("The metadata source commit isn't a full lowercase Git commit.");
         if (!ReleasePackageVerifier.CommitPattern.IsMatch(metadata.Source.Tree))
             throw new PackageSecurityException("The metadata source tree isn't a full lowercase Git tree.");
         if (!string.Equals(metadata.Source.Commit, expectedSourceCommit, StringComparison.Ordinal))
-            throw new PackageSecurityException("The metadata source commit doesn't match the selected release target.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The metadata source commit doesn't match the selected release target."
+            );
         if (!string.Equals(metadata.Build.Configuration, "Release", StringComparison.Ordinal))
             throw new PackageSecurityException("The installer package wasn't recorded as a Release build.");
         if (!string.Equals(metadata.Build.RuntimeIdentifier, "linux-x64", StringComparison.Ordinal))
@@ -686,7 +745,10 @@ public sealed class ReleasePackageVerifier
             StringComparison.Ordinal
         ))
         {
-            throw new PackageSecurityException("The metadata workflow isn't the reviewed Linux release workflow.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The metadata workflow isn't the reviewed Linux release workflow."
+            );
         }
         if (metadata.Artifact.SizeBytes != packageSize)
             throw new PackageSecurityException("The installer package size doesn't match build-metadata.json.");
@@ -782,6 +844,21 @@ public sealed class ReleasePackageVerifier
         if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out int result))
             throw new PackageSecurityException($"build-metadata.json '{description}.{name}' must be an integer.");
         return result;
+    }
+
+    private static T Classify<T>(
+        Func<T> action,
+        PackageSecurityFailureKind failureKind
+    )
+    {
+        try
+        {
+            return action();
+        }
+        catch (PackageSecurityException ex) when (ex.FailureKind == PackageSecurityFailureKind.Unclassified)
+        {
+            throw new PackageSecurityException(failureKind, ex.Message, ex);
+        }
     }
 
     private sealed record ReleaseBuildMetadata(

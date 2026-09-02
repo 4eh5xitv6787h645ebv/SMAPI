@@ -183,6 +183,7 @@ public sealed class BoundedHttpDownloaderTests
         );
 
         PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkTimeout);
         exception.Message.Should().Contain("timed out");
         exception.Message.Should().NotContain("super-secret");
         this.GetDownloadTemporaryPaths().Should().BeEmpty();
@@ -204,8 +205,124 @@ public sealed class BoundedHttpDownloaderTests
         );
 
         PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkUnavailable);
         exception.Message.Should().Contain("HTTP 404");
         exception.Message.Should().NotContain("super-secret");
+    }
+
+    [Test]
+    public async Task DownloadAsync_TruncatedDeclaredBody_IsIncompleteAndDeletesPart()
+    {
+        await using LoopbackHttpServer server = new(async (_, _, stream, cancellationToken) =>
+        {
+            await LoopbackHttpServer.WriteRawAsync(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
+                cancellationToken
+            );
+        });
+        using BoundedHttpDownloader downloader = new(new LoopbackDownloadPolicy());
+        string destination = Path.Combine(this.TempRoot, "package.zip");
+
+        Func<Task> action = () => downloader.DownloadAsync(
+            server.BaseUri,
+            destination,
+            new DownloadLimits(1024, TimeSpan.FromSeconds(5), 0)
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.IncompleteDownload);
+        File.Exists(destination).Should().BeFalse();
+        this.GetDownloadTemporaryPaths().Should().BeEmpty();
+    }
+
+    [Test]
+    [TestCase(false, false)]
+    [TestCase(false, true)]
+    [TestCase(true, false)]
+    [TestCase(true, true)]
+    public async Task DownloadAsync_ReadIOExceptionAfterCancellation_PreservesCancellationAuthority(
+        bool anchored,
+        bool timeout
+    )
+    {
+        CancellationIOExceptionHandler handler = new();
+        using BoundedHttpDownloader downloader = new(new LoopbackDownloadPolicy(), handler);
+        using CancellationTokenSource cancellationSource = new();
+        PrivateReleaseAssetWorkspace? workspace = anchored ? PrivateReleaseAssetWorkspace.Create() : null;
+        string destination = Path.Combine(this.TempRoot, "package.zip");
+        try
+        {
+            DownloadLimits limits = new(1024, timeout ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromSeconds(5), 0);
+            Task<DownloadResult> download = anchored
+                ? downloader.DownloadAsync(
+                    new Uri("http://127.0.0.1/package.zip"),
+                    workspace!.CreateTarget("package.zip", 100),
+                    limits,
+                    cancellationToken: cancellationSource.Token
+                )
+                : downloader.DownloadAsync(
+                    new Uri("http://127.0.0.1/package.zip"),
+                    destination,
+                    limits,
+                    cancellationToken: cancellationSource.Token
+                );
+            await handler.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (!timeout)
+                cancellationSource.Cancel();
+
+            if (timeout)
+            {
+                PackageSecurityException exception = (
+                    await download.Invoking(async task => await task).Should().ThrowAsync<PackageSecurityException>()
+                ).Which;
+                exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkTimeout);
+            }
+            else
+                await download.Invoking(async task => await task).Should().ThrowAsync<OperationCanceledException>();
+
+            if (workspace is not null)
+                workspace.AssertContainsExactly([]);
+            else
+            {
+                File.Exists(destination).Should().BeFalse();
+                this.GetDownloadTemporaryPaths().Should().BeEmpty();
+            }
+        }
+        finally
+        {
+            if (workspace is not null)
+                await workspace.DisposeAsync();
+        }
+    }
+
+    [Test]
+    [TestCase(false, false)]
+    [TestCase(false, true)]
+    [TestCase(true, false)]
+    [TestCase(true, true)]
+    public async Task DownloadAsync_SendAsyncHttpFailureAfterCancellation_PreservesCancellationAuthority(
+        bool anchored,
+        bool timeout
+    )
+    {
+        CancellationHttpRequestHandler handler = new();
+        await this.AssertTransportCancellationAsync(handler, handler.Started, anchored, timeout);
+    }
+
+    [Test]
+    [TestCase(false, false)]
+    [TestCase(false, true)]
+    [TestCase(true, false)]
+    [TestCase(true, true)]
+    public async Task DownloadAsync_ReadAsStreamIoFailureAfterCancellation_PreservesCancellationAuthority(
+        bool anchored,
+        bool timeout
+    )
+    {
+        CancellationIOExceptionContent content = new();
+        FixedResponseHandler handler = new(content);
+        await this.AssertTransportCancellationAsync(handler, content.Started, anchored, timeout);
     }
 
     [Test]
@@ -383,6 +500,62 @@ public sealed class BoundedHttpDownloaderTests
         throw new TimeoutException($"Expected {expected} private download staging file(s).");
     }
 
+    private async Task AssertTransportCancellationAsync(
+        HttpMessageHandler handler,
+        TaskCompletionSource started,
+        bool anchored,
+        bool timeout
+    )
+    {
+        using BoundedHttpDownloader downloader = new(new LoopbackDownloadPolicy(), handler);
+        using CancellationTokenSource cancellationSource = new();
+        PrivateReleaseAssetWorkspace? workspace = anchored ? PrivateReleaseAssetWorkspace.Create() : null;
+        string destination = Path.Combine(this.TempRoot, "transport-package.zip");
+        try
+        {
+            DownloadLimits limits = new(1024, timeout ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromSeconds(5), 0);
+            Task<DownloadResult> download = anchored
+                ? downloader.DownloadAsync(
+                    new Uri("http://127.0.0.1/package.zip"),
+                    workspace!.CreateTarget("package.zip", 100),
+                    limits,
+                    cancellationToken: cancellationSource.Token
+                )
+                : downloader.DownloadAsync(
+                    new Uri("http://127.0.0.1/package.zip"),
+                    destination,
+                    limits,
+                    cancellationToken: cancellationSource.Token
+                );
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (!timeout)
+                cancellationSource.Cancel();
+
+            if (timeout)
+            {
+                PackageSecurityException exception = (
+                    await download.Invoking(async task => await task).Should().ThrowAsync<PackageSecurityException>()
+                ).Which;
+                exception.FailureKind.Should().Be(PackageSecurityFailureKind.NetworkTimeout);
+            }
+            else
+                await download.Invoking(async task => await task).Should().ThrowAsync<OperationCanceledException>();
+
+            if (workspace is not null)
+                workspace.AssertContainsExactly([]);
+            else
+            {
+                File.Exists(destination).Should().BeFalse();
+                this.GetDownloadTemporaryPaths().Should().BeEmpty();
+            }
+        }
+        finally
+        {
+            if (workspace is not null)
+                await workspace.DisposeAsync();
+        }
+    }
+
     private sealed class LoopbackDownloadPolicy : IDownloadUriPolicy
     {
         public void AssertAllowed(Uri uri, bool isInitial)
@@ -409,6 +582,141 @@ public sealed class BoundedHttpDownloaderTests
         public void Report(DownloadProgress value)
         {
             this.Values.Add(value);
+        }
+    }
+
+    private sealed class CancellationIOExceptionHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource ReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        )
+        {
+            return Task.FromResult(
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(new CancellationIOExceptionStream(this.ReadStarted))
+                }
+            );
+        }
+    }
+
+    private sealed class CancellationHttpRequestHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        )
+        {
+            this.Started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                throw new AssertionException("The synthetic transport wait unexpectedly completed.");
+            }
+            catch (OperationCanceledException ex)
+            {
+                throw new HttpRequestException("Synthetic transport shutdown surfaced as HTTP failure.", ex);
+            }
+        }
+    }
+
+    private sealed class FixedResponseHandler(HttpContent content) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        )
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        }
+    }
+
+    private sealed class CancellationIOExceptionContent : HttpContent
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override async Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken)
+        {
+            this.Started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return Stream.Null;
+            }
+            catch (OperationCanceledException ex)
+            {
+                throw new IOException("Synthetic response stream shutdown surfaced as I/O.", ex);
+            }
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            throw new AssertionException("The response stream test must use the cancellation-aware stream factory.");
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    private sealed class CancellationIOExceptionStream(TaskCompletionSource readStarted) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default
+        )
+        {
+            readStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return 0;
+            }
+            catch (OperationCanceledException ex)
+            {
+                throw new IOException("Synthetic transport shutdown surfaced as I/O.", ex);
+            }
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
         }
     }
 

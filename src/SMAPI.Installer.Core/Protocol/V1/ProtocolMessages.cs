@@ -182,16 +182,21 @@ public enum ProtocolNextAction
 /// <summary>A stable class of failure before a mutating operation began.</summary>
 public enum ProtocolPrePlanErrorCode
 {
-    RequestCancelled,
-    InvalidGameFolder,
-    PackageRejected,
-    RecoveryUnavailable,
-    InspectionFailed,
-    CandidateApprovalFailed,
-    PermissionDenied,
-    InputOutputFailure,
-    UnexpectedFailure,
-    NothingToPrune
+    RequestCancelled = 0,
+    InvalidGameFolder = 1,
+    PackageRejected = 2,
+    RecoveryUnavailable = 3,
+    InspectionFailed = 4,
+    CandidateApprovalFailed = 5,
+    PermissionDenied = 6,
+    InputOutputFailure = 7,
+    UnexpectedFailure = 8,
+    NothingToPrune = 9,
+    PackageIntegrityRejected = 10,
+    PackageMetadataRejected = 11,
+    PackageArchiveRejected = 12,
+    PackageProvenanceRejected = 13,
+    PackageReleaseIdentityRejected = 14
 }
 
 public enum ProtocolAcknowledgementKind

@@ -170,7 +170,9 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         );
 
         Func<Task> onlineOnly = async () => await processRunner.RunAsync(missingBundle);
-        await onlineOnly.Should().ThrowAsync<PackageSecurityException>().WithMessage("*rejected*");
+        PackageSecurityException processFailure = (await onlineOnly.Should().ThrowAsync<PackageSecurityException>()).Which;
+        processFailure.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
+        processFailure.Message.Should().Be("The pinned attestation verifier process did not complete successfully.");
 
         VerifiedTaggedPackageTrust trust = await new GitHubArtifactAttestationVerifier(processRunner).VerifyAsync(package, bundle, cli);
         trust.Identity.Should().Be(package.Release);
@@ -778,7 +780,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         return new VerifiedAttestedSubject(ManifestName, ManifestSha256, 6543);
     }
 
-    private static string WriteJson(FixtureOptions? options = null)
+    internal static string WriteJson(FixtureOptions? options = null)
     {
         options ??= new FixtureOptions();
         using MemoryStream stream = new();
@@ -1042,7 +1044,7 @@ internal sealed class GitHubArtifactAttestationVerifierTests
         StatementInvocation
     }
 
-    private sealed class FixtureOptions
+    internal sealed class FixtureOptions
     {
         public AuthorityField Mutation { get; init; }
         public int ResultCount { get; init; } = 1;

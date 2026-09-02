@@ -141,8 +141,14 @@ public sealed record ForkReleaseIdentity
     public void AssertMatches(string embeddedVersion, string assetName)
     {
         if (!string.Equals(embeddedVersion, this.EmbeddedVersion, StringComparison.Ordinal))
-            throw new PackageSecurityException("The package version doesn't match its release tag.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The package version doesn't match its release tag."
+            );
         if (!string.Equals(assetName, this.PackageAssetName, StringComparison.Ordinal))
-            throw new PackageSecurityException("The package filename doesn't match its release identity.");
+            throw new PackageSecurityException(
+                PackageSecurityFailureKind.ReleaseIdentityRejected,
+                "The package filename doesn't match its release identity."
+            );
     }
 }

@@ -183,6 +183,71 @@ internal sealed class InstallerDiagnosticSessionTests
     }
 
     [Test]
+    public async Task ClassifiedPackageFailuresUseStableCodesAndExcludePrivateAuthorityFromShareableViews()
+    {
+        const string privateReleaseAuthority = "PRIVATE-/home/alex/secret-package.zip-https://token.example";
+        (ProtocolPrePlanErrorCode Code, string StableCode)[] cases =
+        [
+            (ProtocolPrePlanErrorCode.PackageIntegrityRejected, "protocol.preplan.package-integrity-rejected"),
+            (ProtocolPrePlanErrorCode.PackageMetadataRejected, "protocol.preplan.package-metadata-rejected"),
+            (ProtocolPrePlanErrorCode.PackageArchiveRejected, "protocol.preplan.package-archive-rejected"),
+            (ProtocolPrePlanErrorCode.PackageProvenanceRejected, "protocol.preplan.package-provenance-rejected"),
+            (ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, "protocol.preplan.package-release-identity-rejected")
+        ];
+        foreach ((ProtocolPrePlanErrorCode code, string stableCode) in cases)
+        {
+            Guid operationId = Guid.NewGuid();
+            InstallerLog log = this.CreateLog(operationId);
+            await using InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+
+            session.Record(InstallerDiagnosticCode.ReleaseFailed, code);
+            session.MarkCompleted();
+            await session.DisposeAsync();
+
+            session.Entries.Select(entry => entry.StableErrorCode).Should().Contain(stableCode);
+            session.Entries.Should().OnlyContain(entry => !entry.Message.Contains(privateReleaseAuthority, StringComparison.Ordinal));
+            string shareable = session.CreateSanitizedCopyText();
+            shareable.Should().Contain(stableCode)
+                .And.NotContain(privateReleaseAuthority)
+                .And.NotContain("/home/alex")
+                .And.NotContain("token.example");
+        }
+    }
+
+    [Test]
+    [TestCase(InstallerDiagnosticCode.ReleaseNetworkUnavailable, "release.network.unavailable")]
+    [TestCase(InstallerDiagnosticCode.ReleaseNetworkTimedOut, "release.network.timeout")]
+    [TestCase(InstallerDiagnosticCode.ReleaseDownloadInterrupted, "release.download.interrupted")]
+    public async Task ReleaseNetworkFailuresUseStageTruthfulStableCodes(
+        InstallerDiagnosticCode diagnosticCode,
+        string stableCode
+    )
+    {
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = this.CreateLog(operationId);
+        await using InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+
+        session.Record(diagnosticCode);
+        session.MarkCompleted();
+        await session.DisposeAsync();
+
+        session.Entries.Select(entry => entry.EventCode).Should().Contain(stableCode);
+        session.CreateSanitizedCopyText().Should().Contain(stableCode);
+    }
+
+    [Test]
+    public async Task UndefinedPrePlanError_IsRejectedBeforeItCanReachTheWriter()
+    {
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = this.CreateLog(operationId);
+        await using InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+
+        Action action = () => session.Record(InstallerDiagnosticCode.ReleaseFailed, (ProtocolPrePlanErrorCode)999);
+
+        action.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Test]
     public async Task SnapshotAndSanitizedCopy_AreBoundedAndExcludeStorageAuthority()
     {
         Guid operationId = Guid.NewGuid();

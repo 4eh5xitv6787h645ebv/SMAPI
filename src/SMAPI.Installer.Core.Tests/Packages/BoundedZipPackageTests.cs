@@ -312,7 +312,8 @@ public sealed class BoundedZipPackageTests
             PermissiveLimits()
         );
 
-        await action.Should().ThrowAsync<PackageSecurityException>();
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
         File.ReadAllText(Path.Combine(destination, "sentinel")).Should().Be("preserve");
     }
 
@@ -351,7 +352,10 @@ public sealed class BoundedZipPackageTests
             PermissiveLimits()
         );
 
-        action.Should().Throw<PackageSecurityException>().WithMessage("*structurally valid ZIP*");
+        PackageSecurityException exception = action.Should().Throw<PackageSecurityException>()
+            .WithMessage("*structurally valid ZIP*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.PackageArchiveRejected);
     }
 
     private string CreateArchive(Action<ZipArchive> build)

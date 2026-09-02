@@ -75,7 +75,10 @@ public sealed class VerifiedPackageContentTests
 
         Func<Task> action = () => new VerifiedPackageContentFactory().ExtractAsync(authority);
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*absent from the verified manifest*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*absent from the verified manifest*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.PackageArchiveRejected);
         authority.AssertUsable();
         await authority.DisposeAsync();
     }
@@ -94,7 +97,54 @@ public sealed class VerifiedPackageContentTests
 
         Func<Task> action = () => new VerifiedPackageContentFactory().ExtractAsync(authority);
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*Unix mode*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*Unix mode*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.PackageArchiveRejected);
+        await authority.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ExtractAsync_AnchoredPayloadMismatchIsPackageArchiveRejectedAtSource()
+    {
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(
+            new Dictionary<string, (byte[] Bytes, int Mode)>(StringComparer.Ordinal)
+            {
+                ["unix-launcher.sh"] = ("launcher"u8.ToArray(), 493)
+            }
+        );
+        VerifiedPackageContentFactory factory = new(payloadRoot =>
+        {
+            File.WriteAllBytes(Path.Combine(payloadRoot, "StardewValley"), "changed!"u8.ToArray());
+        });
+        Func<Task> action = () => factory.ExtractAsync(authority);
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.PackageArchiveRejected);
+        exception.Message.Should().Contain("anchored installer payload");
+        authority.AssertUsable();
+        await authority.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ExtractAsync_LocalPostExtractionAuthorityFailureRemainsUnclassified()
+    {
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(
+            new Dictionary<string, (byte[] Bytes, int Mode)>(StringComparer.Ordinal)
+            {
+                ["unix-launcher.sh"] = ("launcher"u8.ToArray(), 493)
+            }
+        );
+        VerifiedPackageContentFactory factory = new(
+            _ => throw new PackageSecurityException("Synthetic post-extraction authority failure.")
+        );
+        Func<Task> action = () => factory.ExtractAsync(authority);
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
+        authority.AssertUsable();
         await authority.DisposeAsync();
     }
 
@@ -111,8 +161,37 @@ public sealed class VerifiedPackageContentTests
 
         Func<Task> action = () => new VerifiedPackageContentFactory().ExtractAsync(authority);
 
-        await action.Should().ThrowAsync<PackageSecurityException>().WithMessage("*release attestation*");
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>())
+            .WithMessage("*release attestation*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
         authority.AssertUsable();
+        await authority.DisposeAsync();
+    }
+
+    [Test]
+    public async Task ManifestPayloadExtractor_ExistingStagingDestinationRemainsUnclassified()
+    {
+        VerifiedInstallerPackage authority = await this.CreateAuthorityAsync(
+            new Dictionary<string, (byte[] Bytes, int Mode)>(StringComparer.Ordinal)
+            {
+                ["unix-launcher.sh"] = ("launcher"u8.ToArray(), 493)
+            }
+        );
+        string destination = Path.Combine(this.TempRoot, "already-existing-staging");
+        Directory.CreateDirectory(destination);
+        Func<Task> action = () => ManifestPayloadExtractor.ExtractAsync(
+            Path.Combine(this.TempRoot, "unused-archive"),
+            destination,
+            authority.Manifest,
+            ZipPackageLimits.Default,
+            CancellationToken.None
+        );
+
+        PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
+
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
+        Directory.Exists(destination).Should().BeTrue();
         await authority.DisposeAsync();
     }
 
@@ -170,7 +249,10 @@ public sealed class VerifiedPackageContentTests
         );
 
         Action wrong = () => authority.BindTrust(other);
-        wrong.Should().Throw<PackageSecurityException>().WithMessage("*doesn't match*");
+        PackageSecurityException mismatch = wrong.Should().Throw<PackageSecurityException>()
+            .WithMessage("*doesn't match*")
+            .Which;
+        mismatch.FailureKind.Should().Be(PackageSecurityFailureKind.ProvenanceRejected);
         authority.BindTrust(exact);
         Action duplicate = () => authority.BindTrust(exact);
         duplicate.Should().Throw<InvalidOperationException>().WithMessage("*already bound*");

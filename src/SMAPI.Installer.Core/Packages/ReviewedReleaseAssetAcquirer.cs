@@ -227,7 +227,10 @@ public static class ReviewedReleaseAssetAcquirer
                     ).ConfigureAwait(false);
                     linked.Token.ThrowIfCancellationRequested();
                     if (result.BytesReceived != asset.SizeBytes)
-                        throw new PackageSecurityException("A reviewed release asset length differs from its catalog advertisement.");
+                        throw new PackageSecurityException(
+                            PackageSecurityFailureKind.IncompleteDownload,
+                            "A reviewed release asset length differs from its catalog advertisement."
+                        );
                     workspace.RetainPublished(target, asset.Name, asset.SizeBytes);
                     completedBytes = checked(completedBytes + result.BytesReceived);
                     progress?.Report(new ReviewedReleaseAcquisitionProgress(
@@ -252,9 +255,16 @@ public static class ReviewedReleaseAssetAcquirer
             {
                 throw;
             }
+            catch (OperationCanceledException) when (aggregateTimeout.IsCancellationRequested)
+            {
+                throw new PackageSecurityException(
+                    PackageSecurityFailureKind.NetworkTimeout,
+                    "Reviewed release acquisition exceeded its fixed aggregate time limit."
+                );
+            }
             catch (OperationCanceledException)
             {
-                throw new PackageSecurityException("Reviewed release acquisition exceeded its fixed aggregate time limit.");
+                throw;
             }
             catch (PackageSecurityException)
             {

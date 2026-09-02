@@ -83,7 +83,7 @@ internal sealed class BoundedZipPackage
         }
         catch (InvalidDataException ex)
         {
-            throw new PackageSecurityException("The installer package isn't a structurally valid ZIP archive.", ex);
+            throw InvalidArchive("The installer package isn't a structurally valid ZIP archive.", ex);
         }
     }
 
@@ -112,7 +112,7 @@ internal sealed class BoundedZipPackage
         }
         catch (InvalidDataException ex)
         {
-            throw new PackageSecurityException("The installer package failed ZIP integrity validation.", ex);
+            throw InvalidArchive("The installer package failed ZIP integrity validation.", ex);
         }
     }
 
@@ -145,7 +145,7 @@ internal sealed class BoundedZipPackage
         }
         catch (InvalidDataException ex)
         {
-            throw new PackageSecurityException("The verified installer package failed ZIP integrity validation.", ex);
+            throw InvalidArchive("The verified installer package failed ZIP integrity validation.", ex);
         }
     }
 
@@ -204,7 +204,7 @@ internal sealed class BoundedZipPackage
                     string relativePath = validatedEntry.CanonicalPath.Replace('/', Path.DirectorySeparatorChar);
                     string targetPath = Path.GetFullPath(Path.Combine(fullDestinationPath, relativePath));
                     if (!targetPath.StartsWith(destinationPrefix, StringComparison.Ordinal))
-                        throw new PackageSecurityException("A package entry escaped the extraction destination.");
+                        throw InvalidArchive("A package entry escaped the extraction destination.");
 
                     if (validatedEntry.IsDirectory)
                     {
@@ -236,14 +236,14 @@ internal sealed class BoundedZipPackage
                         actualEntryBytes = checked(actualEntryBytes + bytesRead);
                         actualTotalBytes = checked(actualTotalBytes + bytesRead);
                         if (actualEntryBytes > limits.MaxEntryExpandedBytes || actualEntryBytes > validatedEntry.Entry.Length)
-                            throw new PackageSecurityException("A package entry exceeded its declared or configured expanded size.");
+                            throw InvalidArchive("A package entry exceeded its declared or configured expanded size.");
                         if (actualTotalBytes > limits.MaxTotalExpandedBytes)
-                            throw new PackageSecurityException("The package exceeded its configured total expanded size.");
+                            throw InvalidArchive("The package exceeded its configured total expanded size.");
                         await output.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
                     }
 
                     if (actualEntryBytes != validatedEntry.Entry.Length)
-                        throw new PackageSecurityException("A package entry didn't match its declared expanded size.");
+                        throw InvalidArchive("A package entry didn't match its declared expanded size.");
                     await output.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -253,7 +253,7 @@ internal sealed class BoundedZipPackage
             }
 
             if (actualTotalBytes != validated.Inspection.TotalExpandedBytes)
-                throw new PackageSecurityException("The extracted package size didn't match its inspected size.");
+                throw InvalidArchive("The extracted package size didn't match its inspected size.");
             return validated.Inspection;
         }
         catch
@@ -270,9 +270,9 @@ internal sealed class BoundedZipPackage
 
         FileInfo archiveFile = new(archivePath);
         if (!archiveFile.Exists)
-            throw new PackageSecurityException("The selected package archive doesn't exist.");
+            throw InvalidArchive("The selected package archive doesn't exist.");
         if (archiveFile.Length <= 0 || archiveFile.Length > limits.MaxArchiveBytes)
-            throw new PackageSecurityException("The selected package archive has an invalid or excessive size.");
+            throw InvalidArchive("The selected package archive has an invalid or excessive size.");
 
         return new FileStream(
             archiveFile.FullName,
@@ -295,9 +295,9 @@ internal sealed class BoundedZipPackage
             throw new ArgumentException("The expected root must be one literal directory name.", nameof(expectedRoot));
         }
         if (archive.Entries.Count == 0)
-            throw new PackageSecurityException("The installer package archive is empty.");
+            throw InvalidArchive("The installer package archive is empty.");
         if (archive.Entries.Count > limits.MaxEntries)
-            throw new PackageSecurityException("The installer package contains too many entries.");
+            throw InvalidArchive("The installer package contains too many entries.");
 
         HashSet<string> exactPaths = new(StringComparer.Ordinal);
         HashSet<string> caseInsensitivePaths = new(StringComparer.OrdinalIgnoreCase);
@@ -314,9 +314,9 @@ internal sealed class BoundedZipPackage
             this.AssertOrdinaryEntry(entry, isDirectory);
 
             if (!exactPaths.Add(canonicalPath))
-                throw new PackageSecurityException("The installer package contains a duplicate entry path.");
+                throw InvalidArchive("The installer package contains a duplicate entry path.");
             if (!caseInsensitivePaths.Add(canonicalPath))
-                throw new PackageSecurityException("The installer package contains case-colliding entry paths.");
+                throw InvalidArchive("The installer package contains case-colliding entry paths.");
             this.AssertNoPathTypeOrPrefixCollisions(
                 canonicalPath,
                 isDirectory,
@@ -326,20 +326,20 @@ internal sealed class BoundedZipPackage
             );
 
             if (entry.Length < 0 || entry.CompressedLength < 0 || entry.Length > limits.MaxEntryExpandedBytes)
-                throw new PackageSecurityException("An installer package entry has an invalid or excessive expanded size.");
+                throw InvalidArchive("An installer package entry has an invalid or excessive expanded size.");
             if (isDirectory && (entry.Length != 0 || entry.CompressedLength != 0))
-                throw new PackageSecurityException("An installer package directory contains an unexpected data payload.");
+                throw InvalidArchive("An installer package directory contains an unexpected data payload.");
             totalExpandedBytes = checked(totalExpandedBytes + entry.Length);
             if (totalExpandedBytes > limits.MaxTotalExpandedBytes)
-                throw new PackageSecurityException("The installer package exceeds its total expanded size limit.");
+                throw InvalidArchive("The installer package exceeds its total expanded size limit.");
 
             if (entry.Length > 0)
             {
                 if (entry.CompressedLength == 0)
-                    throw new PackageSecurityException("An installer package entry has an impossible compression ratio.");
+                    throw InvalidArchive("An installer package entry has an impossible compression ratio.");
                 double ratio = (double)entry.Length / entry.CompressedLength;
                 if (ratio > limits.MaxCompressionRatio)
-                    throw new PackageSecurityException("An installer package entry exceeds the compression-ratio limit.");
+                    throw InvalidArchive("An installer package entry exceeds the compression-ratio limit.");
             }
 
             entries.Add(new ValidatedEntry(entry, canonicalPath, isDirectory));
@@ -363,7 +363,7 @@ internal sealed class BoundedZipPackage
             || !rawPath.IsNormalized(NormalizationForm.FormC)
         )
         {
-            throw new PackageSecurityException("The installer package contains an unsafe or ambiguous entry path.");
+            throw InvalidArchive("The installer package contains an unsafe or ambiguous entry path.");
         }
 
         string canonicalPath = rawPath.EndsWith("/", StringComparison.Ordinal)
@@ -377,12 +377,12 @@ internal sealed class BoundedZipPackage
             || segments.Any(this.IsUnsafeSegment)
         )
         {
-            throw new PackageSecurityException("The installer package contains a traversing or excessively deep entry path.");
+            throw InvalidArchive("The installer package contains a traversing or excessively deep entry path.");
         }
         if (!string.Equals(segments[0], expectedRoot, StringComparison.Ordinal))
-            throw new PackageSecurityException("The installer package contains an unexpected top-level directory.");
+            throw InvalidArchive("The installer package contains an unexpected top-level directory.");
         if (segments.Length == 1 && !rawPath.EndsWith("/", StringComparison.Ordinal))
-            throw new PackageSecurityException("The installer package top-level entry isn't a directory.");
+            throw InvalidArchive("The installer package top-level entry isn't a directory.");
 
         return canonicalPath;
     }
@@ -418,7 +418,7 @@ internal sealed class BoundedZipPackage
                 && !string.Equals(prefix, observedPrefix, StringComparison.Ordinal)
             )
             {
-                throw new PackageSecurityException("The installer package contains case-colliding path segments.");
+                throw InvalidArchive("The installer package contains case-colliding path segments.");
             }
             observedPrefixCasing[prefix] = prefix;
 
@@ -426,7 +426,7 @@ internal sealed class BoundedZipPackage
             if (!isFullPath)
             {
                 if (filePaths.Contains(prefix))
-                    throw new PackageSecurityException("An installer package file is also used as a parent directory.");
+                    throw InvalidArchive("An installer package file is also used as a parent directory.");
                 directoryPaths.Add(prefix);
             }
         }
@@ -434,13 +434,13 @@ internal sealed class BoundedZipPackage
         if (isDirectory)
         {
             if (filePaths.Contains(canonicalPath))
-                throw new PackageSecurityException("An installer package path is both a file and a directory.");
+                throw InvalidArchive("An installer package path is both a file and a directory.");
             directoryPaths.Add(canonicalPath);
         }
         else
         {
             if (directoryPaths.Contains(canonicalPath))
-                throw new PackageSecurityException("An installer package path is both a directory and a file.");
+                throw InvalidArchive("An installer package path is both a directory and a file.");
             filePaths.Add(canonicalPath);
         }
     }
@@ -452,11 +452,18 @@ internal sealed class BoundedZipPackage
         bool dosDirectory = (attributes & 0x10) != 0;
 
         if (unixType is not 0 and not BoundedZipPackage.UnixRegularFile and not BoundedZipPackage.UnixDirectory)
-            throw new PackageSecurityException("The installer package contains a link, device, socket, or FIFO entry.");
+            throw InvalidArchive("The installer package contains a link, device, socket, or FIFO entry.");
         if (isDirectory && unixType == BoundedZipPackage.UnixRegularFile)
-            throw new PackageSecurityException("A package directory is marked as a regular file.");
+            throw InvalidArchive("A package directory is marked as a regular file.");
         if (!isDirectory && (unixType == BoundedZipPackage.UnixDirectory || dosDirectory || entry.Name.Length == 0))
-            throw new PackageSecurityException("A package file is marked as a directory.");
+            throw InvalidArchive("A package file is marked as a directory.");
+    }
+
+    private static PackageSecurityException InvalidArchive(string message, Exception? innerException = null)
+    {
+        return innerException is null
+            ? new PackageSecurityException(PackageSecurityFailureKind.PackageArchiveRejected, message)
+            : new PackageSecurityException(PackageSecurityFailureKind.PackageArchiveRejected, message, innerException);
     }
 
     private static void TryDeleteDirectory(string path)

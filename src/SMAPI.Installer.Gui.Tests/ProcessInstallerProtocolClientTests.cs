@@ -4001,6 +4001,11 @@ public sealed class ProcessInstallerProtocolClientTests
     [TestCase(ProtocolPrePlanErrorCode.RecoveryUnavailable, ProtocolNextAction.ListRecoveries)]
     [TestCase(ProtocolPrePlanErrorCode.CandidateApprovalFailed, ProtocolNextAction.InspectAgain)]
     [TestCase(ProtocolPrePlanErrorCode.InputOutputFailure, ProtocolNextAction.RetryRequest)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageIntegrityRejected, ProtocolNextAction.ReopenVerifiedPackage)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageMetadataRejected, ProtocolNextAction.ReopenVerifiedPackage)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageArchiveRejected, ProtocolNextAction.ReopenVerifiedPackage)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageProvenanceRejected, ProtocolNextAction.ReopenVerifiedPackage)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, ProtocolNextAction.ReopenVerifiedPackage)]
     public async Task InspectPlanFailStopsGloballyValidButRequestUnreachableRejections(
         ProtocolPrePlanErrorCode errorCode,
         ProtocolNextAction nextAction
@@ -4337,16 +4342,21 @@ public sealed class ProcessInstallerProtocolClientTests
         }
     }
 
-    [Test]
-    public async Task SurfacesNormalCorrelatedPackageRejectionWithoutPrivateLogOrFailStop()
+    [TestCase(ProtocolPrePlanErrorCode.PackageRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageIntegrityRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageMetadataRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageArchiveRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageProvenanceRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected)]
+    public async Task SurfacesTypedCorrelatedPackageRejectionsWithoutPrivateLogOrFailStop(ProtocolPrePlanErrorCode errorCode)
     {
         ScriptedProcess process = new(request => request switch
         {
             HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
             OpenPackageRequest => Serialize(new PrePlanRejectedEvent(
                 Session,
-                ProtocolPrePlanErrorCode.PackageRejected,
-                "The selected release asset set failed strict package verification.",
+                errorCode,
+                "The selected release failed one fixed verification boundary.",
                 ProtocolNextAction.ReopenVerifiedPackage,
                 false,
                 "/private/log/which-must-not-cross-the-interface"
@@ -4362,13 +4372,52 @@ public sealed class ProcessInstallerProtocolClientTests
         InstallerPackageOpenResult result = await client.OpenPackageAsync(CreatePackage());
 
         InstallerPackageOpenRejection rejection = result.Should().BeOfType<InstallerPackageOpenRejection>().Subject;
-        rejection.ErrorCode.Should().Be(ProtocolPrePlanErrorCode.PackageRejected);
+        rejection.ErrorCode.Should().Be(errorCode);
         rejection.NextAction.Should().Be(ProtocolNextAction.ReopenVerifiedPackage);
-        rejection.Message.Should().Be("The selected release asset set failed strict package verification.");
+        rejection.Message.Should().Be("The selected release failed one fixed verification boundary.");
         rejection.IsTerminal.Should().BeFalse();
         result.ToString().Should().NotContain("/private/log");
         process.Terminated.Should().BeFalse();
         process.Disposed.Should().BeFalse();
+    }
+
+    [TestCase(ProtocolPrePlanErrorCode.InvalidGameFolder, ProtocolNextAction.SelectGameFolder)]
+    [TestCase(ProtocolPrePlanErrorCode.RecoveryUnavailable, ProtocolNextAction.ListRecoveries)]
+    [TestCase(ProtocolPrePlanErrorCode.InspectionFailed, ProtocolNextAction.InspectAgain)]
+    [TestCase(ProtocolPrePlanErrorCode.CandidateApprovalFailed, ProtocolNextAction.InspectAgain)]
+    [TestCase(ProtocolPrePlanErrorCode.NothingToPrune, ProtocolNextAction.ListRecoveries)]
+    public async Task PackageOpenFailStopsGloballyValidButRequestUnreachableRejections(
+        ProtocolPrePlanErrorCode errorCode,
+        ProtocolNextAction nextAction
+    )
+    {
+        ScriptedProcess process = new(request => request switch
+        {
+            HandshakeRequest => Serialize(new HandshakeEvent(Session, "1", RequiredCapabilities) { CommandId = request.CommandId }),
+            OpenPackageRequest => Serialize(new PrePlanRejectedEvent(
+                Session,
+                errorCode,
+                "private request-unreachable detail",
+                nextAction,
+                false,
+                "/private/request-unreachable.log"
+            )
+            {
+                CommandId = request.CommandId
+            }),
+            _ => throw new AssertionException("Unexpected protocol request.")
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await client.HandshakeAsync("SMAPI GUI", "1");
+
+        Func<Task> action = () => client.OpenPackageAsync(CreatePackage());
+
+        InstallerProtocolClientException failure = (await action.Should().ThrowAsync<InstallerProtocolClientException>()).Which;
+        failure.Message.Should().NotContain("private request-unreachable detail")
+            .And.NotContain("request-unreachable.log");
+        process.Terminated.Should().BeTrue();
+        process.Disposed.Should().BeTrue();
+        client.HasRetainedPackageAuthority.Should().BeFalse();
     }
 
     [TestCase(true)]
@@ -5169,13 +5218,13 @@ public sealed class ProcessInstallerProtocolClientTests
                 .ToArray();
             this.Operations = this.Operations
                 .Concat(approved.Select(candidate => (Candidate: candidate, Action: (candidate.Reason, candidate.Disposition) switch
-                    {
-                        (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace) => PlanOperationKind.Replace,
-                        (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove) => PlanOperationKind.Remove,
-                        (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace) => PlanOperationKind.Replace,
-                        (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore) => PlanOperationKind.Restore,
-                        _ => (PlanOperationKind?)null
-                    }))
+                {
+                    (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace) => PlanOperationKind.Replace,
+                    (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove) => PlanOperationKind.Remove,
+                    (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace) => PlanOperationKind.Replace,
+                    (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore) => PlanOperationKind.Restore,
+                    _ => (PlanOperationKind?)null
+                }))
                     .Where(item => item.Action is not null)
                     .Where(item => !this.Operations.Any(operation => operation.Kind == item.Action && string.Equals(operation.Path, item.Candidate.Path, StringComparison.Ordinal)))
                     .Select(item => new ProtocolPlanOperation(item.Action!.Value, item.Candidate.Path, item.Candidate.ObservedSha256, item.Candidate.ProposedResultSha256)))

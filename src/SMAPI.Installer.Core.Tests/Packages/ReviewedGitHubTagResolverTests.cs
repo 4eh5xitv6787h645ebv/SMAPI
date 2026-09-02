@@ -101,7 +101,10 @@ public sealed class ReviewedGitHubTagResolverTests
             ReferenceDocument(separatelyParsed.Identity, TagObject, "tag")
         );
 
-        action.Should().Throw<PackageSecurityException>().WithMessage("*different catalog release selection*");
+        PackageSecurityException exception = action.Should().Throw<PackageSecurityException>()
+            .WithMessage("*different catalog release selection*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [Test]
@@ -117,7 +120,10 @@ public sealed class ReviewedGitHubTagResolverTests
             ReferenceDocument(candidate.Identity, new string('c', 40), "tag")
         );
 
-        action.Should().Throw<PackageSecurityException>().WithMessage("*tag moved*");
+        PackageSecurityException exception = action.Should().Throw<PackageSecurityException>()
+            .WithMessage("*tag moved*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [Test]
@@ -134,7 +140,10 @@ public sealed class ReviewedGitHubTagResolverTests
             ReferenceDocument(candidate.Identity, Commit, "commit", commitUri)
         );
 
-        action.Should().Throw<PackageSecurityException>().WithMessage("*lightweight or unsupported Git tag*");
+        PackageSecurityException exception = action.Should().Throw<PackageSecurityException>()
+            .WithMessage("*lightweight or unsupported Git tag*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [Test]
@@ -148,7 +157,10 @@ public sealed class ReviewedGitHubTagResolverTests
             candidate
         );
 
-        action.Should().Throw<PackageSecurityException>().WithMessage("*lightweight or unsupported Git tag*");
+        PackageSecurityException exception = action.Should().Throw<PackageSecurityException>()
+            .WithMessage("*lightweight or unsupported Git tag*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [TestCase("refs/tags/other")]
@@ -163,7 +175,10 @@ public sealed class ReviewedGitHubTagResolverTests
             JsonSerializer.SerializeToUtf8Bytes(document), candidate
         );
 
-        action.Should().Throw<PackageSecurityException>().WithMessage("*different release tag*");
+        PackageSecurityException exception = action.Should().Throw<PackageSecurityException>()
+            .WithMessage("*different release tag*")
+            .Which;
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [Test]
@@ -206,8 +221,14 @@ public sealed class ReviewedGitHubTagResolverTests
         Action first = () => Finalize(candidate, initial, movedObject);
         Action second = () => Finalize(candidate, initial, differentTag);
 
-        first.Should().Throw<PackageSecurityException>().WithMessage("*doesn't match the selected tag object*");
-        second.Should().Throw<PackageSecurityException>().WithMessage("*different release tag*");
+        PackageSecurityException firstException = first.Should().Throw<PackageSecurityException>()
+            .WithMessage("*doesn't match the selected tag object*")
+            .Which;
+        PackageSecurityException secondException = second.Should().Throw<PackageSecurityException>()
+            .WithMessage("*different release tag*")
+            .Which;
+        firstException.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
+        secondException.FailureKind.Should().Be(PackageSecurityFailureKind.ReleaseIdentityRejected);
     }
 
     [TestCase("blob")]

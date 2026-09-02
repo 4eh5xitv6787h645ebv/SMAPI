@@ -21,6 +21,24 @@ public sealed record LinuxTaggedReleaseAssetSet(
 /// </summary>
 public sealed class LinuxTaggedReleasePackageOpener
 {
+    private readonly Func<string, CancellationToken, Task<PinnedGitHubCli>> OpenGitHubCli;
+    private readonly IGitHubAttestationProcessRunner AttestationRunner;
+
+    /// <summary>Create the production tagged-release opener with the exact bundled GitHub CLI pin.</summary>
+    public LinuxTaggedReleasePackageOpener()
+        : this(PinnedGitHubCli.OpenAsync, new GitHubAttestationProcessRunner())
+    {
+    }
+
+    internal LinuxTaggedReleasePackageOpener(
+        Func<string, CancellationToken, Task<PinnedGitHubCli>> openGitHubCli,
+        IGitHubAttestationProcessRunner attestationRunner
+    )
+    {
+        this.OpenGitHubCli = openGitHubCli ?? throw new ArgumentNullException(nameof(openGitHubCli));
+        this.AttestationRunner = attestationRunner ?? throw new ArgumentNullException(nameof(attestationRunner));
+    }
+
     /// <summary>Verify and extract one exact tagged Linux release. The caller owns the returned handle.</summary>
     public async Task<VerifiedPackageContent> OpenAsync(
         LinuxTaggedReleaseAssetSet assets,
@@ -28,7 +46,10 @@ public sealed class LinuxTaggedReleasePackageOpener
     )
     {
         ArgumentNullException.ThrowIfNull(assets);
-        ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(assets.ReleaseTag);
+        ForkReleaseIdentity identity = Classify(
+            () => ForkReleaseIdentity.Parse(assets.ReleaseTag),
+            PackageSecurityFailureKind.ReleaseIdentityRejected
+        );
         VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyFilesAsync(
             assets.PackagePath,
             assets.ChecksumsPath,
@@ -53,9 +74,9 @@ public sealed class LinuxTaggedReleasePackageOpener
                     assets.AttestationBundleChecksumPath,
                     cancellationToken
                 ).ConfigureAwait(false);
-                using PinnedGitHubCli cli = await PinnedGitHubCli.OpenAsync(assets.GitHubCliPath, cancellationToken).ConfigureAwait(false);
+                using PinnedGitHubCli cli = await this.OpenGitHubCli(assets.GitHubCliPath, cancellationToken).ConfigureAwait(false);
                 VerifiedTaggedPackageTrust trust = await new GitHubArtifactAttestationVerifier(
-                    new GitHubAttestationProcessRunner()
+                    this.AttestationRunner
                 ).VerifyAsync(installer, bundle, cli, cancellationToken).ConfigureAwait(false);
                 installer.BindTrust(trust);
 
@@ -85,7 +106,10 @@ public sealed class LinuxTaggedReleasePackageOpener
     {
         ArgumentNullException.ThrowIfNull(assets);
         ArgumentNullException.ThrowIfNull(source);
-        ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(assets.ReleaseTag);
+        ForkReleaseIdentity identity = Classify(
+            () => ForkReleaseIdentity.Parse(assets.ReleaseTag),
+            PackageSecurityFailureKind.ReleaseIdentityRejected
+        );
         VerifiedReleasePackage? release = await new ReleasePackageVerifier().VerifyFilesAsync(
             source,
             identity,
@@ -107,9 +131,9 @@ public sealed class LinuxTaggedReleasePackageOpener
                     source,
                     cancellationToken
                 ).ConfigureAwait(false);
-                using PinnedGitHubCli cli = await PinnedGitHubCli.OpenAsync(assets.GitHubCliPath, cancellationToken).ConfigureAwait(false);
+                using PinnedGitHubCli cli = await this.OpenGitHubCli(assets.GitHubCliPath, cancellationToken).ConfigureAwait(false);
                 VerifiedTaggedPackageTrust trust = await new GitHubArtifactAttestationVerifier(
-                    new GitHubAttestationProcessRunner()
+                    this.AttestationRunner
                 ).VerifyAsync(installer, bundle, cli, cancellationToken).ConfigureAwait(false);
                 installer.BindTrust(trust);
 
@@ -130,4 +154,20 @@ public sealed class LinuxTaggedReleasePackageOpener
             release?.Dispose();
         }
     }
+
+    private static T Classify<T>(
+        Func<T> action,
+        PackageSecurityFailureKind failureKind
+    )
+    {
+        try
+        {
+            return action();
+        }
+        catch (PackageSecurityException ex) when (ex.FailureKind == PackageSecurityFailureKind.Unclassified)
+        {
+            throw new PackageSecurityException(failureKind, ex.Message, ex);
+        }
+    }
+
 }

@@ -611,7 +611,8 @@ internal sealed class GitHubAttestationProcessRunnerTests
         {
             Func<Task> action = async () => await this.Runner.RunAsync(this.Request(script, [pidFile]));
             PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
-            exception.Message.Should().Be("The GitHub attestation verifier rejected the selected release evidence.");
+            exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
+            exception.Message.Should().Be("The pinned attestation verifier process did not complete successfully.");
         }
 
         int descendantPid = int.Parse(await File.ReadAllTextAsync(pidFile));
@@ -627,7 +628,8 @@ internal sealed class GitHubAttestationProcessRunnerTests
         Func<Task> action = async () => await this.Runner.RunAsync(this.Request(script, [secret]));
 
         PackageSecurityException exception = (await action.Should().ThrowAsync<PackageSecurityException>()).Which;
-        exception.Message.Should().Be("The GitHub attestation verifier rejected the selected release evidence.");
+        exception.FailureKind.Should().Be(PackageSecurityFailureKind.Unclassified);
+        exception.Message.Should().Be("The pinned attestation verifier process did not complete successfully.");
         exception.ToString().Should().NotContain(secret);
     }
 

@@ -82,7 +82,7 @@ internal sealed class LocalReleaseVerificationControllerTests
         {
             Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
                 ProtocolPrePlanErrorCode.PackageRejected,
-                ProtocolNextAction.RetryRequest,
+                ProtocolNextAction.ReopenVerifiedPackage,
                 $"unsafe detail from {selectedDirectory}",
                 false
             ))
@@ -97,12 +97,73 @@ internal sealed class LocalReleaseVerificationControllerTests
         snapshot.Source.Should().Be(ReleasePackageSource.LocalFolder);
         snapshot.VerifiedRelease.Should().BeNull();
         snapshot.RejectionCode.Should().Be(ProtocolPrePlanErrorCode.PackageRejected);
-        snapshot.RejectionNextAction.Should().Be(ProtocolNextAction.RetryRequest);
+        snapshot.RejectionNextAction.Should().Be(ProtocolNextAction.ReopenVerifiedPackage);
         snapshot.CanRetry.Should().BeFalse("public-release retry must never reuse a local selection");
         snapshot.CanChooseLocal.Should().BeTrue("a retryable rejection permits a fresh folder selection");
         snapshot.ToString().Should().NotContain(selectedDirectory);
         package.DisposeCalls.Should().Be(1);
         client.DisposeCalls.Should().Be(1);
+        await AwaitBounded(controller.DisposeAsync().AsTask());
+    }
+
+    [TestCase(ProtocolPrePlanErrorCode.PackageIntegrityRejected, ReleaseVerificationError.PackageIntegrityOrMetadataRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageMetadataRejected, ReleaseVerificationError.PackageIntegrityOrMetadataRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageArchiveRejected, ReleaseVerificationError.PackageIntegrityOrMetadataRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageProvenanceRejected, ReleaseVerificationError.PackageProvenanceOrIdentityRejected)]
+    [TestCase(ProtocolPrePlanErrorCode.PackageReleaseIdentityRejected, ReleaseVerificationError.PackageProvenanceOrIdentityRejected)]
+    public async Task TypedLocalRejectionRequiresFreshFolderSelectionInsteadOfRetry(
+        ProtocolPrePlanErrorCode rejectionCode,
+        ReleaseVerificationError expectedError
+    )
+    {
+        const string firstPath = "/home/alice/private/first-package";
+        const string secondPath = "/home/alice/private/second-package";
+        Queue<FakePreparedPackage> packages = new([new(), new()]);
+        FakeLocalReleaseService local = new()
+        {
+            Prepare = (_, _) => Task.FromResult<IPreparedReleasePackage>(packages.Dequeue())
+        };
+        Func<FakeClient> rejectingClient = () => new()
+        {
+            Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
+                rejectionCode,
+                ProtocolNextAction.ReopenVerifiedPackage,
+                $"private rejection for {firstPath}?token=SECRET",
+                false
+            ))
+        };
+        FakeClient firstClient = rejectingClient();
+        FakeClient secondClient = rejectingClient();
+        Queue<FakeClient> clients = new([firstClient, secondClient]);
+        ReleaseVerificationController controller = new(new FakeReleaseService(), () => clients.Dequeue(), local);
+
+        await AwaitBounded(controller.StartLocalAsync(firstPath));
+
+        ReleaseVerificationSnapshot firstFailure = controller.Snapshot;
+        firstFailure.State.Should().Be(ReleaseVerificationState.Failed);
+        firstFailure.Error.Should().Be(expectedError);
+        firstFailure.RejectionCode.Should().Be(rejectionCode);
+        firstFailure.VerifiedRelease.Should().BeNull();
+        firstFailure.CanRetry.Should().BeFalse("a local path is never retained as retry authority");
+        firstFailure.CanChooseLocal.Should().BeTrue("the user may explicitly select a fresh complete folder");
+        firstFailure.ToString().Should().NotContain("alice").And.NotContain("SECRET");
+        Action retry = () => _ = controller.RetryAsync();
+        retry.Should().Throw<InvalidOperationException>().WithMessage("*selected again*");
+
+        await AwaitBounded(controller.StartLocalAsync(secondPath));
+
+        ReleaseVerificationSnapshot secondFailure = controller.Snapshot;
+        secondFailure.State.Should().Be(ReleaseVerificationState.Failed);
+        secondFailure.Error.Should().Be(expectedError);
+        secondFailure.RejectionCode.Should().Be(rejectionCode);
+        secondFailure.AttemptNumber.Should().Be(2);
+        secondFailure.VerifiedRelease.Should().BeNull();
+        secondFailure.CanRetry.Should().BeFalse();
+        secondFailure.CanChooseLocal.Should().BeTrue();
+        secondFailure.ToString().Should().NotContain("alice").And.NotContain("SECRET");
+        local.Paths.Should().Equal(firstPath, secondPath);
+        firstClient.DisposeCalls.Should().Be(1);
+        secondClient.DisposeCalls.Should().Be(1);
         await AwaitBounded(controller.DisposeAsync().AsTask());
     }
 
@@ -390,7 +451,7 @@ internal sealed class LocalReleaseVerificationControllerTests
         {
             Open = (_, _) => Task.FromResult<InstallerPackageOpenResult>(new InstallerPackageOpenRejection(
                 ProtocolPrePlanErrorCode.PackageRejected,
-                ProtocolNextAction.RetryRequest,
+                ProtocolNextAction.ReopenVerifiedPackage,
                 "safe rejection",
                 false
             ))
