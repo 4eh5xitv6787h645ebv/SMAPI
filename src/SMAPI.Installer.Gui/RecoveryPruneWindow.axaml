@@ -1,0 +1,325 @@
+<Window
+    x:Class="StardewModdingAPI.Installer.Gui.RecoveryPruneWindow"
+    x:DataType="vm:RecoveryPruneViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
+    Title="SMAPI Linux Installer — Recovery history cleanup"
+    Width="900"
+    Height="760"
+    MinWidth="420"
+    MinHeight="420"
+    WindowStartupLocation="CenterScreen">
+  <Window.Styles>
+    <Style Selector="Border.keyboard-focus:focus-visible">
+      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderThickness" Value="3" />
+    </Style>
+    <Style Selector="CheckBox.keyboard-focus:focus-visible">
+      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderThickness" Value="3" />
+    </Style>
+  </Window.Styles>
+
+  <ScrollViewer
+      x:Name="PageScrollViewer"
+      HorizontalScrollBarVisibility="Disabled"
+      VerticalScrollBarVisibility="Auto">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="18">
+      <StackPanel Grid.Row="0" Spacing="4">
+        <TextBlock
+            AutomationProperties.HeadingLevel="1"
+            FontSize="30"
+            FontWeight="Bold"
+            Text="Manage recovery history"
+            TextWrapping="Wrap" />
+        <TextBlock Classes="muted" FontSize="16" Text="Bounded local recovery cleanup for Linux desktop" TextWrapping="Wrap" />
+      </StackPanel>
+
+      <Border
+          x:Name="SafetyBoundary"
+          Grid.Row="1"
+          Padding="14"
+          AutomationProperties.Name="Review first. Loading, selecting, and previewing recovery cleanup changes no files. Confirmation and Run are separate explicit actions, and Cancel is the recommended default."
+          Background="#192C43"
+          BorderBrush="#5AA7E8"
+          BorderThickness="1"
+          CornerRadius="8">
+        <StackPanel Spacing="6">
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Safety boundary" />
+          <TextBlock
+              Text="Loading, selecting, and previewing recovery cleanup changes no files. Confirmation and Run are separate explicit actions. Cancel is the recommended default."
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="2" Classes="card">
+        <StackPanel Spacing="8">
+          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Bound verified context" />
+          <Border
+              x:Name="GameContextRegion"
+              AutomationProperties.Name="{Binding GameAccessibleName}">
+            <TextBlock
+                x:Name="GameDetail"
+                Text="{Binding GameDetail}"
+                TextWrapping="Wrap" />
+          </Border>
+          <TextBlock
+              x:Name="ReleaseDetail"
+              AutomationProperties.Name="{Binding ReleaseAccessibleName}"
+              Text="{Binding ReleaseDetail}"
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="3" Classes="card">
+        <StackPanel Spacing="14">
+          <Border
+              x:Name="StatusRegion"
+              Classes="keyboard-focus"
+              Focusable="True"
+              TabIndex="0"
+              AutomationProperties.LiveSetting="{Binding StatusLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}">
+            <StackPanel Spacing="7">
+              <TextBlock AutomationProperties.HeadingLevel="2" FontSize="23" FontWeight="SemiBold" Text="{Binding Heading}" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border
+              x:Name="ErrorRegion"
+              Classes="keyboard-focus"
+              Focusable="True"
+              TabIndex="1"
+              IsVisible="{Binding IsErrorVisible}"
+              AutomationProperties.LiveSetting="{Binding ErrorLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}"
+              Padding="12"
+              Background="#3B1F26"
+              BorderBrush="#FF8A9A"
+              BorderThickness="2"
+              CornerRadius="6">
+            <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+          </Border>
+
+          <StackPanel IsVisible="{Binding IsProgressVisible}" Spacing="8">
+            <ProgressBar
+                x:Name="CleanupProgress"
+                Height="14"
+                IsIndeterminate="{Binding IsProgressIndeterminate}"
+                Maximum="{Binding ProgressMaximum}"
+                Value="{Binding ProgressValue}"
+                AutomationProperties.Name="{Binding ProgressDetail}" />
+            <Border
+                x:Name="StageLiveRegion"
+                IsVisible="{Binding HasProgressStage}"
+                AutomationProperties.LiveSetting="{Binding StageLiveSetting}"
+                AutomationProperties.Name="{Binding StageAnnouncement}">
+              <TextBlock Classes="muted" Text="{Binding StageAnnouncement}" TextWrapping="Wrap" />
+            </Border>
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsHistoryListVisible}" Spacing="7">
+            <Label Content="Oldest recovery _point to keep" Target="{Binding #HistoryList}" />
+            <TextBlock
+                Classes="muted"
+                Text="Choose the oldest point to retain. That point and every newer point are kept; only older recovery history is considered for cleanup. Selection alone changes nothing."
+                TextWrapping="Wrap" />
+            <ListBox
+                x:Name="HistoryList"
+                Classes="focus-ring"
+                Focusable="True"
+                MaxHeight="350"
+                MinHeight="120"
+                TabIndex="2"
+                AutomationProperties.AccessKey="Alt+P"
+                AutomationProperties.Name="Oldest recovery point to keep"
+                AutomationProperties.HelpText="Use Up and Down Arrow to choose one exact retention boundary. No point is selected automatically, and selection changes no files."
+                ItemsSource="{Binding Choices}"
+                SelectedItem="{Binding SelectedChoice, Mode=TwoWay}"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                SelectionMode="Single">
+              <ListBox.ItemsPanel>
+                <ItemsPanelTemplate>
+                  <VirtualizingStackPanel />
+                </ItemsPanelTemplate>
+              </ListBox.ItemsPanel>
+              <ListBox.Styles>
+                <Style Selector="ListBoxItem" x:CompileBindings="False">
+                  <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                </Style>
+              </ListBox.Styles>
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:RecoveryPruneChoiceItem">
+                  <StackPanel Margin="4" MaxWidth="760" Spacing="3">
+                    <TextBlock FontWeight="SemiBold" Text="{Binding Title}" TextWrapping="Wrap" />
+                    <TextBlock Classes="muted" Text="{Binding Detail}" TextWrapping="Wrap" />
+                  </StackPanel>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </StackPanel>
+
+          <Border
+              x:Name="ReviewRegion"
+              Classes="keyboard-focus"
+              Focusable="True"
+              TabIndex="3"
+              IsVisible="{Binding IsPlanVisible}"
+              AutomationProperties.LiveSetting="{Binding ReviewLiveSetting}"
+              AutomationProperties.Name="{Binding LiveAnnouncement}"
+              Padding="14"
+              Background="#281F14"
+              BorderBrush="#FFD166"
+              BorderThickness="1"
+              CornerRadius="7">
+            <StackPanel Spacing="10">
+              <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Review exact cleanup facts" />
+              <TextBlock Text="{Binding BoundaryDetail}" TextWrapping="Wrap" />
+              <ItemsControl ItemsSource="{Binding PlanRows}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:RecoveryPruneFactRow">
+                    <Grid Margin="0,3" ColumnDefinitions="2*,3*" AutomationProperties.Name="{Binding AccessibleName}">
+                      <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                      <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <TextBlock
+                  x:Name="CleanupScopeWarningText"
+                  FontWeight="SemiBold"
+                  Text="{Binding CleanupScopeWarning}"
+                  TextWrapping="Wrap" />
+              <CheckBox
+                  x:Name="ConsentCheckBox"
+                  Classes="keyboard-focus"
+                  TabIndex="4"
+                  IsEnabled="{Binding IsConsentVisible}"
+                  IsVisible="{Binding IsConsentVisible}"
+                  AutomationProperties.AccessKey="Alt+A"
+                  AutomationProperties.Name="Acknowledge permanent recovery history cleanup"
+                  AutomationProperties.HelpText="This acknowledgment starts unchecked. It permits confirmation only for the exact reviewed cleanup facts; it does not run cleanup."
+                  Content="I _acknowledge that the reviewed recovery history cleanup is permanent"
+                  IsChecked="{Binding IsDestructiveConsentChecked, Mode=TwoWay}" />
+            </StackPanel>
+          </Border>
+
+          <WrapPanel x:Name="ActionPanel" Orientation="Horizontal">
+            <Button
+                x:Name="LoadButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="5"
+                AutomationProperties.AccessKey="Alt+H"
+                AutomationProperties.Name="Load or refresh recovery history"
+                AutomationProperties.HelpText="Explicitly lists bounded local recovery points. It does not select, preview, confirm, or run cleanup and changes no files."
+                Command="{Binding ListCommand}"
+                Content="Load or refresh _history" />
+            <Button
+                x:Name="InspectButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="6"
+                AutomationProperties.AccessKey="Alt+I"
+                AutomationProperties.Name="Preview recovery history cleanup"
+                AutomationProperties.HelpText="Requests a bounded read-only preview for the exact selected retention boundary. It changes no files."
+                Command="{Binding InspectCommand}"
+                Content="Prev_iew cleanup" />
+            <Button
+                x:Name="CancelButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="7"
+                IsVisible="{Binding IsCancelVisible}"
+                AutomationProperties.AccessKey="Alt+C"
+                AutomationProperties.Name="Cancel or close recovery cleanup safely"
+                AutomationProperties.HelpText="Cancel is the recommended default. During execution this requests cancellation and waits for the exact terminal result."
+                Command="{Binding CancelCommand}"
+                Content="_Cancel" />
+            <Button
+                x:Name="ConfirmButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="8"
+                IsVisible="{Binding IsConfirmVisible}"
+                AutomationProperties.AccessKey="Alt+F"
+                AutomationProperties.Name="Confirm exact recovery cleanup plan"
+                AutomationProperties.HelpText="Consumes the checked acknowledgment to confirm this exact plan. Confirmation does not run cleanup."
+                Command="{Binding ConfirmCommand}"
+                Content="Con_firm plan" />
+            <Button
+                x:Name="RunButton"
+                Classes="primary focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="9"
+                IsVisible="{Binding IsRunVisible}"
+                AutomationProperties.AccessKey="Alt+R"
+                AutomationProperties.Name="Run confirmed recovery cleanup"
+                AutomationProperties.HelpText="This separate explicit action starts the confirmed recovery cleanup exactly once."
+                Command="{Binding RunCommand}"
+                Content="_Run cleanup" />
+            <Button
+                x:Name="ExitButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="10"
+                IsVisible="{Binding IsExitVisible}"
+                AutomationProperties.AccessKey="Alt+X"
+                AutomationProperties.Name="Close recovery history cleanup"
+                Command="{Binding ExitCommand}"
+                Content="E_xit" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border
+          x:Name="ResultRegion"
+          Grid.Row="4"
+          Classes="card keyboard-focus"
+          Focusable="True"
+          TabIndex="11"
+          IsVisible="{Binding IsResultVisible}"
+          AutomationProperties.LiveSetting="{Binding ResultLiveSetting}"
+          AutomationProperties.Name="{Binding LiveAnnouncement}">
+        <StackPanel Spacing="10">
+          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Exact recovery cleanup result" />
+          <ItemsControl ItemsSource="{Binding ResultRows}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:RecoveryPruneFactRow">
+                <Grid Margin="0,3" ColumnDefinitions="2*,3*" AutomationProperties.Name="{Binding AccessibleName}">
+                  <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <Border
+          Grid.Row="5"
+          x:Name="SettlementWarningRegion"
+          Padding="12"
+          IsVisible="{Binding IsSettlementWarningVisible}"
+          Background="#3B3216"
+          BorderBrush="#FFD166"
+          BorderThickness="2"
+          CornerRadius="6"
+          AutomationProperties.Name="{Binding SettlementWarning}">
+        <StackPanel Spacing="5">
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Backend close not confirmed" />
+          <TextBlock Text="{Binding SettlementWarning}" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <TextBlock
+          Grid.Row="6"
+          Classes="muted"
+          Text="For safety, any completed, cancelled, failed, or uncertain cleanup requires a fresh verified session before another attempt."
+          TextWrapping="Wrap" />
+    </Grid>
+  </ScrollViewer>
+</Window>

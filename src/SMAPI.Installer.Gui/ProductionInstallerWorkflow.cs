@@ -16,6 +16,7 @@ internal sealed class ProductionInstallerWorkflow
     private readonly Func<GameDiscoveryWindow, Task<string?>> PickFolder;
     private readonly Func<PlanReviewViewModel, PlanReviewWindow> PlanWindowFactory;
     private readonly Func<ExecutionViewModel, ExecutionWindow> ExecutionWindowFactory;
+    private readonly Func<RecoveryPruneViewModel, RecoveryPruneWindow> RecoveryPruneWindowFactory;
     private ReleaseVerificationController? ReleaseController;
     private ReleaseVerificationViewModel? ReleaseViewModel;
     private ReleaseVerificationWindow? ReleaseWindow;
@@ -26,7 +27,7 @@ internal sealed class ProductionInstallerWorkflow
     private PlanReviewViewModel? PlanViewModel;
     private PlanReviewWindow? PlanWindow;
     private int TransitionStarted;
-    private int PlanTransitionStarted;
+    private int SelectedGameTransitionStarted;
     private int PickerActive;
     private int ExecutionTransitionStarted;
 
@@ -37,7 +38,8 @@ internal sealed class ProductionInstallerWorkflow
         Func<GameDiscoveryViewModel, GameDiscoveryWindow>? discoveryWindowFactory = null,
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
         Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
-        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null
+        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null,
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null
     )
     {
         this.ReleaseService = releaseService ?? throw new ArgumentNullException(nameof(releaseService));
@@ -47,6 +49,7 @@ internal sealed class ProductionInstallerWorkflow
         this.PickFolder = pickFolder ?? PickFolderAsync;
         this.PlanWindowFactory = planWindowFactory ?? (viewModel => new(viewModel));
         this.ExecutionWindowFactory = executionWindowFactory ?? (viewModel => new(viewModel));
+        this.RecoveryPruneWindowFactory = recoveryPruneWindowFactory ?? (viewModel => new(viewModel));
     }
 
     /// <summary>Create the initial window exactly once without starting network or backend work.</summary>
@@ -82,6 +85,7 @@ internal sealed class ProductionInstallerWorkflow
             GameDiscoveryWindow transitionedWindow = window;
             transitionedWindow.FolderPickerRequested += (_, _) => this.OnFolderPickerRequested(transitionedWindow);
             viewModel.ContinueRequested += this.OnPlanContinueRequested;
+            viewModel.RecoveryCleanupRequested += this.OnRecoveryCleanupRequested;
 
             this.DiscoveryController = controller;
             this.DiscoveryViewModel = viewModel;
@@ -120,7 +124,7 @@ internal sealed class ProductionInstallerWorkflow
 
     private async void OnPlanContinueRequested(object? sender, EventArgs eventArgs)
     {
-        if (Interlocked.Exchange(ref this.PlanTransitionStarted, 1) != 0)
+        if (Interlocked.Exchange(ref this.SelectedGameTransitionStarted, 1) != 0)
             return;
 
         IPlanInspectionSession? session = null;
@@ -143,6 +147,7 @@ internal sealed class ProductionInstallerWorkflow
 
             this.ActivateNextWindow(window);
             this.DiscoveryViewModel!.ContinueRequested -= this.OnPlanContinueRequested;
+            this.DiscoveryViewModel.RecoveryCleanupRequested -= this.OnRecoveryCleanupRequested;
             this.DiscoveryWindow!.Close();
             this.DiscoveryController = null;
             this.DiscoveryViewModel = null;
@@ -173,7 +178,57 @@ internal sealed class ProductionInstallerWorkflow
             {
                 // The transferred authority remains unusable; only sanitized failure state reaches the UI.
             }
-            this.DiscoveryViewModel?.ReportTransitionFailure();
+            this.DiscoveryViewModel?.ReportTransitionFailure(GameDiscoveryTransitionDestination.PlanReview);
+        }
+    }
+
+    private async void OnRecoveryCleanupRequested(object? sender, EventArgs eventArgs)
+    {
+        if (Interlocked.Exchange(ref this.SelectedGameTransitionStarted, 1) != 0)
+            return;
+
+        IPlanInspectionSession? session = null;
+        RecoveryPruneController? controller = null;
+        RecoveryPruneViewModel? viewModel = null;
+        RecoveryPruneWindow? window = null;
+        try
+        {
+            session = this.DiscoveryController!.TakeSelectedGameSession();
+            controller = new(session);
+            session = null;
+            viewModel = new(controller);
+            controller = null;
+            window = this.RecoveryPruneWindowFactory(viewModel)
+                ?? throw new InvalidOperationException("The recovery-history window factory returned null.");
+            viewModel = null;
+
+            this.ActivateNextWindow(window);
+            this.DiscoveryViewModel!.ContinueRequested -= this.OnPlanContinueRequested;
+            this.DiscoveryViewModel.RecoveryCleanupRequested -= this.OnRecoveryCleanupRequested;
+            this.DiscoveryWindow!.Close();
+            this.DiscoveryController = null;
+            this.DiscoveryViewModel = null;
+            this.DiscoveryWindow = null;
+            window = null;
+        }
+        catch
+        {
+            try
+            {
+                if (window is not null)
+                    await window.CloseAfterFailedActivationAsync().ConfigureAwait(true);
+                else if (viewModel is not null)
+                    await viewModel.DisposeAsync().ConfigureAwait(true);
+                else if (controller is not null)
+                    await controller.DisposeAsync().ConfigureAwait(true);
+                else if (session is not null)
+                    await session.DisposeAsync().ConfigureAwait(true);
+            }
+            catch
+            {
+                // The transferred authority remains unusable; only sanitized failure state reaches the UI.
+            }
+            this.DiscoveryViewModel?.ReportTransitionFailure(GameDiscoveryTransitionDestination.RecoveryCleanup);
         }
     }
 

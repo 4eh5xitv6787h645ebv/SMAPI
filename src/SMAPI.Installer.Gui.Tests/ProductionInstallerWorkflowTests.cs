@@ -201,6 +201,122 @@ internal sealed class ProductionInstallerWorkflowTests
     }
 
     [AvaloniaTest]
+    public async Task ValidGameTransfersOneBoundSessionIntoRecoveryHistoryWithoutExecution()
+    {
+        ProtocolGameCandidate game = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation");
+        TrackingClient client = new() { DiscoveredGames = [game], EnableRollback = true };
+        GameDiscoveryWindow? discoveryWindow = null;
+        PlanReviewWindow? planWindow = null;
+        RecoveryPruneWindow? recoveryWindow = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next =>
+            {
+                if (next is GameDiscoveryWindow discovery)
+                    discoveryWindow = discovery;
+                else if (next is PlanReviewWindow plan)
+                    planWindow = plan;
+                else
+                    recoveryWindow = next.Should().BeOfType<RecoveryPruneWindow>().Subject;
+            }
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discoveryWindow is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)discoveryWindow!.DataContext!;
+        await discovery.StartAsync();
+
+        discovery.ManageRecoveriesCommand.Execute(null);
+        discovery.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => recoveryWindow is not null);
+
+        planWindow.Should().BeNull("plan and recovery routes share one selected-game transfer gate");
+        client.ExecuteCalls.Should().Be(0);
+        discovery.IsContinueVisible.Should().BeFalse();
+        discovery.IsRecoveryCleanupVisible.Should().BeFalse();
+        await discoveryWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(0, "the recovery window owns the transferred backend session");
+        await recoveryWindow!.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+        await releaseWindow.DisposeAsync();
+    }
+
+    [AvaloniaTest]
+    public async Task RecoveryWindowConstructionFailureClosesTransferredAuthorityAndShowsSafeError()
+    {
+        ProtocolGameCandidate game = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation");
+        TrackingClient client = new() { DiscoveredGames = [game] };
+        GameDiscoveryWindow? discoveryWindow = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next => discoveryWindow = next.Should().BeOfType<GameDiscoveryWindow>().Subject,
+            recoveryPruneWindowFactory: _ => throw new InvalidOperationException("synthetic private recovery-window failure")
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discoveryWindow is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)discoveryWindow!.DataContext!;
+        await discovery.StartAsync();
+
+        discovery.ManageRecoveriesCommand.Execute(null);
+        await WaitUntilAsync(() => discovery.Heading == "The recovery-history screen could not open" && client.DisposeCalls == 1);
+
+        discovery.Message.Should().Contain("No game files were changed").And.NotContain("synthetic");
+        discovery.IsContinueVisible.Should().BeFalse();
+        discovery.IsRecoveryCleanupVisible.Should().BeFalse();
+        discovery.IsExitVisible.Should().BeTrue();
+        client.ExecuteCalls.Should().Be(0);
+        await discoveryWindow.DisposeAsync();
+        await releaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
+    public async Task PartialRecoveryWindowActivationClosesVisibleWindowAndTransferredAuthority()
+    {
+        ProtocolGameCandidate game = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation");
+        TrackingClient client = new() { DiscoveredGames = [game] };
+        GameDiscoveryWindow? discoveryWindow = null;
+        RecoveryPruneWindow? partiallyActivated = null;
+        ProductionInstallerWorkflow workflow = CreateWorkflow(
+            client,
+            next =>
+            {
+                if (next is GameDiscoveryWindow discovery)
+                    discoveryWindow = discovery;
+                else
+                {
+                    partiallyActivated = next.Should().BeOfType<RecoveryPruneWindow>().Subject;
+                    partiallyActivated.Show();
+                    throw new InvalidOperationException("synthetic private recovery activation failure");
+                }
+            }
+        );
+        ReleaseVerificationWindow releaseWindow = workflow.CreateInitialWindow();
+        ReleaseVerificationViewModel release = (ReleaseVerificationViewModel)releaseWindow.DataContext!;
+        await VerifyAsync(release);
+        release.ContinueCommand.Execute(null);
+        await WaitUntilAsync(() => discoveryWindow is not null);
+        GameDiscoveryViewModel discovery = (GameDiscoveryViewModel)discoveryWindow!.DataContext!;
+        await discovery.StartAsync();
+
+        discovery.ManageRecoveriesCommand.Execute(null);
+        await WaitUntilAsync(() => discovery.Heading == "The recovery-history screen could not open" && client.DisposeCalls == 1);
+
+        partiallyActivated.Should().NotBeNull();
+        partiallyActivated!.IsVisible.Should().BeFalse();
+        discovery.Message.Should().NotContain("synthetic").And.Contain("No game files were changed");
+        client.ExecuteCalls.Should().Be(0);
+        await discoveryWindow.DisposeAsync();
+        await releaseWindow.DisposeAsync();
+        client.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
     public async Task PlanWindowConstructionFailureClosesTransferredAuthorityAndShowsSafeError()
     {
         ProtocolGameCandidate game = new("/games/Stardew Valley", LinuxGameFolderStatus.Valid, "Stardew Valley test installation");
@@ -453,7 +569,8 @@ internal sealed class ProductionInstallerWorkflowTests
         Func<GameDiscoveryViewModel, GameDiscoveryWindow>? windowFactory = null,
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
         Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
-        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null
+        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null,
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null
     )
     {
         ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
@@ -461,7 +578,7 @@ internal sealed class ProductionInstallerWorkflowTests
         {
             CompletePreparation = true
         };
-        return new(service, () => client, activate, windowFactory, pickFolder, planWindowFactory, executionWindowFactory);
+        return new(service, () => client, activate, windowFactory, pickFolder, planWindowFactory, executionWindowFactory, recoveryPruneWindowFactory);
     }
 
     private static async Task VerifyAsync(ReleaseVerificationViewModel viewModel)

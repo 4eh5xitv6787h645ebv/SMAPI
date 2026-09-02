@@ -15,7 +15,14 @@ internal enum GameDiscoveryFocusTarget
     Browse,
     Retry,
     Continue,
+    RecoveryCleanup,
     Exit
+}
+
+internal enum GameDiscoveryTransitionDestination
+{
+    PlanReview,
+    RecoveryCleanup
 }
 
 internal sealed class GameCandidateItem
@@ -144,9 +151,12 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     private string liveAnnouncement = "Ready to find Stardew Valley.";
     private EventHandler? FolderPickerRequestedValue;
     private EventHandler? ContinueRequestedValue;
+    private EventHandler? RecoveryCleanupRequestedValue;
     private bool folderPickerPending;
     private bool folderPickerFailed;
     private bool transitionFailed;
+    private bool transitionRequested;
+    private GameDiscoveryTransitionDestination transitionDestination = GameDiscoveryTransitionDestination.PlanReview;
     private bool started;
     private bool disposed;
 
@@ -158,8 +168,12 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.BrowseCommand = new RelayCommand(this.RequestFolderPicker, this.CanBrowse);
         this.CancelCommand = new AsyncRelayCommand(controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
         this.ContinueCommand = new RelayCommand(
-            () => this.ContinueRequestedValue?.Invoke(this, EventArgs.Empty),
+            () => this.RequestTransition(GameDiscoveryTransitionDestination.PlanReview, this.ContinueRequestedValue),
             () => this.IsContinueVisible
+        );
+        this.ManageRecoveriesCommand = new RelayCommand(
+            () => this.RequestTransition(GameDiscoveryTransitionDestination.RecoveryCleanup, this.RecoveryCleanupRequestedValue),
+            () => this.IsRecoveryCleanupVisible
         );
         this.ExitCommand = new RelayCommand(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.IsExitVisible);
         this.Controller.Changed += this.OnControllerChanged;
@@ -198,6 +212,23 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
             this.ContinueRequestedValue -= value;
             this.OnPropertyChanged(nameof(this.IsContinueVisible));
             this.ContinueCommand.NotifyCanExecuteChanged();
+        }
+    }
+
+    /// <summary>Raised only when the exact current valid backend-issued game can be transferred to recovery cleanup.</summary>
+    public event EventHandler? RecoveryCleanupRequested
+    {
+        add
+        {
+            this.RecoveryCleanupRequestedValue += value;
+            this.OnPropertyChanged(nameof(this.IsRecoveryCleanupVisible));
+            this.ManageRecoveriesCommand.NotifyCanExecuteChanged();
+        }
+        remove
+        {
+            this.RecoveryCleanupRequestedValue -= value;
+            this.OnPropertyChanged(nameof(this.IsRecoveryCleanupVisible));
+            this.ManageRecoveriesCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -278,8 +309,14 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public bool IsCancelVisible => this.snapshot.CanCancel;
 
     public bool IsContinueVisible => !this.transitionFailed
+        && !this.transitionRequested
         && this.snapshot.CanContinue
         && this.ContinueRequestedValue is not null;
+
+    public bool IsRecoveryCleanupVisible => !this.transitionFailed
+        && !this.transitionRequested
+        && this.snapshot.CanContinue
+        && this.RecoveryCleanupRequestedValue is not null;
 
     public bool IsExitVisible => this.transitionFailed || this.snapshot.State is GameDiscoveryState.Cancelled
         or GameDiscoveryState.Failed
@@ -292,6 +329,8 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
     public AsyncRelayCommand CancelCommand { get; }
 
     public RelayCommand ContinueCommand { get; }
+
+    public RelayCommand ManageRecoveriesCommand { get; }
 
     public RelayCommand ExitCommand { get; }
 
@@ -323,13 +362,16 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.FocusRequested?.Invoke(this, GameDiscoveryFocusTarget.Status);
     }
 
-    /// <summary>Publish a sanitized terminal failure after the planning owner was transferred but its window could not open.</summary>
-    internal void ReportTransitionFailure()
+    /// <summary>Publish a sanitized terminal failure after the selected-game owner was transferred but its destination could not open.</summary>
+    internal void ReportTransitionFailure(GameDiscoveryTransitionDestination destination)
     {
         if (this.disposed)
             return;
         this.transitionFailed = true;
-        this.Heading = "The read-only plan screen could not open";
+        this.transitionDestination = destination;
+        this.Heading = destination == GameDiscoveryTransitionDestination.RecoveryCleanup
+            ? "The recovery-history screen could not open"
+            : "The read-only plan screen could not open";
         this.Message = "The verified installer session closed safely. No game files were changed. Close and reopen the installer before trying again.";
         this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
         this.NotifyDerivedProperties();
@@ -377,6 +419,16 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.folderPickerPending = true;
         this.BrowseCommand.NotifyCanExecuteChanged();
         this.FolderPickerRequestedValue?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void RequestTransition(GameDiscoveryTransitionDestination destination, EventHandler? handler)
+    {
+        if (this.disposed || this.transitionFailed || this.transitionRequested || !this.snapshot.CanContinue || handler is null)
+            return;
+        this.transitionRequested = true;
+        this.transitionDestination = destination;
+        this.NotifyDerivedProperties();
+        handler.Invoke(this, EventArgs.Empty);
     }
 
     private void OnControllerChanged(object? sender, EventArgs e)
@@ -476,8 +528,12 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
                 "No game files were changed. Close and reopen the installer before trying again."
             ),
             GameDiscoveryState.Transferred => (
-                "Opening plan review…",
-                "The validated game folder and verified release are moving to the read-only plan screen. Nothing has been changed."
+                this.transitionDestination == GameDiscoveryTransitionDestination.RecoveryCleanup
+                    ? "Opening recovery history…"
+                    : "Opening plan review…",
+                this.transitionDestination == GameDiscoveryTransitionDestination.RecoveryCleanup
+                    ? "The validated game folder and verified release are moving to the recovery-history screen. Cleanup does not begin until you inspect, confirm, and explicitly run it. Nothing has been changed."
+                    : "The validated game folder and verified release are moving to the read-only plan screen. Nothing has been changed."
             ),
             GameDiscoveryState.Disposed => (
                 "Closing safely…",
@@ -492,7 +548,9 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         return value.State switch
         {
             GameDiscoveryState.Ready or GameDiscoveryState.ManualValid
-                when value.SelectedCandidate?.State == LinuxGameFolderStatus.Valid => GameDiscoveryFocusTarget.Continue,
+                when value.SelectedCandidate?.State == LinuxGameFolderStatus.Valid && this.IsContinueVisible => GameDiscoveryFocusTarget.Continue,
+            GameDiscoveryState.Ready or GameDiscoveryState.ManualValid
+                when value.SelectedCandidate?.State == LinuxGameFolderStatus.Valid && this.IsRecoveryCleanupVisible => GameDiscoveryFocusTarget.RecoveryCleanup,
             GameDiscoveryState.Ready => GameDiscoveryFocusTarget.CandidateList,
             GameDiscoveryState.NoCandidates or GameDiscoveryState.ManualInvalid when this.BrowseCommand.CanExecute(null) => GameDiscoveryFocusTarget.Browse,
             GameDiscoveryState.Cancelled or GameDiscoveryState.Failed or GameDiscoveryState.SessionFaulted => GameDiscoveryFocusTarget.Exit,
@@ -512,11 +570,13 @@ internal sealed class GameDiscoveryViewModel : ObservableObject, IAsyncDisposabl
         this.OnPropertyChanged(nameof(this.IsRetryVisible));
         this.OnPropertyChanged(nameof(this.IsCancelVisible));
         this.OnPropertyChanged(nameof(this.IsContinueVisible));
+        this.OnPropertyChanged(nameof(this.IsRecoveryCleanupVisible));
         this.OnPropertyChanged(nameof(this.IsExitVisible));
         this.RetryCommand.NotifyCanExecuteChanged();
         this.BrowseCommand.NotifyCanExecuteChanged();
         this.CancelCommand.NotifyCanExecuteChanged();
         this.ContinueCommand.NotifyCanExecuteChanged();
+        this.ManageRecoveriesCommand.NotifyCanExecuteChanged();
         this.ExitCommand.NotifyCanExecuteChanged();
     }
 

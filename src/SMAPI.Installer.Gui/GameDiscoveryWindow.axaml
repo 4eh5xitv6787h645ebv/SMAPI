@@ -174,10 +174,21 @@
                 IsVisible="{Binding IsContinueVisible}"
                 Content="Review _plan" />
             <Button
+                x:Name="RecoveryCleanupButton"
+                Classes="focus-ring"
+                Margin="0,0,12,10"
+                TabIndex="6"
+                AutomationProperties.AccessKey="Alt+H"
+                AutomationProperties.Name="Manage recovery history"
+                AutomationProperties.HelpText="Transfers this exact validated folder and verified release to recovery-history inspection. Opening the screen does not remove anything."
+                Command="{Binding ManageRecoveriesCommand}"
+                IsVisible="{Binding IsRecoveryCleanupVisible}"
+                Content="Manage recovery _history" />
+            <Button
                 x:Name="ExitButton"
                 Classes="primary focus-ring"
                 Margin="0,0,12,10"
-                TabIndex="6"
+                TabIndex="7"
                 AutomationProperties.AccessKey="Alt+E"
                 AutomationProperties.Name="Exit installer"
                 AutomationProperties.HelpText="Closes this terminal installer session. Reopen the installer to start a new session."

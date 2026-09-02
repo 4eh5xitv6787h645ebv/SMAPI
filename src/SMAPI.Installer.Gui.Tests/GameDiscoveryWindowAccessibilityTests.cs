@@ -146,6 +146,38 @@ internal sealed partial class GameDiscoveryAccessibilityTests
     }
 
     [AvaloniaTest]
+    public async Task ValidSelectionExposesDistinctPlanAndRecoveryHistoryRoutes()
+    {
+        ProtocolGameCandidate valid = GameDiscoveryControllerTests.Candidate("valid", LinuxGameFolderStatus.Valid);
+        GameDiscoveryControllerTests.FakeVerifiedSession session = new()
+        {
+            Discovery = _ => Task.FromResult<IReadOnlyList<ProtocolGameCandidate>>([valid])
+        };
+        GameDiscoveryViewModel viewModel = new(new GameDiscoveryController(session));
+        viewModel.ContinueRequested += (_, _) => { };
+        viewModel.RecoveryCleanupRequested += (_, _) => { };
+        GameDiscoveryWindow window = new(viewModel);
+        window.Show();
+        await WaitUntilAsync(() => viewModel.IsContinueVisible && viewModel.IsRecoveryCleanupVisible);
+
+        Button plan = window.FindControl<Button>("ContinueButton")!;
+        Button recovery = window.FindControl<Button>("RecoveryCleanupButton")!;
+        plan.IsVisible.Should().BeTrue();
+        recovery.IsVisible.Should().BeTrue();
+        AutomationProperties.GetAccessKey(plan).Should().Be("Alt+P");
+        AutomationProperties.GetAccessKey(recovery).Should().Be("Alt+H");
+        AutomationProperties.GetName(recovery).Should().Be("Manage recovery history");
+        AutomationProperties.GetHelpText(recovery).Should().Contain("does not remove anything");
+        new[] { plan, recovery }
+            .Select(AutomationProperties.GetAccessKey)
+            .Should().OnlyHaveUniqueItems();
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
     public async Task InvalidManualFolderHasExactAccessibleReasonAndSafeFocus()
     {
         ProtocolGameCandidate invalid = GameDiscoveryControllerTests.Candidate("manual", LinuxGameFolderStatus.MissingGameAssembly);
