@@ -688,6 +688,24 @@ This slice provides a detailed bounded private event log and a more restricted s
 
 This documentation and correction slice does not publish or qualify a GUI release and adds no production screenshot. Public artifact, clean lifecycle, trusted-workload, desktop/AT-SPI, and authentic screenshot evidence remain unchecked.
 
+### Graphical launcher signal stability
+
+- [x] Keep HUP, INT, and TERM handlers assignment-only, retain the first requested signal and exact exit status, mask later handled signals on the normal settlement path, and forward only to a retained exact running or stopped direct-child identity ([fork PR #247](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/247); exact reviewed head [`f8fe5739`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/f8fe5739487391ea5984d4ad8d944d926c7566a5)).
+- [x] Refuse further private-bundle creation or apphost launch after a retained pre-launch signal; close interrupted job-query, blocking-wait, and stale Bash job-bookkeeping boundaries without clearing a live child PID or overwriting its authoritative wait status ([independent correctness/security/privacy review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/247#issuecomment-5510913229)).
+- [x] Cover all six first-signal permutations, real running and stopped apphosts, repeated signals, exact query/wait interruption, completed-status preservation, cleanup, identity loss, and one-through-twenty configurable stress repetitions using bounded fixture-free package tests and no shipped test hook ([review and local exact-package evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/247#issuecomment-5510913229)).
+- [x] Pass the maximum twenty-repetition exact-package signal matrix twice locally and both required hosted workflows ([deterministic performance gates `33640495457`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33640495457); [Linux qualification `33640495332`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33640495332)).
+- [x] Merge PR #247 into `develop` at [`7fef8735`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/7fef8735) and delete `phase4/gui-launcher-signal-stability` locally and on origin.
+
+### Authenticated release relationship labels
+
+- [x] Show presentation-only **Same version as receipt**, **Upgrade**, and **Downgrade** labels after an authenticated plan is returned, using one canonical fork-release comparator across catalog, Core protocol, process client, and GUI controller boundaries ([fork PR #246](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/246); reviewed implementation commit [`f1720eba`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/f1720eba02cf007b6f2349ab27eadcb5aafc19e0)).
+- [x] Label the selected fork package **Fork Linux alpha (experimental)** without claiming identical bytes, acquisition source, authority, or trust from a version comparison; clear all relationship labels on cancellation, staleness, fault, or workflow replacement ([architecture/security/privacy and UX review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/246#issuecomment-5509933543)).
+- [x] Cover numeric components beyond `Int32`, malformed identities, Core/process/controller agreement, workflow continuity, hostile/stale results, keyboard presentation, and accessibility; pass 1,095/1,095 Core tests, 900/900 GUI tests, warning-free Release builds, formatting, and private-value scans ([PR #246 evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/246)).
+- [x] Pass both required workflows on the final prerequisite-integrated PR head ([deterministic performance gates `33641182978`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33641182978); [Linux qualification `33641183373`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33641183373)).
+- [x] Merge PR #246 into `develop` at [`d85750cf`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/d85750cf) and delete `phase4/release-relationship-labels` locally and on origin.
+
+These labels are exact-plan evidence only. Authenticated local-package selection, the combined current/upgrade/prerelease/downgrade/local-package R1 documentation, clean public-package qualification, and authentic production screenshots remain unchecked.
+
 ### Phase 4 tests, reviews, packaging, and integration
 
 - [ ] Add GUI unit tests.
