@@ -58,6 +58,7 @@ jobs:
                 shell: bash
                 run: |
                     set -euo pipefail
+                    build/scripts/test-linux-release-inputs.sh
                     bash -n build/scripts/stage-pinned-github-cli.sh
                     bash -n build/scripts/test-stage-pinned-github-cli.sh
                     bash -n build/scripts/test-pinned-github-cli-callers.sh

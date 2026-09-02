@@ -168,8 +168,11 @@ build/scripts/qualify-published-linux-alpha.sh \
 The wrapper refuses root and an existing destination. It checks the public release's exact six-file
 inventory before downloading and again after verification, then applies the strict checksum,
 metadata, manifest-authority, bundle, and two-subject attestation policy before atomically exposing
-only the six verified files. The token is delivered only to the two public inventory requests and
-is not written to the resulting directory.
+only the six verified files. It captures and removes `GH_TOKEN` from the ambient process environment
+before staging or download helpers start, then delivers it only to the two bounded public inventory
+requests; attestation verification and every other helper receive no token. Inventory calls have a
+60-second deadline, local-bundle attestation calls have a 120-second deadline, and each download has
+bounded connect, total, and low-speed times. The token is never written to the resulting directory.
 
 ## Install
 
@@ -298,7 +301,7 @@ The published performance comparison describes one controlled workstation and wo
 a universal FPS, power, CPU-use, or latency claim. Published alpha.1 has no GUI/updater, and its current
 rollback flow is not atomic. The published alpha.1 dispatcher is not validation-only: its net6 path
 may create or refresh dependency metadata before launch. The planned alpha 2 dispatcher from PR #177
-dispatcher removes that mutation and rechecks path identities to catch ordinary concurrent changes
+removes that mutation and rechecks path identities to catch ordinary concurrent changes
 during validation, but same-user adversarial path replacement between validation and process
 execution remains outside that nonprivileged launcher's threat boundary. Those statements describe
 planned alpha 2 behavior, not alpha.1. See the [comparison](../upstream-comparison.md),

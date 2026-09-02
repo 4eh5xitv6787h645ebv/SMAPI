@@ -40,8 +40,8 @@ smapi_assert_downloaded_asset() {
 # Internal testable core. The public entry point below always supplies a GitHub CLI staged by the
 # repository's exact 2.92.0 archive/hash verifier. Callers should use the script entry point, not this function.
 smapi_download_and_verify_linux_alpha() {
-    if [[ $# -ne 6 ]]; then
-        smapi_release_error "Internal usage: smapi_download_and_verify_linux_alpha TAG COMMIT TREE ASSET-DIR VERIFY-DIR PINNED-GH"
+    if [[ $# -ne 7 ]]; then
+        smapi_release_error "Internal usage: smapi_download_and_verify_linux_alpha TAG COMMIT TREE ASSET-DIR VERIFY-DIR PINNED-GH GITHUB-TOKEN"
         return
     fi
 
@@ -51,6 +51,10 @@ smapi_download_and_verify_linux_alpha() {
     local asset_directory="$4"
     local verification_directory="$5"
     local pinned_gh="$6"
+    local github_token="$7"
+    # The token is a shell-function argument, not an exported process variable. Remove any ambient
+    # copy before the first external validation helper and inject it only into the two API calls.
+    unset GH_TOKEN
     local version_base alpha_number release_version
     if [[ ! "$release_tag" =~ ^fork-4eh5xitv6787h645ebv-linux-v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([1-9][0-9]*)$ ]]; then
         smapi_release_error "The release tag is not one canonical SMAPI Linux fork alpha tag."
@@ -74,7 +78,6 @@ smapi_download_and_verify_linux_alpha() {
         smapi_release_error "The staged pinned GitHub CLI is unavailable."
         return
     fi
-    local github_token="${GH_TOKEN:-}"
     if [[ -z "$github_token" ]]; then
         smapi_release_error "GH_TOKEN is required for the pinned GitHub CLI to verify the public release asset inventory."
         return
@@ -108,7 +111,7 @@ smapi_download_and_verify_linux_alpha() {
     local inventory_stage inventory_output
     for inventory_stage in before-download; do
         inventory_output="$verification_directory/release-inventory-$inventory_stage.json"
-        env -i \
+        timeout --signal=TERM --kill-after=10s 60s env -i \
             HOME="$private_home" \
             GH_CONFIG_DIR="$private_home" \
             XDG_CONFIG_HOME="$private_home" \
@@ -168,6 +171,10 @@ smapi_download_and_verify_linux_alpha() {
             --location \
             --max-redirs 3 \
             --max-filesize "${maximum_sizes[$index]}" \
+            --connect-timeout 15 \
+            --max-time 300 \
+            --speed-limit 1024 \
+            --speed-time 30 \
             --retry 3 \
             --retry-all-errors \
             --proto '=https' \
@@ -312,7 +319,7 @@ smapi_download_and_verify_linux_alpha() {
     local subject verification_output
     for subject in "$package_name" "$manifest_name"; do
         verification_output="$verification_directory/$subject.attestation.json"
-        env -i \
+        timeout --signal=TERM --kill-after=15s 120s env -i \
             HOME="$private_home" \
             GH_CONFIG_DIR="$private_home" \
             XDG_CONFIG_HOME="$private_home" \
@@ -366,7 +373,7 @@ smapi_download_and_verify_linux_alpha() {
     fi
 
     inventory_output="$verification_directory/release-inventory-after-verification.json"
-    env -i \
+    timeout --signal=TERM --kill-after=10s 60s env -i \
         HOME="$private_home" \
         GH_CONFIG_DIR="$private_home" \
         XDG_CONFIG_HOME="$private_home" \
@@ -415,12 +422,18 @@ smapi_download_and_verify_linux_alpha() {
 }
 
 qualify_published_linux_alpha_main() {
+    local github_token="${GH_TOKEN:-}"
+    unset GH_TOKEN
     if [[ $# -ne 5 ]]; then
         printf '%s\n' "Usage: $0 <release-tag> <source-commit> <source-tree> <new-download-directory> <official-gh-2.92.0-linux-amd64-archive>" >&2
         return 2
     fi
     if [[ "$EUID" -eq 0 ]]; then
         smapi_release_error "Published Linux alpha qualification must run as a normal user, never root."
+        return
+    fi
+    if [[ -z "$github_token" ]]; then
+        smapi_release_error "GH_TOKEN is required for the pinned GitHub CLI to verify the public release asset inventory."
         return
     fi
 
@@ -452,12 +465,16 @@ qualify_published_linux_alpha_main() {
     chmod 0700 -- "$scratch"
     scratch_identity="$(stat -c '%d:%i' -- "$scratch")"
     cleanup_published_alpha_qualification() {
-        if [[ -d "$scratch" && ! -L "$scratch" \
-            && "$(stat -c '%d:%i' -- "$scratch")" == "$scratch_identity" ]]; then
-            rm -rf --one-file-system -- "$scratch"
+        local cleanup_scratch="$1"
+        local cleanup_identity="$2"
+        if [[ -d "$cleanup_scratch" && ! -L "$cleanup_scratch" \
+            && "$(stat -c '%d:%i' -- "$cleanup_scratch")" == "$cleanup_identity" ]]; then
+            rm -rf --one-file-system -- "$cleanup_scratch"
         fi
     }
-    trap cleanup_published_alpha_qualification EXIT
+    local cleanup_command
+    printf -v cleanup_command 'cleanup_published_alpha_qualification %q %q' "$scratch" "$scratch_identity"
+    trap "$cleanup_command" EXIT
 
     assets="$scratch/assets"
     verification="$scratch/verification"
@@ -465,7 +482,7 @@ qualify_published_linux_alpha_main() {
     install -d -m 0700 -- "$assets" "$verification"
     "$script_directory/stage-pinned-github-cli.sh" "$gh_archive" "$pinned" >/dev/null
     smapi_download_and_verify_linux_alpha \
-        "$release_tag" "$release_commit" "$source_tree" "$assets" "$verification" "$pinned/gh"
+        "$release_tag" "$release_commit" "$source_tree" "$assets" "$verification" "$pinned/gh" "$github_token"
 
     local assets_identity
     assets_identity="$(stat -c '%d:%i' -- "$assets")"

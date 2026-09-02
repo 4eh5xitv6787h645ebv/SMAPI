@@ -128,6 +128,8 @@ mkdir -m 0700 -- "$fake_bin"
 printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
+    '[[ -z "${GH_TOKEN+x}" ]]' \
+    'printf "%s\n" "$*" >> "$SMAPI_TEST_CURL_ARGUMENT_LOG"' \
     'output=""' \
     'url=""' \
     'while [[ $# -gt 0 ]]; do' \
@@ -145,6 +147,18 @@ printf '%s\n' \
     'if [[ -f "$SMAPI_TEST_CURL_EXTRA_NAME" && "$(<"$SMAPI_TEST_CURL_EXTRA_NAME")" == "$name" ]]; then printf "unexpected\n" > "$(dirname -- "$output")/unexpected"; fi' \
     > "$fake_bin/curl"
 chmod 0700 -- "$fake_bin/curl"
+
+printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    '[[ -z "${GH_TOKEN+x}" ]]' \
+    'printf "%s\n" "$*" >> "$SMAPI_TEST_TIMEOUT_LOG"' \
+    'if [[ -n "${SMAPI_TEST_TIMEOUT_FAIL:-}" ]]; then exit 124; fi' \
+    'while [[ "$1" == --* ]]; do shift; done' \
+    'shift' \
+    'exec "$@"' \
+    > "$fake_bin/timeout"
+chmod 0700 -- "$fake_bin/timeout"
 
 fake_gh="$test_root/fake-gh/gh"
 mkdir -m 0700 -- "$(dirname -- "$fake_gh")"
@@ -180,6 +194,7 @@ printf '%s\n' \
     '    /usr/bin/jq -cn --arg tag "$tag" --argjson assets "$asset_json" '\''{tag_name: $tag, draft: false, prerelease: true, assets: $assets}'\''' \
     '    exit 0' \
     'fi' \
+    '[[ -z "${GH_TOKEN+x}" ]]' \
     '[[ "$1" == attestation && "$2" == verify ]]' \
     'subject="$3"' \
     'directory="$(dirname -- "$subject")"' \
@@ -195,13 +210,18 @@ printf '%s\n' \
 chmod 0700 -- "$fake_gh"
 
 curl_log="$test_root/curl.log"
+curl_argument_log="$test_root/curl-arguments.log"
+timeout_log="$test_root/timeout.log"
 curl_fail_name="$test_root/curl-fail-name"
 curl_extra_name="$test_root/curl-extra-name"
 export SMAPI_TEST_RELEASE_FIXTURE="$fixture"
 export SMAPI_TEST_CURL_LOG="$curl_log"
+export SMAPI_TEST_CURL_ARGUMENT_LOG="$curl_argument_log"
+export SMAPI_TEST_TIMEOUT_LOG="$timeout_log"
 export SMAPI_TEST_CURL_FAIL_NAME="$curl_fail_name"
 export SMAPI_TEST_CURL_EXTRA_NAME="$curl_extra_name"
-export GH_TOKEN=synthetic-public-read-token
+github_token=synthetic-public-read-token
+export SMAPI_TEST_EXPLICIT_TOKEN="$github_token"
 
 new_case_directories() {
     local case_name="$1"
@@ -214,9 +234,11 @@ run_success() {
     local case_name="$1"
     rm -f -- "$curl_fail_name" "$curl_extra_name" "$(dirname -- "$fake_gh")/gh.mode" "$(dirname -- "$fake_gh")/gh.calls" "$(dirname -- "$fake_gh")/api.count"
     : > "$curl_log"
+    : > "$curl_argument_log"
+    : > "$timeout_log"
     new_case_directories "$case_name"
     PATH="$fake_bin:$PATH" smapi_download_and_verify_linux_alpha \
-        "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
+        "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh" "$github_token"
 }
 
 expect_failure() {
@@ -231,6 +253,9 @@ expect_failure() {
 run_success valid
 test "$(find "$case_assets" -mindepth 1 -maxdepth 1 -printf . | wc -c)" = 6
 test "$(wc -l < "$curl_log")" = 6
+test "$(grep -Fc -- '--connect-timeout 15 --max-time 300 --speed-limit 1024 --speed-time 30' "$curl_argument_log")" = 6
+test "$(grep -Fc -- '--signal=TERM --kill-after=10s 60s env -i' "$timeout_log")" = 2
+test "$(grep -Fc -- '--signal=TERM --kill-after=15s 120s env -i' "$timeout_log")" = 2
 test "$(wc -l < "$(dirname -- "$fake_gh")/gh.calls")" = 4
 test "$(grep -Fc -- "api --method GET --hostname api.github.com" "$(dirname -- "$fake_gh")/gh.calls")" = 2
 grep -F -- "attestation verify $case_assets/$package_name" "$(dirname -- "$fake_gh")/gh.calls" >/dev/null
@@ -243,48 +268,100 @@ if grep -E -i 'modpack|save|blossom|/home/' "$curl_log" >/dev/null; then
     exit 1
 fi
 
+new_case_directories command-timeout
+expect_failure command-timeout env \
+    PATH="$fake_bin:$PATH" \
+    SMAPI_TEST_TIMEOUT_FAIL=1 \
+    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
+    _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
+
+# Exercise the public entry point with a fake staging helper. The exported token must be captured
+# and removed before staging, timeout, curl, or attestation helpers are launched.
+entrypoint_root="$test_root/public-entrypoint"
+mkdir -m 0700 -- "$entrypoint_root"
+cp -- "$qualifier" "$entrypoint_root/qualify-published-linux-alpha.sh"
+stage_log="$test_root/stage.log"
+printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    '[[ -z "${GH_TOKEN+x}" ]]' \
+    '[[ $# -eq 2 ]]' \
+    'printf "token absent\n" > "$SMAPI_TEST_STAGE_LOG"' \
+    'mkdir -m 0700 -- "$2"' \
+    'cp -- "$SMAPI_TEST_FAKE_GH_DIRECTORY/gh" "$2/gh"' \
+    'cp -- "$SMAPI_TEST_FAKE_GH_DIRECTORY/release-assets" "$2/release-assets"' \
+    'chmod 0555 -- "$2/gh"' \
+    > "$entrypoint_root/stage-pinned-github-cli.sh"
+chmod 0700 -- "$entrypoint_root/stage-pinned-github-cli.sh"
+export SMAPI_TEST_STAGE_LOG="$stage_log"
+export SMAPI_TEST_FAKE_GH_DIRECTORY
+SMAPI_TEST_FAKE_GH_DIRECTORY="$(dirname -- "$fake_gh")"
+rm -f -- "$(dirname -- "$fake_gh")/gh.mode" "$(dirname -- "$fake_gh")/api.count"
+: > "$curl_log"
+: > "$curl_argument_log"
+: > "$timeout_log"
+published_assets="$test_root/published-assets"
+if ! GH_TOKEN="$github_token" PATH="$fake_bin:$PATH" \
+    "$entrypoint_root/qualify-published-linux-alpha.sh" \
+    "$release_tag" "$release_commit" "$source_tree" "$published_assets" "$test_root/not-used-gh-archive" \
+    > "$test_root/public-entrypoint.stdout" 2> "$test_root/public-entrypoint.stderr"; then
+    cat -- "$test_root/public-entrypoint.stdout" "$test_root/public-entrypoint.stderr" >&2
+    echo "The public entrypoint token-confinement case failed." >&2
+    exit 1
+fi
+test "$(<"$stage_log")" = "token absent"
+test "$(find "$published_assets" -mindepth 1 -maxdepth 1 -printf . | wc -c)" = 6
+test "$(find "$test_root" -mindepth 1 -maxdepth 1 -name '.smapi-public-alpha.*' -printf . | wc -c)" = 0
+test "$(grep -Fc -- '--connect-timeout 15 --max-time 300 --speed-limit 1024 --speed-time 30' "$curl_argument_log")" = 6
+test "$(grep -Fc -- '--signal=TERM --kill-after=10s 60s env -i' "$timeout_log")" = 2
+test "$(grep -Fc -- '--signal=TERM --kill-after=15s 120s env -i' "$timeout_log")" = 2
+if grep -F -- "$github_token" "$test_root/public-entrypoint.stdout" "$test_root/public-entrypoint.stderr" >/dev/null; then
+    echo "The public qualifier wrote its GitHub token to terminal output." >&2
+    exit 1
+fi
+
 printf '%s\n' inventory-extra > "$(dirname -- "$fake_gh")/gh.mode"
 new_case_directories inventory-extra
-expect_failure inventory-extra env PATH="$fake_bin:$PATH" GH_TOKEN="$GH_TOKEN" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+expect_failure inventory-extra env PATH="$fake_bin:$PATH" GH_TOKEN="$github_token" bash -c \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 printf '%s\n' inventory-missing > "$(dirname -- "$fake_gh")/gh.mode"
 new_case_directories inventory-missing
-expect_failure inventory-missing env PATH="$fake_bin:$PATH" GH_TOKEN="$GH_TOKEN" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+expect_failure inventory-missing env PATH="$fake_bin:$PATH" GH_TOKEN="$github_token" bash -c \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 rm -f -- "$(dirname -- "$fake_gh")/gh.mode"
 
 printf '%s\n' inventory-extra-second > "$(dirname -- "$fake_gh")/gh.mode"
 rm -f -- "$(dirname -- "$fake_gh")/api.count"
 new_case_directories inventory-changed-after-verification
-expect_failure inventory-changed-after-verification env PATH="$fake_bin:$PATH" GH_TOKEN="$GH_TOKEN" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+expect_failure inventory-changed-after-verification env PATH="$fake_bin:$PATH" GH_TOKEN="$github_token" bash -c \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 rm -f -- "$(dirname -- "$fake_gh")/gh.mode" "$(dirname -- "$fake_gh")/api.count"
 
 new_case_directories invalid-tag
 expect_failure invalid-tag env PATH="$fake_bin:$PATH" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha bad-tag "$2" "$3" "$4" "$5" "$6"' \
+    'source "$1"; smapi_download_and_verify_linux_alpha bad-tag "$2" "$3" "$4" "$5" "$6" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 new_case_directories invalid-commit
 expect_failure invalid-commit env PATH="$fake_bin:$PATH" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" bad "$3" "$4" "$5" "$6"' \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" bad "$3" "$4" "$5" "$6" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 printf '%s\n' "$bundle_name.sha256" > "$curl_extra_name"
 new_case_directories extra-entry
 expect_failure extra-entry env PATH="$fake_bin:$PATH" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 rm -f -- "$curl_extra_name"
 
 printf '%s\n' build-metadata.json > "$curl_fail_name"
 new_case_directories interrupted-download
 expect_failure interrupted-download env PATH="$fake_bin:$PATH" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 rm -f -- "$curl_fail_name"
 
@@ -295,7 +372,7 @@ new_case_directories corrupt-package
 expect_failure corrupt-package env \
     PATH="$fake_bin:$PATH" \
     SMAPI_TEST_RELEASE_FIXTURE="$corrupt_fixture" \
-    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 oversized_fixture="$test_root/oversized-fixture"
@@ -305,7 +382,7 @@ new_case_directories oversized-asset
 expect_failure oversized-asset env \
     PATH="$fake_bin:$PATH" \
     SMAPI_TEST_RELEASE_FIXTURE="$oversized_fixture" \
-    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 checksums_fixture="$test_root/checksums-fixture"
@@ -315,7 +392,7 @@ new_case_directories checksum-extra-subject
 expect_failure checksum-extra-subject env \
     PATH="$fake_bin:$PATH" \
     SMAPI_TEST_RELEASE_FIXTURE="$checksums_fixture" \
-    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 metadata_cases=(
@@ -334,7 +411,7 @@ for metadata_case in "${metadata_cases[@]}"; do
     expect_failure "$metadata_case_name" env \
         PATH="$fake_bin:$PATH" \
         SMAPI_TEST_RELEASE_FIXTURE="$metadata_fixture" \
-        bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+        bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
         _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 done
 
@@ -357,7 +434,7 @@ new_case_directories manifest-identity
 expect_failure manifest-identity env \
     PATH="$fake_bin:$PATH" \
     SMAPI_TEST_RELEASE_FIXTURE="$manifest_fixture" \
-    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 sidecar_fixture="$test_root/sidecar-fixture"
@@ -367,25 +444,25 @@ new_case_directories bundle-sidecar
 expect_failure bundle-sidecar env \
     PATH="$fake_bin:$PATH" \
     SMAPI_TEST_RELEASE_FIXTURE="$sidecar_fixture" \
-    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    bash -c 'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 printf '%s\n' fail-package > "$(dirname -- "$fake_gh")/gh.mode"
 new_case_directories package-attestation
 expect_failure package-attestation env PATH="$fake_bin:$PATH" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 printf '%s\n' fail-manifest > "$(dirname -- "$fake_gh")/gh.mode"
 new_case_directories manifest-attestation
 expect_failure manifest-attestation env PATH="$fake_bin:$PATH" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 printf '%s\n' wrong-statement > "$(dirname -- "$fake_gh")/gh.mode"
 new_case_directories wrong-statement
 expect_failure wrong-statement env PATH="$fake_bin:$PATH" bash -c \
-    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7"' \
+    'source "$1"; smapi_download_and_verify_linux_alpha "$2" "$3" "$4" "$5" "$6" "$7" "$SMAPI_TEST_EXPLICIT_TOKEN"' \
     _ "$qualifier" "$release_tag" "$release_commit" "$source_tree" "$case_assets" "$case_verification" "$fake_gh"
 
 expect_failure existing-destination "$qualifier" \
