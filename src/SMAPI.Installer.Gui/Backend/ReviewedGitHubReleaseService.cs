@@ -138,7 +138,7 @@ internal sealed class ReviewedGitHubReleaseService : IReviewedReleaseService
                 cancellationToken.ThrowIfCancellationRequested();
                 this.ThrowIfLifetimeEnded();
                 InstallerPackageOpenInput package = acquisition.Bind(resolved);
-                PreparedReleasePackage prepared = this.PublishPrepared(package, acquisition);
+                RetainedPreparedReleasePackage prepared = this.PublishPrepared(package, acquisition);
                 acquisition = null;
                 return prepared;
             }
@@ -415,7 +415,7 @@ internal sealed class ReviewedGitHubReleaseService : IReviewedReleaseService
         completed?.TrySetResult();
     }
 
-    private PreparedReleasePackage PublishPrepared(
+    private RetainedPreparedReleasePackage PublishPrepared(
         InstallerPackageOpenInput package,
         IReviewedReleaseAcquisition acquisition
     )
@@ -424,7 +424,7 @@ internal sealed class ReviewedGitHubReleaseService : IReviewedReleaseService
         {
             if (Volatile.Read(ref this.Disposed) != 0)
                 throw new ObjectDisposedException(nameof(ReviewedGitHubReleaseService));
-            return new PreparedReleasePackage(package, acquisition);
+            return new RetainedPreparedReleasePackage(package, acquisition);
         }
     }
 
@@ -486,55 +486,6 @@ internal sealed class ReviewedGitHubReleaseService : IReviewedReleaseService
             }
 
             _ = DisposeJoinedAsync(dispose!, owner!);
-            return new ValueTask(disposal);
-        }
-    }
-
-    private sealed class PreparedReleasePackage : IPreparedReleasePackage
-    {
-        private readonly object Sync = new();
-        private readonly InstallerPackageOpenInput PackageValue;
-        private IReviewedReleaseAcquisition? Acquisition;
-        private Task? DisposalTask;
-
-        public PreparedReleasePackage(
-            InstallerPackageOpenInput package,
-            IReviewedReleaseAcquisition acquisition
-        )
-        {
-            this.PackageValue = package ?? throw new ArgumentNullException(nameof(package));
-            this.Acquisition = acquisition ?? throw new ArgumentNullException(nameof(acquisition));
-        }
-
-        public InstallerPackageOpenInput Package
-        {
-            get
-            {
-                lock (this.Sync)
-                {
-                    ObjectDisposedException.ThrowIf(this.DisposalTask is not null, this);
-                    return this.PackageValue;
-                }
-            }
-        }
-
-        public ValueTask DisposeAsync()
-        {
-            Task disposal;
-            TaskCompletionSource? owner = null;
-            IReviewedReleaseAcquisition? acquisition = null;
-            lock (this.Sync)
-            {
-                if (this.DisposalTask is not null)
-                    return new ValueTask(this.DisposalTask);
-
-                acquisition = this.Acquisition;
-                this.Acquisition = null;
-                owner = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                disposal = this.DisposalTask = owner.Task;
-            }
-
-            _ = DisposeJoinedAsync(() => acquisition!.DisposeAsync(), owner!);
             return new ValueTask(disposal);
         }
     }

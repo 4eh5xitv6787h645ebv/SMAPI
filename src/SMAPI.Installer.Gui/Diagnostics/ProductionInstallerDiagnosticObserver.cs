@@ -79,6 +79,7 @@ internal sealed class ProductionInstallerDiagnosticObserver
         ReviewedReleasePreparationStage.ObservingTag => InstallerDiagnosticCode.ReleaseVerifying,
         ReviewedReleasePreparationStage.Downloading => InstallerDiagnosticCode.ReleaseDownloading,
         ReviewedReleasePreparationStage.RefreshingTag => InstallerDiagnosticCode.ReleaseVerifying,
+        ReviewedReleasePreparationStage.ImportingLocalPackage => InstallerDiagnosticCode.ReleaseVerifying,
         _ => throw new ArgumentOutOfRangeException(nameof(stage))
     };
 

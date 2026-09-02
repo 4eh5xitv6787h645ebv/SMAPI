@@ -32,6 +32,17 @@ internal sealed partial class ReleaseVerificationWindow : Window, IAsyncDisposab
 
     internal bool IsNarrowLayout { get; private set; }
 
+    public event EventHandler? LocalPackageFolderRequested
+    {
+        add => this.ViewModel.LocalPackageFolderRequested += value;
+        remove => this.ViewModel.LocalPackageFolderRequested -= value;
+    }
+
+    public Task ApplyLocalPackageFolderAsync(string? path)
+    {
+        return this.ViewModel.ApplyLocalPackageFolderAsync(path);
+    }
+
     internal void ApplyResponsiveLayout(double viewportWidth)
     {
         this.IsNarrowLayout = viewportWidth < 620;
@@ -90,6 +101,7 @@ internal sealed partial class ReleaseVerificationWindow : Window, IAsyncDisposab
                 Control control = target switch
                 {
                     ReleaseVerificationFocusTarget.ReleaseSelector => this.ReleaseSelector,
+                    ReleaseVerificationFocusTarget.LocalPackage => this.LocalPackageButton,
                     ReleaseVerificationFocusTarget.Retry => this.RetryButton,
                     ReleaseVerificationFocusTarget.Continue => this.ContinueButton,
                     _ when this.ViewModel.IsErrorVisible => this.ErrorRegion,

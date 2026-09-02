@@ -118,6 +118,8 @@ internal sealed class ProductionInstallerDiagnosticObserverTests
             false,
             false,
             false,
+            false,
+            ReleasePackageSource.LocalFolder,
             new(hostile, hostile, hostile, hostile, hostile, hostile, hostile, 1, hostile, hostile, hostile),
             null,
             null,

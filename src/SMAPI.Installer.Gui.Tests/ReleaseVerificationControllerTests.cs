@@ -642,7 +642,9 @@ internal sealed class ReleaseVerificationControllerTests
 
         Task cancellation = Task.Run(controller.CancelAsync);
         await AwaitBounded(callbackEntered.Task);
-        Task disposal = Task.Run(() => controller.DisposeAsync().AsTask());
+        // DisposeAsync captures the active operation before yielding; invoke it directly so this gate doesn't
+        // confuse a queued-but-not-started Task.Run with disposal having actually joined the cancellation.
+        Task disposal = controller.DisposeAsync().AsTask();
         cancellation.IsCompleted.Should().BeFalse();
         disposal.IsCompleted.Should().BeFalse();
         client.DisposeCalls.Should().Be(0);

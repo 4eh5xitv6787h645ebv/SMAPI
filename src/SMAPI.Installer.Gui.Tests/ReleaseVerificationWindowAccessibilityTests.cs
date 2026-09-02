@@ -58,7 +58,7 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
     {
         const double PhysicalViewportWidth = 1400;
         double deviceIndependentWidth = PhysicalViewportWidth / scale;
-        ReleaseVerificationWindow window = CreateWindow([]);
+        ReleaseVerificationWindow window = CreateWindow([], exposeLocalPackageAction: true);
         AssertRenderedLayout(window, deviceIndependentWidth);
         window.Close();
     }
@@ -66,7 +66,7 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
     [AvaloniaTest]
     public void Narrow420DipLayoutRendersWithoutHorizontalPageScrollAtTwoHundredPercent()
     {
-        ReleaseVerificationWindow window = CreateWindow([]);
+        ReleaseVerificationWindow window = CreateWindow([], exposeLocalPackageAction: true);
         ScrollViewer scroll = AssertRenderedLayout(window, 420);
         window.IsNarrowLayout.Should().BeTrue();
         window.FindControl<Grid>("PageGrid")!.Margin.Left.Should().Be(14);
@@ -166,16 +166,19 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
             () => new ReleaseVerificationViewModelTests.FakeProtocolClient(true, candidate)
         ));
         ReleaseVerificationWindow window = new(viewModel);
+        window.LocalPackageFolderRequested += (_, _) => { };
         window.Show();
         await WaitUntilAsync(() => viewModel.IsDownloadActionVisible);
         ComboBox selector = window.FindControl<ComboBox>("ReleaseSelector")!;
         Button download = window.FindControl<Button>("DownloadButton")!;
+        Button local = window.FindControl<Button>("LocalPackageButton")!;
         Button cancel = window.FindControl<Button>("CancelButton")!;
         Border status = window.FindControl<Border>("StatusRegion")!;
         Control[] actionControls =
         [
             selector,
             download,
+            local,
             window.FindControl<Button>("RetryButton")!,
             window.FindControl<Button>("ContinueButton")!,
             cancel,
@@ -188,6 +191,10 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         selector.IsFocused.Should().BeTrue();
         Press(window, Key.Tab);
         download.IsFocused.Should().BeTrue("forward traversal follows the visible ready-state order");
+        Press(window, Key.Tab);
+        local.IsFocused.Should().BeTrue("the production local-package action follows the public download action");
+        Press(window, Key.Tab, RawInputModifiers.Shift);
+        download.IsFocused.Should().BeTrue("reverse traversal returns from local-package selection to download");
         PressAccessKey(window, PhysicalKey.E);
         selector.IsFocused.Should().BeTrue("Alt+E focuses the release selector in the Ready state");
         Press(window, Key.Tab);
@@ -250,14 +257,20 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         Dispatcher.UIThread.RunJobs();
     }
 
-    private static ReleaseVerificationWindow CreateWindow(IReadOnlyList<ReviewedReleaseCandidate> catalog)
+    private static ReleaseVerificationWindow CreateWindow(
+        IReadOnlyList<ReviewedReleaseCandidate> catalog,
+        bool exposeLocalPackageAction = false
+    )
     {
         ReviewedReleaseCandidate fallback = catalog.FirstOrDefault() ?? ReleaseVerificationViewModelTests.Candidate();
         ReleaseVerificationViewModel viewModel = new(new ReleaseVerificationController(
             new ReleaseVerificationViewModelTests.FakeReleaseService(catalog),
             () => new ReleaseVerificationViewModelTests.FakeProtocolClient(false, fallback)
         ));
-        return new ReleaseVerificationWindow(viewModel);
+        ReleaseVerificationWindow window = new(viewModel);
+        if (exposeLocalPackageAction)
+            window.LocalPackageFolderRequested += (_, _) => { };
+        return window;
     }
 
     private static ScrollViewer AssertRenderedLayout(ReleaseVerificationWindow window, double width)

@@ -32,6 +32,12 @@ internal enum ReleaseVerificationError
     CleanupFailed
 }
 
+internal enum ReleasePackageSource
+{
+    ReviewedDownload,
+    LocalFolder
+}
+
 internal sealed record ReleaseVerificationSnapshot(
     long Generation,
     ReleaseVerificationState State,
@@ -43,7 +49,9 @@ internal sealed record ReleaseVerificationSnapshot(
     int MaximumAttempts,
     bool CanStart,
     bool CanRetry,
+    bool CanChooseLocal,
     bool CanCancel,
+    ReleasePackageSource? Source,
     ProtocolReleaseIdentity? VerifiedRelease,
     ProtocolPrePlanErrorCode? RejectionCode,
     ProtocolNextAction? RejectionNextAction,
@@ -60,6 +68,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
 
     private readonly object Sync = new();
     private readonly IReviewedReleaseService ReleaseService;
+    private readonly ILocalReleasePackageService LocalReleaseService;
     private readonly Func<IInstallerProtocolClient> ClientFactory;
     private ReviewedReleaseCandidate[] ReleasesValue = [];
     private ReviewedReleaseCandidate? SelectedReleaseValue;
@@ -71,6 +80,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
     private bool VerifiedSessionTaken;
     private long GenerationValue;
     private int AttemptNumberValue;
+    private int LocalAttemptNumberValue;
+    private ReleasePackageSource? SourceValue;
     private bool DisposeStarted;
     private ProtocolReleaseIdentity? VerifiedReleaseValue;
     private ProtocolPrePlanErrorCode? RejectionCodeValue;
@@ -81,11 +92,13 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
 
     public ReleaseVerificationController(
         IReviewedReleaseService releaseService,
-        Func<IInstallerProtocolClient> clientFactory
+        Func<IInstallerProtocolClient> clientFactory,
+        ILocalReleasePackageService? localReleaseService = null
     )
     {
         this.ReleaseService = releaseService ?? throw new ArgumentNullException(nameof(releaseService));
         this.ClientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
+        this.LocalReleaseService = localReleaseService ?? new LocalReleasePackageService();
     }
 
     public event EventHandler? Changed;
@@ -108,11 +121,13 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             if (this.ActiveOperation is not null || this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
                 throw new InvalidOperationException("Release verification already owns an active operation or verified backend session.");
 
-            operation = this.BeginOperation(cancellationToken);
+            operation = this.BeginOperation(ControllerOperationKind.Catalog, cancellationToken);
             this.ReleasesValue = [];
             this.SelectedReleaseValue = null;
             this.ProgressValue = null;
             this.AttemptNumberValue = 0;
+            this.LocalAttemptNumberValue = 0;
+            this.SourceValue = null;
             this.ClearResultAuthority();
             this.StateValue = ReleaseVerificationState.LoadingCatalog;
             this.ErrorValue = ReleaseVerificationError.None;
@@ -135,6 +150,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             if (!ReferenceEquals(this.SelectedReleaseValue, selected))
                 this.AttemptNumberValue = 0;
             this.SelectedReleaseValue = selected;
+            this.SourceValue = ReleasePackageSource.ReviewedDownload;
             this.ProgressValue = null;
             this.ClearResultAuthority();
             this.StateValue = ReleaseVerificationState.Ready;
@@ -146,6 +162,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         AttemptContext attempt;
+        ReviewedReleaseCandidate candidate;
         lock (this.Sync)
         {
             this.AssertNotDisposed();
@@ -158,11 +175,50 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             if (this.AttemptNumberValue != 0)
                 throw new InvalidOperationException("Use RetryAsync after a completed verification attempt.");
 
-            attempt = this.BeginAttempt(cancellationToken);
+            candidate = this.SelectedReleaseValue;
+            attempt = this.BeginAttempt(
+                ReleasePackageSource.ReviewedDownload,
+                ++this.AttemptNumberValue,
+                cancellationToken
+            );
         }
         this.PublishChanged();
-        _ = this.RunAttemptAsync(attempt);
+        _ = this.RunAttemptAsync(attempt, candidate);
         return attempt.Operation.Completion.Task;
+    }
+
+    /// <summary>
+    /// Snapshot one freshly selected local folder and submit it to the same authoritative backend package opener.
+    /// The selected path is used only by this operation and is never included in a snapshot or diagnostic projection.
+    /// </summary>
+    public Task StartLocalAsync(string selectedDirectory, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(selectedDirectory);
+        ControllerOperation? catalogOperation;
+        lock (this.Sync)
+        {
+            this.AssertNotDisposed();
+            if (this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
+                throw new InvalidOperationException("A verified release session already owns the controller.");
+            catalogOperation = this.ActiveOperation;
+            if (
+                catalogOperation is not null
+                && (
+                    catalogOperation.Kind != ControllerOperationKind.Catalog
+                    || this.StateValue != ReleaseVerificationState.LoadingCatalog
+                )
+            )
+                throw new InvalidOperationException("A local package cannot replace an active verification attempt.");
+            if (catalogOperation is not null)
+            {
+                this.StateValue = ReleaseVerificationState.CleaningUp;
+                this.ProgressValue = null;
+            }
+        }
+        if (catalogOperation is null)
+            return this.BeginLocalAttempt(selectedDirectory, cancellationToken);
+        this.PublishChanged();
+        return this.ReplaceCatalogWithLocalAsync(catalogOperation, selectedDirectory, cancellationToken);
     }
 
     public Task RetryAsync(CancellationToken cancellationToken = default)
@@ -175,6 +231,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             this.AssertNotDisposed();
             if (this.ActiveOperation is not null || this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
                 throw new InvalidOperationException("Release verification hasn't finished disposing its prior authorities.");
+            if (this.SourceValue != ReleasePackageSource.ReviewedDownload)
+                throw new InvalidOperationException("A local package must be selected again instead of retrying a reviewed download.");
             if (this.StateValue is not (ReleaseVerificationState.Failed or ReleaseVerificationState.Cancelled))
                 throw new InvalidOperationException("Only a completed failed or cancelled attempt can be retried.");
             bool retryableOutcome = this.StateValue == ReleaseVerificationState.Cancelled
@@ -191,7 +249,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             }
             selectedTag = this.SelectedReleaseValue.Identity.Tag;
             attemptNumber = this.AttemptNumberValue + 1;
-            operation = this.BeginOperation(cancellationToken);
+            operation = this.BeginOperation(ControllerOperationKind.Catalog, cancellationToken);
             this.StateValue = ReleaseVerificationState.LoadingCatalog;
             this.ErrorValue = ReleaseVerificationError.None;
             this.ProgressValue = null;
@@ -318,24 +376,97 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         this.PublishChanged();
     }
 
-    private ControllerOperation BeginOperation(CancellationToken callerCancellation)
+    private ControllerOperation BeginOperation(
+        ControllerOperationKind kind,
+        CancellationToken callerCancellation
+    )
     {
         CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellation);
-        ControllerOperation operation = new(++this.GenerationValue, cancellation, callerCancellation);
+        ControllerOperation operation = new(++this.GenerationValue, kind, cancellation, callerCancellation);
         this.ActiveOperation = operation;
         return operation;
     }
 
-    private AttemptContext BeginAttempt(CancellationToken callerCancellation)
+    private AttemptContext BeginAttempt(
+        ReleasePackageSource source,
+        int attemptNumber,
+        CancellationToken callerCancellation
+    )
     {
-        ReviewedReleaseCandidate selected = this.SelectedReleaseValue!;
-        ControllerOperation operation = this.BeginOperation(callerCancellation);
-        AttemptContext attempt = new(operation, selected, ++this.AttemptNumberValue);
+        ControllerOperation operation = this.BeginOperation(ControllerOperationKind.Attempt, callerCancellation);
+        AttemptContext attempt = new(operation, source, attemptNumber);
+        this.SourceValue = source;
         this.ProgressValue = null;
         this.ClearResultAuthority();
         this.StateValue = ReleaseVerificationState.Handshaking;
         this.ErrorValue = ReleaseVerificationError.None;
         return attempt;
+    }
+
+    private Task BeginLocalAttempt(string selectedDirectory, CancellationToken cancellationToken)
+    {
+        AttemptContext attempt;
+        lock (this.Sync)
+        {
+            this.AssertNotDisposed();
+            if (this.ActiveOperation is not null || this.VerifiedAttempt is not null || this.VerifiedSessionTaken)
+                throw new InvalidOperationException("Release verification still owns an active authority.");
+            if (!this.CanBeginLocalAttempt())
+                throw new InvalidOperationException("A local package cannot be selected from the current terminal state.");
+            if (this.LocalAttemptNumberValue >= MaximumAttempts)
+            {
+                this.ErrorValue = ReleaseVerificationError.RetryLimitReached;
+                throw new InvalidOperationException("The bounded local-package verification limit was reached.");
+            }
+
+            this.SelectedReleaseValue = null;
+            attempt = this.BeginAttempt(
+                ReleasePackageSource.LocalFolder,
+                ++this.LocalAttemptNumberValue,
+                cancellationToken
+            );
+        }
+        this.PublishChanged();
+        _ = this.RunAttemptAsync(attempt, candidate: null, selectedDirectory, yieldFirst: true);
+        return attempt.Operation.Completion.Task;
+    }
+
+    private async Task ReplaceCatalogWithLocalAsync(
+        ControllerOperation catalogOperation,
+        string selectedDirectory,
+        CancellationToken cancellationToken
+    )
+    {
+        await catalogOperation.RequestCancellationAsync().ConfigureAwait(false);
+        await catalogOperation.Completion.Task.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        Task attempt = this.BeginLocalAttempt(selectedDirectory, cancellationToken);
+        selectedDirectory = "";
+        await attempt.ConfigureAwait(false);
+    }
+
+    private bool CanBeginLocalAttempt()
+    {
+        if (this.StateValue is ReleaseVerificationState.Verified
+            or ReleaseVerificationState.CleaningUp
+            or ReleaseVerificationState.Disposed)
+        {
+            return false;
+        }
+        if (this.ErrorValue is ReleaseVerificationError.BackendUnavailable
+            or ReleaseVerificationError.SessionFaulted
+            or ReleaseVerificationError.CleanupFailed
+            or ReleaseVerificationError.RetryLimitReached)
+        {
+            return false;
+        }
+        if (this.ErrorValue == ReleaseVerificationError.PackageRejected && this.RejectionIsTerminalValue)
+            return false;
+        return this.StateValue is ReleaseVerificationState.Idle
+            or ReleaseVerificationState.Ready
+            or ReleaseVerificationState.NoCompatibleRelease
+            or ReleaseVerificationState.Cancelled
+            or ReleaseVerificationState.Failed;
     }
 
     private async Task RunRetryAsync(ControllerOperation operation, string selectedTag, int attemptNumber)
@@ -373,6 +504,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 else
                 {
                     this.AttemptNumberValue = attemptNumber;
+                    this.SourceValue = ReleasePackageSource.ReviewedDownload;
+                    operation.Kind = ControllerOperationKind.Attempt;
                     this.StateValue = ReleaseVerificationState.Handshaking;
                     this.ErrorValue = ReleaseVerificationError.None;
                 }
@@ -383,8 +516,12 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 await this.CompleteOperationAsync(operation).ConfigureAwait(false);
                 return;
             }
-
-            await this.RunAttemptAsync(new AttemptContext(operation, refreshed, attemptNumber), yieldFirst: false)
+            await this.RunAttemptAsync(
+                new AttemptContext(operation, ReleasePackageSource.ReviewedDownload, attemptNumber),
+                refreshed,
+                selectedDirectory: null,
+                yieldFirst: false
+            )
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
@@ -417,6 +554,9 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                     return;
                 this.ReleasesValue = releases;
                 this.SelectedReleaseValue = releases.FirstOrDefault();
+                this.SourceValue = this.SelectedReleaseValue is null
+                    ? null
+                    : ReleasePackageSource.ReviewedDownload;
                 this.StateValue = releases.Length == 0
                     ? ReleaseVerificationState.NoCompatibleRelease
                     : ReleaseVerificationState.Ready;
@@ -437,12 +577,17 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         }
     }
 
-    private Task RunAttemptAsync(AttemptContext attempt)
+    private Task RunAttemptAsync(AttemptContext attempt, ReviewedReleaseCandidate candidate)
     {
-        return this.RunAttemptAsync(attempt, yieldFirst: true);
+        return this.RunAttemptAsync(attempt, candidate, selectedDirectory: null, yieldFirst: true);
     }
 
-    private async Task RunAttemptAsync(AttemptContext attempt, bool yieldFirst)
+    private async Task RunAttemptAsync(
+        AttemptContext attempt,
+        ReviewedReleaseCandidate? candidate,
+        string? selectedDirectory,
+        bool yieldFirst
+    )
     {
         if (yieldFirst)
             await Task.Yield();
@@ -465,15 +610,40 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             attempt.Operation.Cancellation.Token.ThrowIfCancellationRequested();
 
             this.SetAttemptStage(attempt, ReleaseVerificationState.Preparing);
-            PreparationProgressTracker progress = new(this, attempt);
-            Task<IPreparedReleasePackage> preparation = this.ReleaseService.PrepareAsync(
-                attempt.Candidate,
-                progress,
-                attempt.Operation.Cancellation.Token
-            );
+            PreparationProgressTracker? progress = null;
+            Task<IPreparedReleasePackage> preparation;
+            if (attempt.Source == ReleasePackageSource.LocalFolder)
+            {
+                this.ReportProgress(attempt, new ReviewedReleasePreparationProgress(
+                    ReviewedReleasePreparationStage.ImportingLocalPackage,
+                    null,
+                    0,
+                    0,
+                    0,
+                    0
+                ));
+                string localDirectory = selectedDirectory
+                    ?? throw new InvalidOperationException("The local release attempt lost its selected directory.");
+                preparation = this.LocalReleaseService.PrepareAsync(
+                    localDirectory,
+                    attempt.Operation.Cancellation.Token
+                );
+                selectedDirectory = null;
+            }
+            else
+            {
+                ReviewedReleaseCandidate reviewed = candidate
+                    ?? throw new InvalidOperationException("The reviewed release attempt lost its catalog candidate.");
+                progress = new PreparationProgressTracker(this, attempt);
+                preparation = this.ReleaseService.PrepareAsync(
+                    reviewed,
+                    progress,
+                    attempt.Operation.Cancellation.Token
+                );
+            }
             prepared = await this.AwaitWithSessionFaultAsync(preparation, attempt).ConfigureAwait(false);
             ArgumentNullException.ThrowIfNull(prepared);
-            progress.SealAndAssertComplete();
+            progress?.SealAndAssertComplete();
             attempt.Operation.Cancellation.Token.ThrowIfCancellationRequested();
 
             this.SetAttemptStage(attempt, ReleaseVerificationState.OpeningPackage);
@@ -862,10 +1032,25 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
                 )
             );
         bool canRetry = idleAuthority
+            && this.SourceValue == ReleasePackageSource.ReviewedDownload
             && retryableOutcome
             && this.SelectedReleaseValue is not null
             && this.ReleasesValue.Any(value => ReferenceEquals(value, this.SelectedReleaseValue))
             && this.AttemptNumberValue is > 0 and < MaximumAttempts;
+        int attemptNumber = this.SourceValue == ReleasePackageSource.LocalFolder
+            ? this.LocalAttemptNumberValue
+            : this.AttemptNumberValue;
+        bool catalogCanBeReplaced = this.ActiveOperation?.Kind == ControllerOperationKind.Catalog
+            && this.StateValue == ReleaseVerificationState.LoadingCatalog
+            && this.VerifiedAttempt is null
+            && !this.VerifiedSessionTaken
+            && !this.DisposeStarted;
+        bool canChooseLocal = catalogCanBeReplaced
+            || (
+                idleAuthority
+                && this.LocalAttemptNumberValue < MaximumAttempts
+                && this.CanBeginLocalAttempt()
+            );
         return new ReleaseVerificationSnapshot(
             this.GenerationValue,
             this.StateValue,
@@ -873,11 +1058,13 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             Array.AsReadOnly(this.ReleasesValue.ToArray()),
             this.SelectedReleaseValue,
             this.ProgressValue,
-            this.AttemptNumberValue,
+            attemptNumber,
             MaximumAttempts,
             idleAuthority && this.StateValue == ReleaseVerificationState.Ready && this.AttemptNumberValue == 0,
             canRetry,
+            canChooseLocal,
             this.ActiveOperation is not null && this.StateValue != ReleaseVerificationState.CleaningUp,
+            this.SourceValue,
             this.VerifiedReleaseValue,
             this.RejectionCodeValue,
             this.RejectionNextActionValue,
@@ -914,8 +1101,15 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         this.RejectionIsTerminalValue = false;
     }
 
+    private enum ControllerOperationKind
+    {
+        Catalog,
+        Attempt
+    }
+
     private sealed class ControllerOperation(
         long generation,
+        ControllerOperationKind kind,
         CancellationTokenSource cancellation,
         CancellationToken callerCancellation
     )
@@ -927,6 +1121,7 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
         private bool ExplicitUserCancellation;
 
         public long Generation { get; } = generation;
+        public ControllerOperationKind Kind { get; set; } = kind;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool CleanupFailed
@@ -1021,12 +1216,12 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
 
     private sealed class AttemptContext(
         ControllerOperation operation,
-        ReviewedReleaseCandidate candidate,
+        ReleasePackageSource source,
         int attemptNumber
     )
     {
         public ControllerOperation Operation { get; } = operation;
-        public ReviewedReleaseCandidate Candidate { get; } = candidate;
+        public ReleasePackageSource Source { get; } = source;
         public int AttemptNumber { get; } = attemptNumber;
         public IInstallerProtocolClient? Client { get; set; }
         public Task? ClientDisposal { get; set; }
@@ -1062,6 +1257,8 @@ internal sealed class ReleaseVerificationController : IAsyncDisposable
             {
                 if (this.Sealed)
                     return;
+                if (value.Stage == ReviewedReleasePreparationStage.ImportingLocalPackage)
+                    throw new InvalidOperationException("A reviewed release preparation reported the local-import stage.");
                 int stage = (int)value.Stage;
                 if (!Enum.IsDefined(value.Stage) || (this.LastStage.HasValue && stage < (int)this.LastStage.Value))
                     throw new InvalidOperationException("Release preparation reported an invalid stage transition.");

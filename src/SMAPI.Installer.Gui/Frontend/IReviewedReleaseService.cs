@@ -8,7 +8,8 @@ internal enum ReviewedReleasePreparationStage
 {
     ObservingTag,
     Downloading,
-    RefreshingTag
+    RefreshingTag,
+    ImportingLocalPackage
 }
 
 /// <summary>Sanitized aggregate progress which never exposes a download URI or private workspace path.</summary>

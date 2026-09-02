@@ -10,6 +10,7 @@ internal enum ReleaseVerificationFocusTarget
 {
     Status,
     ReleaseSelector,
+    LocalPackage,
     Retry,
     Continue
 }
@@ -28,12 +29,15 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
     private string releaseDetail = "No release selected.";
     private string verifiedIdentityDetail = "";
     private double progressValue;
+    private EventHandler? LocalPackageFolderRequestedValue;
     private EventHandler? ContinueRequestedValue;
     private long AnnouncedGeneration = -1;
     private ReleaseVerificationState? AnnouncedState;
     private int AnnouncedAsset = -1;
     private int AnnouncedPercentBucket = -1;
     private bool transitionFailed;
+    private bool localPackagePickerPending;
+    private bool localPackagePickerFailed;
     private bool started;
     private bool disposed;
 
@@ -43,6 +47,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         this.snapshot = controller.Snapshot;
         this.LoadCatalogCommand = new AsyncRelayCommand(this.LoadCatalogAsync, this.CanLoadCatalog, this.HandlePresentationFailure);
         this.DownloadAndVerifyCommand = new AsyncRelayCommand(this.StartVerificationAsync, () => this.snapshot.CanStart, this.HandlePresentationFailure);
+        this.UseLocalPackageCommand = new RelayCommand(this.RequestLocalPackageFolder, this.CanUseLocalPackage);
         this.RetryCommand = new AsyncRelayCommand(this.RetryAsync, this.CanRetry, this.HandlePresentationFailure);
         this.CancelCommand = new AsyncRelayCommand(this.Controller.CancelAsync, () => this.snapshot.CanCancel, this.HandlePresentationFailure);
         this.ContinueCommand = new RelayCommand(
@@ -56,6 +61,20 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
     }
 
     public event EventHandler<ReleaseVerificationFocusTarget>? FocusRequested;
+
+    public event EventHandler? LocalPackageFolderRequested
+    {
+        add
+        {
+            this.LocalPackageFolderRequestedValue += value;
+            this.NotifyDerivedProperties();
+        }
+        remove
+        {
+            this.LocalPackageFolderRequestedValue -= value;
+            this.NotifyDerivedProperties();
+        }
+    }
 
     /// <summary>Raised only after the backend has authoritatively opened the package.</summary>
     public event EventHandler? ContinueRequested
@@ -87,6 +106,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         {
             if (value is null || ReferenceEquals(value, this.selectedRelease))
                 return;
+            this.ClearLocalPackagePickerFailure();
             this.Controller.SelectRelease(value);
         }
     }
@@ -135,9 +155,34 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     public string DurableState => "Unchanged — nothing has been installed";
 
-    public bool IsReleaseSelectorEnabled => this.snapshot.State == ReleaseVerificationState.Ready && this.snapshot.CanStart;
+    public bool IsReleaseSelectorEnabled => (
+            this.snapshot.State == ReleaseVerificationState.Ready
+            && this.snapshot.Source != ReleasePackageSource.LocalFolder
+            && this.snapshot.CanStart
+        )
+        || (
+            this.snapshot.Source == ReleasePackageSource.LocalFolder
+            && this.snapshot.Releases.Count > 0
+            && (
+                this.snapshot.State == ReleaseVerificationState.Cancelled
+                || (
+                    this.snapshot.State == ReleaseVerificationState.Failed
+                    && (
+                        this.snapshot.Error == ReleaseVerificationError.PreparationFailed
+                        || (
+                            this.snapshot.Error == ReleaseVerificationError.PackageRejected
+                            && !this.snapshot.RejectionIsTerminal
+                        )
+                    )
+                )
+            )
+        );
 
-    public bool IsDownloadActionVisible => this.snapshot.State == ReleaseVerificationState.Ready;
+    public bool IsDownloadActionVisible => this.snapshot.State == ReleaseVerificationState.Ready
+        && this.snapshot.Source != ReleasePackageSource.LocalFolder;
+
+    public bool IsLocalPackageActionVisible => this.snapshot.CanChooseLocal
+        && this.LocalPackageFolderRequestedValue is not null;
 
     public bool IsRetryVisible => this.CanRetry();
 
@@ -159,7 +204,9 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         TotalBytes: > 0
     };
 
-    public bool IsErrorVisible => this.transitionFailed || this.snapshot.State == ReleaseVerificationState.Failed;
+    public bool IsErrorVisible => this.transitionFailed
+        || this.localPackagePickerFailed
+        || this.snapshot.State == ReleaseVerificationState.Failed;
 
     public AutomationLiveSetting StatusLiveSetting => this.IsErrorVisible
         ? AutomationLiveSetting.Off
@@ -173,11 +220,52 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     public AsyncRelayCommand DownloadAndVerifyCommand { get; }
 
+    public RelayCommand UseLocalPackageCommand { get; }
+
     public AsyncRelayCommand RetryCommand { get; }
 
     public AsyncRelayCommand CancelCommand { get; }
 
     public RelayCommand ContinueCommand { get; }
+
+    public Task ApplyLocalPackageFolderAsync(string? path)
+    {
+        this.localPackagePickerPending = false;
+        this.ClearLocalPackagePickerFailure();
+        this.NotifyDerivedProperties();
+        if (path is null || this.disposed)
+        {
+            this.FocusRequested?.Invoke(this, ReleaseVerificationFocusTarget.LocalPackage);
+            return Task.CompletedTask;
+        }
+        return this.Controller.StartLocalAsync(path);
+    }
+
+    internal void ReportLocalPackagePickerFailure()
+    {
+        if (this.disposed)
+            return;
+        this.localPackagePickerPending = false;
+        this.localPackagePickerFailed = true;
+        this.Heading = "The desktop folder picker could not open";
+        this.Message = "No release files were read and no game files were changed. Choose the local package folder again, or use a reviewed public release.";
+        this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
+        this.NotifyDerivedProperties();
+        this.FocusRequested?.Invoke(this, ReleaseVerificationFocusTarget.LocalPackage);
+    }
+
+    internal void ReportLocalPackageStartFailure()
+    {
+        if (this.disposed)
+            return;
+        this.localPackagePickerPending = false;
+        this.localPackagePickerFailed = true;
+        this.Heading = "The selected local package could not be checked";
+        this.Message = "The release session is no longer available. Close and reopen the installer; no game files were changed.";
+        this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
+        this.NotifyDerivedProperties();
+        this.FocusRequested?.Invoke(this, ReleaseVerificationFocusTarget.Status);
+    }
 
     /// <summary>Publish a sanitized fail-closed state if the next local window couldn't take ownership.</summary>
     internal void ReportTransitionFailure()
@@ -223,6 +311,8 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
     {
         if (this.disposed || this.snapshot.CanCancel)
             return false;
+        if (this.snapshot.Source == ReleasePackageSource.LocalFolder)
+            return false;
         if (this.snapshot.State == ReleaseVerificationState.NoCompatibleRelease)
             return true;
         if (this.snapshot.Error == ReleaseVerificationError.CatalogUnavailable || this.snapshot.AttemptNumber == 0)
@@ -242,11 +332,31 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     private Task StartVerificationAsync()
     {
+        this.ClearLocalPackagePickerFailure();
         return this.Controller.StartAsync();
+    }
+
+    private bool CanUseLocalPackage()
+    {
+        return !this.disposed
+            && !this.localPackagePickerPending
+            && this.snapshot.CanChooseLocal
+            && this.LocalPackageFolderRequestedValue is not null;
+    }
+
+    private void RequestLocalPackageFolder()
+    {
+        if (!this.CanUseLocalPackage())
+            return;
+        this.ClearLocalPackagePickerFailure();
+        this.localPackagePickerPending = true;
+        this.NotifyDerivedProperties();
+        this.LocalPackageFolderRequestedValue?.Invoke(this, EventArgs.Empty);
     }
 
     private Task RetryAsync()
     {
+        this.ClearLocalPackagePickerFailure();
         if (
             this.snapshot.State == ReleaseVerificationState.NoCompatibleRelease
             || this.snapshot.Error == ReleaseVerificationError.CatalogUnavailable
@@ -274,26 +384,41 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
         ReleaseVerificationState previousState = this.snapshot.State;
         long previousGeneration = this.snapshot.Generation;
+        bool preservePickerFailure = this.localPackagePickerFailed;
         this.snapshot = next;
         this.Releases = next.Releases;
-        this.SetProperty(ref this.selectedRelease, next.SelectedRelease, nameof(this.SelectedRelease));
-        this.ReleaseDetail = FormatReleaseDetail(next.SelectedRelease);
-        this.VerifiedIdentityDetail = FormatVerifiedIdentity(next.VerifiedRelease);
-        (this.Heading, this.Message) = GetCopy(next);
+        ReviewedReleaseCandidate? visibleSelection = next.Source == ReleasePackageSource.LocalFolder
+            ? null
+            : next.SelectedRelease;
+        this.SetProperty(ref this.selectedRelease, visibleSelection, nameof(this.SelectedRelease));
+        this.ReleaseDetail = FormatReleaseDetail(next);
+        this.VerifiedIdentityDetail = FormatVerifiedIdentity(next.VerifiedRelease, next.Source);
+        if (!preservePickerFailure)
+            (this.Heading, this.Message) = GetCopy(next);
         this.ProgressText = GetProgressText(next);
         this.ProgressValue = GetProgressValue(next.Progress);
-        this.UpdateLiveAnnouncement(next);
+        if (!preservePickerFailure)
+            this.UpdateLiveAnnouncement(next);
         this.NotifyDerivedProperties();
 
         bool stateChanged = previousState != next.State || previousGeneration != next.Generation;
-        if (requestFocus && stateChanged)
+        if (requestFocus && stateChanged && !preservePickerFailure)
             this.FocusRequested?.Invoke(this, this.GetFocusTarget(next));
+    }
+
+    private void ClearLocalPackagePickerFailure()
+    {
+        if (!this.localPackagePickerFailed)
+            return;
+        this.localPackagePickerFailed = false;
+        this.ApplySnapshot(this.snapshot, requestFocus: false);
     }
 
     private void NotifyDerivedProperties()
     {
         this.OnPropertyChanged(nameof(this.IsReleaseSelectorEnabled));
         this.OnPropertyChanged(nameof(this.IsDownloadActionVisible));
+        this.OnPropertyChanged(nameof(this.IsLocalPackageActionVisible));
         this.OnPropertyChanged(nameof(this.IsRetryVisible));
         this.OnPropertyChanged(nameof(this.IsContinueVisible));
         this.OnPropertyChanged(nameof(this.IsCancelVisible));
@@ -305,6 +430,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         this.OnPropertyChanged(nameof(this.IsEmptyVisible));
         this.LoadCatalogCommand.NotifyCanExecuteChanged();
         this.DownloadAndVerifyCommand.NotifyCanExecuteChanged();
+        this.UseLocalPackageCommand.NotifyCanExecuteChanged();
         this.RetryCommand.NotifyCanExecuteChanged();
         this.CancelCommand.NotifyCanExecuteChanged();
         this.ContinueCommand.NotifyCanExecuteChanged();
@@ -329,11 +455,11 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
             ),
             ReleaseVerificationState.LoadingCatalog => (
                 "Checking for compatible Linux releases…",
-                "Contacting the reviewed GitHub release catalog. Nothing is being installed."
+                "Contacting the reviewed GitHub release catalog. You can instead choose a local six-file release folder; nothing is being installed."
             ),
             ReleaseVerificationState.NoCompatibleRelease => (
                 "No compatible graphical-installer release is available",
-                "Published releases do not yet contain the complete six-file package required by this installer. Nothing was downloaded and your game is unchanged."
+                "Published releases do not yet contain the complete six-file package required by this installer. Nothing was downloaded; you can choose a local folder containing those six files, and it will still be fully verified."
             ),
             ReleaseVerificationState.Ready => (
                 "Choose an experimental Linux release",
@@ -341,7 +467,9 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
             ),
             ReleaseVerificationState.Handshaking => (
                 "Starting the verification service…",
-                "Opening the local installer service. Nothing is being installed."
+                value.Source == ReleasePackageSource.LocalFolder
+                    ? "Opening the local installer service before reading the selected release folder. Nothing is being installed."
+                    : "Opening the local installer service. Nothing is being installed."
             ),
             ReleaseVerificationState.Preparing => value.Progress?.Stage switch
             {
@@ -357,13 +485,19 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                     "Rechecking the selected release identity…",
                     "Confirming that the selected tag did not move while its files were downloaded."
                 ),
+                ReviewedReleasePreparationStage.ImportingLocalPackage => (
+                    "Checking the selected local release files…",
+                    "Privately copying the exact six files. Their identity, integrity, and GitHub provenance are not trusted until backend verification succeeds."
+                ),
                 _ => (
                     "Preparing the selected release…",
                     "Checking release identity before downloading. Nothing is being installed."
                 )
             },
             ReleaseVerificationState.OpeningPackage => (
-                "Verifying the downloaded release…",
+                value.Source == ReleasePackageSource.LocalFolder
+                    ? "Verifying the selected local release…"
+                    : "Verifying the downloaded release…",
                 "Checking package integrity, release metadata, GitHub provenance, and the local installer package."
             ),
             ReleaseVerificationState.CleaningUp => (
@@ -375,20 +509,28 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
                 "Nothing has been installed yet. Continue to choose a game folder and review a change plan."
             ),
             ReleaseVerificationState.Cancelled => (
-                "Download cancelled",
-                "No complete installer package was retained. Your game is unchanged."
+                value.Source == ReleasePackageSource.LocalFolder
+                    ? "Local package check cancelled"
+                    : "Download cancelled",
+                value.Source == ReleasePackageSource.LocalFolder
+                    ? "No complete installer package was retained. Your game is unchanged. Choose the local folder again for a fresh attempt."
+                    : "No complete installer package was retained. Your game is unchanged."
             ),
             ReleaseVerificationState.Failed => value.Error switch
             {
                 ReleaseVerificationError.CatalogUnavailable => (
                     "Couldn’t check for releases",
-                    "No package was downloaded. Check your connection, then try again."
+                    "No package was downloaded. Check your connection and try again, or choose a local six-file release folder."
                 ),
                 ReleaseVerificationError.PreparationFailed => (
-                    "The release could not be prepared safely",
-                    value.CanRetry
-                        ? "No complete package was retained and your game is unchanged. Try the download once more."
-                        : "No complete package was retained and your game is unchanged. Close and reopen the installer before trying again."
+                    value.Source == ReleasePackageSource.LocalFolder
+                        ? "The selected local release folder was not accepted"
+                        : "The release could not be prepared safely",
+                    value.Source == ReleasePackageSource.LocalFolder && value.CanChooseLocal
+                        ? "No complete package was retained and your game is unchanged. Correct the folder contents, then choose the folder again for a fresh check."
+                        : value.CanRetry
+                            ? "No complete package was retained and your game is unchanged. Try the download once more."
+                            : "No complete package was retained and your game is unchanged. Close and reopen the installer before trying again."
                 ),
                 ReleaseVerificationError.PackageRejected => (
                     "The release could not be verified",
@@ -473,25 +615,43 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         return value.State switch
         {
             ReleaseVerificationState.Ready => ReleaseVerificationFocusTarget.ReleaseSelector,
-            ReleaseVerificationState.NoCompatibleRelease or ReleaseVerificationState.Cancelled => ReleaseVerificationFocusTarget.Retry,
+            ReleaseVerificationState.NoCompatibleRelease => this.IsLocalPackageActionVisible
+                ? ReleaseVerificationFocusTarget.LocalPackage
+                : ReleaseVerificationFocusTarget.Retry,
+            ReleaseVerificationState.Cancelled when value.Source == ReleasePackageSource.LocalFolder && this.IsLocalPackageActionVisible => ReleaseVerificationFocusTarget.LocalPackage,
+            ReleaseVerificationState.Cancelled => ReleaseVerificationFocusTarget.Retry,
+            ReleaseVerificationState.Failed when value.Source == ReleasePackageSource.LocalFolder && this.IsLocalPackageActionVisible => ReleaseVerificationFocusTarget.LocalPackage,
             ReleaseVerificationState.Verified when this.ContinueCommand.CanExecute(null) => ReleaseVerificationFocusTarget.Continue,
             _ => ReleaseVerificationFocusTarget.Status
         };
     }
 
-    private static string FormatReleaseDetail(ReviewedReleaseCandidate? release)
+    private static string FormatReleaseDetail(ReleaseVerificationSnapshot snapshot)
     {
+        if (snapshot.Source == ReleasePackageSource.LocalFolder)
+        {
+            return snapshot.VerifiedRelease is null
+                ? "Local package folder selected — not verified yet.\nThe selected path stays private and is not retained for retry."
+                : "Local package • Fork Linux alpha (experimental)\nIdentity comes only from completed backend verification.";
+        }
+        ReviewedReleaseCandidate? release = snapshot.SelectedRelease;
         if (release is null)
             return "No compatible release selected.";
         long totalBytes = release.Assets.Sum(asset => asset.SizeBytes);
         return $"{release.DisplayLabel}\nExact tag: {release.Identity.Tag}\nSix advertised files • {FormatBytes(totalBytes)} total";
     }
 
-    private static string FormatVerifiedIdentity(ProtocolReleaseIdentity? release)
+    private static string FormatVerifiedIdentity(
+        ProtocolReleaseIdentity? release,
+        ReleasePackageSource? source
+    )
     {
         if (release is null)
             return "";
-        return $"Verified tag: {release.Tag}\nVerified source commit: {release.SourceCommit}";
+        string acquisition = source == ReleasePackageSource.LocalFolder
+            ? "Verified package source: Local folder"
+            : "Verified package source: Reviewed public download";
+        return $"{acquisition}\nVerified tag: {release.Tag}\nVerified source commit: {release.SourceCommit}";
     }
 
     private static string GetRejectionNextStep(ReleaseVerificationSnapshot value)
@@ -500,6 +660,12 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
             return "The retry limit has been reached. Close and reopen the installer to start a new verification session.";
         if (value.RejectionIsTerminal)
             return "Close and reopen the installer to start a new verification session.";
+        if (value.Source == ReleasePackageSource.LocalFolder)
+        {
+            return value.CanChooseLocal
+                ? "Correct the six local release files, then choose the folder again for a fresh check."
+                : "Close and reopen the installer to start a new verification session.";
+        }
         if (!value.CanRetry)
             return "Close and reopen the installer to start a new verification session.";
         return value.RejectionNextAction switch
