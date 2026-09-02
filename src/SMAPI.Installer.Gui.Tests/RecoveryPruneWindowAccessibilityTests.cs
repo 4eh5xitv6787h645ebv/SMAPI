@@ -20,7 +20,7 @@ namespace StardewModdingAPI.Installer.Gui.Tests;
 internal sealed class RecoveryPruneWindowAccessibilityTests
 {
     [AvaloniaTest]
-    public async Task WindowStartsExplicitReadOnlyUnselectedAndKeepsPrivatePathOutOfAutomation()
+    public async Task WindowStartsExplicitReadOnlyUnselectedAndShowsExactEscapedTargetOnlyInBoundContext()
     {
         const string privatePath = "/home/private-user/secret-game";
         FakePruneSession session = new(privatePath, Points(2));
@@ -45,9 +45,9 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         ControlAutomationPeer.CreatePeerForElement(status).GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
         ControlAutomationPeer.CreatePeerForElement(boundary).GetName().Should()
             .Contain("changes no files").And.Contain("separate explicit actions").And.Contain("Cancel");
-        AutomationProperties.GetName(gameContext).Should().Be(viewModel.GameAccessibleName).And.NotContain(privatePath);
-        ControlAutomationPeer.CreatePeerForElement(game).GetName().Should().NotContain(privatePath);
-        game.Text.Should().NotContain(privatePath);
+        AutomationProperties.GetName(gameContext).Should().Be(viewModel.GameAccessibleName).And.Contain(privatePath);
+        ControlAutomationPeer.CreatePeerForElement(game).GetName().Should().Contain(privatePath);
+        game.Text.Should().Contain(privatePath);
         viewModel.LiveAnnouncement.Should().NotContain(privatePath);
 
         Control[] accessKeyControls =
@@ -68,6 +68,32 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         Press(window, Key.Escape);
         await WaitUntilAsync(() => !window.IsVisible);
         session.DisposeCalls.Should().Be(1);
+    }
+
+    [AvaloniaTest]
+    public async Task ArrowKeyBrowsingKeepsFocusInRecoveryPointListAcrossSelections()
+    {
+        FakePruneSession session = new("/games/Stardew Valley", Points(3));
+        RecoveryPruneViewModel viewModel = new(new RecoveryPruneController(session));
+        RecoveryPruneWindow window = new(viewModel);
+        window.Show();
+        await WaitUntilAsync(() => window.FindControl<Button>("LoadButton")!.IsFocused);
+        await viewModel.ListCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        ListBox list = window.FindControl<ListBox>("HistoryList")!;
+        list.Focus(NavigationMethod.Tab);
+        list.IsKeyboardFocusWithin.Should().BeTrue();
+        Press(window, Key.Down);
+        await WaitUntilAsync(() => list.SelectedIndex == 0);
+        list.IsKeyboardFocusWithin.Should().BeTrue("the first selection must not move focus to Preview");
+        Press(window, Key.Down);
+        await WaitUntilAsync(() => list.SelectedIndex == 1);
+        list.IsKeyboardFocusWithin.Should().BeTrue("users must be able to continue browsing with arrow keys");
+        session.InspectCalls.Should().Be(0);
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
     }
 
     [AvaloniaTest]
@@ -101,7 +127,7 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
 
         viewModel.IsPlanVisible.Should().BeTrue();
         AutomationProperties.GetName(list).Should().Contain("Oldest recovery point to keep");
-        viewModel.PlanRows.Select(row => row.Label).Should().Contain(["Retained recovery points", "Older points removed"]);
+        viewModel.PlanRows.Select(row => row.Label).Should().Contain(["Retained recovery points", "Older points to remove", "Recovery generations to clean"]);
         consent.IsChecked.Should().BeFalse("destructive consent must never be preselected");
         confirm.IsVisible.Should().BeTrue();
         confirm.IsEffectivelyEnabled.Should().BeFalse();
@@ -130,6 +156,55 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         AutomationProperties.GetName(settlementWarning).Should()
             .Contain("did not confirm a clean close")
             .And.Contain("fresh verified installer session");
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task AuxiliaryOnlyReviewRendersExactScopeAndStillRequiresConsentConfirmAndSeparateRun()
+    {
+        FakePruneSession session = new("/games/Stardew Valley", Points(1))
+        {
+            PruneInspection = (_, _) => Task.FromResult<BoundInstallerRecoveryPrunePlanResult>(Plan(1, 1, auxiliaryCleanup: true)),
+            ExecutionRemovedCount = 0
+        };
+        RecoveryPruneViewModel viewModel = new(new RecoveryPruneController(session));
+        RecoveryPruneWindow window = new(viewModel);
+        window.Show();
+        await WaitUntilAsync(() => window.FindControl<Button>("LoadButton")!.IsFocused);
+
+        await viewModel.ListCommand.ExecuteAsync();
+        viewModel.SelectedChoice = viewModel.Choices.Single();
+        await viewModel.InspectCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        TextBlock warning = window.FindControl<TextBlock>("CleanupScopeWarningText")!;
+        CheckBox consent = window.FindControl<CheckBox>("ConsentCheckBox")!;
+        Button confirm = window.FindControl<Button>("ConfirmButton")!;
+        Button run = window.FindControl<Button>("RunButton")!;
+        warning.Text.Should().Be("No recovery points will be removed; authenticated auxiliary recovery metadata will be cleaned permanently. It cannot be restored unless you have a separate external backup.");
+        viewModel.PlanRows.Should().Contain(row => row.Label == "Older points to remove" && row.Value == "0");
+        viewModel.PlanRows.Should().Contain(row => row.Label == "Recovery generations to clean" && row.Value == "0");
+        consent.IsChecked.Should().BeFalse();
+        confirm.IsEffectivelyEnabled.Should().BeFalse();
+        run.IsVisible.Should().BeFalse();
+        session.ConfirmCalls.Should().Be(0);
+        session.ExecuteCalls.Should().Be(0);
+
+        consent.IsChecked = true;
+        await WaitUntilAsync(() => confirm.IsEffectivelyEnabled);
+        session.ConfirmCalls.Should().Be(0, "consent alone must not confirm the exact auxiliary-only plan");
+        session.ExecuteCalls.Should().Be(0);
+        await viewModel.ConfirmCommand.ExecuteAsync();
+        Dispatcher.UIThread.RunJobs();
+        session.ConfirmCalls.Should().Be(1);
+        session.ExecuteCalls.Should().Be(0, "confirmation must remain separate from execution");
+        run.IsVisible.Should().BeTrue();
+
+        await viewModel.RunCommand.ExecuteAsync();
+        await WaitUntilAsync(() => viewModel.IsResultVisible);
+        session.ExecuteCalls.Should().Be(1);
 
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
@@ -182,7 +257,7 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         RecoveryPruneViewModel viewModel = new(new RecoveryPruneController(session));
         RecoveryPruneWindow window = new(viewModel);
         window.Width = 420;
-        window.Height = 600;
+        window.Height = 540;
         window.ApplyResponsiveLayout(420);
         window.Show();
         Dispatcher.UIThread.RunJobs();
@@ -211,13 +286,28 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
 
         viewModel.IsDestructiveConsentChecked = true;
         await viewModel.ConfirmCommand.ExecuteAsync();
+        Button run = window.FindControl<Button>("RunButton")!;
+        ScrollViewer scroll = window.FindControl<ScrollViewer>("PageScrollViewer")!;
+        foreach (double logicalHeight in new[] { 864d, 720d, 540d })
+        {
+            window.Height = logicalHeight;
+            Dispatcher.UIThread.RunJobs();
+            AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+            Dispatcher.UIThread.RunJobs();
+            run.BringIntoView();
+            run.Focus(NavigationMethod.Tab);
+            Dispatcher.UIThread.RunJobs();
+            run.IsFocused.Should().BeTrue($"Run must be keyboard reachable at a {logicalHeight}-DIP work area");
+            scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1, "the 420-DIP layout must not clip horizontally at common 125%, 150%, or 200% desktop scales");
+        }
         await viewModel.RunCommand.ExecuteAsync();
         await WaitUntilAsync(() => viewModel.IsResultVisible);
         Dispatcher.UIThread.RunJobs();
         ActiveLiveRegionCount().Should().Be(1, "the exact terminal result is announced once");
 
         window.IsNarrowLayout.Should().BeTrue();
-        window.FindControl<ScrollViewer>("PageScrollViewer")!.HorizontalScrollBarVisibility.Should().Be(ScrollBarVisibility.Disabled);
+        window.MinHeight.Should().BeLessThanOrEqualTo(420);
+        scroll.HorizontalScrollBarVisibility.Should().Be(ScrollBarVisibility.Disabled);
         window.CaptureRenderedFrame().Should().NotBeNull();
 
         window.Close();
@@ -238,12 +328,12 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
             .ToArray();
     }
 
-    private static BoundInstallerRecoveryPrunePlanSuccess Plan(int retainNewest, int catalogCount) => new(
+    private static BoundInstallerRecoveryPrunePlanSuccess Plan(int retainNewest, int catalogCount, bool auxiliaryCleanup = false) => new(
         retainNewest,
         retainNewest,
         catalogCount - retainNewest,
         catalogCount - retainNewest,
-        false,
+        auxiliaryCleanup,
         1,
         [ProtocolPlanRisk.RecoveryPrune],
         ProtocolRecommendedDefault.Cancel,
@@ -324,6 +414,8 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         public int ExecuteCalls => Volatile.Read(ref this.executeCalls);
         public int DisposeCalls => Volatile.Read(ref this.disposeCalls);
         public Func<CancellationToken, Task<BoundInstallerRecoveryCatalogResult>>? RecoveryCatalog { get; init; }
+        public Func<BoundInstallerRecoveryPoint, CancellationToken, Task<BoundInstallerRecoveryPrunePlanResult>>? PruneInspection { get; init; }
+        public int ExecutionRemovedCount { get; init; } = 1;
 
         public Task<BoundInstallerRecoveryCatalogResult> ListRecoveriesAsync(CancellationToken cancellationToken = default)
         {
@@ -341,6 +433,8 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Interlocked.Increment(ref this.inspectCalls);
+            if (this.PruneInspection is not null)
+                return this.PruneInspection(oldestPointToKeep, cancellationToken);
             return Task.FromResult<BoundInstallerRecoveryPrunePlanResult>(Plan(oldestPointToKeep.Ordinal, this.Points.Count));
         }
 
@@ -373,7 +467,7 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 Interlocked.Increment(ref owner.executeCalls);
-                return Task.FromResult(SuccessfulOperation(1, owner.Settlement));
+                return Task.FromResult(SuccessfulOperation(owner.ExecutionRemovedCount, owner.Settlement));
             }
 
             public ValueTask DisposeAsync()

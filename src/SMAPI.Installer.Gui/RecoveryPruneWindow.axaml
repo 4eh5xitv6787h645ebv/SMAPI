@@ -8,7 +8,7 @@
     Width="900"
     Height="760"
     MinWidth="420"
-    MinHeight="560"
+    MinHeight="420"
     WindowStartupLocation="CenterScreen">
   <Window.Styles>
     <Style Selector="Border.keyboard-focus:focus-visible">
@@ -189,8 +189,9 @@
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
               <TextBlock
+                  x:Name="CleanupScopeWarningText"
                   FontWeight="SemiBold"
-                  Text="Cleanup permanently removes the reviewed recovery history. It cannot be restored unless you have a separate external backup."
+                  Text="{Binding CleanupScopeWarning}"
                   TextWrapping="Wrap" />
               <CheckBox
                   x:Name="ConsentCheckBox"

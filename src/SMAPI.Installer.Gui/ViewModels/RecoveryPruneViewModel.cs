@@ -1,6 +1,6 @@
+using System.Globalization;
 using Avalonia.Automation;
 using Avalonia.Threading;
-using System.Globalization;
 using StardewModdingAPI.Installer.Core.Planning;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Transactions;
@@ -120,15 +120,17 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
 
     public string ReleaseAccessibleName => $"Bound verified release: {this.snapshot.Release.Tag}. Version: {this.snapshot.Release.EmbeddedVersion}";
 
-    public string GameDetail => "Validated Stardew Valley game folder";
+    public string GameDetail => $"Game: {this.snapshot.Game.DisplayName}\nFolder: {this.snapshot.Game.DisplayPath}";
 
-    public string GameAccessibleName => "Bound validated Stardew Valley game folder";
+    public string GameAccessibleName => $"Bound recovery-cleanup target. Game: {this.snapshot.Game.DisplayName}. Folder: {this.snapshot.Game.DisplayPath}";
 
     public string BoundaryDetail => this.snapshot.State is RecoveryPruneControllerState.ReviewReady or RecoveryPruneControllerState.Confirming
         ? "Review only. Cancel is the recommended default. Confirmation still performs no cleanup; Run cleanup is a separate action."
         : this.snapshot.State == RecoveryPruneControllerState.ReadyToRun
             ? "Confirmed but unchanged. Cancel is the recommended default. Nothing is removed until you choose Run cleanup."
             : "Loading, selecting, and inspecting change no files. Cleanup requires unchecked consent, confirmation, and a separate Run action.";
+
+    public string CleanupScopeWarning => CreateCleanupScopeWarning(this.snapshot.Plan);
 
     public IReadOnlyList<RecoveryPruneChoiceItem> Choices
     {
@@ -414,9 +416,13 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
                 : "No recovery cleanup has started.";
         this.NotifyDerivedProperties();
 
-        bool focusChanged = previous.State != next.State
-            || previous.Generation != next.Generation
-            || !ReferenceEquals(previous.Selected, next.Selected);
+        bool selectionOnly = previous.State == RecoveryPruneControllerState.CatalogReady
+            && next.State == RecoveryPruneControllerState.CatalogReady
+            && previous.Choices.Count == next.Choices.Count
+            && previous.Choices.Select((choice, index) => ReferenceEquals(choice, next.Choices[index])).All(match => match)
+            && !ReferenceEquals(previous.Selected, next.Selected);
+        bool focusChanged = !selectionOnly
+            && (previous.State != next.State || previous.Generation != next.Generation);
         if (requestFocus && focusChanged)
             this.FocusRequested?.Invoke(this, GetFocusTarget(next));
     }
@@ -447,7 +453,7 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
     {
         foreach (string property in new[]
         {
-            nameof(this.ReleaseDetail), nameof(this.ReleaseAccessibleName), nameof(this.BoundaryDetail),
+            nameof(this.ReleaseDetail), nameof(this.ReleaseAccessibleName), nameof(this.BoundaryDetail), nameof(this.CleanupScopeWarning),
             nameof(this.IsHistoryListVisible), nameof(this.IsPlanVisible), nameof(this.IsBusy), nameof(this.IsProgressVisible),
             nameof(this.IsProgressIndeterminate), nameof(this.HasProgressStage), nameof(this.ProgressMaximum), nameof(this.ProgressValue),
             nameof(this.IsConsentVisible), nameof(this.IsConfirmVisible), nameof(this.IsRunVisible), nameof(this.IsCancelVisible),
@@ -514,8 +520,8 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
         [
             new("Newest points retained", FormatNumber(plan.RetainNewest)),
             new("Retained recovery points", FormatNumber(plan.RetainedCount)),
-            new("Older points removed", FormatNumber(plan.RemovedCount)),
-            new("Recovery generations cleaned", FormatNumber(plan.CleanupGenerationCount)),
+            new("Older points to remove", FormatNumber(plan.RemovedCount)),
+            new("Recovery generations to clean", FormatNumber(plan.CleanupGenerationCount)),
             new("Auxiliary cleanup", plan.AuxiliaryCleanupPlanned ? "Planned" : "Not planned"),
             new("Warnings", FormatNumber(plan.WarningCount)),
             new("Observed risk", FormatRisks(plan.Risks)),
@@ -523,6 +529,20 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
             new("Confirmation", plan.RequiresConfirmation ? "Required before Run cleanup" : throw new ArgumentOutOfRangeException(nameof(plan)))
         ];
         return Array.AsReadOnly(rows);
+    }
+
+    private static string CreateCleanupScopeWarning(RecoveryPrunePlanPresentation? plan)
+    {
+        if (plan is null)
+            return "No cleanup scope has been inspected. Loading and selection change no files.";
+        string recoveryPointLabel = plan.RemovedCount == 1 ? "recovery point" : "recovery points";
+        return (plan.RemovedCount, plan.AuxiliaryCleanupPlanned) switch
+        {
+            ( > 0, true) => $"This reviewed cleanup will permanently remove {FormatNumber(plan.RemovedCount)} older {recoveryPointLabel} and clean authenticated auxiliary recovery metadata. It cannot be restored unless you have a separate external backup.",
+            ( > 0, false) => $"This reviewed cleanup will permanently remove {FormatNumber(plan.RemovedCount)} older {recoveryPointLabel}. It cannot be restored unless you have a separate external backup.",
+            (0, true) => "No recovery points will be removed; authenticated auxiliary recovery metadata will be cleaned permanently. It cannot be restored unless you have a separate external backup.",
+            _ => "This reviewed plan reports no recovery history to clean. Cancel and load fresh recovery history before taking another action."
+        };
     }
 
     private static IReadOnlyList<RecoveryPruneFactRow> CreateResultRows(RecoveryPruneResultPresentation? result)

@@ -58,13 +58,14 @@ internal sealed class RecoveryPruneViewModelTests
         session.InspectedPoints.Should().BeEmpty();
         viewModel.SelectedChoice = viewModel.Choices[0];
         viewModel.InspectCommand.CanExecute(null).Should().BeTrue();
-        focus.Should().Contain(RecoveryPruneFocusTarget.Inspect);
+        focus.Should().NotContain(RecoveryPruneFocusTarget.Inspect, "arrow-key list selection must not steal focus from recovery-point browsing");
 
         await viewModel.InspectCommand.ExecuteAsync();
 
         viewModel.IsPlanVisible.Should().BeTrue();
         viewModel.PlanRows.Should().HaveCount(9);
-        viewModel.PlanRows.Should().Contain(row => row.Label == "Older points removed" && row.Value == "1");
+        viewModel.PlanRows.Should().Contain(row => row.Label == "Older points to remove" && row.Value == "1");
+        viewModel.PlanRows.Should().Contain(row => row.Label == "Recovery generations to clean" && row.Value == "1");
         viewModel.IsDestructiveConsentChecked.Should().BeFalse();
         viewModel.ConfirmCommand.CanExecute(null).Should().BeFalse();
         confirmed.ExecuteCalls.Should().Be(0);
@@ -138,8 +139,9 @@ internal sealed class RecoveryPruneViewModelTests
         await viewModel.InspectCommand.ExecuteAsync();
 
         viewModel.PlanRows.Should().HaveCount(9).And.OnlyContain(row => row.AccessibleName.Length <= 256);
-        viewModel.PlanRows.Should().Contain(row => row.Label == "Older points removed" && row.Value == "0");
+        viewModel.PlanRows.Should().Contain(row => row.Label == "Older points to remove" && row.Value == "0");
         viewModel.PlanRows.Should().Contain(row => row.Label == "Auxiliary cleanup" && row.Value == "Planned");
+        viewModel.CleanupScopeWarning.Should().Be("No recovery points will be removed; authenticated auxiliary recovery metadata will be cleaned permanently. It cannot be restored unless you have a separate external backup.");
         viewModel.IsDestructiveConsentChecked.Should().BeFalse();
         viewModel.RunCommand.CanExecute(null).Should().BeFalse();
         session.ConfirmedPoints.Should().BeEmpty();
@@ -322,12 +324,14 @@ internal sealed class RecoveryPruneViewModelTests
     }
 
     [Test]
-    public void PresentationSurfaceAndCopyContainNoBackendAuthorityOrPrivateGamePath()
+    public void PresentationSurfaceShowsExactEscapedTargetOnlyInBoundContextWithoutBackendAuthority()
     {
-        const string PrivatePath = "/home/private-user/secret-game";
-        FakePlanSession session = new() { Game = new(PrivatePath, "Stardew Valley") };
-        RecoveryPruneController controller = new(session);
-        RecoveryPruneViewModel viewModel = new(controller, () => true, _ => { });
+        const string FirstPath = "/games/first-\u202E-install";
+        const string SecondPath = "/games/second-install";
+        FakePlanSession firstSession = new() { Game = new(FirstPath, "Stardew Valley") };
+        FakePlanSession secondSession = new() { Game = new(SecondPath, "Stardew Valley") };
+        RecoveryPruneViewModel first = new(new RecoveryPruneController(firstSession), () => true, _ => { });
+        RecoveryPruneViewModel second = new(new RecoveryPruneController(secondSession), () => true, _ => { });
 
         typeof(RecoveryPruneChoiceItem).GetProperties().Should().NotContain(property =>
             property.PropertyType == typeof(RecoveryPruneChoice)
@@ -337,12 +341,14 @@ internal sealed class RecoveryPruneViewModelTests
         typeof(RecoveryPruneViewModel).GetProperties().Should().NotContain(property =>
             property.PropertyType == typeof(RecoveryPruneController)
             || property.PropertyType == typeof(RecoveryPruneChoice)
-            || property.Name.Contains("Path", StringComparison.OrdinalIgnoreCase)
             || property.Name.Contains("Digest", StringComparison.OrdinalIgnoreCase));
-        string.Join('|', viewModel.GameDetail, viewModel.GameAccessibleName, viewModel.Heading, viewModel.Message, viewModel.LiveAnnouncement)
-            .Should().NotContain(PrivatePath).And.NotContain("private-user");
+        first.GameDetail.Should().Contain("Stardew Valley").And.Contain("/games/first-\\u202E-install").And.NotContain("\u202E");
+        first.GameAccessibleName.Should().Contain("/games/first-\\u202E-install").And.NotContain("\u202E");
+        second.GameDetail.Should().Contain(SecondPath).And.NotBe(first.GameDetail, "same-name installations must remain distinguishable before destructive cleanup");
+        string.Join('|', first.Heading, first.Message, first.LiveAnnouncement).Should().NotContain("/games/");
 
-        viewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        first.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        second.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
     private static RecoveryPruneViewModel CreateViewModel(FakePlanSession session)
