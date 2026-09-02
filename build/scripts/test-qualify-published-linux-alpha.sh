@@ -298,7 +298,8 @@ test "$(grep -Fc -- '--signal=TERM --kill-after=10s 60s' "$timeout_log")" = 2
 test "$(grep -Fc -- '--signal=TERM --kill-after=15s 120s' "$timeout_log")" = 2
 test "$(wc -l < "$env_argument_log")" = 2
 test "$(wc -l < "$(dirname -- "$fake_gh")/gh.calls")" = 4
-test "$(grep -Fc -- "api --method GET --hostname api.github.com" "$(dirname -- "$fake_gh")/gh.calls")" = 2
+test "$(grep -Fc -- "api --method GET --hostname github.com" "$(dirname -- "$fake_gh")/gh.calls")" = 2
+test "$(grep -Fc -- "--hostname api.github.com" "$(dirname -- "$fake_gh")/gh.calls")" = 0
 grep -F -- "attestation verify $case_assets/$package_name" "$(dirname -- "$fake_gh")/gh.calls" >/dev/null
 grep -F -- "attestation verify $case_assets/$manifest_name" "$(dirname -- "$fake_gh")/gh.calls" >/dev/null
 grep -F -- "--cert-identity https://github.com/$workflow" "$(dirname -- "$fake_gh")/gh.calls" >/dev/null
