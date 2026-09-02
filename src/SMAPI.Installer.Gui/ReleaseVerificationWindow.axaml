@@ -3,6 +3,7 @@
     x:DataType="vm:ReleaseVerificationViewModel"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:StardewModdingAPI.Installer.Gui"
     xmlns:packages="using:StardewModdingAPI.Installer.Core.Packages"
     xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
     Title="SMAPI Linux Installer — Release verification"
@@ -31,6 +32,7 @@
             Text="SMAPI Linux Installer"
             TextWrapping="Wrap" />
         <TextBlock Classes="muted" FontSize="16" Text="Experimental Linux release verification" TextWrapping="Wrap" />
+        <local:InstallerDiagnosticsAccess x:Name="DiagnosticsAccess" />
       </StackPanel>
 
       <Border

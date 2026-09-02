@@ -1,7 +1,10 @@
+using Avalonia.Controls;
 using Avalonia.Headless.NUnit;
 using FluentAssertions;
 using StardewModdingAPI.Installer.Core.Packages;
+using StardewModdingAPI.Installer.Core.Privacy;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
@@ -10,15 +13,41 @@ namespace StardewModdingAPI.Installer.Gui.Tests;
 internal sealed class GuiCompositionTests
 {
     [AvaloniaTest]
-    public async Task DefaultCompositionMapsProductionAndDemoToTheirActualWindows()
+    public void DefaultCompositionKeepsDemoAvailableAndRejectsProductionWithoutDiagnostics()
     {
-        ReleaseVerificationWindow production = GuiComposition.CreateMainWindow(GuiLaunchMode.Production)
-            .Should().BeOfType<ReleaseVerificationWindow>().Subject;
         MainWindow demo = GuiComposition.CreateMainWindow(GuiLaunchMode.Demo)
             .Should().BeOfType<MainWindow>().Subject;
+        Action productionWithoutDiagnostics = () => GuiComposition.CreateMainWindow(GuiLaunchMode.Production);
+        Action productionOverloadWithoutDiagnostics = () => GuiComposition.CreateMainWindow(
+            GuiLaunchMode.Production,
+            _ => { },
+            diagnosticSession: null
+        );
 
-        await production.DisposeAsync();
         demo.DataContext.Should().BeOfType<MainWindowViewModel>();
+        productionWithoutDiagnostics.Should().Throw<InvalidOperationException>().WithMessage("*requires*diagnostic*");
+        productionOverloadWithoutDiagnostics.Should().Throw<ArgumentNullException>();
+    }
+
+    [AvaloniaTest]
+    public async Task ProductionCompositionRequiresAndDisplaysItsDiagnosticOwner()
+    {
+        string temporaryDirectory = Path.Combine(Path.GetTempPath(), $"smapi-gui-composition-diagnostics-{Guid.NewGuid():N}");
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = new(new(Path.Combine(temporaryDirectory, "state")), operationId, DateTimeOffset.UnixEpoch);
+        await using (InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch))
+        {
+            ReleaseVerificationWindow window = GuiComposition.CreateMainWindow(
+                GuiLaunchMode.Production,
+                _ => { },
+                session
+            ).Should().BeOfType<ReleaseVerificationWindow>().Subject;
+
+            window.FindControl<InstallerDiagnosticsAccess>("DiagnosticsAccess")!.IsVisible.Should().BeTrue();
+
+            await window.DisposeAsync();
+        }
+        Directory.Delete(temporaryDirectory, recursive: true);
     }
 
     [AvaloniaTest]
@@ -49,7 +78,7 @@ internal sealed class GuiCompositionTests
             return new MainWindow();
         }
 
-        ReleaseVerificationWindow window = GuiComposition.CreateMainWindow(
+        ReleaseVerificationWindow window = GuiComposition.CreateMainWindowFromFactoriesForTesting(
             GuiLaunchMode.Production,
             CreateProduction,
             CreateDemo
@@ -72,7 +101,7 @@ internal sealed class GuiCompositionTests
         int productionFactoryCalls = 0;
         int demoFactoryCalls = 0;
 
-        MainWindow window = GuiComposition.CreateMainWindow(
+        MainWindow window = GuiComposition.CreateMainWindowFromFactoriesForTesting(
             GuiLaunchMode.Demo,
             () =>
             {

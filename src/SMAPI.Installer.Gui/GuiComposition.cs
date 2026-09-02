@@ -1,5 +1,6 @@
 using Avalonia.Controls;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
@@ -11,22 +12,36 @@ internal static class GuiComposition
     /// <summary>Create the selected top-level window.</summary>
     public static Window CreateMainWindow(GuiLaunchMode mode)
     {
-        return CreateMainWindow(mode, window => window.Show());
+        return mode switch
+        {
+            GuiLaunchMode.Demo => new MainWindow(),
+            GuiLaunchMode.Production => throw new InvalidOperationException("Production composition requires an initialized private diagnostic session."),
+            _ => throw new ArgumentOutOfRangeException(nameof(mode))
+        };
     }
 
-    /// <summary>Create the selected top-level window and provide the production next-window activation boundary.</summary>
-    internal static Window CreateMainWindow(GuiLaunchMode mode, Action<Window> activateNextWindow)
+    /// <summary>Create the selected top-level window with the production-only diagnostic owner.</summary>
+    internal static Window CreateMainWindow(
+        GuiLaunchMode mode,
+        Action<Window> activateNextWindow,
+        InstallerDiagnosticSession? diagnosticSession
+    )
     {
         ArgumentNullException.ThrowIfNull(activateNextWindow);
-        return CreateMainWindow(
-            mode,
-            () => CreateReleaseVerificationWindow(activateNextWindow),
-            () => new MainWindow()
-        );
+        return mode switch
+        {
+            GuiLaunchMode.Production => CreateReleaseVerificationWindow(
+                activateNextWindow,
+                diagnosticSession ?? throw new ArgumentNullException(nameof(diagnosticSession), "Production composition requires private diagnostics.")
+            ),
+            GuiLaunchMode.Demo when diagnosticSession is null => new MainWindow(),
+            GuiLaunchMode.Demo => throw new ArgumentException("Demo mode must not receive production diagnostics.", nameof(diagnosticSession)),
+            _ => throw new ArgumentOutOfRangeException(nameof(mode))
+        };
     }
 
     /// <summary>Create the selected top-level window through explicit factories for deterministic composition tests.</summary>
-    internal static Window CreateMainWindow(
+    internal static Window CreateMainWindowFromFactoriesForTesting(
         GuiLaunchMode mode,
         Func<Window> createProduction,
         Func<Window> createDemo
@@ -43,12 +58,16 @@ internal static class GuiComposition
         };
     }
 
-    private static ReleaseVerificationWindow CreateReleaseVerificationWindow(Action<Window> activateNextWindow)
+    private static ReleaseVerificationWindow CreateReleaseVerificationWindow(
+        Action<Window> activateNextWindow,
+        InstallerDiagnosticSession diagnosticSession
+    )
     {
         ProductionInstallerWorkflow workflow = new(
             new ReviewedGitHubReleaseService(),
             ProcessInstallerProtocolClient.CreateForCurrentProcess,
-            activateNextWindow
+            activateNextWindow,
+            diagnosticSession
         );
         return workflow.CreateInitialWindow();
     }

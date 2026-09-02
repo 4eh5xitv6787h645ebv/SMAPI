@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Avalonia;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 
 namespace StardewModdingAPI.Installer.Gui;
 
@@ -14,7 +15,12 @@ internal static class Program
             OperatingSystem.IsLinux() ? GetEffectiveUserId() : null,
             mode => StartSelectedMode(
                 mode,
-                selectedMode => BuildAvaloniaApp(selectedMode).StartWithClassicDesktopLifetime(args),
+                selectedMode => StartSelectedModeWithDiagnostics(
+                    selectedMode,
+                    () => InstallerDiagnosticSession.CreateProduction(),
+                    (desktopMode, diagnosticSession) => BuildAvaloniaApp(desktopMode, diagnosticSession).StartWithClassicDesktopLifetime(args),
+                    Console.Error
+                ),
                 Console.Error
             ),
             Console.Error
@@ -57,9 +63,56 @@ internal static class Program
         return startDesktop(mode);
     }
 
-    public static AppBuilder BuildAvaloniaApp(GuiLaunchMode mode)
+    /// <summary>Create production diagnostics after launch gates and before the desktop can start any work.</summary>
+    internal static int StartSelectedModeWithDiagnostics(
+        GuiLaunchMode mode,
+        Func<InstallerDiagnosticSession> createDiagnostics,
+        Func<GuiLaunchMode, InstallerDiagnosticSession?, int> startDesktop,
+        TextWriter diagnostics
+    )
     {
-        return AppBuilder.Configure(() => new App(mode))
+        ArgumentNullException.ThrowIfNull(createDiagnostics);
+        ArgumentNullException.ThrowIfNull(startDesktop);
+        ArgumentNullException.ThrowIfNull(diagnostics);
+        if (!Enum.IsDefined(mode))
+        {
+            diagnostics.WriteLine("The graphical installer launch mode is invalid.");
+            return 2;
+        }
+        if (mode == GuiLaunchMode.Demo)
+            return startDesktop(mode, null);
+
+        InstallerDiagnosticSession session;
+        try
+        {
+            session = createDiagnostics()
+                ?? throw new InstallerDiagnosticsUnavailableException();
+        }
+        catch
+        {
+            diagnostics.WriteLine("The graphical installer couldn't create its private local diagnostic log safely. No network request or game access was started.");
+            return 1;
+        }
+
+        try
+        {
+            int exitCode = startDesktop(mode, session);
+            session.MarkCompleted();
+            return exitCode;
+        }
+        finally
+        {
+            session.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
+    public static AppBuilder BuildAvaloniaApp(GuiLaunchMode mode, InstallerDiagnosticSession? diagnosticSession = null)
+    {
+        if (mode == GuiLaunchMode.Production && diagnosticSession is null)
+            throw new ArgumentNullException(nameof(diagnosticSession), "Production desktop startup requires private diagnostics.");
+        if (mode == GuiLaunchMode.Demo && diagnosticSession is not null)
+            throw new ArgumentException("Demo mode must not receive production diagnostics.", nameof(diagnosticSession));
+        return AppBuilder.Configure(() => new App(mode, diagnosticSession))
             .UsePlatformDetect()
             .LogToTrace();
     }

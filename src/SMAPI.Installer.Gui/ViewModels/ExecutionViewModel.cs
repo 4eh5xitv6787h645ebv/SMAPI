@@ -4,6 +4,7 @@ using StardewModdingAPI.Installer.Core.Packages;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 using StardewModdingAPI.Installer.Core.Transactions;
 using StardewModdingAPI.Installer.Gui.Backend;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.Frontend;
 
 namespace StardewModdingAPI.Installer.Gui.ViewModels;
@@ -30,6 +31,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
     private readonly ExecutionController Controller;
     private readonly Func<bool> HasUiThreadAccess;
     private readonly Action<Action> PostToUiThread;
+    private readonly Action EnsureDiagnosticLoggingReady;
     private readonly object SnapshotDispatchSync = new();
     private ExecutionSnapshot snapshot;
     private ExecutionSnapshot? pendingSnapshot;
@@ -43,15 +45,21 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
     private TransactionStage? announcedStage;
     private bool disposed;
 
-    public ExecutionViewModel(ExecutionController controller, Func<bool>? hasUiThreadAccess = null, Action<Action>? postToUiThread = null)
+    public ExecutionViewModel(
+        ExecutionController controller,
+        Func<bool>? hasUiThreadAccess = null,
+        Action<Action>? postToUiThread = null,
+        Action? ensureDiagnosticLoggingReady = null
+    )
     {
         this.Controller = controller ?? throw new ArgumentNullException(nameof(controller));
         this.HasUiThreadAccess = hasUiThreadAccess ?? Dispatcher.UIThread.CheckAccess;
         this.PostToUiThread = postToUiThread ?? (action => Dispatcher.UIThread.Post(action));
+        this.EnsureDiagnosticLoggingReady = ensureDiagnosticLoggingReady ?? (() => { });
         this.snapshot = controller.Snapshot;
-        this.RunCommand = new(controller.RunAsync, () => this.snapshot.CanRun, this.HandlePresentationFailure);
+        this.RunCommand = new(() => this.StartMutation(controller.RunAsync), () => this.snapshot.CanRun, this.HandlePresentationFailure);
         this.CancelCommand = new(this.CancelOrCloseAsync, this.CanCancelOrClose, this.HandleCancellationFailure);
-        this.RecoverCommand = new(() => controller.RecoverAsync(), () => this.snapshot.CanRecover, this.HandlePresentationFailure);
+        this.RecoverCommand = new(() => this.StartMutation(() => controller.RecoverAsync()), () => this.snapshot.CanRecover, this.HandlePresentationFailure);
         this.ExitCommand = new(() => this.CloseRequested?.Invoke(this, EventArgs.Empty), () => this.snapshot.CanExit);
         this.Controller.Changed += this.OnControllerChanged;
         this.ApplySnapshot(this.snapshot, requestFocus: false);
@@ -186,6 +194,12 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
             return Task.CompletedTask;
         }
         return this.Controller.RequestCancellationAsync();
+    }
+
+    private Task StartMutation(Func<Task> start)
+    {
+        this.EnsureDiagnosticLoggingReady();
+        return start();
     }
 
     private async Task ObserveCancellationAsync(Task request)
@@ -431,10 +445,15 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         this.ExitCommand.NotifyCanExecuteChanged();
     }
 
-    private void HandlePresentationFailure(Exception _)
+    private void HandlePresentationFailure(Exception error)
     {
-        this.Heading = "The installer action could not be presented safely";
-        this.Message = "Keep this window open if work may be active. No private backend detail is shown here.";
+        bool diagnosticsUnavailable = error is InstallerDiagnosticsUnavailableException;
+        this.Heading = diagnosticsUnavailable
+            ? "Private diagnostic logging is unavailable"
+            : "The installer action could not be presented safely";
+        this.Message = diagnosticsUnavailable
+            ? "No operation was started. Close this installer, make sure another installer is not open, and retry as your normal desktop user."
+            : "Keep this window open if work may be active. No private backend detail is shown here.";
         this.LiveAnnouncement = $"{this.Heading}. {this.Message}";
         this.FocusRequested?.Invoke(this, ExecutionFocusTarget.Problem);
     }

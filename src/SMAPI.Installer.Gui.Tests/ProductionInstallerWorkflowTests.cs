@@ -578,7 +578,16 @@ internal sealed class ProductionInstallerWorkflowTests
         {
             CompletePreparation = true
         };
-        return new(service, () => client, activate, windowFactory, pickFolder, planWindowFactory, executionWindowFactory, recoveryPruneWindowFactory);
+        return ProductionInstallerWorkflow.CreateWithoutDiagnosticsForTesting(
+            service,
+            () => client,
+            activate,
+            windowFactory,
+            pickFolder,
+            planWindowFactory,
+            executionWindowFactory,
+            recoveryPruneWindowFactory
+        );
     }
 
     private static async Task VerifyAsync(ReleaseVerificationViewModel viewModel)

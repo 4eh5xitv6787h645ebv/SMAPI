@@ -1,0 +1,16 @@
+<UserControl
+    x:Class="StardewModdingAPI.Installer.Gui.InstallerDiagnosticsAccess"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    IsVisible="False">
+  <Button
+      x:Name="OpenButton"
+      Classes="focus-ring"
+      HorizontalAlignment="Left"
+      Margin="0,8,0,0"
+      AutomationProperties.AccessKey="Alt+D"
+      AutomationProperties.HelpText="Opens a bounded local-only diagnostic snapshot. It never opens a path supplied by the installer backend."
+      AutomationProperties.Name="View private diagnostic log"
+      Click="OnOpenClicked"
+      Content="View _diagnostic log" />
+</UserControl>
