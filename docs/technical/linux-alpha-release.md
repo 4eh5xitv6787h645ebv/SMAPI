@@ -151,6 +151,26 @@ and manifest, against this repository, tagged workflow, and selected commit esta
 release authority. Do not substitute an unattested local or candidate four-primary-asset set for the
 published tagged six-asset set.
 
+For the post-publication qualification record, maintainers use the repository wrapper with a
+fine-grained read-only `GH_TOKEN`, the exact tag/commit/tree, a new destination, and the official
+GitHub CLI 2.92.0 Linux x86_64 archive already checked by the staging script:
+
+```bash
+test -n "${GH_TOKEN:-}" # export a fine-grained read-only token without placing it in shell history
+build/scripts/qualify-published-linux-alpha.sh \
+  'COPY THE EXACT RELEASE TAG HERE' \
+  'COPY THE EXACT 40-CHARACTER RELEASE COMMIT HERE' \
+  'COPY THE EXACT 40-CHARACTER SOURCE TREE HERE' \
+  '/new/private/destination' \
+  '/path/to/gh_2.92.0_linux_amd64.tar.gz'
+```
+
+The wrapper refuses root and an existing destination. It checks the public release's exact six-file
+inventory before downloading and again after verification, then applies the strict checksum,
+metadata, manifest-authority, bundle, and two-subject attestation policy before atomically exposing
+only the six verified files. The token is delivered only to the two public inventory requests and
+is not written to the resulting directory.
+
 ## Install
 
 Extract the verified ZIP. In a desktop session, run `install on Linux.sh`. If the file manager does
@@ -220,7 +240,7 @@ backup rules. If terminal automation cannot run it, `internal/linux/install.dat`
    private-runtime `createdump` executable as mode 755. The private app-relative runtime contains
    `host/fxr` and `shared/Microsoft.NETCore.App`; it intentionally does not bundle the `dotnet` CLI.
 
-For an unreleased next-alpha/source build containing PR #177 only, step 4 must preserve both exact
+For the planned alpha 2 build containing PR #177, step 4 must preserve both exact
 bytes and Unix mode:
 
 ```bash
@@ -239,7 +259,7 @@ names, IDs, versions, dependency IDs, callback identities, filesystem-derived de
 information. Inspect any report before sharing it. The installer and release workflow never upload
 the private benchmark modpack or save.
 
-### Unreleased graphical-installer diagnostics
+### Planned alpha 2 graphical-installer diagnostics
 
 The graphical candidate stores its local JSONL diagnostics under
 `$XDG_STATE_HOME/smapi-installer/logs` when `XDG_STATE_HOME` is an absolute path, or
@@ -277,17 +297,17 @@ ownership, backup, validation, or rollback decisions automatically.
 The published performance comparison describes one controlled workstation and workload. It is not
 a universal FPS, power, CPU-use, or latency claim. Published alpha.1 has no GUI/updater, and its current
 rollback flow is not atomic. The published alpha.1 dispatcher is not validation-only: its net6 path
-may create or refresh dependency metadata before launch. The unreleased PR #177 source-build
+may create or refresh dependency metadata before launch. The planned alpha 2 dispatcher from PR #177
 dispatcher removes that mutation and rechecks path identities to catch ordinary concurrent changes
 during validation, but same-user adversarial path replacement between validation and process
 execution remains outside that nonprivileged launcher's threat boundary. Those statements describe
-unreleased next-alpha/source-build behavior, not alpha.1. See the [comparison](../upstream-comparison.md),
+planned alpha 2 behavior, not alpha.1. See the [comparison](../upstream-comparison.md),
 [validation record](linux-alpha-release-validation.md), and
 [issue tracker](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues).
 
 ## Maintainer release process
 
-The Phase 3 pull request must pass `Linux alpha release qualification` and the repository's required
+The alpha 2 release-preparation pull request must pass `Linux alpha release qualification` and the repository's required
 performance gate. Hosted CI compiles the game-bound test assembly against pinned public reference
 assemblies, then executes the fixture-free runtime-dispatcher and analyzer suites with zero-test
 discovery treated as an error. Reference assemblies are deliberately non-executable, so they must
@@ -310,4 +330,4 @@ complete package/manifest authority verification before and after workflow-artif
 attests both subjects, exports the local attestation bundle and its checksum sidecar, and publishes
 the exact six named release files. The downloaded public six-asset set—not a local package or pre-tag
 candidate—is then used for final clean-room verification.
-These next-alpha steps do not retroactively describe the published alpha.1 assets.
+These alpha 2 steps do not retroactively describe the published alpha.1 assets.

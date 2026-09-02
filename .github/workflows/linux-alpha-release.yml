@@ -126,6 +126,18 @@ jobs:
                     bash -n build/scripts/test-stage-pinned-github-cli.sh
                     bash -n build/scripts/test-pinned-github-cli-callers.sh
                     build/scripts/test-pinned-github-cli-callers.sh
+                    bash -n build/scripts/qualify-published-linux-alpha.sh
+                    bash -n build/scripts/test-qualify-published-linux-alpha.sh
+                    build/scripts/test-qualify-published-linux-alpha.sh
+                    python3 build/scripts/test-linux-gui-screenshot-evidence.py
+                    if [[ -f docs/screenshots/linux-gui/manifest.json ]]; then
+                        private_strings="$RUNNER_TEMP/linux-gui-screenshot-private-strings.txt"
+                        printf '%s\n' 'smapi-evidence-ci-private-sentinel' > "$private_strings"
+                        python3 build/scripts/validate-linux-gui-screenshot-evidence.py \
+                            --manifest docs/screenshots/linux-gui/manifest.json \
+                            --assets-root docs/screenshots/linux-gui \
+                            --private-strings-file "$private_strings"
+                    fi
                     bash -n build/scripts/finalize-install-package.sh
                     bash -n build/scripts/test-packaged-linux-gui.sh
                     bash -n build/scripts/test-packaged-linux-gui-inputs.sh

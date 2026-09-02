@@ -29,7 +29,7 @@ One image may cover adjacent states when every state remains legible and the cap
 
 | ID | Required visible state | Minimum evidence |
 | --- | --- | --- |
-| R1 | Release selection showing the installed/current release plus applicable upgrade, prerelease, downgrade, and local-package labels | Controlled fixture |
+| R1 | Release selection showing bounded public prerelease choices and the local-package route, without claiming an installed/current, upgrade, or downgrade relationship before authenticated game-receipt inspection | Controlled fixture |
 | R2 | Real public-package download in progress, with bounded byte progress and Cancel | Real qualification |
 | R3 | Interrupted or cancelled download with retry guidance and no incomplete published package | Controlled transport failure through the production adapter |
 | R4 | Checksum and release-metadata verification in progress | Real qualification |

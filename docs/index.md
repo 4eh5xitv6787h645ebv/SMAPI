@@ -104,7 +104,7 @@ health view
   </a>
   <a class="doc-card" href="technical/linux-gui-shell.html">
     <strong>Linux graphical installer</strong>
-    <span>Review the unreleased production candidate, private diagnostics, troubleshooting, and retained terminal fallback.</span>
+    <span>Review the planned alpha 2 graphical package, private diagnostics, troubleshooting, and retained terminal fallback.</span>
   </a>
   <a class="doc-card" href="technical/linux-gui-screenshot-evidence.html">
     <strong>Installer screenshot evidence plan</strong>
