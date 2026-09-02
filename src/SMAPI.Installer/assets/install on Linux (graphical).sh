@@ -22,13 +22,14 @@ requested_signal_name=""
 requested_exit_status=""
 signal_forwarded=false
 signal_deadline=0
+bundle_cleanup_allowed=true
+settlement_failed=false
+settlement_status=0
 cleanup() {
-    if [[ -n "$child_pid" ]]; then
-        send_exact_signal KILL || true
-        wait "$child_pid" 2>/dev/null || true
-        child_pid=""
+    if [[ -n "$child_pid" && "$settlement_failed" == false ]]; then
+        force_kill_and_settle_child || true
     fi
-    if [[ -n "$bundle_root" && -d "$bundle_root" ]]; then
+    if [[ "$bundle_cleanup_allowed" == true && -n "$bundle_root" && -d "$bundle_root" ]]; then
         rm -rf -- "$bundle_root"
     fi
 }
@@ -41,8 +42,85 @@ is_running_child_job() {
         if [[ "$active_pid" == "$child_pid" ]]; then
             return 0
         fi
-    done < <(jobs -pr)
+    done < <(jobs -pr 2>/dev/null)
     return 1
+} 2>/dev/null
+
+is_active_child_job() {
+    local active_pid=""
+
+    [[ -n "$child_pid" ]] || return 1
+    while IFS= read -r active_pid; do
+        if [[ "$active_pid" == "$child_pid" ]]; then
+            return 0
+        fi
+    done < <(jobs -p 2>/dev/null)
+    return 1
+} 2>/dev/null
+
+is_stopped_child_job() {
+    local stopped_pid=""
+
+    [[ -n "$child_pid" ]] || return 1
+    while IFS= read -r stopped_pid; do
+        if [[ "$stopped_pid" == "$child_pid" ]]; then
+            return 0
+        fi
+    done < <(jobs -ps 2>/dev/null)
+    return 1
+} 2>/dev/null
+
+kill_live_direct_job_fallback() {
+    # Fail-closed settlement only: `jobs -pr`/`jobs -ps` prove the direct job is still live. A
+    # completed `jobs -p` entry is bookkeeping-only because its kernel PID may already be reusable.
+    # Normal signal forwarding always requires the stronger Linux /proc identity.
+    if ! is_running_child_job && ! is_stopped_child_job; then
+        return 1
+    fi
+    kill -s KILL -- "$child_pid" 2>/dev/null
+}
+
+force_kill_and_settle_child() {
+    local settlement_deadline=$((SECONDS + 3))
+
+    [[ -n "$child_pid" ]] || return 0
+    # Settlement is terminal. The first requested signal/status was already retained, so later
+    # handled signals must not interrupt wait or reenter forwarding while KILL/reap is in progress.
+    trap '' HUP INT TERM
+    if is_active_child_job; then
+        if ! send_exact_signal KILL; then
+            kill_live_direct_job_fallback || true
+        fi
+    fi
+
+    while is_active_child_job; do
+        if is_running_child_job || is_stopped_child_job; then
+            if ! send_exact_signal KILL; then
+                kill_live_direct_job_fallback || true
+            fi
+        fi
+        if ! is_running_child_job && ! is_stopped_child_job; then
+            set +e
+            wait "$child_pid" 2>/dev/null
+            settlement_status=$?
+            set -e
+        fi
+
+        if ! is_active_child_job; then
+            child_pid=""
+            return 0
+        fi
+        if (( SECONDS >= settlement_deadline )); then
+            settlement_failed=true
+            bundle_cleanup_allowed=false
+            printf '%s\n' "The graphical installer couldn't safely settle its child process; temporary runtime files were retained." >&2
+            return 1
+        fi
+        sleep 0.05 || true
+    done
+
+    child_pid=""
+    return 0
 }
 
 read_process_state_and_start_time() {
@@ -50,7 +128,8 @@ read_process_state_and_start_time() {
     local stat_line=""
     local -a stat_fields=()
 
-    IFS= read -r stat_line < "/proc/$process_id/stat" || return 1
+    [[ -r "/proc/$process_id/stat" ]] || return 1
+    IFS= read -r stat_line 2>/dev/null < "/proc/$process_id/stat" || return 1
     stat_line="${stat_line##*) }"
     read -r -a stat_fields <<< "$stat_line"
     [[ "${#stat_fields[@]}" -ge 20 ]] || return 1
@@ -149,37 +228,54 @@ while is_running_child_job; do
     sleep 0.01 || true
 done
 forward_pending_signal
+if [[ "$child_identity_ready" == false ]] && is_running_child_job; then
+    force_kill_and_settle_child || true
+    printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." >&2
+    if [[ -n "$requested_exit_status" ]]; then
+        exit "$requested_exit_status"
+    fi
+    exit 1
+fi
 
 status=0
 kill_sent=false
 while true; do
     if [[ "$signal_forwarded" == true ]]; then
         if ! is_exact_child_running; then
-            set +e
-            wait "$child_pid"
-            status=$?
-            set -e
+            force_kill_and_settle_child || true
+            status=$settlement_status
             break
         fi
         if [[ "$kill_sent" == false ]] && (( SECONDS >= signal_deadline )); then
-            if send_exact_signal KILL; then
-                kill_sent=true
-            fi
+            force_kill_and_settle_child || true
+            status=$settlement_status
+            kill_sent=true
+            break
         fi
         sleep 0.05 || true
         continue
     fi
 
     set +e
-    wait "$child_pid"
+    wait "$child_pid" 2>/dev/null
     status=$?
     set -e
-    if ! is_running_child_job; then
+    if ! is_active_child_job; then
         break
     fi
     forward_pending_signal
+    if [[ -n "$requested_signal_name" && "$signal_forwarded" == false ]] && is_running_child_job; then
+        force_kill_and_settle_child || true
+        status=$settlement_status
+        break
+    fi
+    if [[ -z "$requested_signal_name" ]] && is_stopped_child_job; then
+        sleep 0.05 || true
+    fi
 done
-child_pid=""
+if [[ "$settlement_failed" == false ]]; then
+    child_pid=""
+fi
 
 if [[ -n "$requested_exit_status" ]]; then
     exit "$requested_exit_status"

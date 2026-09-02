@@ -157,6 +157,90 @@ printf '%s\n' \
 chmod 755 "$guard_bin/dotnet"
 guarded_path="$guard_bin:/usr/bin:/bin"
 
+# Make only launcher-side Linux executable identity reads fail. The supervisor keeps the real
+# readlink on PATH so it can independently retain and settle the exact packaged apphost.
+identity_guard_bin="$test_root/identity-guard-bin"
+mkdir "$identity_guard_bin"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    '[[ "$SMAPI_GUI_EXPECTED_LAUNCHER_PID" =~ ^[1-9][0-9]*$ ]] || exec /usr/bin/readlink "$@"' \
+    'should_inject=false' \
+    'ancestor_pid="$PPID"' \
+    'for _ in {1..12}; do' \
+    '    [[ "$ancestor_pid" =~ ^[1-9][0-9]*$ && -r "/proc/$ancestor_pid/status" ]] || break' \
+    '    ancestor_exe="$(/usr/bin/readlink -e -- "/proc/$ancestor_pid/exe" 2>/dev/null || true)"' \
+    '    [[ -n "$ancestor_exe" ]] || exec /usr/bin/readlink "$@"' \
+    '    if [[ "$ancestor_exe" == "$SMAPI_GUI_EXPECTED_APPHOST" ]]; then' \
+    '        exec /usr/bin/readlink "$@"' \
+    '    fi' \
+    '    if [[ "$ancestor_pid" == "$SMAPI_GUI_EXPECTED_LAUNCHER_PID" ]]; then' \
+    '        [[ "$ancestor_exe" == "$SMAPI_GUI_EXPECTED_LAUNCHER_BASH" && -r "/proc/$ancestor_pid/cmdline" ]] || break' \
+    '        launcher_argument=false' \
+    '        while IFS= read -r -d "" argument; do' \
+    '            if [[ "$argument" == "$SMAPI_GUI_EXPECTED_LAUNCHER" ]]; then' \
+    '                launcher_argument=true' \
+    '                break' \
+    '            fi' \
+    '        done < "/proc/$ancestor_pid/cmdline"' \
+    '        [[ "$launcher_argument" == true ]] && should_inject=true' \
+    '        break' \
+    '    fi' \
+    '    parent_pid=""' \
+    '    while IFS=$'"'"'\t'"'"' read -r key value _; do' \
+    '        if [[ "$key" == "PPid:" ]]; then' \
+    '            parent_pid="$value"' \
+    '            break' \
+    '        fi' \
+    '    done < "/proc/$ancestor_pid/status"' \
+    '    [[ -n "$parent_pid" && "$parent_pid" != "$ancestor_pid" ]] || break' \
+    '    ancestor_pid="$parent_pid"' \
+    'done' \
+    'if [[ "$should_inject" != true ]]; then' \
+    '    exec /usr/bin/readlink "$@"' \
+    'fi' \
+    'for argument in "$@"; do' \
+    '    if [[ "$argument" =~ ^/proc/[0-9]+/exe$ ]]; then' \
+    '        read_count=0' \
+    '        if [[ -f "$SMAPI_GUI_IDENTITY_READ_COUNT" ]]; then' \
+    '            IFS= read -r read_count < "$SMAPI_GUI_IDENTITY_READ_COUNT" || [[ -n "$read_count" ]]' \
+    '        fi' \
+    '        [[ "$read_count" =~ ^[0-9]+$ ]] || exit 1' \
+    '        ((read_count += 1))' \
+    '        printf "%s\n" "$read_count" > "$SMAPI_GUI_IDENTITY_READ_COUNT"' \
+    '        if [[ "${SMAPI_GUI_IDENTITY_READ_DELAY:-0}" != 0 ]]; then' \
+    '            sleep "$SMAPI_GUI_IDENTITY_READ_DELAY"' \
+    '        fi' \
+    '        if (( read_count > SMAPI_GUI_IDENTITY_FAIL_AFTER )); then' \
+    '            : > "$SMAPI_GUI_IDENTITY_FAILURE_MARKER"' \
+    '            exit 1' \
+    '        fi' \
+    '    fi' \
+    'done' \
+    'exec /usr/bin/readlink "$@"' \
+    > "$identity_guard_bin/readlink"
+chmod 755 "$identity_guard_bin/readlink"
+identity_guarded_path="$identity_guard_bin:$guarded_path"
+launcher_bash="$(readlink -e -- "$(command -v bash)")"
+identity_scope_proof_count="$test_root/non-launcher-identity-read-count"
+identity_scope_proof_marker="$test_root/non-launcher-identity-failure"
+identity_scope_proof_output="$test_root/non-launcher-readlink.output"
+env \
+    SMAPI_GUI_EXPECTED_APPHOST="$gui_apphost" \
+    SMAPI_GUI_EXPECTED_LAUNCHER="$launcher" \
+    SMAPI_GUI_EXPECTED_LAUNCHER_BASH="$launcher_bash" \
+    SMAPI_GUI_EXPECTED_LAUNCHER_PID="$BASHPID" \
+    SMAPI_GUI_IDENTITY_READ_COUNT="$identity_scope_proof_count" \
+    SMAPI_GUI_IDENTITY_FAILURE_MARKER="$identity_scope_proof_marker" \
+    SMAPI_GUI_IDENTITY_FAIL_AFTER=0 \
+    "$identity_guard_bin/readlink" -e -- "/proc/$BASHPID/exe" > "$identity_scope_proof_output"
+printf '%s\n' "$launcher_bash" > "$test_root/non-launcher-readlink.expected"
+if ! cmp -s -- "$test_root/non-launcher-readlink.expected" "$identity_scope_proof_output" \
+    || [[ -e "$identity_scope_proof_count" || -e "$identity_scope_proof_marker" ]]; then
+    echo "The launcher-scoped identity fault injector affected a representative non-launcher read." >&2
+    exit 1
+fi
+
 assert_no_runtime_leak() {
     local state_root="$1"
     local output_path="$2"
@@ -351,11 +435,15 @@ run_launcher_signal_smoke() {
     local signal_name="$1"
     local expected_status="$2"
     local stop_child="$3"
+    local repeat_signals="${4:-false}"
     local case_name state_root output_path status
 
     case_name="launcher-${signal_name,,}"
     if [[ "$stop_child" == true ]]; then
         case_name+="-stopped-child"
+    fi
+    if [[ "$repeat_signals" == true ]]; then
+        case_name+="-repeated-signals"
     fi
     state_root="$(make_state_root "$case_name")"
     output_path="$test_root/$case_name.output"
@@ -387,6 +475,7 @@ run_launcher_signal_smoke() {
                     signal_name="$4"
                     expected_status="$5"
                     stop_child="$6"
+                    repeat_signals="$7"
                     state=""
                     launcher_pid=""
                     gui_pid=""
@@ -446,6 +535,25 @@ run_launcher_signal_smoke() {
 
                         is_exact_gui_identity || return 1
                         kill -s "$requested_signal" -- "$gui_pid"
+                    }
+
+                    exact_gui_has_pending_term() {
+                        local key value
+                        local signal_pending=0 shared_pending=0
+
+                        is_exact_gui_identity || return 1
+                        while read -r key value _; do
+                            case "$key" in
+                                SigPnd:)
+                                    signal_pending="$value"
+                                    ;;
+                                ShdPnd:)
+                                    shared_pending="$value"
+                                    ;;
+                            esac
+                        done < "/proc/$gui_pid/status"
+                        [[ "$signal_pending" =~ ^[0-9a-fA-F]+$ && "$shared_pending" =~ ^[0-9a-fA-F]+$ ]] || return 1
+                        (( (16#$signal_pending & 16384) != 0 || (16#$shared_pending & 16384) != 0 ))
                     }
 
                     cleanup_signal_case() {
@@ -526,6 +634,23 @@ run_launcher_signal_smoke() {
                     fi
                     is_running_direct_launcher_job || fail_case LAUNCHER_AUTHORITY_LOST_BEFORE_SIGNAL
                     kill -s "$signal_name" -- "$launcher_pid" || fail_case LAUNCHER_SIGNAL_REJECTED
+                    if [[ "$repeat_signals" == true ]]; then
+                        pending_term=false
+                        for _ in {1..300}; do
+                            is_running_direct_launcher_job || fail_case LAUNCHER_SETTLED_BEFORE_PENDING_TERM
+                            is_exact_gui_identity || fail_case APPHOST_IDENTITY_CHANGED_BEFORE_PENDING_TERM
+                            if exact_gui_has_pending_term; then
+                                pending_term=true
+                                break
+                            fi
+                            sleep 0.01
+                        done
+                        [[ "$pending_term" == true ]] || fail_case APPHOST_PENDING_TERM_NOT_OBSERVED
+                        is_running_direct_launcher_job || fail_case LAUNCHER_SETTLED_BEFORE_REPEATED_HUP
+                        kill -HUP -- "$launcher_pid" || fail_case REPEATED_HUP_REJECTED
+                        is_running_direct_launcher_job || fail_case LAUNCHER_SETTLED_BEFORE_REPEATED_INT
+                        kill -INT -- "$launcher_pid" || fail_case REPEATED_INT_REJECTED
+                    fi
                     set +e
                     wait "$launcher_pid"
                     launcher_status=$?
@@ -551,7 +676,7 @@ run_launcher_signal_smoke() {
                         fail_case PRIVATE_BUNDLE_REMAINED
                     fi
                     trap - EXIT
-                ' signal-supervisor "$launcher" "$gui_apphost" "$state_root" "$signal_name" "$expected_status" "$stop_child"
+                ' signal-supervisor "$launcher" "$gui_apphost" "$state_root" "$signal_name" "$expected_status" "$stop_child" "$repeat_signals"
     ) > "$output_path" 2>&1
     status=$?
     set -e
@@ -563,7 +688,307 @@ run_launcher_signal_smoke() {
                 failure_code="${BASH_REMATCH[1]}"
             fi
         done < "$output_path"
-        echo "The packaged graphical launcher did not settle its exact apphost and private bundle after $signal_name (stopped child: $stop_child; code: $failure_code); raw output is withheld from CI logs." >&2
+        echo "The packaged graphical launcher did not settle its exact apphost and private bundle after $signal_name (stopped child: $stop_child; repeated signals: $repeat_signals; code: $failure_code); raw output is withheld from CI logs." >&2
+        exit 1
+    fi
+    assert_no_runtime_leak "$state_root" "$output_path"
+}
+
+run_identity_failure_smoke() {
+    local scenario="$1"
+    local fail_after expected_status case_name launch_argument read_delay expect_failure_marker
+    local state_root output_path status expected_output identity_failure_marker identity_read_count
+
+    case "$scenario" in
+        initial)
+            fail_after=0
+            expected_status=1
+            case_name="identity-capture-failure"
+            launch_argument="--demo"
+            read_delay=0
+            expect_failure_marker=true
+            ;;
+        post-capture)
+            fail_after=2
+            expected_status=143
+            case_name="identity-post-capture-failure"
+            launch_argument="--demo"
+            read_delay=0
+            expect_failure_marker=true
+            ;;
+        completed-job)
+            fail_after=999
+            expected_status=2
+            case_name="identity-completed-job"
+            launch_argument="--unexpected"
+            read_delay=1
+            expect_failure_marker=false
+            ;;
+        *)
+            echo "Unknown packaged launcher identity-failure scenario: $scenario" >&2
+            exit 2
+            ;;
+    esac
+
+    state_root="$(make_state_root "$case_name")"
+    output_path="$test_root/$case_name.output"
+    expected_output="$test_root/$case_name.expected"
+    identity_failure_marker="$test_root/$case_name.failure-marker"
+    identity_read_count="$test_root/$case_name.read-count"
+    set +e
+    (
+        cd "$state_root/work"
+        env -i \
+            PATH="$guarded_path" \
+            HOME="$state_root/home" \
+            XDG_CACHE_HOME="$state_root/cache" \
+            XDG_CONFIG_HOME="$state_root/config" \
+            XDG_DATA_HOME="$state_root/data" \
+            XDG_RUNTIME_DIR="$state_root/runtime" \
+            TMPDIR="$state_root/tmp" \
+            SMAPI_GUI_DOTNET_MARKER="$dotnet_marker" \
+            DOTNET_ROOT="$state_root/no-system-dotnet" \
+            DOTNET_ROOT_X64="$state_root/no-system-dotnet" \
+            DOTNET_MULTILEVEL_LOOKUP=0 \
+            DOTNET_EnableDiagnostics=0 \
+            DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+            DOTNET_NOLOGO=1 \
+            XDG_SESSION_TYPE=x11 \
+            timeout --signal=TERM --kill-after=5s 15s \
+                xvfb-run -a bash -c '
+                    set -euo pipefail
+                    launcher="$1"
+                    gui_apphost="$2"
+                    state_root="$3"
+                    identity_guarded_path="$4"
+                    identity_failure_marker="$5"
+                    identity_read_count="$6"
+                    fail_after="$7"
+                    scenario="$8"
+                    expected_status="$9"
+                    launcher_bash="${10}"
+                    read_delay="${11}"
+                    launch_argument="${12}"
+                    expect_failure_marker="${13}"
+                    launcher_pid=""
+                    gui_pid=""
+                    gui_start_time=""
+                    state=""
+
+                    fail_case() {
+                        printf "QUALIFIER_FAILURE=%s\n" "$1" >&2
+                        exit 1
+                    }
+
+                    get_start_time() {
+                        local pid="$1"
+                        local stat_line stat_fields
+
+                        IFS= read -r stat_line < "/proc/$pid/stat" 2>/dev/null || return 1
+                        stat_fields="${stat_line##*) }"
+                        set -- $stat_fields
+                        [[ $# -ge 20 ]] || return 1
+                        printf "%s\n" "${20}"
+                    }
+
+                    is_exact_gui_identity() {
+                        local current_exe current_start_time
+
+                        [[ -n "$gui_pid" && -n "$gui_start_time" ]] || return 1
+                        current_exe="$(/usr/bin/readlink -- "/proc/$gui_pid/exe" 2>/dev/null || true)"
+                        [[ "$current_exe" == "$gui_apphost" ]] || return 1
+                        current_start_time="$(get_start_time "$gui_pid" 2>/dev/null || true)"
+                        [[ "$current_start_time" == "$gui_start_time" ]]
+                    }
+
+                    is_running_direct_launcher_job() {
+                        local active_pid child_pid children="" children_path jobs_snapshot
+                        local is_running_job=false
+
+                        [[ -n "$launcher_pid" ]] || return 1
+                        jobs_snapshot="$state_root/identity-failure-running-jobs"
+                        jobs -pr > "$jobs_snapshot"
+                        while IFS= read -r active_pid; do
+                            if [[ "$active_pid" == "$launcher_pid" ]]; then
+                                is_running_job=true
+                                break
+                            fi
+                        done < "$jobs_snapshot"
+                        [[ "$is_running_job" == true ]] || return 1
+                        children_path="/proc/$BASHPID/task/$BASHPID/children"
+                        [[ -r "$children_path" ]] || return 1
+                        IFS= read -r children < "$children_path" 2>/dev/null || [[ -n "$children" ]] || return 1
+                        for child_pid in $children; do
+                            [[ "$child_pid" == "$launcher_pid" ]] && return 0
+                        done
+                        return 1
+                    }
+
+                    signal_exact_gui() {
+                        local requested_signal="$1"
+
+                        is_exact_gui_identity || return 1
+                        kill -s "$requested_signal" -- "$gui_pid"
+                    }
+
+                    cleanup_identity_failure_case() {
+                        set +e
+                        if is_running_direct_launcher_job; then
+                            kill -TERM "$launcher_pid" 2>/dev/null
+                        fi
+                        for _ in {1..500}; do
+                            is_running_direct_launcher_job || break
+                            sleep 0.01
+                        done
+                        if is_running_direct_launcher_job; then
+                            kill -KILL "$launcher_pid" 2>/dev/null
+                        fi
+                        if [[ -n "$launcher_pid" ]]; then
+                            wait "$launcher_pid" 2>/dev/null
+                            launcher_pid=""
+                        fi
+                        if is_exact_gui_identity; then
+                            signal_exact_gui KILL 2>/dev/null || true
+                        fi
+                    }
+                    trap cleanup_identity_failure_case EXIT
+
+                    /usr/bin/env \
+                        --default-signal=HUP \
+                        --default-signal=INT \
+                        --default-signal=TERM \
+                        PATH="$identity_guarded_path" \
+                        SMAPI_GUI_IDENTITY_FAILURE_MARKER="$identity_failure_marker" \
+                        SMAPI_GUI_IDENTITY_READ_COUNT="$identity_read_count" \
+                        SMAPI_GUI_IDENTITY_FAIL_AFTER="$fail_after" \
+                        SMAPI_GUI_IDENTITY_READ_DELAY="$read_delay" \
+                        SMAPI_GUI_EXPECTED_APPHOST="$gui_apphost" \
+                        SMAPI_GUI_EXPECTED_LAUNCHER="$launcher" \
+                        SMAPI_GUI_EXPECTED_LAUNCHER_BASH="$launcher_bash" \
+                        bash -c "export SMAPI_GUI_EXPECTED_LAUNCHER_PID=\"\$BASHPID\"; exec \"\$1\" \"\$2\"" \
+                            identity-launcher-trampoline "$launcher" "$launch_argument" &
+                    launcher_pid=$!
+                    for _ in {1..1500}; do
+                        if [[ -r "/proc/$launcher_pid/task/$launcher_pid/children" ]]; then
+                            IFS= read -r children < "/proc/$launcher_pid/task/$launcher_pid/children" || true
+                            for child in $children; do
+                                child_exe="$(/usr/bin/readlink -- "/proc/$child/exe" 2>/dev/null || true)"
+                                if [[ "$child_exe" == "$gui_apphost" ]]; then
+                                    gui_pid="$child"
+                                    break 2
+                                fi
+                            done
+                        fi
+                        is_running_direct_launcher_job || break
+                        sleep 0.01
+                    done
+                    [[ -n "$gui_pid" ]] || fail_case APPHOST_NOT_OBSERVED
+                    gui_start_time="$(get_start_time "$gui_pid" 2>/dev/null || true)"
+                    if [[ "$scenario" != completed-job ]] \
+                        && { [[ -z "$gui_start_time" ]] || ! is_exact_gui_identity; }; then
+                        fail_case APPHOST_IDENTITY_NOT_RETAINED
+                    fi
+
+                    if [[ "$scenario" == post-capture ]]; then
+                        for _ in {1..300}; do
+                            read_count=0
+                            if [[ -f "$identity_read_count" ]]; then
+                                IFS= read -r read_count < "$identity_read_count" || [[ -n "$read_count" ]]
+                            fi
+                            [[ "$read_count" =~ ^[0-9]+$ ]] || fail_case INVALID_IDENTITY_READ_COUNT
+                            (( read_count >= 1 )) && break
+                            is_running_direct_launcher_job || fail_case LAUNCHER_EXITED_BEFORE_CAPTURE
+                            sleep 0.01
+                        done
+                        (( read_count >= 1 )) || fail_case CAPTURE_READ_NOT_OBSERVED
+                        for _ in {1..10}; do
+                            is_running_direct_launcher_job || fail_case LAUNCHER_EXITED_AFTER_CAPTURE
+                            is_exact_gui_identity || fail_case APPHOST_IDENTITY_CHANGED_AFTER_CAPTURE
+                            sleep 0.01
+                        done
+                        signal_exact_gui STOP || fail_case APPHOST_STOP_REJECTED
+                        for _ in {1..100}; do
+                            state="$(sed -n "s/^State:[[:space:]]*\([^[:space:]]\).*/\1/p" "/proc/$gui_pid/status" 2>/dev/null || true)"
+                            [[ "$state" == T || "$state" == t ]] && break
+                            is_exact_gui_identity || fail_case APPHOST_IDENTITY_CHANGED_DURING_STOP
+                            sleep 0.01
+                        done
+                        if [[ "$state" != T && "$state" != t ]]; then
+                            fail_case APPHOST_DID_NOT_STOP
+                        fi
+                        is_running_direct_launcher_job || fail_case LAUNCHER_AUTHORITY_LOST_BEFORE_SIGNAL
+                        kill -TERM "$launcher_pid" || fail_case LAUNCHER_SIGNAL_REJECTED
+                    fi
+
+                    for _ in {1..700}; do
+                        is_running_direct_launcher_job || break
+                        sleep 0.01
+                    done
+                    if is_running_direct_launcher_job; then
+                        fail_case LAUNCHER_DID_NOT_SETTLE
+                    fi
+                    set +e
+                    wait "$launcher_pid"
+                    launcher_status=$?
+                    set -e
+                    launcher_pid=""
+                    [[ "$launcher_status" -eq "$expected_status" ]] || fail_case LAUNCHER_STATUS_MISMATCH
+                    if [[ "$expect_failure_marker" == true ]]; then
+                        [[ -f "$identity_failure_marker" ]] || fail_case FAILURE_INJECTION_NOT_OBSERVED
+                    else
+                        [[ ! -e "$identity_failure_marker" ]] || fail_case UNEXPECTED_FAILURE_INJECTION
+                    fi
+                    if [[ "$scenario" == post-capture ]]; then
+                        IFS= read -r read_count < "$identity_read_count" || [[ -n "$read_count" ]]
+                        [[ "$read_count" =~ ^[0-9]+$ ]] || fail_case INVALID_FINAL_IDENTITY_READ_COUNT
+                        (( read_count >= 3 )) || fail_case POST_FORWARD_REVALIDATION_NOT_OBSERVED
+                    elif [[ "$scenario" == completed-job ]]; then
+                        IFS= read -r read_count < "$identity_read_count" || [[ -n "$read_count" ]]
+                        [[ "$read_count" =~ ^[0-9]+$ ]] || fail_case INVALID_COMPLETED_IDENTITY_READ_COUNT
+                        (( read_count >= 1 )) || fail_case COMPLETED_JOB_READ_NOT_OBSERVED
+                    fi
+
+                    for _ in {1..500}; do
+                        if ! is_exact_gui_identity; then
+                            gui_pid=""
+                            gui_start_time=""
+                            break
+                        fi
+                        sleep 0.01
+                    done
+                    [[ -z "$gui_pid" ]] || fail_case APPHOST_DID_NOT_SETTLE
+                    if find "$state_root/tmp" -mindepth 1 -maxdepth 1 -name "smapi-installer-gui.*" -print -quit | grep -q .; then
+                        fail_case PRIVATE_BUNDLE_REMAINED
+                    fi
+                    trap - EXIT
+                ' identity-failure-supervisor "$launcher" "$gui_apphost" "$state_root" "$identity_guarded_path" "$identity_failure_marker" "$identity_read_count" "$fail_after" "$scenario" "$expected_status" "$launcher_bash" "$read_delay" "$launch_argument" "$expect_failure_marker"
+    ) > "$output_path" 2>&1
+    status=$?
+    set -e
+    if [[ "$status" -ne 0 ]]; then
+        local failure_code="UNKNOWN"
+        local output_line
+        while IFS= read -r output_line; do
+            if [[ "$output_line" =~ ^QUALIFIER_FAILURE=([A-Z0-9_-]+)$ ]]; then
+                failure_code="${BASH_REMATCH[1]}"
+            fi
+        done < "$output_path"
+        echo "The packaged graphical launcher did not fail closed in the $scenario child-identity scenario (code: $failure_code); raw output is withheld from CI logs." >&2
+        exit 1
+    fi
+    case "$scenario" in
+        initial)
+            printf '%s\n' "The graphical installer couldn't verify its child process safely, so it was stopped." > "$expected_output"
+            ;;
+        post-capture)
+            : > "$expected_output"
+            ;;
+        completed-job)
+            printf '%s\n' 'The graphical installer accepts either no arguments or exactly --demo.' > "$expected_output"
+            ;;
+    esac
+    if ! cmp -s -- "$expected_output" "$output_path"; then
+        echo "The packaged graphical launcher emitted an unexpected $scenario child-identity failure diagnostic; raw output is withheld from CI logs." >&2
         exit 1
     fi
     assert_no_runtime_leak "$state_root" "$output_path"
@@ -578,6 +1003,10 @@ run_launcher_signal_smoke HUP 129 false
 run_launcher_signal_smoke INT 130 false
 run_launcher_signal_smoke TERM 143 false
 run_launcher_signal_smoke TERM 143 true
+run_launcher_signal_smoke TERM 143 true true
+run_identity_failure_smoke initial
+run_identity_failure_smoke post-capture
+run_identity_failure_smoke completed-job
 
 invalid_state="$(make_state_root invalid-arguments)"
 set +e
