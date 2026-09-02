@@ -35,6 +35,99 @@ public sealed class ForkReleaseIdentityTests
         action.Should().Throw<PackageSecurityException>();
     }
 
+    [TestCase(
+        "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.12-linux-x64-installer.zip",
+        "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.12",
+        "4.5.3",
+        12
+    )]
+    [TestCase(
+        "SMAPI-0.0.0-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip",
+        "fork-4eh5xitv6787h645ebv-linux-v0.0.0-alpha.1",
+        "0.0.0",
+        1
+    )]
+    [TestCase(
+        "SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2147483647-linux-x64-installer.zip",
+        "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2147483647",
+        "4.5.3",
+        int.MaxValue
+    )]
+    public void ParsePackageAssetName_CanonicalName_DerivesExactIdentity(
+        string assetName,
+        string expectedTag,
+        string expectedVersion,
+        int expectedAlpha
+    )
+    {
+        ForkReleaseIdentity identity = ForkReleaseIdentity.ParsePackageAssetName(assetName);
+
+        identity.Tag.Should().Be(expectedTag);
+        identity.Version.Should().Be(expectedVersion);
+        identity.AlphaSequence.Should().Be(expectedAlpha);
+        identity.PackageAssetName.Should().Be(assetName);
+    }
+
+    [Test]
+    public void ParsePackageAssetName_LargeCanonicalVersionComponent_RoundTripsWithoutFixedWidthConversion()
+    {
+        string component = new('9', 80);
+        string version = $"{component}.0.0";
+        string assetName = $"SMAPI-{version}-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip";
+
+        ForkReleaseIdentity identity = ForkReleaseIdentity.ParsePackageAssetName(assetName);
+
+        identity.Version.Should().Be(version);
+        identity.Tag.Should().Be($"fork-4eh5xitv6787h645ebv-linux-v{version}-alpha.1");
+        identity.PackageAssetName.Should().Be(assetName);
+    }
+
+    [TestCase(null)]
+    [TestCase("")]
+    [TestCase("SMAPI-4.5.3-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-arm64-installer.zip")]
+    [TestCase("smapi-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-UNOFFICIAL.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4EH5XITV6787H645EBV.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.other.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.windows.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.beta.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3.0-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-04.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.05.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.03-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.-5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.x-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.0-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.01-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2147483648-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.+1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.١-linux-x64-installer.zip")]
+    [TestCase("/tmp/SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip")]
+    [TestCase("SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip\n")]
+    public void ParsePackageAssetName_NonCanonicalOrMismatchedName_Rejects(string? assetName)
+    {
+        Action action = () => ForkReleaseIdentity.ParsePackageAssetName(assetName!);
+
+        action.Should().Throw<PackageSecurityException>()
+            .WithMessage("*filename*canonical SMAPI Linux fork alpha package*");
+    }
+
+    [Test]
+    public void ParsePackageAssetName_ExcessiveFilenameOrDerivedTag_RejectsBeforeIdentityPublication()
+    {
+        string excessiveFilename = new('9', 256);
+        string excessiveVersion = new('9', 150);
+        string excessiveTagName = $"SMAPI-{excessiveVersion}.0.0-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip";
+
+        FluentActions.Invoking(() => ForkReleaseIdentity.ParsePackageAssetName(excessiveFilename))
+            .Should().Throw<PackageSecurityException>();
+        FluentActions.Invoking(() => ForkReleaseIdentity.ParsePackageAssetName(excessiveTagName))
+            .Should().Throw<PackageSecurityException>();
+    }
+
     [Test]
     public void AssertMatches_Mismatch_RejectsVersionAndFilename()
     {

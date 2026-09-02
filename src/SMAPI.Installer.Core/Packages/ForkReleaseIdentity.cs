@@ -12,6 +12,10 @@ public sealed record ForkReleaseIdentity
     public const string RepositoryUrl = "https://github.com/4eh5xitv6787h645ebv/SMAPI";
 
     private const string ForkMarker = "4eh5xitv6787h645ebv";
+    private const string PackageAssetPrefix = "SMAPI-";
+    private const string PackageAssetIdentityMarker = "-unofficial." + ForkReleaseIdentity.ForkMarker + ".linux.alpha.";
+    private const string PackageAssetSuffix = "-linux-x64-installer.zip";
+    private const int MaximumPackageAssetNameLength = 255;
 
     private static readonly Regex TagPattern = new(
         @"\Afork-4eh5xitv6787h645ebv-linux-v(?<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-alpha\.(?<alpha>[1-9][0-9]*)\z",
@@ -39,7 +43,7 @@ public sealed record ForkReleaseIdentity
         this.Version = version;
         this.AlphaSequence = alphaSequence;
         this.EmbeddedVersion = $"{version}-unofficial.{ForkReleaseIdentity.ForkMarker}.linux.alpha.{alphaSequence}";
-        this.PackageAssetName = $"SMAPI-{this.EmbeddedVersion}-linux-x64-installer.zip";
+        this.PackageAssetName = $"{ForkReleaseIdentity.PackageAssetPrefix}{this.EmbeddedVersion}{ForkReleaseIdentity.PackageAssetSuffix}";
     }
 
     /// <summary>Parse and validate a fork-specific Linux alpha tag.</summary>
@@ -60,6 +64,49 @@ public sealed record ForkReleaseIdentity
         }
 
         return new ForkReleaseIdentity(candidate, match.Groups["version"].Value, alphaSequence);
+    }
+
+    /// <summary>Parse the exact canonical installer-package filename for one fork Linux alpha release.</summary>
+    internal static ForkReleaseIdentity ParsePackageAssetName(string assetName)
+    {
+        string candidate = assetName ?? "";
+        if (
+            candidate.Length > ForkReleaseIdentity.MaximumPackageAssetNameLength
+            || !candidate.StartsWith(ForkReleaseIdentity.PackageAssetPrefix, StringComparison.Ordinal)
+            || !candidate.EndsWith(ForkReleaseIdentity.PackageAssetSuffix, StringComparison.Ordinal)
+        )
+        {
+            throw new PackageSecurityException("The selected installer filename isn't a canonical SMAPI Linux fork alpha package.");
+        }
+
+        string embeddedIdentity = candidate[ForkReleaseIdentity.PackageAssetPrefix.Length..^ForkReleaseIdentity.PackageAssetSuffix.Length];
+        int markerIndex = embeddedIdentity.IndexOf(
+            ForkReleaseIdentity.PackageAssetIdentityMarker,
+            StringComparison.Ordinal
+        );
+        if (markerIndex <= 0)
+            throw new PackageSecurityException("The selected installer filename isn't a canonical SMAPI Linux fork alpha package.");
+
+        string version = embeddedIdentity[..markerIndex];
+        string alpha = embeddedIdentity[(markerIndex + ForkReleaseIdentity.PackageAssetIdentityMarker.Length)..];
+        ForkReleaseIdentity identity;
+        try
+        {
+            identity = ForkReleaseIdentity.Parse(
+                $"fork-{ForkReleaseIdentity.ForkMarker}-linux-v{version}-alpha.{alpha}"
+            );
+        }
+        catch (PackageSecurityException ex)
+        {
+            throw new PackageSecurityException(
+                "The selected installer filename isn't a canonical SMAPI Linux fork alpha package.",
+                ex
+            );
+        }
+
+        if (!string.Equals(candidate, identity.PackageAssetName, StringComparison.Ordinal))
+            throw new PackageSecurityException("The selected installer filename isn't a canonical SMAPI Linux fork alpha package.");
+        return identity;
     }
 
     /// <summary>Compare two canonical fork releases in ascending version and alpha order.</summary>

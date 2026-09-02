@@ -146,6 +146,56 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
     }
 
     [Test]
+    public async Task Lease_BindAndDisposeAreSerializedAndDisposeRevokesCompletedProjection()
+    {
+        ReviewedReleaseCandidate candidate = Candidate(7);
+        using ManualResetEventSlim bindEntered = new(false);
+        using ManualResetEventSlim releaseBind = new(false);
+        using ManualResetEventSlim disposeStarted = new(false);
+        ReviewedReleaseAssetLease lease = await ReviewedReleaseAssetAcquirer.AcquireAsync(
+            candidate,
+            new RecordingTransport(),
+            beforeBindForTesting: () =>
+            {
+                bindEntered.Set();
+                releaseBind.Wait();
+            }
+        );
+        Task<ReviewedReleaseProtocolAssetPaths>? binding = null;
+        Task? disposing = null;
+        try
+        {
+            ReviewedGitHubResolvedTag resolved = new(candidate, Commit);
+            binding = Task.Run(() => lease.Bind(resolved));
+            bindEntered.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+            disposing = Task.Run(async () =>
+            {
+                disposeStarted.Set();
+                await lease.DisposeAsync();
+            });
+
+            disposeStarted.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+            await Task.Yield();
+            disposing.IsCompleted.Should().BeFalse("disposal must wait for the in-progress projection to finish atomically");
+            releaseBind.Set();
+            ReviewedReleaseProtocolAssetPaths paths = await binding.WaitAsync(TimeSpan.FromSeconds(2));
+            await disposing.WaitAsync(TimeSpan.FromSeconds(2));
+
+            AssetPaths(paths).Should().OnlyContain(path => !File.Exists(path));
+            FluentActions.Invoking(() => lease.Bind(resolved)).Should().Throw<ObjectDisposedException>();
+        }
+        finally
+        {
+            releaseBind.Set();
+            if (binding is not null)
+                await binding.WaitAsync(TimeSpan.FromSeconds(2));
+            if (disposing is not null)
+                await disposing.WaitAsync(TimeSpan.FromSeconds(2));
+            await lease.DisposeAsync();
+        }
+    }
+
+    [Test]
     public async Task AcquireAsync_ResultLengthMismatchFailsStopsSequenceAndCleansPublishedFile()
     {
         ReviewedReleaseCandidate candidate = Candidate(11);
@@ -157,7 +207,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
             transport,
             workspaceFactory: () =>
             {
-                ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+                PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
                 namedWorkspace = ResolveProcTarget(workspace.ProcPath);
                 return workspace;
             }
@@ -173,9 +223,9 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
     public async Task AnchoredDownloader_ShortCatalogBodyIsRejectedBeforePublicationAndLeavesNoTemporary()
     {
         ReviewedReleaseAsset asset = Candidate(12).GetAsset(ReviewedReleaseAssetKind.InstallerPackage);
-        ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
         string namedWorkspace = ResolveProcTarget(workspace.ProcPath);
-        AnchoredDownloadTarget target = workspace.CreateTarget(asset);
+        AnchoredDownloadTarget target = workspace.CreateTarget(asset.Name, asset.SizeBytes);
         using BoundedHttpDownloader downloader = new(
             new ReviewedGitHubReleaseAssetPolicy(),
             new FixedResponseHandler(new ByteArrayContent(new byte[11]))
@@ -197,9 +247,9 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
     public async Task AnchoredDownloader_UnknownLengthShortBodyIsRejectedBeforePublication()
     {
         ReviewedReleaseAsset asset = Candidate(12).GetAsset(ReviewedReleaseAssetKind.InstallerPackage);
-        ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
         string namedWorkspace = ResolveProcTarget(workspace.ProcPath);
-        AnchoredDownloadTarget target = workspace.CreateTarget(asset);
+        AnchoredDownloadTarget target = workspace.CreateTarget(asset.Name, asset.SizeBytes);
         using BoundedHttpDownloader downloader = new(
             new ReviewedGitHubReleaseAssetPolicy(),
             new FixedResponseHandler(new UnknownLengthContent(new byte[11]))
@@ -221,9 +271,9 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
     public async Task AnchoredDownloader_MidBodyCancellationRemovesTemporaryAndNeverPublishes()
     {
         ReviewedReleaseAsset asset = Candidate(12).GetAsset(ReviewedReleaseAssetKind.InstallerPackage);
-        ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
         string namedWorkspace = ResolveProcTarget(workspace.ProcPath);
-        AnchoredDownloadTarget target = workspace.CreateTarget(asset);
+        AnchoredDownloadTarget target = workspace.CreateTarget(asset.Name, asset.SizeBytes);
         using CancellationTokenSource cancellation = new();
         using BoundedHttpDownloader downloader = new(
             new ReviewedGitHubReleaseAssetPolicy(),
@@ -257,7 +307,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
             cancellationToken: cancellation.Token,
             workspaceFactory: () =>
             {
-                ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+                PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
                 namedWorkspace = ResolveProcTarget(workspace.ProcPath);
                 return workspace;
             }
@@ -282,7 +332,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
             cancellationToken: cancellation.Token,
             workspaceFactory: () =>
             {
-                ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+                PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
                 namedWorkspace = ResolveProcTarget(workspace.ProcPath);
                 return workspace;
             }
@@ -308,7 +358,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
             workspaceFactory: () =>
             {
                 workspaceCalled = true;
-                return ReviewedReleaseAssetWorkspace.Create();
+                return PrivateReleaseAssetWorkspace.Create();
             }
         );
 
@@ -352,7 +402,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
         File.WriteAllText(extra, "keep");
 
         FluentActions.Invoking(() => lease.Bind(resolved))
-            .Should().Throw<PackageSecurityException>().WithMessage("*exactly six assets*");
+            .Should().Throw<PackageSecurityException>().WithMessage("*exactly the expected files*");
         await lease.DisposeAsync();
 
         File.ReadAllText(extra).Should().Be("keep");
@@ -372,7 +422,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
         foreach (string kind in new[] { "symlink", "hardlink", "fifo", "directory" })
         {
             ReviewedReleaseAsset asset = Candidate(3).GetAsset(ReviewedReleaseAssetKind.Checksums);
-            ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+            PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
             string named = ResolveProcTarget(workspace.ProcPath);
             string leaf = Path.Combine(named, asset.Name);
             switch (kind)
@@ -382,7 +432,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
                 case "fifo": mkfifo(leaf, 0x180).Should().Be(0); break;
                 case "directory": Directory.CreateDirectory(leaf); break;
             }
-            AnchoredDownloadTarget target = workspace.CreateTarget(asset);
+            AnchoredDownloadTarget target = workspace.CreateTarget(asset.Name, asset.SizeBytes);
             Action assertReady = target.AssertReady;
             if (kind == "directory")
                 assertReady.Should().Throw<PackageSecurityException>().WithMessage("*workspace changed*");
@@ -395,7 +445,7 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
         }
 
         ReviewedReleaseAsset ownerAsset = Candidate(3).GetAsset(ReviewedReleaseAssetKind.Checksums);
-        ReviewedReleaseAssetWorkspace ownerWorkspace = ReviewedReleaseAssetWorkspace.Create();
+        PrivateReleaseAssetWorkspace ownerWorkspace = PrivateReleaseAssetWorkspace.Create();
         AnchoredDownloadTarget wrongOwner = new(
             ownerWorkspace.FileSystem,
             ownerAsset.Name,
@@ -413,20 +463,79 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
     public async Task Target_RejectsWorkspaceSpecialModeBits()
     {
         ReviewedReleaseAsset asset = Candidate(3).GetAsset(ReviewedReleaseAssetKind.Checksums);
-        ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
         string named = ResolveProcTarget(workspace.ProcPath);
         File.SetUnixFileMode(named, (UnixFileMode)0x3c0);
 
-        FluentActions.Invoking(() => workspace.CreateTarget(asset)).Should().Throw<PackageSecurityException>();
+        FluentActions.Invoking(() => workspace.CreateTarget(asset.Name, asset.SizeBytes)).Should().Throw<PackageSecurityException>();
 
         File.SetUnixFileMode(named, (UnixFileMode)0x1c0);
         await workspace.DisposeAsync();
     }
 
     [Test]
+    public async Task Workspace_RetainCopiedRegistersExactBoundedCopy()
+    {
+        string sourceRoot = Path.Combine(Path.GetTempPath(), $"smapi-copy-source-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllBytes(Path.Combine(sourceRoot, "source"), [1, 2, 3, 4]);
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
+        string namedWorkspace = ResolveProcTarget(workspace.ProcPath);
+        try
+        {
+            using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+            using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("source");
+            LinuxFileIdentity copied = workspace.FileSystem.CopyFileBounded(source, "copied", 0x180, 4, 4);
+
+            workspace.RetainCopied("copied", 4, copied);
+            workspace.AssertContainsExactly(["copied"]);
+
+            File.ReadAllBytes(workspace.GetProcPath("copied")).Should().Equal(1, 2, 3, 4);
+        }
+        finally
+        {
+            await workspace.DisposeAsync();
+            Directory.Delete(sourceRoot, true);
+        }
+        Directory.Exists(namedWorkspace).Should().BeFalse();
+    }
+
+    [Test]
+    public async Task Workspace_RetainCopiedRejectsReplacedCopyAndCleanupPreservesReplacement()
+    {
+        string sourceRoot = Path.Combine(Path.GetTempPath(), $"smapi-copy-source-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(sourceRoot);
+        File.WriteAllBytes(Path.Combine(sourceRoot, "source"), [1, 2, 3, 4]);
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
+        string namedWorkspace = ResolveProcTarget(workspace.ProcPath);
+        string copiedPath = Path.Combine(namedWorkspace, "copied");
+        try
+        {
+            using LinuxAnchoredFileSystem sourceFileSystem = new(sourceRoot);
+            using LinuxAnchoredFile source = sourceFileSystem.OpenRegularFileForRead("source");
+            LinuxFileIdentity copied = workspace.FileSystem.CopyFileBounded(source, "copied", 0x180, 4, 4);
+            File.Delete(copiedPath);
+            File.WriteAllBytes(copiedPath, [9, 9, 9, 9]);
+            File.SetUnixFileMode(copiedPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+            FluentActions.Invoking(() => workspace.RetainCopied("copied", 4, copied))
+                .Should().Throw<PackageSecurityException>().WithMessage("*changed after staging*");
+            await workspace.DisposeAsync();
+            File.ReadAllBytes(copiedPath).Should().Equal(9, 9, 9, 9);
+        }
+        finally
+        {
+            await workspace.DisposeAsync();
+            Directory.Delete(sourceRoot, true);
+            if (Directory.Exists(namedWorkspace))
+                Directory.Delete(namedWorkspace, true);
+        }
+    }
+
+    [Test]
     public async Task Workspace_IsCurrentUserPrivateEmptyAndCleanupDoesNotChaseRenamedReplacement()
     {
-        ReviewedReleaseAssetWorkspace workspace = ReviewedReleaseAssetWorkspace.Create();
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create();
         string named = ResolveProcTarget(workspace.ProcPath);
         File.GetUnixFileMode(named).Should().Be(
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
@@ -447,6 +556,45 @@ internal sealed class ReviewedReleaseAssetAcquirerTests
         Directory.Exists(moved).Should().BeTrue();
         Directory.Delete(named, true);
         Directory.Delete(moved, true);
+    }
+
+    [Test]
+    public async Task Workspace_DisposalImmediatelyRevokesPublishedProcCapabilityWhileCleanupIsStalled()
+    {
+        using ManualResetEventSlim cleanupEntered = new(false);
+        using ManualResetEventSlim releaseCleanup = new(false);
+        PrivateReleaseAssetWorkspace workspace = PrivateReleaseAssetWorkspace.Create(
+            afterCreatedForTesting: null,
+            beforeCleanupForTesting: () =>
+            {
+                cleanupEntered.Set();
+                releaseCleanup.Wait();
+            }
+        );
+        string publishedProcPath = workspace.ProcPath;
+        string namedWorkspace = ResolveProcTarget(publishedProcPath);
+        ValueTask disposal = default;
+        try
+        {
+            disposal = workspace.DisposeAsync();
+            cleanupEntered.Wait(TimeSpan.FromSeconds(2)).Should().BeTrue();
+
+            Directory.Exists(namedWorkspace).Should().BeTrue("bounded cleanup is deliberately stalled by the test");
+            FluentActions.Invoking(() => _ = workspace.ProcPath).Should().Throw<ObjectDisposedException>();
+            if (Directory.Exists(publishedProcPath))
+            {
+                ResolveProcTarget(publishedProcPath).Should().NotBe(
+                    namedWorkspace,
+                    "a reused descriptor number must not retain the revoked workspace authority"
+                );
+            }
+        }
+        finally
+        {
+            releaseCleanup.Set();
+            await disposal.AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        Directory.Exists(namedWorkspace).Should().BeFalse();
     }
 
     [Test]
