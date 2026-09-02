@@ -52,7 +52,12 @@ if grep -Fq "local-package picker is not available" "$release_workflow"; then
 fi
 grep -Fq 'exact six files' "$release_workflow"
 grep -Fq 'For rollback, choose **Load or refresh history**, select one authenticated generation, then use **Inspect rollback**, **Confirm reviewed plan**, and **Run rollback**.' "$release_workflow"
-grep -Fq 'use **Uninstall** first' "$release_workflow"
+grep -Fq 'use the GUI **Uninstall** first' "$release_workflow"
 grep -Fq 'never treats the folder path or metadata as verified identity' "$release_workflow"
+grep -Fq 'a narrower legacy install/uninstall fallback' "$release_workflow"
+grep -Fq 'does not repeat release verification' "$release_workflow"
+grep -Fq 'its wrapper accepts no options' "$release_workflow"
+grep -Fq 'a nonzero console status does not establish rollback' "$release_workflow"
+grep -Fq 'review it before sharing' "$release_workflow"
 
 echo "Linux release input validation tests passed."
