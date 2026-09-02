@@ -20,6 +20,7 @@ internal enum RecoveryPruneControllerState
     Starting,
     Running,
     CancellationRequested,
+    Cancelled,
     CancelledBeforeStart,
     Terminal,
     StateUnknown,
@@ -318,6 +319,7 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
             if (this.StateValue is RecoveryPruneControllerState.Listing or RecoveryPruneControllerState.Inspecting or RecoveryPruneControllerState.Confirming)
             {
                 ActiveRequest request = this.Request!;
+                request.CancellationWasRequested = true;
                 result = request.CancellationTask ??= ReserveCancellation(out settlement);
                 if (settlement is not null)
                     source = request.Cancellation;
@@ -416,13 +418,18 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
                 cleanup = true;
             else
             {
+                bool cancelled = request.CancellationWasRequested || request.Cancellation.IsCancellationRequested;
                 request.Dispose();
                 this.Request = null;
                 this.ActiveTask = null;
-                this.RejectionValue = rejection;
                 if (this.SessionFaultNotification.IsCompleted)
                 {
                     this.StateValue = RecoveryPruneControllerState.SessionFaulted;
+                    cleanup = true;
+                }
+                else if (cancelled)
+                {
+                    this.StateValue = RecoveryPruneControllerState.Cancelled;
                     cleanup = true;
                 }
                 else if (failure is not null)
@@ -433,6 +440,7 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
                 else
                 {
                     this.StateValue = next;
+                    this.RejectionValue = rejection;
                     this.ChoicePresentations = choices;
                     this.CurrentChoices = authorities ?? new(ReferenceEqualityComparer.Instance);
                     cleanup = rejection?.IsTerminal == true;
@@ -484,15 +492,18 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
                 cleanup = true;
             else
             {
+                bool cancelled = request.CancellationWasRequested || request.Cancellation.IsCancellationRequested;
                 request.Dispose();
                 this.Request = null;
                 this.ActiveTask = null;
-                this.PlanValue = plan;
-                this.RejectionValue = rejection;
-                this.CurrentConfirmation = confirmation;
                 if (this.SessionFaultNotification.IsCompleted)
                 {
                     this.StateValue = RecoveryPruneControllerState.SessionFaulted;
+                    cleanup = true;
+                }
+                else if (cancelled)
+                {
+                    this.StateValue = RecoveryPruneControllerState.Cancelled;
                     cleanup = true;
                 }
                 else if (failure is not null)
@@ -503,6 +514,9 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
                 else
                 {
                     this.StateValue = next;
+                    this.PlanValue = plan;
+                    this.RejectionValue = rejection;
+                    this.CurrentConfirmation = confirmation;
                     if (next == RecoveryPruneControllerState.RelistRequired)
                     {
                         this.ChoicePresentations = [];
@@ -522,12 +536,17 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
         await Task.Yield();
         IConfirmedRecoveryPruneSession? confirmed = null;
         Exception? failure = null;
+        bool exactConfirmed = false;
         try { confirmed = await this.Session.ConfirmRecoveryPruneAsync(confirmation, request.Cancellation.Token).ConfigureAwait(false); }
         catch (Exception error) { failure = error; }
 
         if (failure is null)
         {
-            try { ValidateConfirmedOwner(confirmed, this.Session); }
+            try
+            {
+                ValidateConfirmedOwner(confirmed, this.Session, this.SessionFaultNotification);
+                exactConfirmed = true;
+            }
             catch (Exception error) { failure = error; }
         }
 
@@ -536,26 +555,53 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
         {
             if (ReferenceEquals(this.Request, request) && !this.DisposeStarted)
             {
+                bool cancelled = request.CancellationWasRequested || request.Cancellation.IsCancellationRequested;
                 request.Dispose();
                 this.Request = null;
-                this.ActiveTask = null;
                 if (this.SessionFaultNotification.IsCompleted)
                     this.StateValue = RecoveryPruneControllerState.SessionFaulted;
+                else if (cancelled)
+                    this.StateValue = RecoveryPruneControllerState.Cancelled;
                 else if (failure is not null)
                     this.StateValue = RecoveryPruneControllerState.Failed;
                 else
                 {
                     this.ConfirmedSession = confirmed;
                     this.StateValue = RecoveryPruneControllerState.ReadyToRun;
+                    this.ActiveTask = null;
                     accepted = true;
                 }
             }
         }
-        this.PublishChanged();
-        if (!accepted && confirmed is not null)
-            await DisposeSafelyAsync(confirmed).ConfigureAwait(false);
-        if (!accepted)
+        if (accepted)
+        {
+            this.PublishChanged();
+            return;
+        }
+
+        if (confirmed is not null)
+        {
+            if (exactConfirmed)
+                await this.SettleRejectedConfirmedOwnerAsync(confirmed).ConfigureAwait(false);
+            else
+            {
+                await DisposeSafelyAsync(confirmed).ConfigureAwait(false);
+                await this.SettleOwnedSessionAsync().ConfigureAwait(false);
+            }
+        }
+        else
             await this.SettleOwnedSessionAsync().ConfigureAwait(false);
+
+        lock (this.Sync)
+        {
+            if (ReferenceEquals(this.Request, request))
+            {
+                request.Dispose();
+                this.Request = null;
+            }
+            this.ActiveTask = null;
+        }
+        this.PublishChanged();
     }
 
     private async Task RunExecutionAsync()
@@ -694,6 +740,8 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
 
     private async Task DisposeCoreAsync()
     {
+        await Task.Yield();
+        this.PublishChanged();
         try
         {
             ActiveRequest? request;
@@ -775,6 +823,7 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
                 or RecoveryPruneControllerState.RelistRequired
                 or RecoveryPruneControllerState.ReviewReady
                 or RecoveryPruneControllerState.ReadyToRun
+                or RecoveryPruneControllerState.Cancelled
                 or RecoveryPruneControllerState.CancelledBeforeStart
                 or RecoveryPruneControllerState.Terminal
                 or RecoveryPruneControllerState.StateUnknown
@@ -923,7 +972,6 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
             return terminal.DurableState == ProtocolDurableState.Unknown
                 && terminal.ErrorCode == ProtocolTerminalErrorCode.UnexpectedCoreFailure
                 && terminal.RecoveryDisposition == ProtocolRecoveryDisposition.StateRefreshRequired
-                && terminal.BackendSettlement == InstallerBackendSettlement.Unconfirmed
                 && summary.LogicallyRemovedGenerationCount is null
                 && summary.PhysicallyCleanedGenerationCount is null
                 && summary.PendingCleanupGenerationCount is null
@@ -1072,12 +1120,16 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
         return valid ? new(rejection.ErrorCode, rejection.NextAction, rejection.IsTerminal) : throw new InvalidOperationException("The recovery-cleanup rejection was invalid.");
     }
 
-    private static void ValidateConfirmedOwner(IConfirmedRecoveryPruneSession? confirmed, IPlanInspectionSession source)
+    private static void ValidateConfirmedOwner(
+        IConfirmedRecoveryPruneSession? confirmed,
+        IPlanInspectionSession source,
+        Task<InstallerProtocolClientException> sessionFaultNotification
+    )
     {
         if (confirmed is null
             || !ReferenceEquals(confirmed.Release, source.Release)
             || !ReferenceEquals(confirmed.Game, source.Game)
-            || confirmed.SessionFaulted is null)
+            || !ReferenceEquals(confirmed.SessionFaulted, sessionFaultNotification))
             throw new InvalidOperationException("The confirmed recovery-cleanup owner was invalid.");
     }
 
@@ -1105,6 +1157,21 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
             return this.SessionCleanupTask ??= this.ConfirmedSession is { } confirmed
                 ? DisposeSafelyAsync(confirmed)
                 : DisposeSafelyAsync(this.Session);
+    }
+
+    private async Task SettleRejectedConfirmedOwnerAsync(IConfirmedRecoveryPruneSession confirmed)
+    {
+        Task cleanup = DisposeSafelyAsync(confirmed);
+        Task? prior;
+        lock (this.Sync)
+        {
+            prior = this.SessionCleanupTask;
+            this.SessionCleanupTask ??= cleanup;
+        }
+        if (prior is null)
+            await cleanup.ConfigureAwait(false);
+        else
+            await Task.WhenAll(prior, cleanup).ConfigureAwait(false);
     }
 
     private Task RequestExecutionCancellationIgnoringFaultAsync(InstallerRecoveryPruneOperation execution)
@@ -1154,7 +1221,7 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
         Task request;
         try { request = source.CancelAsync(); }
         catch (ObjectDisposedException) { settlement.TrySetResult(); return; }
-        catch (Exception error) { settlement.TrySetException(error); return; }
+        catch { settlement.TrySetResult(); return; }
         _ = SettleCancellationAsync(request, settlement);
     }
 
@@ -1162,14 +1229,14 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
     {
         Task request;
         try { request = execution.RequestCancellationAsync(); }
-        catch (Exception error) { settlement.TrySetException(error); return; }
+        catch { settlement.TrySetResult(); return; }
         _ = SettleCancellationAsync(request, settlement);
     }
 
     private static async Task SettleCancellationAsync(Task request, TaskCompletionSource settlement)
     {
         try { await request.ConfigureAwait(false); settlement.TrySetResult(); }
-        catch (Exception error) { settlement.TrySetException(error); }
+        catch { settlement.TrySetResult(); }
     }
 
     private static async Task CancelSourceIgnoringFaultAsync(CancellationTokenSource source)
@@ -1194,6 +1261,7 @@ internal sealed class RecoveryPruneController : IAsyncDisposable
     {
         public CancellationTokenSource Cancellation { get; }
         public Task? CancellationTask { get; set; }
+        public bool CancellationWasRequested { get; set; }
 
         public ActiveRequest(CancellationTokenSource cancellation)
         {

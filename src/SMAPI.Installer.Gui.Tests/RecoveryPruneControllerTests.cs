@@ -38,6 +38,7 @@ internal sealed class RecoveryPruneControllerTests
         };
         confirmed.Release = session.Release;
         confirmed.Game = session.Game;
+        confirmed.SessionFaulted = session.SessionFaulted;
         InstallerRecoveryPruneTerminalResult terminal = ExactTerminal();
         confirmed.Execute = _ => Task.FromResult(Operation(Task.FromResult<InstallerRecoveryPruneResult>(terminal)));
         await using RecoveryPruneController controller = new(session);
@@ -228,7 +229,6 @@ internal sealed class RecoveryPruneControllerTests
     [TestCase(ProtocolPruneOutcome.Interrupted)]
     [TestCase(ProtocolPruneOutcome.CancelledWithCleanupPending)]
     [TestCase(ProtocolPruneOutcome.FailedWithCleanupPending)]
-    [TestCase(ProtocolPruneOutcome.UnexpectedCoreFailure)]
     [TestCase(ProtocolPruneOutcome.CancelledAfterApply)]
     [TestCase(ProtocolPruneOutcome.FailedAfterApply)]
     public async Task EveryValidTypedTerminalFamilyPublishesItsExactOutcome(ProtocolPruneOutcome outcome)
@@ -255,6 +255,66 @@ internal sealed class RecoveryPruneControllerTests
         controller.Snapshot.Result.Should().BeOfType<RecoveryPruneTerminalPresentation>()
             .Which.Outcome.Should().Be(outcome);
         prepared.Confirmed.DisposeCalls.Should().Be(1);
+    }
+
+    [TestCase(InstallerBackendSettlement.ConfirmedClosed)]
+    [TestCase(InstallerBackendSettlement.Unconfirmed)]
+    public async Task UnexpectedCoreFailureAcceptsEveryDefinedBackendSettlement(InstallerBackendSettlement settlement)
+    {
+        InstallerRecoveryPruneTerminalResult terminal = TerminalForOutcome(ProtocolPruneOutcome.UnexpectedCoreFailure, settlement);
+        var prepared = await CreateReadyToRunAsync(
+            _ => Task.FromResult(Operation(Task.FromResult<InstallerRecoveryPruneResult>(terminal))),
+            removesGeneration: true
+        );
+        await using RecoveryPruneController controller = prepared.Controller;
+
+        await controller.RunAsync().WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(RecoveryPruneControllerState.Terminal);
+        controller.Snapshot.Result.Should().BeOfType<RecoveryPruneTerminalPresentation>()
+            .Which.BackendSettlement.Should().Be(settlement);
+    }
+
+    [TestCase(CancellationFailure.ThrowsSynchronously)]
+    [TestCase(CancellationFailure.ReturnsFaultedTask)]
+    public async Task CancellationFailureIsPrivateAncillaryAndExactTerminalStillWins(CancellationFailure failure)
+    {
+        const string PrivateFailure = "private cancellation failure /home/wife/Mods";
+        int cancellationCalls = 0;
+        TaskCompletionSource<InstallerRecoveryPruneResult> completion = NewSource<InstallerRecoveryPruneResult>();
+        var prepared = await CreateReadyToRunAsync(
+            _ => Task.FromResult(Operation(completion.Task, () =>
+            {
+                Interlocked.Increment(ref cancellationCalls);
+                return failure == CancellationFailure.ThrowsSynchronously
+                    ? throw new InvalidOperationException(PrivateFailure)
+                    : Task.FromException(new InvalidOperationException(PrivateFailure));
+            })),
+            removesGeneration: true
+        );
+        await using RecoveryPruneController controller = prepared.Controller;
+        Task run = controller.RunAsync();
+        await WaitUntilAsync(() => controller.Snapshot.State == RecoveryPruneControllerState.Running);
+
+        await controller.RequestCancellationAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        InstallerRecoveryPruneTerminalResult terminal = TerminalForOutcome(ProtocolPruneOutcome.CancelledBeforePublication);
+        completion.SetResult(terminal);
+        await run.WaitAsync(TimeSpan.FromSeconds(2));
+
+        cancellationCalls.Should().Be(1);
+        controller.Snapshot.State.Should().Be(RecoveryPruneControllerState.Terminal);
+        controller.Snapshot.Result.Should().Be(new RecoveryPruneTerminalPresentation(
+            terminal.Outcome,
+            terminal.DurableState,
+            terminal.ErrorCode,
+            terminal.RecoveryDisposition,
+            terminal.NextAction,
+            terminal.Summary.LogicallyRemovedGenerationCount,
+            terminal.Summary.PhysicallyCleanedGenerationCount,
+            terminal.Summary.PendingCleanupGenerationCount,
+            terminal.Summary.AuxiliaryCleanupPending,
+            terminal.BackendSettlement
+        ));
     }
 
     [Test]
@@ -334,7 +394,12 @@ internal sealed class RecoveryPruneControllerTests
             PruneInspection = (_, _) => Task.FromResult<BoundInstallerRecoveryPrunePlanResult>(Plan(1, 1, 0, auxiliaryCleanup: true)),
             PruneConfirmation = (_, _) => confirmation.Task
         };
-        FakeConfirmedPruneSession confirmed = new() { Release = session.Release, Game = session.Game };
+        FakeConfirmedPruneSession confirmed = new()
+        {
+            Release = session.Release,
+            Game = session.Game,
+            SessionFaulted = session.SessionFaulted
+        };
         await using RecoveryPruneController controller = new(session);
         await controller.ListRecoveriesAsync();
         controller.SelectRecoveryPoint(controller.Snapshot.Choices[0]);
@@ -352,6 +417,81 @@ internal sealed class RecoveryPruneControllerTests
         session.ConfirmedPrunes.Should().ContainSingle();
         await controller.DisposeAsync();
         confirmed.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ConfirmedOwnerWithForeignFaultTaskIsRejectedAndDisposed()
+    {
+        BoundInstallerRecoveryPoint point = Point(1, current: true);
+        FakeConfirmedPruneSession foreign = new();
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(new BoundInstallerRecoveryCatalogSuccess([point])),
+            PruneInspection = (_, _) => Task.FromResult<BoundInstallerRecoveryPrunePlanResult>(Plan(1, 1, 0, auxiliaryCleanup: true)),
+            PruneConfirmation = (_, _) => Task.FromResult<IConfirmedRecoveryPruneSession>(foreign)
+        };
+        foreign.Release = session.Release;
+        foreign.Game = session.Game;
+        await using RecoveryPruneController controller = new(session);
+        await controller.ListRecoveriesAsync();
+        controller.SelectRecoveryPoint(controller.Snapshot.Choices.Single());
+        await controller.InspectAsync();
+
+        await controller.ConfirmAsync(RecoveryPruneConsent.ConfirmDestructiveCleanup).WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(RecoveryPruneControllerState.Failed);
+        controller.Snapshot.CanRun.Should().BeFalse();
+        foreign.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ConcurrentAndReentrantDisposalJoinGatedReturnedOwnerCleanup()
+    {
+        TaskCompletionSource<IConfirmedRecoveryPruneSession> confirmation = NewSource<IConfirmedRecoveryPruneSession>();
+        TaskCompletionSource releaseDisposal = NewSource();
+        Task? reentrantDisposal = null;
+        RecoveryPruneController? controller = null;
+        BoundInstallerRecoveryPoint point = Point(1, current: true);
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => Task.FromResult<BoundInstallerRecoveryCatalogResult>(new BoundInstallerRecoveryCatalogSuccess([point])),
+            PruneInspection = (_, _) => Task.FromResult<BoundInstallerRecoveryPrunePlanResult>(Plan(1, 1, 0, auxiliaryCleanup: true)),
+            PruneConfirmation = (_, _) => confirmation.Task
+        };
+        FakeConfirmedPruneSession confirmed = new()
+        {
+            Release = session.Release,
+            Game = session.Game,
+            SessionFaulted = session.SessionFaulted,
+            Disposal = () =>
+            {
+                reentrantDisposal = controller!.DisposeAsync().AsTask();
+                return releaseDisposal.Task;
+            }
+        };
+        controller = new(session);
+        await controller.ListRecoveriesAsync();
+        controller.SelectRecoveryPoint(controller.Snapshot.Choices.Single());
+        await controller.InspectAsync();
+        Task active = controller.ConfirmAsync(RecoveryPruneConsent.ConfirmDestructiveCleanup);
+        await WaitUntilAsync(() => session.ConfirmedPrunes.Length == 1);
+
+        Task firstDisposal = controller.DisposeAsync().AsTask();
+        Task secondDisposal = controller.DisposeAsync().AsTask();
+        firstDisposal.Should().BeSameAs(secondDisposal);
+        confirmation.SetResult(confirmed);
+        await WaitUntilAsync(() => confirmed.DisposeCalls == 1);
+
+        reentrantDisposal.Should().BeSameAs(firstDisposal);
+        active.IsCompleted.Should().BeFalse();
+        firstDisposal.IsCompleted.Should().BeFalse();
+        releaseDisposal.SetResult();
+        await Task.WhenAll(active, firstDisposal, secondDisposal, reentrantDisposal!).WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(RecoveryPruneControllerState.Disposed);
+        confirmed.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(0, "the exact confirmed owner receives the transferred session lifetime");
     }
 
     [TestCase(MalformedCatalog.DuplicateReference)]
@@ -492,6 +632,104 @@ internal sealed class RecoveryPruneControllerTests
         session.DisposeCalls.Should().Be(1);
     }
 
+    [TestCase(PendingStage.List, PreExecutionCancellation.RequestWithLateSuccess)]
+    [TestCase(PendingStage.List, PreExecutionCancellation.CallerTokenWithCancelledTask)]
+    [TestCase(PendingStage.List, PreExecutionCancellation.CallerTokenWithLateSuccess)]
+    [TestCase(PendingStage.Inspect, PreExecutionCancellation.RequestWithLateSuccess)]
+    [TestCase(PendingStage.Inspect, PreExecutionCancellation.CallerTokenWithCancelledTask)]
+    [TestCase(PendingStage.Inspect, PreExecutionCancellation.CallerTokenWithLateSuccess)]
+    [TestCase(PendingStage.Confirm, PreExecutionCancellation.RequestWithLateSuccess)]
+    [TestCase(PendingStage.Confirm, PreExecutionCancellation.CallerTokenWithCancelledTask)]
+    [TestCase(PendingStage.Confirm, PreExecutionCancellation.CallerTokenWithLateSuccess)]
+    public async Task PreExecutionCancellationIsNotFailureAndLateSuccessCannotPublish(
+        PendingStage stage,
+        PreExecutionCancellation cancellation
+    )
+    {
+        using CancellationTokenSource caller = new();
+        CancellationToken commandToken = cancellation == PreExecutionCancellation.RequestWithLateSuccess ? default : caller.Token;
+        TaskCompletionSource<BoundInstallerRecoveryCatalogResult> list = NewSource<BoundInstallerRecoveryCatalogResult>();
+        TaskCompletionSource<BoundInstallerRecoveryPrunePlanResult> inspect = NewSource<BoundInstallerRecoveryPrunePlanResult>();
+        TaskCompletionSource<IConfirmedRecoveryPruneSession> confirm = NewSource<IConfirmedRecoveryPruneSession>();
+        BoundInstallerRecoveryPoint point = Point(1, current: true);
+        FakeConfirmedPruneSession lateConfirmed = new();
+        FakePlanSession session = new()
+        {
+            RecoveryCatalog = _ => stage == PendingStage.List
+                ? list.Task
+                : Task.FromResult<BoundInstallerRecoveryCatalogResult>(new BoundInstallerRecoveryCatalogSuccess([point])),
+            PruneInspection = (_, _) => stage == PendingStage.Inspect
+                ? inspect.Task
+                : Task.FromResult<BoundInstallerRecoveryPrunePlanResult>(Plan(1, 1, 0, auxiliaryCleanup: true)),
+            PruneConfirmation = (_, _) => confirm.Task
+        };
+        lateConfirmed.Release = session.Release;
+        lateConfirmed.Game = session.Game;
+        lateConfirmed.SessionFaulted = session.SessionFaulted;
+        RecoveryPruneController controller = new(session);
+        Task active;
+        switch (stage)
+        {
+            case PendingStage.List:
+                active = controller.ListRecoveriesAsync(commandToken);
+                await WaitUntilAsync(() => session.RecoveryListCalls == 1);
+                break;
+            case PendingStage.Inspect:
+                await controller.ListRecoveriesAsync();
+                controller.SelectRecoveryPoint(controller.Snapshot.Choices.Single());
+                active = controller.InspectAsync(commandToken);
+                await WaitUntilAsync(() => session.InspectedPrunes.Length == 1);
+                break;
+            case PendingStage.Confirm:
+                await controller.ListRecoveriesAsync();
+                controller.SelectRecoveryPoint(controller.Snapshot.Choices.Single());
+                await controller.InspectAsync();
+                active = controller.ConfirmAsync(RecoveryPruneConsent.ConfirmDestructiveCleanup, commandToken);
+                await WaitUntilAsync(() => session.ConfirmedPrunes.Length == 1);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(stage), stage, null);
+        }
+        controller.Snapshot.CanCancel.Should().BeTrue();
+
+        if (cancellation == PreExecutionCancellation.RequestWithLateSuccess)
+            await controller.RequestCancellationAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        else
+            caller.Cancel();
+
+        if (cancellation == PreExecutionCancellation.CallerTokenWithCancelledTask)
+        {
+            if (stage == PendingStage.List)
+                list.SetCanceled(caller.Token);
+            else if (stage == PendingStage.Inspect)
+                inspect.SetCanceled(caller.Token);
+            else
+                confirm.SetCanceled(caller.Token);
+        }
+        else if (stage == PendingStage.List)
+            list.SetResult(new BoundInstallerRecoveryCatalogSuccess([point]));
+        else if (stage == PendingStage.Inspect)
+            inspect.SetResult(Plan(1, 1, 0, auxiliaryCleanup: true));
+        else
+            confirm.SetResult(lateConfirmed);
+
+        await active.WaitAsync(TimeSpan.FromSeconds(2));
+
+        controller.Snapshot.State.Should().Be(RecoveryPruneControllerState.Cancelled);
+        controller.Snapshot.CanRun.Should().BeFalse();
+        controller.Snapshot.Result.Should().BeNull();
+        session.DisposeCalls.Should().Be(
+            stage == PendingStage.Confirm && cancellation != PreExecutionCancellation.CallerTokenWithCancelledTask ? 0 : 1
+        );
+        lateConfirmed.DisposeCalls.Should().Be(
+            stage == PendingStage.Confirm && cancellation != PreExecutionCancellation.CallerTokenWithCancelledTask ? 1 : 0
+        );
+        await controller.DisposeAsync();
+        session.DisposeCalls.Should().Be(
+            stage == PendingStage.Confirm && cancellation != PreExecutionCancellation.CallerTokenWithCancelledTask ? 0 : 1
+        );
+    }
+
     [TestCase(PendingStage.List)]
     [TestCase(PendingStage.Inspect)]
     [TestCase(PendingStage.Confirm)]
@@ -514,6 +752,7 @@ internal sealed class RecoveryPruneControllerTests
         };
         lateConfirmed.Release = session.Release;
         lateConfirmed.Game = session.Game;
+        lateConfirmed.SessionFaulted = session.SessionFaulted;
         RecoveryPruneController controller = new(session);
         Task active;
         switch (stage)
@@ -552,7 +791,7 @@ internal sealed class RecoveryPruneControllerTests
         await disposal.WaitAsync(TimeSpan.FromSeconds(2));
 
         controller.Snapshot.State.Should().Be(RecoveryPruneControllerState.Disposed);
-        session.DisposeCalls.Should().Be(1);
+        session.DisposeCalls.Should().Be(stage == PendingStage.Confirm ? 0 : 1);
         lateConfirmed.DisposeCalls.Should().Be(stage == PendingStage.Confirm ? 1 : 0);
     }
 
@@ -626,6 +865,7 @@ internal sealed class RecoveryPruneControllerTests
         };
         confirmed.Release = session.Release;
         confirmed.Game = session.Game;
+        confirmed.SessionFaulted = session.SessionFaulted;
         RecoveryPruneController controller = new(session);
         await controller.ListRecoveriesAsync();
         controller.SelectRecoveryPoint(controller.Snapshot.Choices[0]);
@@ -673,7 +913,10 @@ internal sealed class RecoveryPruneControllerTests
         InstallerBackendSettlement.ConfirmedClosed
     );
 
-    private static InstallerRecoveryPruneTerminalResult TerminalForOutcome(ProtocolPruneOutcome outcome)
+    private static InstallerRecoveryPruneTerminalResult TerminalForOutcome(
+        ProtocolPruneOutcome outcome,
+        InstallerBackendSettlement? backendSettlement = null
+    )
     {
         (ProtocolDurableState Durable, ProtocolTerminalErrorCode? Error, ProtocolRecoveryDisposition Recovery, InstallerRecoveryPruneSummary Summary) values = outcome switch
         {
@@ -740,9 +983,9 @@ internal sealed class RecoveryPruneControllerTests
             values.Recovery,
             ProtocolNextAction.ListRecoveries,
             values.Summary,
-            outcome == ProtocolPruneOutcome.UnexpectedCoreFailure
+            backendSettlement ?? (outcome == ProtocolPruneOutcome.UnexpectedCoreFailure
                 ? InstallerBackendSettlement.Unconfirmed
-                : InstallerBackendSettlement.ConfirmedClosed
+                : InstallerBackendSettlement.ConfirmedClosed)
         );
     }
 
@@ -799,6 +1042,19 @@ internal sealed class RecoveryPruneControllerTests
         FaultedCompletion,
         UnrequestedCancellationTerminal,
         InvalidTerminalAccounting
+    }
+
+    internal enum CancellationFailure
+    {
+        ThrowsSynchronously,
+        ReturnsFaultedTask
+    }
+
+    internal enum PreExecutionCancellation
+    {
+        RequestWithLateSuccess,
+        CallerTokenWithCancelledTask,
+        CallerTokenWithLateSuccess
     }
 
     internal enum PendingStage
@@ -927,8 +1183,8 @@ internal sealed class RecoveryPruneControllerTests
 
         public ProtocolReleaseIdentity Release { get; set; } = GameDiscoveryControllerTests.Release();
         public VerifiedGamePresentation Game { get; set; } = new("/games/Stardew Valley", "Stardew Valley");
-        public TaskCompletionSource<InstallerProtocolClientException> Fault { get; } = NewSource<InstallerProtocolClientException>();
-        public Task<InstallerProtocolClientException> SessionFaulted => this.Fault.Task;
+        public Task<InstallerProtocolClientException> SessionFaulted { get; set; }
+            = NewSource<InstallerProtocolClientException>().Task;
         public int ExecuteCalls => Volatile.Read(ref this.ExecuteCount);
         public int DisposeCalls => Volatile.Read(ref this.DisposeCount);
         public Func<CancellationToken, Task<InstallerRecoveryPruneOperation>> Execute { get; set; }
