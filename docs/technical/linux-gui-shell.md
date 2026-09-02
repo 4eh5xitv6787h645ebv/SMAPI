@@ -225,6 +225,12 @@ containing the exact six release files; both routes reach the same authenticated
 Installed/current, upgrade, and downgrade relationships are shown only after the selected game and
 its receipt have been inspected, never inferred from an unauthenticated catalog label.
 
+The corrected alpha 3 source is still a non-public candidate. Its planned embedded version is
+`4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.3` and its reserved annotated tag is
+`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3`; neither is a public-package claim. Alpha 2 remains
+the current download until the candidate is merged, qualified, tagged, published, freshly
+downloaded, independently verified, and exercised with the authorized trusted workload.
+
 The exact reviewed source, tagged release workflow, six public assets, fresh public-download
 verification, packaged GUI smoke, and disposable install/update/uninstall/failure lifecycle have
 passed. The exact-source merge candidate also passed the authorized trusted workload, but the tag
