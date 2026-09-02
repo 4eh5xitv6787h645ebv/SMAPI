@@ -400,10 +400,12 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         }
     }
 
-    private async Task<PrunePlanEvent> InspectPruneAsync(InspectPruneRequest request, CancellationToken cancellationToken)
+    private async Task<ProtocolEvent> InspectPruneAsync(InspectPruneRequest request, CancellationToken cancellationToken)
     {
         RecoveryCatalogEvent catalog = this.WithSession(() => this.Session.ResolveRecoveryCatalog(request.SessionId, request.CatalogId));
         RecoveryPrunePlan plan = await this.Engine.InspectRecoveryPruneAsync(catalog.GameRoot.CanonicalPath, request.RetainNewest, cancellationToken).ConfigureAwait(false);
+        if (plan.RemovedGenerationIds.Count == 0 && plan.CleanupGenerationIds.Count == 0 && !plan.HasAuxiliaryCleanup)
+            return this.Emit(this.WithSession(() => this.Session.RecordNoPruneWork(request, plan)));
         return this.Emit(this.WithSession(() => this.Session.IssuePrunePlan(request, plan)));
     }
 
@@ -435,6 +437,7 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
         {
             using CancellationTokenRegistration outerRegistration = outerCancellation.Register(() => this.RequestOuterPruneCancellation(request));
             RecoveryPruneOutcome outcome = await this.Engine.ExecuteRecoveryPruneAsync(plan, plan.ConfirmationDigest, active.Token).ConfigureAwait(false);
+            ValidateCorePruneOutcome(plan, outcome);
             ProtocolEvent terminal = this.CreatePruneTerminal(request, outcome);
             this.CompletePruneTerminal(terminal); return this.Emit(terminal);
         }
@@ -510,11 +513,50 @@ public sealed class LinuxInstallerProtocolService : IDisposable, IAsyncDisposabl
             RecoveryPruneOutcomeStatus.Interrupted => new PruneInterruptionEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.Interrupted, TerminalState(logical > 0 || cleaned > 0 ? ProtocolDurableState.PruneApplied : ProtocolDurableState.Unchanged, RequireError(outcome.ErrorCode), outcome.RequiresCleanup ? ProtocolRecoveryDisposition.CleanupPending : ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries), summary, outcome.RequiresCleanup ? $"{message} {pending}" : message, this.SanitizedLogPath),
             RecoveryPruneOutcomeStatus.CancelledWithCleanupPending => new PruneCancelledEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.CancelledWithCleanupPending, TerminalState(logical > 0 || cleaned > 0 ? ProtocolDurableState.PruneApplied : ProtocolDurableState.Unchanged, RequireNoError(outcome.ErrorCode), ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries), summary, logical > 0 ? $"{message} Logical retention was published; {pending}" : $"{message} No logical generations were removed; {pending}", this.SanitizedLogPath),
             RecoveryPruneOutcomeStatus.FailedWithCleanupPending => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.FailedWithCleanupPending, TerminalState(logical > 0 || cleaned > 0 ? ProtocolDurableState.PruneApplied : ProtocolDurableState.Unchanged, RequireError(outcome.ErrorCode), ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries), summary, $"{message} {pending}", this.SanitizedLogPath),
+            RecoveryPruneOutcomeStatus.CancelledAfterApply => new PruneCancelledEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.CancelledAfterApply, TerminalState(ProtocolDurableState.PruneApplied, RequireNoError(outcome.ErrorCode), ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries), summary, $"{message} Observed pruning work was applied; list recoveries again to refresh exact state.", this.SanitizedLogPath),
+            RecoveryPruneOutcomeStatus.FailedAfterApply => new PruneFailureEvent(request.SessionId, request.PrunePlanId, request.PruneDigest, ProtocolPruneOutcome.FailedAfterApply, TerminalState(ProtocolDurableState.PruneApplied, RequireError(outcome.ErrorCode), ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries), summary, $"{message} Observed pruning work was applied; list recoveries again to refresh exact state.", this.SanitizedLogPath),
             _ => throw new ProtocolException("The core returned an unknown recovery-prune status.")
         })) with
         {
             CommandId = request.CommandId
         };
+    }
+
+    private static void ValidateCorePruneOutcome(RecoveryPrunePlan plan, RecoveryPruneOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(outcome);
+        HashSet<Guid> removed = plan.RemovedGenerationIds.ToHashSet();
+        HashSet<Guid> cleanup = plan.CleanupGenerationIds.ToHashSet();
+        Guid[] logical = outcome.LogicallyRemovedGenerationIds.ToArray();
+        Guid[] cleaned = outcome.PhysicallyCleanedGenerationIds.ToArray();
+        Guid[] pending = outcome.PendingCleanupGenerationIds.ToArray();
+        if (logical.Distinct().Count() != logical.Length || logical.Length > 0 && (logical.Length != removed.Count || !removed.SetEquals(logical)))
+            throw new ProtocolException("The core prune outcome logical generation identities don't match the confirmed plan.");
+        if (cleaned.Distinct().Count() != cleaned.Length || cleaned.Any(id => !cleanup.Contains(id)))
+            throw new ProtocolException("The core prune outcome cleaned generation identities aren't a unique subset of the confirmed plan.");
+        if (pending.Distinct().Count() != pending.Length || pending.Any(id => !cleanup.Contains(id)))
+            throw new ProtocolException("The core prune outcome pending generation identities aren't a unique subset of the confirmed plan.");
+        if (cleaned.Intersect(pending).Any())
+            throw new ProtocolException("The core prune outcome can't report one generation as both cleaned and pending.");
+        bool logicalPublished = logical.Length > 0;
+        if (outcome.AuxiliaryCleanupPending && !plan.HasAuxiliaryCleanup && (removed.Count == 0 || logicalPublished))
+            throw new ProtocolException("The core prune outcome reports auxiliary cleanup which the confirmed plan couldn't create or observe.");
+        if (!logicalPublished && removed.Count > 0 && cleaned.Length > 0)
+            throw new ProtocolException("The core prune outcome can't report physical cleanup for a logical prune which wasn't published.");
+        if (!logicalPublished && pending.Any(removed.Contains))
+            throw new ProtocolException("The core prune outcome can't report newly removed generations as pending before logical publication.");
+        bool requiresCompleteCleanupAccounting = outcome.Status is RecoveryPruneOutcomeStatus.Interrupted or RecoveryPruneOutcomeStatus.CancelledWithCleanupPending or RecoveryPruneOutcomeStatus.FailedWithCleanupPending
+            || outcome.RequiresCleanup && outcome.Status is RecoveryPruneOutcomeStatus.FailedBeforePublication or RecoveryPruneOutcomeStatus.CancelledBeforePublication;
+        if (requiresCompleteCleanupAccounting)
+        {
+            HashSet<Guid> expectedAccounted = logicalPublished ? cleanup : cleanup.Where(id => !removed.Contains(id)).ToHashSet();
+            HashSet<Guid> accounted = cleaned.Concat(pending).ToHashSet();
+            if (accounted.Count != expectedAccounted.Count || !expectedAccounted.SetEquals(accounted))
+                throw new ProtocolException("The core prune outcome doesn't account for every confirmed generation cleanup after its observed publication boundary.");
+        }
+        if (outcome.Status is RecoveryPruneOutcomeStatus.Succeeded or RecoveryPruneOutcomeStatus.CancelledAfterApply or RecoveryPruneOutcomeStatus.FailedAfterApply && (logical.Length != removed.Count || !removed.SetEquals(logical) || cleaned.Length != cleanup.Count || !cleanup.SetEquals(cleaned)))
+            throw new ProtocolException("A successful or after-apply core prune outcome must report the exact confirmed logical and physical generation identities.");
     }
 
     private static ProtocolTerminalState TerminalState(ProtocolDurableState durableState, ProtocolTerminalErrorCode? error, ProtocolRecoveryDisposition recoveryDisposition, ProtocolNextAction nextAction) => new(durableState, error, recoveryDisposition, nextAction);

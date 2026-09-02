@@ -239,6 +239,7 @@ internal sealed class ProtocolJsonSerializerTests
             [ProtocolPrePlanErrorCode.InvalidGameFolder] = ProtocolNextAction.SelectGameFolder,
             [ProtocolPrePlanErrorCode.PackageRejected] = ProtocolNextAction.ReopenVerifiedPackage,
             [ProtocolPrePlanErrorCode.RecoveryUnavailable] = ProtocolNextAction.ListRecoveries,
+            [ProtocolPrePlanErrorCode.NothingToPrune] = ProtocolNextAction.ListRecoveries,
             [ProtocolPrePlanErrorCode.InspectionFailed] = ProtocolNextAction.InspectAgain,
             [ProtocolPrePlanErrorCode.CandidateApprovalFailed] = ProtocolNextAction.InspectAgain,
             [ProtocolPrePlanErrorCode.PermissionDenied] = ProtocolNextAction.ReviewFilesystem,
@@ -271,6 +272,35 @@ internal sealed class ProtocolJsonSerializerTests
                 }
             }
         }
+    }
+
+    [Test]
+    public void PrePlanErrorCode_AdditionPreservesExistingNumericValues()
+    {
+        ((int)ProtocolPrePlanErrorCode.RequestCancelled).Should().Be(0);
+        ((int)ProtocolPrePlanErrorCode.InvalidGameFolder).Should().Be(1);
+        ((int)ProtocolPrePlanErrorCode.PackageRejected).Should().Be(2);
+        ((int)ProtocolPrePlanErrorCode.RecoveryUnavailable).Should().Be(3);
+        ((int)ProtocolPrePlanErrorCode.InspectionFailed).Should().Be(4);
+        ((int)ProtocolPrePlanErrorCode.CandidateApprovalFailed).Should().Be(5);
+        ((int)ProtocolPrePlanErrorCode.PermissionDenied).Should().Be(6);
+        ((int)ProtocolPrePlanErrorCode.InputOutputFailure).Should().Be(7);
+        ((int)ProtocolPrePlanErrorCode.UnexpectedFailure).Should().Be(8);
+        ((int)ProtocolPrePlanErrorCode.NothingToPrune).Should().Be(9);
+    }
+
+    [Test]
+    public void PruneOutcome_AdditionsPreserveExistingNumericValues()
+    {
+        ((int)ProtocolPruneOutcome.Succeeded).Should().Be(0);
+        ((int)ProtocolPruneOutcome.FailedBeforePublication).Should().Be(1);
+        ((int)ProtocolPruneOutcome.CancelledBeforePublication).Should().Be(2);
+        ((int)ProtocolPruneOutcome.Interrupted).Should().Be(3);
+        ((int)ProtocolPruneOutcome.CancelledWithCleanupPending).Should().Be(4);
+        ((int)ProtocolPruneOutcome.FailedWithCleanupPending).Should().Be(5);
+        ((int)ProtocolPruneOutcome.UnexpectedCoreFailure).Should().Be(6);
+        ((int)ProtocolPruneOutcome.CancelledAfterApply).Should().Be(7);
+        ((int)ProtocolPruneOutcome.FailedAfterApply).Should().Be(8);
     }
 
     [Test]
@@ -380,6 +410,28 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPrunePlanId prune = ProtocolPrunePlanId.CreateRandom();
         PruneInterruptionEvent pending = new(session, prune, digest, ProtocolPruneOutcome.Interrupted, new(ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.ListRecoveries), new(0, 0, 0, false), "Stopped.", null);
         pending.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact typed outcome table*");
+
+        ProtocolTerminalState pruned = new(ProtocolDurableState.PruneApplied, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries);
+        new PruneSuccessEvent(session, prune, digest, ProtocolPruneOutcome.Succeeded, pruned, new(1, 1, 1, false), "Done.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*successful prune*pending cleanup*");
+        new PruneSuccessEvent(session, prune, digest, ProtocolPruneOutcome.Succeeded, pruned, new(1, 1, 0, true), "Done.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*successful prune*pending cleanup*");
+
+        ProtocolTerminalState failedBeforePublication = new(ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries);
+        new PruneFailureEvent(session, prune, digest, ProtocolPruneOutcome.FailedBeforePublication, failedBeforePublication, new(1, 0, 0, false), "Failed.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*before publication*applied work*");
+        ProtocolTerminalState cancelledBeforePublication = new(ProtocolDurableState.Unchanged, null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ListRecoveries);
+        new PruneCancelledEvent(session, prune, digest, ProtocolPruneOutcome.CancelledBeforePublication, cancelledBeforePublication, new(0, 1, 0, false), "Cancelled.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*before publication*applied work*");
+
+        ProtocolTerminalState failedAfterApply = new(ProtocolDurableState.PruneApplied, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries);
+        ProtocolJsonSerializer.SerializeLine(new PruneFailureEvent(session, prune, digest, ProtocolPruneOutcome.FailedAfterApply, failedAfterApply, new(1, 0, 0, false), "Failed.", null)).Should().NotBeEmpty();
+        ProtocolTerminalState cancelledAfterApply = new(ProtocolDurableState.PruneApplied, null, ProtocolRecoveryDisposition.StateRefreshRequired, ProtocolNextAction.ListRecoveries);
+        ProtocolJsonSerializer.SerializeLine(new PruneCancelledEvent(session, prune, digest, ProtocolPruneOutcome.CancelledAfterApply, cancelledAfterApply, new(0, 1, 0, false), "Cancelled.", null)).Should().NotBeEmpty();
+        new PruneFailureEvent(session, prune, digest, ProtocolPruneOutcome.FailedAfterApply, failedAfterApply, new(1, 0, 1, false), "Failed.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*after-apply*no known pending cleanup*");
+        new PruneCancelledEvent(session, prune, digest, ProtocolPruneOutcome.CancelledAfterApply, cancelledAfterApply, new(0, 0, 0, false), "Cancelled.", null)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*after-apply*applied work*");
     }
 
     [Test]
@@ -513,6 +565,15 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolJsonSerializer.SerializeLine(cleanupPlan).Should().NotBeEmpty();
         new PrunePlanEvent(session, id, cleanupDigest, ExecutionDigest, catalog, GameRoot, HashA, 1, [keep], [], ["22222222222222222222222222222222"], "Cleanup.", [], true)
             .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*digest*");
+
+        ProtocolPlanDigest auxiliaryDigest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [keep], [], [], true, "Auxiliary cleanup.", [], true);
+        PrunePlanEvent auxiliaryPlan = new(session, id, auxiliaryDigest, ExecutionDigest, catalog, GameRoot, HashA, 1, [keep], [], [], true, "Auxiliary cleanup.", [], true);
+        string auxiliaryLine = ProtocolJsonSerializer.SerializeLine(auxiliaryPlan);
+        ProtocolJsonSerializer.DeserializeEventLine(auxiliaryLine).Should().BeEquivalentTo(auxiliaryPlan);
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(auxiliaryLine.Replace("\"auxiliaryCleanupPlanned\":true,", "", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*missing*auxiliaryCleanupPlanned*");
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(auxiliaryLine.Replace("\"auxiliaryCleanupPlanned\":true", "\"auxiliaryCleanupPlanned\":true,\"auxiliaryCleanupPlanned\":true", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*duplicate*property*");
+        new PrunePlanEvent(session, id, auxiliaryDigest, ExecutionDigest, catalog, GameRoot, HashA, 1, [keep], [], [], false, "Auxiliary cleanup.", [], true)
+            .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>();
     }
 
     private static PlanEvent CreatePlan()

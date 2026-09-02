@@ -679,6 +679,7 @@ public sealed class RecoveryPrunePlan
     public IReadOnlyList<Guid> RetainedGenerationIds { get; }
     public IReadOnlyList<Guid> RemovedGenerationIds { get; }
     public IReadOnlyList<Guid> CleanupGenerationIds { get; }
+    public bool HasAuxiliaryCleanup { get; }
     public Sha256Digest ConfirmationDigest { get; }
     internal IReadOnlyList<Sha256Digest> RetentionDocumentCatalog { get; }
     internal Sha256Digest? PendingPointerSha256 { get; }
@@ -693,7 +694,8 @@ public sealed class RecoveryPrunePlan
         IEnumerable<Guid> removedGenerationIds,
         IEnumerable<Guid> cleanupGenerationIds,
         IEnumerable<Sha256Digest> retentionDocumentCatalog,
-        Sha256Digest? pendingPointerSha256
+        Sha256Digest? pendingPointerSha256,
+        bool hasAuxiliaryCleanup = false
     )
     {
         ArgumentNullException.ThrowIfNull(gameRoot);
@@ -729,6 +731,7 @@ public sealed class RecoveryPrunePlan
         this.RetainedGenerationIds = Array.AsReadOnly(retained);
         this.RemovedGenerationIds = Array.AsReadOnly(removed);
         this.CleanupGenerationIds = Array.AsReadOnly(cleanup);
+        this.HasAuxiliaryCleanup = hasAuxiliaryCleanup;
         this.RetentionDocumentCatalog = Array.AsReadOnly(retentionDocuments);
         this.PendingPointerSha256 = pendingPointerSha256;
         this.ConfirmationDigest = Sha256Digest.Hash(this.GetCanonicalBytes());
@@ -758,6 +761,7 @@ public sealed class RecoveryPrunePlan
             WriteIds(writer, "retained_generation_ids", this.RetainedGenerationIds);
             WriteIds(writer, "removed_generation_ids", this.RemovedGenerationIds);
             WriteIds(writer, "cleanup_generation_ids", this.CleanupGenerationIds);
+            writer.WriteBoolean("has_auxiliary_cleanup", this.HasAuxiliaryCleanup);
             writer.WriteStartArray("retention_document_catalog");
             foreach (Sha256Digest digest in this.RetentionDocumentCatalog)
                 writer.WriteStringValue(digest.Value);
@@ -1086,6 +1090,10 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             .Where(id => physical.Contains(id) && !newlyRemoved.Contains(id))
             .ToArray() ?? [];
         Guid[] cleanup = newlyRemoved.Concat(pendingRemoved).ToArray();
+        Sha256Digest? currentRetentionSha256 = currentState.Pointer?.RetentionSha256;
+        bool hasAuxiliaryCleanup = state.PendingPointerSha256 is not null
+            || state.RetentionDocumentCatalog.Any(digest => digest != currentRetentionSha256)
+            || newlyRemoved.Length > 0 && currentRetentionSha256 is not null;
         return new RecoveryPrunePlan(
             gameRoot,
             operationGeneration,
@@ -1096,7 +1104,8 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             newlyRemoved,
             cleanup,
             state.RetentionDocumentCatalog,
-            state.PendingPointerSha256
+            state.PendingPointerSha256,
+            hasAuxiliaryCleanup
         );
     }
 
@@ -1215,7 +1224,7 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
             Sha256Digest[] orphanDocuments = state.RetentionDocumentCatalog
                 .Where(digest => digest != currentRetentionSha256)
                 .ToArray();
-            if (plan.CleanupGenerationIds.Count == 0 && orphanDocuments.Length == 0)
+            if (plan.CleanupGenerationIds.Count == 0 && !plan.HasAuxiliaryCleanup)
                 throw new InstallerTransactionException(TransactionErrorCode.InvalidPlan, "The recovery-prune plan has no retained history or physical cleanup change to apply.");
             cancellationToken.ThrowIfCancellationRequested();
             lease.ReserveNextGeneration(lease.Generation);
@@ -1280,12 +1289,16 @@ public sealed class CommittedRecoveryHandle : IDisposable, ICommittedRecoveryCon
                     .ToArray()
                 : Array.Empty<Guid>();
             auxiliaryCleanupPending &= exactPlanAuthenticated;
+            bool appliedWork = logical.Length > 0 || physicallyCleaned.Count > 0;
+            bool cleanupPending = pending.Length > 0 || auxiliaryCleanupPending;
             RecoveryPruneOutcomeStatus status = exception switch
             {
-                OperationCanceledException when logicalStatePublished || physicallyCleaned.Count > 0 => RecoveryPruneOutcomeStatus.CancelledWithCleanupPending,
+                OperationCanceledException when cleanupPending => RecoveryPruneOutcomeStatus.CancelledWithCleanupPending,
+                OperationCanceledException when appliedWork => RecoveryPruneOutcomeStatus.CancelledAfterApply,
                 OperationCanceledException => RecoveryPruneOutcomeStatus.CancelledBeforePublication,
                 SimulatedProcessTerminationException => RecoveryPruneOutcomeStatus.Interrupted,
-                _ when logicalStatePublished || physicallyCleaned.Count > 0 || pending.Length > 0 || auxiliaryCleanupPending => RecoveryPruneOutcomeStatus.FailedWithCleanupPending,
+                _ when cleanupPending => RecoveryPruneOutcomeStatus.FailedWithCleanupPending,
+                _ when appliedWork => RecoveryPruneOutcomeStatus.FailedAfterApply,
                 _ => RecoveryPruneOutcomeStatus.FailedBeforePublication
             };
             TransactionErrorCode? code = exception is OperationCanceledException
