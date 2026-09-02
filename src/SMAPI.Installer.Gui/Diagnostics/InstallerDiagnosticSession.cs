@@ -147,7 +147,8 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         InstallerLog log,
         Guid operationId,
         Func<DateTimeOffset>? getNow = null,
-        Task? writerStartGate = null
+        Task? writerStartGate = null,
+        int? progressCapacity = null
     )
     {
         this.Log = log ?? throw new ArgumentNullException(nameof(log));
@@ -157,7 +158,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         this.GetNow = getNow ?? (() => DateTimeOffset.UtcNow);
         this.WriterStartGate = writerStartGate ?? Task.CompletedTask;
         this.Normal = CreateChannel(NormalCapacity, BoundedChannelFullMode.Wait);
-        this.Progress = CreateChannel(ProgressCapacity, BoundedChannelFullMode.Wait);
+        this.Progress = CreateChannel(progressCapacity ?? ProgressCapacity, BoundedChannelFullMode.Wait);
         this.Terminal = CreateChannel(TerminalCapacity, BoundedChannelFullMode.Wait);
 
         // This synchronous fixed record proves the private log can be created and written before the production
@@ -354,7 +355,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
 
     void IProductionInstallerDiagnosticSink.RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage)
     {
-        ValidateReleaseProgressCode(code);
+        ValidateReleaseProgressCode(code, stage);
         _ = GetReleaseStageMessage(stage);
         this.RecordProgress(new ProgressKey(code, stage, null), releaseTag: null);
     }
@@ -790,10 +791,11 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         }
     }
 
-    private static void ValidateReleaseProgressCode(InstallerDiagnosticCode code)
+    private static void ValidateReleaseProgressCode(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage)
     {
-        if (code is not (InstallerDiagnosticCode.ReleaseDownloading or InstallerDiagnosticCode.ReleaseVerifying))
-            throw new ArgumentException("A reviewed release-progress diagnostic code is required.", nameof(code));
+        InstallerDiagnosticCode expected = ProductionInstallerDiagnosticObserver.MapReleaseProgressStage(stage);
+        if (code != expected)
+            throw new ArgumentException("The release-progress diagnostic code must match its reviewed stage.", nameof(code));
     }
 
     private static void ValidateTransactionProgressCode(InstallerDiagnosticCode code)

@@ -146,26 +146,13 @@ internal sealed class InstallerDiagnosticSessionTests
         TaskCompletionSource progressGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Guid progressId = Guid.NewGuid();
         InstallerLog progressLog = this.CreateLog(progressId, maximumFileBytes: 64 * 1024);
-        await using (InstallerDiagnosticSession progress = new(progressLog, progressId, () => DateTimeOffset.UnixEpoch, progressGate.Task))
+        await using (InstallerDiagnosticSession progress = new(progressLog, progressId, () => DateTimeOffset.UnixEpoch, progressGate.Task, progressCapacity: 1))
         {
             IProductionInstallerDiagnosticSink sink = progress;
-            foreach (InstallerDiagnosticCode code in new[]
-            {
-                InstallerDiagnosticCode.ExecutionProgress,
-                InstallerDiagnosticCode.ExecutionRecoveryProgress,
-                InstallerDiagnosticCode.RecoveryPruneProgress
-            })
-            {
-                foreach (TransactionStage stage in Enum.GetValues<TransactionStage>())
-                    sink.RecordProgress(code, stage);
-            }
-            foreach (InstallerDiagnosticCode code in new[] { InstallerDiagnosticCode.ReleaseDownloading, InstallerDiagnosticCode.ReleaseVerifying })
-            {
-                foreach (ReviewedReleasePreparationStage stage in Enum.GetValues<ReviewedReleasePreparationStage>())
-                    sink.RecordProgress(code, stage);
-            }
+            sink.RecordProgress(InstallerDiagnosticCode.ReleaseVerifying, ReviewedReleasePreparationStage.ObservingTag);
+            sink.RecordProgress(InstallerDiagnosticCode.ReleaseDownloading, ReviewedReleasePreparationStage.Downloading);
 
-            progress.Snapshot.CoalescedEventCount.Should().BeGreaterThan(0);
+            progress.Snapshot.CoalescedEventCount.Should().Be(1);
             progress.Snapshot.RawLogOmittedEntryCount.Should().Be(0);
             progress.IsAvailable.Should().BeTrue();
             progressGate.SetResult();
@@ -301,6 +288,14 @@ internal sealed class InstallerDiagnosticSessionTests
         ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ExecutionProgress, ReviewedReleasePreparationStage.Downloading)))
             .Should().Throw<ArgumentException>();
         ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ReleaseDownloading, TransactionStage.Staging)))
+            .Should().Throw<ArgumentException>();
+        ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ReleaseDownloading, ReviewedReleasePreparationStage.ObservingTag)))
+            .Should().Throw<ArgumentException>();
+        ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ReleaseDownloading, ReviewedReleasePreparationStage.RefreshingTag)))
+            .Should().Throw<ArgumentException>();
+        ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ReleaseDownloading, ReviewedReleasePreparationStage.ImportingLocalPackage)))
+            .Should().Throw<ArgumentException>();
+        ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ReleaseVerifying, ReviewedReleasePreparationStage.Downloading)))
             .Should().Throw<ArgumentException>();
         session.Entries.Should().NotContain(entry => entry.EventCode.Contains("terminal", StringComparison.Ordinal));
     }
