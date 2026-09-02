@@ -305,10 +305,17 @@ run_window_smoke() {
     local name="$1"
     local isolate_network="$2"
     shift 2
-    local state_root output_path status smoke_pid gui_pid gui_start_time process_exe resolved_exe current_uid current_gid
+    local state_root xauthority_path output_path status smoke_pid gui_pid gui_start_time process_exe resolved_exe current_uid current_gid
     local -a isolation_prefix=()
 
     state_root="$(make_state_root "$name")"
+    # Ubuntu's xvfb-run owns a temporary directory only when it also creates the Xauthority file.
+    # Its EXIT cleanup can intermittently fail and replace the already-verified launcher status
+    # with xvfb-run's reserved exit 5. Keep authorization state in this smoke's private root so
+    # wrapper housekeeping can't mask the launcher result we're explicitly testing.
+    xauthority_path="$state_root/xauthority"
+    : > "$xauthority_path"
+    chmod 600 "$xauthority_path"
     output_path="$test_root/$name.output"
     if [[ "$isolate_network" == true ]]; then
         current_uid="$(id -u)"
@@ -355,7 +362,7 @@ run_window_smoke() {
             no_proxy=localhost,127.0.0.1 \
             XDG_SESSION_TYPE=x11 \
             timeout --signal=TERM --kill-after=5s 30s \
-                xvfb-run -a "$launcher" "$@"
+                xvfb-run -a -f "$xauthority_path" "$launcher" "$@"
     ) > "$output_path" 2>&1 &
     smoke_pid=$!
     active_smoke_pid="$smoke_pid"

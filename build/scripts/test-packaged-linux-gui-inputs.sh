@@ -39,6 +39,14 @@ if [[ "$launcher_source_text" != *$'abort_before_launch_if_requested() {\n    [[
     exit 1
 fi
 
+packaged_test_source_text="$(<"$qualifier")"
+xvfb_authority_guard=$'xauthority_path="$state_root/xauthority"\n    : > "$xauthority_path"\n    chmod 600 "$xauthority_path"'
+if [[ "$packaged_test_source_text" != *"$xvfb_authority_guard"* ]] \
+    || [[ "$(grep -Fc 'xvfb-run -a -f "$xauthority_path" "$launcher" "$@"' "$qualifier")" -ne 1 ]]; then
+    echo "The packaged-GUI window smoke must use its private caller-owned Xauthority file so xvfb-run cleanup cannot mask the launcher status." >&2
+    exit 1
+fi
+
 run_expect_status() {
     local expected_status="$1"
     local expected_text="$2"
