@@ -195,7 +195,7 @@ Scope constraints apply throughout:
 - [x] Protect unrelated game files through receipt-owned transactional planning and lifecycle preservation assertions ([lifecycle test at the exact reviewed commit](https://github.com/4eh5xitv6787h645ebv/SMAPI/blob/052699e8ccba0d13f9d4f02e0bb199aa04cec605/build/scripts/test-linux-installer-lifecycle.sh)).
 - [x] Detect modified or unknown existing SMAPI files before replacement and require explicit reviewed approval ([production operation guide](linux-gui-shell.md#use-the-production-workflow)).
 - [x] Make destructive actions explicit and recoverable with Cancel-focused confirmation, durable recovery, and rollback ([final exact-head review](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250#issuecomment-5513895409)).
-- [x] Keep the non-GUI/manual installation path documented ([terminal fallback](linux-gui-shell.md#private-diagnostics-and-troubleshooting)).
+- [x] Keep the non-GUI/manual installation path documented ([console and headless fallback](linux-gui-shell.md#console-and-headless-fallback)).
 
 ### Desktop UX and accessibility
 
