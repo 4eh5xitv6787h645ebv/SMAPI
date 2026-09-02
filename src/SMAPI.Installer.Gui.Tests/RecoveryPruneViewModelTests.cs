@@ -106,10 +106,13 @@ internal sealed class RecoveryPruneViewModelTests
             )
         };
         await using RecoveryPruneViewModel viewModel = CreateViewModel(session);
+        List<RecoveryPruneFocusTarget> focus = [];
+        viewModel.FocusRequested += (_, target) => focus.Add(target);
         await viewModel.ListCommand.ExecuteAsync();
         RecoveryPruneChoiceItem stale = viewModel.Choices.Single();
         viewModel.SelectedChoice = stale;
         viewModel.ListCommand.CanExecute(null).Should().BeTrue();
+        focus.Clear();
 
         await viewModel.ListCommand.ExecuteAsync();
 
@@ -117,6 +120,7 @@ internal sealed class RecoveryPruneViewModelTests
         viewModel.Heading.Should().Be("Choose the oldest recovery point to keep");
         viewModel.SelectedChoice.Should().BeNull();
         viewModel.Choices.Should().ContainSingle().Which.Should().NotBeSameAs(stale);
+        focus.Should().EndWith(RecoveryPruneFocusTarget.HistoryList, "a reminted catalog generation must return focus to the fresh list");
         Action selectStale = () => viewModel.SelectedChoice = stale;
         selectStale.Should().Throw<ArgumentException>();
         session.InspectedPoints.Should().BeEmpty();
@@ -141,10 +145,35 @@ internal sealed class RecoveryPruneViewModelTests
         viewModel.PlanRows.Should().HaveCount(9).And.OnlyContain(row => row.AccessibleName.Length <= 256);
         viewModel.PlanRows.Should().Contain(row => row.Label == "Older points to remove" && row.Value == "0");
         viewModel.PlanRows.Should().Contain(row => row.Label == "Auxiliary cleanup" && row.Value == "Planned");
-        viewModel.CleanupScopeWarning.Should().Be("No recovery points will be removed; authenticated auxiliary recovery metadata will be cleaned permanently. It cannot be restored unless you have a separate external backup.");
+        viewModel.CleanupScopeWarning.Should().Be("No recovery points will be removed. This reviewed cleanup will permanently clean authenticated auxiliary recovery metadata. These changes cannot be restored unless you have a separate external backup.");
         viewModel.IsDestructiveConsentChecked.Should().BeFalse();
         viewModel.RunCommand.CanExecute(null).Should().BeFalse();
         session.ConfirmedPoints.Should().BeEmpty();
+    }
+
+    [Test]
+    public void CleanupGenerationOnlyWarningsUseEveryValidatedScopeField()
+    {
+        FakePlanSession session = new();
+        RecoveryPruneController controller = new(session);
+        RecoveryPruneViewModel viewModel = new(controller, () => true, _ => throw new AssertionException("No post expected."));
+        RecoveryPruneSnapshot initial = controller.Snapshot;
+        RecoveryPrunePlanPresentation pendingGenerations = PlanPresentation() with
+        {
+            RemovedCount = 0,
+            CleanupGenerationCount = 2,
+            AuxiliaryCleanupPlanned = false
+        };
+
+        viewModel.ApplySnapshotForTesting(Snapshot(initial, 1, 1, RecoveryPruneControllerState.ReviewReady, plan: pendingGenerations, canConfirm: true));
+        viewModel.CleanupScopeWarning.Should().Be("No recovery points will be removed. This reviewed cleanup will permanently clean 2 authenticated recovery generations. These changes cannot be restored unless you have a separate external backup.");
+
+        viewModel.ApplySnapshotForTesting(Snapshot(initial, 2, 2, RecoveryPruneControllerState.ReviewReady, plan: pendingGenerations with { AuxiliaryCleanupPlanned = true }, canConfirm: true));
+        viewModel.CleanupScopeWarning.Should().Contain("clean 2 authenticated recovery generations")
+            .And.Contain("clean authenticated auxiliary recovery metadata")
+            .And.NotContain("no recovery history to clean");
+
+        viewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
     [Test]

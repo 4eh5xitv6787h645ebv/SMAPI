@@ -151,11 +151,99 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         await WaitUntilAsync(() => viewModel.IsResultVisible);
         session.ExecuteCalls.Should().Be(1);
         viewModel.ResultRows.Should().NotBeEmpty();
+        window.FindControl<Border>("ReviewRegion")!.IsVisible.Should().BeFalse("pre-run consent copy must be hidden after execution starts");
         Border settlementWarning = window.FindControl<Border>("SettlementWarningRegion")!;
         settlementWarning.IsVisible.Should().BeTrue();
         AutomationProperties.GetName(settlementWarning).Should()
             .Contain("did not confirm a clean close")
             .And.Contain("fresh verified installer session");
+
+        window.Close();
+        await WaitUntilAsync(() => !window.IsVisible);
+    }
+
+    [AvaloniaTest]
+    public async Task RunningAndPartialAuxiliaryTerminalHidePreRunReviewAndShowExactResult()
+    {
+        FakePruneSession session = new("/games/Stardew Valley", Points(1));
+        RecoveryPruneController controller = new(session);
+        RecoveryPruneViewModel viewModel = new(controller);
+        RecoveryPruneWindow window = new(viewModel);
+        window.Show();
+        await WaitUntilAsync(() => window.FindControl<Button>("LoadButton")!.IsFocused);
+        RecoveryPrunePlanPresentation plan = new(
+            1,
+            1,
+            0,
+            2,
+            true,
+            1,
+            [ProtocolPlanRisk.RecoveryPrune],
+            ProtocolRecommendedDefault.Cancel,
+            true
+        );
+        RecoveryPruneSnapshot basis = controller.Snapshot;
+        Border review = window.FindControl<Border>("ReviewRegion")!;
+        Border result = window.FindControl<Border>("ResultRegion")!;
+        TextBlock warning = window.FindControl<TextBlock>("CleanupScopeWarningText")!;
+
+        viewModel.ApplySnapshotForTesting(basis with
+        {
+            Generation = 1,
+            Revision = 1,
+            State = RecoveryPruneControllerState.ReviewReady,
+            Plan = plan,
+            CanList = false,
+            CanConfirm = true
+        });
+        Dispatcher.UIThread.RunJobs();
+        review.IsVisible.Should().BeTrue();
+        warning.Text.Should().Contain("clean 2 authenticated recovery generations")
+            .And.Contain("clean authenticated auxiliary recovery metadata");
+
+        viewModel.ApplySnapshotForTesting(basis with
+        {
+            Generation = 1,
+            Revision = 2,
+            State = RecoveryPruneControllerState.Running,
+            Plan = plan,
+            ProgressStage = TransactionStage.CleaningRecovery,
+            CompletedUnits = 1,
+            TotalUnits = 2,
+            CanList = false,
+            CanCancel = true
+        });
+        Dispatcher.UIThread.RunJobs();
+        review.IsVisible.Should().BeFalse("consent-oriented future-tense copy is no longer true once cleanup runs");
+        result.IsVisible.Should().BeFalse();
+
+        RecoveryPruneTerminalPresentation partial = new(
+            ProtocolPruneOutcome.FailedWithCleanupPending,
+            ProtocolDurableState.PruneApplied,
+            ProtocolTerminalErrorCode.IoFailure,
+            ProtocolRecoveryDisposition.CleanupPending,
+            ProtocolNextAction.ListRecoveries,
+            0,
+            0,
+            1,
+            true,
+            InstallerBackendSettlement.ConfirmedClosed
+        );
+        viewModel.ApplySnapshotForTesting(basis with
+        {
+            Generation = 2,
+            Revision = 3,
+            State = RecoveryPruneControllerState.Terminal,
+            Plan = plan,
+            Result = partial,
+            CanList = false,
+            CanExit = true
+        });
+        Dispatcher.UIThread.RunJobs();
+        review.IsVisible.Should().BeFalse("terminal partial cleanup must not appear to await consent or Run");
+        result.IsVisible.Should().BeTrue();
+        viewModel.ResultRows.Should().Contain(row => row.Label == "Pending cleanup generations" && row.Value == "1");
+        viewModel.ResultRows.Should().Contain(row => row.Label == "Auxiliary cleanup pending" && row.Value == "Yes");
 
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
@@ -183,7 +271,7 @@ internal sealed class RecoveryPruneWindowAccessibilityTests
         CheckBox consent = window.FindControl<CheckBox>("ConsentCheckBox")!;
         Button confirm = window.FindControl<Button>("ConfirmButton")!;
         Button run = window.FindControl<Button>("RunButton")!;
-        warning.Text.Should().Be("No recovery points will be removed; authenticated auxiliary recovery metadata will be cleaned permanently. It cannot be restored unless you have a separate external backup.");
+        warning.Text.Should().Be("No recovery points will be removed. This reviewed cleanup will permanently clean authenticated auxiliary recovery metadata. These changes cannot be restored unless you have a separate external backup.");
         viewModel.PlanRows.Should().Contain(row => row.Label == "Older points to remove" && row.Value == "0");
         viewModel.PlanRows.Should().Contain(row => row.Label == "Recovery generations to clean" && row.Value == "0");
         consent.IsChecked.Should().BeFalse();

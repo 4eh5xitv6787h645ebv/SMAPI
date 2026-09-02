@@ -180,7 +180,10 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
 
     public bool IsHistoryListVisible => this.snapshot.State == RecoveryPruneControllerState.CatalogReady && this.Choices.Count > 0;
 
-    public bool IsPlanVisible => this.PlanRows.Count > 0;
+    public bool IsPlanVisible => this.PlanRows.Count > 0
+        && this.snapshot.State is RecoveryPruneControllerState.ReviewReady
+            or RecoveryPruneControllerState.Confirming
+            or RecoveryPruneControllerState.ReadyToRun;
 
     public bool IsBusy => this.snapshot.State is RecoveryPruneControllerState.Listing
         or RecoveryPruneControllerState.Inspecting
@@ -418,6 +421,7 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
 
         bool selectionOnly = previous.State == RecoveryPruneControllerState.CatalogReady
             && next.State == RecoveryPruneControllerState.CatalogReady
+            && previous.Generation == next.Generation
             && previous.Choices.Count == next.Choices.Count
             && previous.Choices.Select((choice, index) => ReferenceEquals(choice, next.Choices[index])).All(match => match)
             && !ReferenceEquals(previous.Selected, next.Selected);
@@ -535,15 +539,26 @@ internal sealed class RecoveryPruneViewModel : ObservableObject, IAsyncDisposabl
     {
         if (plan is null)
             return "No cleanup scope has been inspected. Loading and selection change no files.";
-        string recoveryPointLabel = plan.RemovedCount == 1 ? "recovery point" : "recovery points";
-        return (plan.RemovedCount, plan.AuxiliaryCleanupPlanned) switch
-        {
-            ( > 0, true) => $"This reviewed cleanup will permanently remove {FormatNumber(plan.RemovedCount)} older {recoveryPointLabel} and clean authenticated auxiliary recovery metadata. It cannot be restored unless you have a separate external backup.",
-            ( > 0, false) => $"This reviewed cleanup will permanently remove {FormatNumber(plan.RemovedCount)} older {recoveryPointLabel}. It cannot be restored unless you have a separate external backup.",
-            (0, true) => "No recovery points will be removed; authenticated auxiliary recovery metadata will be cleaned permanently. It cannot be restored unless you have a separate external backup.",
-            _ => "This reviewed plan reports no recovery history to clean. Cancel and load fresh recovery history before taking another action."
-        };
+        List<string> actions = [];
+        if (plan.RemovedCount > 0)
+            actions.Add($"remove {FormatNumber(plan.RemovedCount)} older {(plan.RemovedCount == 1 ? "recovery point" : "recovery points")}");
+        if (plan.CleanupGenerationCount > 0)
+            actions.Add($"clean {FormatNumber(plan.CleanupGenerationCount)} authenticated recovery {(plan.CleanupGenerationCount == 1 ? "generation" : "generations")}");
+        if (plan.AuxiliaryCleanupPlanned)
+            actions.Add("clean authenticated auxiliary recovery metadata");
+        if (actions.Count == 0)
+            return "This reviewed plan reports no recovery history to clean. Cancel and load fresh recovery history before taking another action.";
+        string noPointRemoval = plan.RemovedCount == 0 ? "No recovery points will be removed. " : "";
+        return $"{noPointRemoval}This reviewed cleanup will permanently {JoinScopeActions(actions)}. These changes cannot be restored unless you have a separate external backup.";
     }
+
+    private static string JoinScopeActions(IReadOnlyList<string> actions) => actions.Count switch
+    {
+        1 => actions[0],
+        2 => $"{actions[0]} and {actions[1]}",
+        3 => $"{actions[0]}, {actions[1]}, and {actions[2]}",
+        _ => throw new ArgumentOutOfRangeException(nameof(actions))
+    };
 
     private static IReadOnlyList<RecoveryPruneFactRow> CreateResultRows(RecoveryPruneResultPresentation? result)
     {
