@@ -81,7 +81,7 @@ internal sealed class InstallerDiagnosticSessionTests
     }
 
     [Test]
-    public async Task SingleLaneStateFlood_UsesOneBoundedWriterWakeAndSettles()
+    public async Task SingleLaneStateFlood_AccountsDroppedStateRecordsAsRawLogOmissionsAndSettles()
     {
         Guid operationId = Guid.NewGuid();
         InstallerLog log = this.CreateLog(operationId, maximumFileBytes: 64 * 1024);
@@ -97,8 +97,80 @@ internal sealed class InstallerDiagnosticSessionTests
         await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
 
         session.Entries.Count.Should().BeLessThanOrEqualTo(InstallerDiagnosticSession.MaximumDisplayEntries);
-        session.CoalescedEventCount.Should().BeGreaterThan(0);
+        session.Snapshot.RawLogOmittedEntryCount.Should().BeGreaterThan(0);
+        session.CoalescedEventCount.Should().Be(0, "state/error records are omitted, not described as coalesced progress");
         File.ReadLines(log.Path).Last().Should().Contain("session.completed");
+    }
+
+    [Test]
+    public async Task EveryQueueLaneHasDistinctDeterministicOverflowAccounting()
+    {
+        TaskCompletionSource normalGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Guid normalId = Guid.NewGuid();
+        InstallerLog normalLog = this.CreateLog(normalId, maximumFileBytes: 64 * 1024);
+        await using (InstallerDiagnosticSession normal = new(normalLog, normalId, () => DateTimeOffset.UnixEpoch, normalGate.Task))
+        {
+            for (int index = 0; index < 129; index++)
+                normal.Record(InstallerDiagnosticCode.ReleaseCatalogLoading);
+
+            normal.Snapshot.RawLogOmittedEntryCount.Should().Be(1);
+            normal.Snapshot.CoalescedEventCount.Should().Be(0);
+            normalGate.SetResult();
+            normal.MarkCompleted();
+        }
+
+        TaskCompletionSource terminalGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Guid terminalId = Guid.NewGuid();
+        InstallerLog terminalLog = this.CreateLog(terminalId, maximumFileBytes: 64 * 1024);
+        await using (InstallerDiagnosticSession terminal = new(terminalLog, terminalId, () => DateTimeOffset.UnixEpoch, terminalGate.Task))
+        {
+            IProductionInstallerDiagnosticSink sink = terminal;
+            for (int index = 0; index < 17; index++)
+            {
+                sink.RecordExecutionTerminal(
+                    InstallerOperation.Install,
+                    ProtocolExecutionOutcome.Succeeded,
+                    ProtocolDurableState.Committed,
+                    null,
+                    ProtocolNextAction.InspectAgain
+                );
+            }
+
+            terminal.Snapshot.RawLogOmittedEntryCount.Should().Be(1);
+            terminal.Snapshot.CoalescedEventCount.Should().Be(0);
+            terminal.IsAvailable.Should().BeFalse("losing a controller terminal makes later mutation admission unsafe");
+            terminalGate.SetResult();
+            terminal.MarkCompleted();
+        }
+
+        TaskCompletionSource progressGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Guid progressId = Guid.NewGuid();
+        InstallerLog progressLog = this.CreateLog(progressId, maximumFileBytes: 64 * 1024);
+        await using (InstallerDiagnosticSession progress = new(progressLog, progressId, () => DateTimeOffset.UnixEpoch, progressGate.Task))
+        {
+            IProductionInstallerDiagnosticSink sink = progress;
+            foreach (InstallerDiagnosticCode code in new[]
+            {
+                InstallerDiagnosticCode.ExecutionProgress,
+                InstallerDiagnosticCode.ExecutionRecoveryProgress,
+                InstallerDiagnosticCode.RecoveryPruneProgress
+            })
+            {
+                foreach (TransactionStage stage in Enum.GetValues<TransactionStage>())
+                    sink.RecordProgress(code, stage);
+            }
+            foreach (InstallerDiagnosticCode code in new[] { InstallerDiagnosticCode.ReleaseDownloading, InstallerDiagnosticCode.ReleaseVerifying })
+            {
+                foreach (ReviewedReleasePreparationStage stage in Enum.GetValues<ReviewedReleasePreparationStage>())
+                    sink.RecordProgress(code, stage);
+            }
+
+            progress.Snapshot.CoalescedEventCount.Should().BeGreaterThan(0);
+            progress.Snapshot.RawLogOmittedEntryCount.Should().Be(0);
+            progress.IsAvailable.Should().BeTrue();
+            progressGate.SetResult();
+            progress.MarkCompleted();
+        }
     }
 
     [Test]
@@ -207,6 +279,33 @@ internal sealed class InstallerDiagnosticSessionTests
     }
 
     [Test]
+    public async Task ProgressApis_RejectEveryExactTerminalCodeAndMismatchedStageFamily()
+    {
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = this.CreateLog(operationId);
+        await using InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+        IProductionInstallerDiagnosticSink sink = session;
+
+        foreach (InstallerDiagnosticCode terminal in new[]
+        {
+            InstallerDiagnosticCode.ExecutionTerminal,
+            InstallerDiagnosticCode.ExecutionRecoveryTerminal,
+            InstallerDiagnosticCode.RecoveryPruneTerminal
+        })
+        {
+            ((Action)(() => session.RecordProgress(terminal))).Should().Throw<ArgumentException>();
+            ((Action)(() => sink.RecordProgress(terminal, ReviewedReleasePreparationStage.Downloading))).Should().Throw<ArgumentException>();
+            ((Action)(() => sink.RecordProgress(terminal, TransactionStage.Staging))).Should().Throw<ArgumentException>();
+        }
+
+        ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ExecutionProgress, ReviewedReleasePreparationStage.Downloading)))
+            .Should().Throw<ArgumentException>();
+        ((Action)(() => sink.RecordProgress(InstallerDiagnosticCode.ReleaseDownloading, TransactionStage.Staging)))
+            .Should().Throw<ArgumentException>();
+        session.Entries.Should().NotContain(entry => entry.EventCode.Contains("terminal", StringComparison.Ordinal));
+    }
+
+    [Test]
     public async Task ClassifiedPackageFailuresUseStableCodesAndExcludePrivateAuthorityFromShareableViews()
     {
         const string privateReleaseAuthority = "PRIVATE-/home/alex/secret-package.zip-https://token.example";
@@ -283,18 +382,54 @@ internal sealed class InstallerDiagnosticSessionTests
             session.EnsureReadyForMutation();
 
         InstallerDiagnosticSnapshot snapshot = session.Snapshot;
-        string copy = session.CreateSanitizedCopyText();
+        InstallerDiagnosticCapture capture = session.CreateSanitizedCapture();
+        string copy = capture.Text;
 
         snapshot.Health.Should().Be(InstallerDiagnosticHealth.BoundedWithOmissions);
         snapshot.Entries.Should().HaveCount(InstallerDiagnosticSession.MaximumDisplayEntries);
         snapshot.DisplayOmittedEntryCount.Should().BeGreaterThan(0);
         snapshot.RawLogOmittedEntryCount.Should().Be(0);
+        capture.DisplayedEntryCount.Should().Be(InstallerDiagnosticSession.MaximumSanitizedCopyEntries);
+        capture.DisplayOmittedEntryCount.Should().Be(snapshot.DisplayOmittedEntryCount + InstallerDiagnosticSession.MaximumDisplayEntries - InstallerDiagnosticSession.MaximumSanitizedCopyEntries);
         Encoding.UTF8.GetByteCount(copy).Should().BeLessThanOrEqualTo(InstallerDiagnosticSession.MaximumSanitizedCopyBytes);
         copy.Should().Contain("Review this text before sharing it.");
         copy.Should().Contain("Display-window omissions:").And.Contain("Private raw-log omissions: 0");
         copy.Should().NotContain(privatePath).And.NotContain(operationId.ToString("N"));
         copy.Split('\n').Count(line => line.Contains("diagnostics.mutation-ready", StringComparison.Ordinal))
             .Should().BeLessThanOrEqualTo(InstallerDiagnosticSession.MaximumSanitizedCopyEntries);
+    }
+
+    [Test]
+    public async Task SanitizedCaptureCountsOnlyLinesThatFitTheByteBound()
+    {
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = this.CreateLog(operationId);
+        await using InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+        IProductionInstallerDiagnosticSink sink = session;
+        for (int index = 0; index < InstallerDiagnosticSession.MaximumSanitizedCopyEntries; index++)
+        {
+            int expectedEntries = index + 2;
+            sink.RecordExecutionTerminal(
+                InstallerOperation.Rollback,
+                ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired,
+                ProtocolDurableState.RecoveryCompleted,
+                ProtocolTerminalErrorCode.UnexpectedCoreFailure,
+                ProtocolNextAction.StartNewSession
+            );
+            await WaitUntilAsync(() => session.Entries.Count >= expectedEntries);
+        }
+
+        InstallerDiagnosticCapture capture = session.CreateSanitizedCapture();
+        int renderedEntryLines = capture.Text.Split('\n').Count(line => line.StartsWith("1970-01-01T00:00:00.0000000+00:00 [", StringComparison.Ordinal));
+
+        capture.DisplayedEntryCount.Should().Be(renderedEntryLines);
+        capture.DisplayedEntryCount.Should().BeLessThan(InstallerDiagnosticSession.MaximumSanitizedCopyEntries);
+        capture.DisplayOmittedEntryCount.Should().BeGreaterThan(0);
+        capture.Health.Should().Be(InstallerDiagnosticHealth.BoundedWithOmissions);
+        capture.Text.Should().Contain("[sanitized diagnostics truncated to the copy limit]")
+            .And.Contain($"Displayed entries in this copy: {capture.DisplayedEntryCount}")
+            .And.Contain($"Display-window omissions: {capture.DisplayOmittedEntryCount}");
+        Encoding.UTF8.GetByteCount(capture.Text).Should().BeLessThanOrEqualTo(InstallerDiagnosticSession.MaximumSanitizedCopyBytes);
     }
 
     [Test]

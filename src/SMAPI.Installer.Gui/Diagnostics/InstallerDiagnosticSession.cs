@@ -132,6 +132,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     private readonly object Sync = new();
     private readonly List<InstallerDiagnosticEntry> EntriesValue = [];
     private readonly HashSet<ProgressKey> ObservedProgress = [];
+    private readonly Task WriterStartGate;
     private readonly Task Writer;
     private int coalescedEvents;
     private int clipboardWriteActive;
@@ -142,13 +143,19 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     private bool completed;
     private bool disposeStarted;
 
-    public InstallerDiagnosticSession(InstallerLog log, Guid operationId, Func<DateTimeOffset>? getNow = null)
+    public InstallerDiagnosticSession(
+        InstallerLog log,
+        Guid operationId,
+        Func<DateTimeOffset>? getNow = null,
+        Task? writerStartGate = null
+    )
     {
         this.Log = log ?? throw new ArgumentNullException(nameof(log));
         if (operationId == Guid.Empty)
             throw new ArgumentException("A diagnostic operation ID is required.", nameof(operationId));
         this.OperationId = operationId;
         this.GetNow = getNow ?? (() => DateTimeOffset.UtcNow);
+        this.WriterStartGate = writerStartGate ?? Task.CompletedTask;
         this.Normal = CreateChannel(NormalCapacity, BoundedChannelFullMode.Wait);
         this.Progress = CreateChannel(ProgressCapacity, BoundedChannelFullMode.Wait);
         this.Terminal = CreateChannel(TerminalCapacity, BoundedChannelFullMode.Wait);
@@ -219,11 +226,12 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         {
             lock (this.Sync)
             {
+                int coalescedEventCount = Math.Max(0, Volatile.Read(ref this.coalescedEvents));
                 InstallerDiagnosticHealth health = this.disposeStarted
                     ? InstallerDiagnosticHealth.Disposed
                     : this.unavailable
                         ? InstallerDiagnosticHealth.WriteFailed
-                        : this.displayOmittedEntries > 0 || this.rawLogOmittedEntries > 0 || Volatile.Read(ref this.coalescedEvents) > 0
+                        : this.displayOmittedEntries > 0 || this.rawLogOmittedEntries > 0 || coalescedEventCount > 0
                             ? InstallerDiagnosticHealth.BoundedWithOmissions
                             : InstallerDiagnosticHealth.Healthy;
                 return new(
@@ -232,7 +240,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
                     this.EntriesValue.ToArray(),
                     this.displayOmittedEntries,
                     this.rawLogOmittedEntries,
-                    Math.Max(0, Volatile.Read(ref this.coalescedEvents))
+                    coalescedEventCount
                 );
             }
         }
@@ -242,15 +250,16 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     public InstallerDiagnosticCapture CreateSanitizedCapture()
     {
         InstallerDiagnosticSnapshot snapshot = this.Snapshot;
+        SanitizedCopyProjection projection = CreateSanitizedCopyProjection(snapshot);
         return new(
             snapshot.Revision,
-            snapshot.Health,
-            GetHealthLabel(snapshot.Health),
-            snapshot.Entries.Count,
-            snapshot.DisplayOmittedEntryCount,
+            projection.Health,
+            GetHealthLabel(projection.Health),
+            projection.DisplayedEntryCount,
+            projection.DisplayOmittedEntryCount,
             snapshot.RawLogOmittedEntryCount,
             snapshot.CoalescedEventCount,
-            CreateSanitizedCopyText(snapshot)
+            projection.Text
         );
     }
 
@@ -258,37 +267,51 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     public string CreateSanitizedCopyText()
         => this.CreateSanitizedCapture().Text;
 
-    private static string CreateSanitizedCopyText(InstallerDiagnosticSnapshot snapshot)
+    private static SanitizedCopyProjection CreateSanitizedCopyProjection(InstallerDiagnosticSnapshot snapshot)
     {
-        StringBuilder result = new();
-        AppendBounded(result, "SMAPI Linux graphical installer — sanitized diagnostics\n");
-        AppendBounded(result, "Review this text before sharing it. Local paths, identifiers, and backend prose are excluded.\n");
-        AppendBounded(result, $"Snapshot health: {GetHealthLabel(snapshot.Health)}\n");
-
-        IReadOnlyList<InstallerDiagnosticEntry> entries = snapshot.Entries.Count <= MaximumSanitizedCopyEntries
-            ? snapshot.Entries
-            : snapshot.Entries.Skip(snapshot.Entries.Count - MaximumSanitizedCopyEntries).ToArray();
-        int additionalOmissions = snapshot.Entries.Count - entries.Count;
-        int displayOmitted = snapshot.DisplayOmittedEntryCount > int.MaxValue - additionalOmissions
-            ? int.MaxValue
-            : snapshot.DisplayOmittedEntryCount + additionalOmissions;
-        AppendBounded(result, $"Displayed entries in this copy: {entries.Count.ToString(CultureInfo.InvariantCulture)}\n");
-        AppendBounded(result, $"Display-window omissions: {displayOmitted.ToString(CultureInfo.InvariantCulture)}\n");
-        AppendBounded(result, $"Private raw-log omissions: {snapshot.RawLogOmittedEntryCount.ToString(CultureInfo.InvariantCulture)}\n");
-        AppendBounded(result, $"Coalesced intermediate events: {snapshot.CoalescedEventCount.ToString(CultureInfo.InvariantCulture)}\n");
-
-        foreach (InstallerDiagnosticEntry entry in entries)
+        int maximumEntryCount = Math.Min(snapshot.Entries.Count, MaximumSanitizedCopyEntries);
+        for (int displayedEntryCount = maximumEntryCount; displayedEntryCount >= 0; displayedEntryCount--)
         {
-            string line = $"{entry.Timestamp.ToUniversalTime():O} [{GetLevelLabel(entry.Level)}] {entry.EventCode}: {entry.Message}";
-            if (entry.StableErrorCode is not null)
-                line += $" error={entry.StableErrorCode}";
-            if (!TryAppendBounded(result, line + "\n", Encoding.UTF8.GetByteCount(SanitizedCopyTruncationMarker)))
+            int additionalDisplayOmissions = snapshot.Entries.Count - displayedEntryCount;
+            int displayOmittedEntryCount = snapshot.DisplayOmittedEntryCount > int.MaxValue - additionalDisplayOmissions
+                ? int.MaxValue
+                : snapshot.DisplayOmittedEntryCount + additionalDisplayOmissions;
+            InstallerDiagnosticHealth health = snapshot.Health == InstallerDiagnosticHealth.Healthy && displayOmittedEntryCount > 0
+                ? InstallerDiagnosticHealth.BoundedWithOmissions
+                : snapshot.Health;
+            bool byteLimited = displayedEntryCount < maximumEntryCount;
+            StringBuilder result = new();
+            AppendBounded(result, "SMAPI Linux graphical installer — sanitized diagnostics\n");
+            AppendBounded(result, "Review this text before sharing it. Local paths, identifiers, and backend prose are excluded.\n");
+            AppendBounded(result, $"Snapshot health: {GetHealthLabel(health)}\n");
+            AppendBounded(result, $"Displayed entries in this copy: {displayedEntryCount.ToString(CultureInfo.InvariantCulture)}\n");
+            AppendBounded(result, $"Display-window omissions: {displayOmittedEntryCount.ToString(CultureInfo.InvariantCulture)}\n");
+            AppendBounded(result, $"Private raw-log omissions: {snapshot.RawLogOmittedEntryCount.ToString(CultureInfo.InvariantCulture)}\n");
+            AppendBounded(result, $"Coalesced intermediate events: {snapshot.CoalescedEventCount.ToString(CultureInfo.InvariantCulture)}\n");
+
+            IReadOnlyList<InstallerDiagnosticEntry> entries = snapshot.Entries.Count == displayedEntryCount
+                ? snapshot.Entries
+                : snapshot.Entries.Skip(snapshot.Entries.Count - displayedEntryCount).ToArray();
+            bool fits = true;
+            int reservedBytes = byteLimited ? Encoding.UTF8.GetByteCount(SanitizedCopyTruncationMarker) : 0;
+            foreach (InstallerDiagnosticEntry entry in entries)
             {
-                AppendBounded(result, SanitizedCopyTruncationMarker);
-                break;
+                string line = $"{entry.Timestamp.ToUniversalTime():O} [{GetLevelLabel(entry.Level)}] {entry.EventCode}: {entry.Message}";
+                if (entry.StableErrorCode is not null)
+                    line += $" error={entry.StableErrorCode}";
+                if (!TryAppendBounded(result, line + "\n", reservedBytes))
+                {
+                    fits = false;
+                    break;
+                }
             }
+            if (!fits)
+                continue;
+            if (byteLimited)
+                AppendBounded(result, SanitizedCopyTruncationMarker);
+            return new(result.ToString(), health, displayedEntryCount, displayOmittedEntryCount);
         }
-        return result.ToString();
+        throw new InvalidOperationException("The fixed diagnostic copy header exceeded its reviewed bound.");
     }
 
     /// <summary>Acquire the one cross-window clipboard-write authority for this production session.</summary>
@@ -324,16 +347,21 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
 
     /// <summary>Queue a latest-value progress event. Replaced intermediate values are intentionally coalesced.</summary>
     public void RecordProgress(InstallerDiagnosticCode code, string? releaseTag = null)
-        => this.RecordProgress(new ProgressKey(code, null, null), releaseTag);
+    {
+        ValidateUntypedProgressCode(code);
+        this.RecordProgress(new ProgressKey(code, null, null), releaseTag);
+    }
 
     void IProductionInstallerDiagnosticSink.RecordProgress(InstallerDiagnosticCode code, ReviewedReleasePreparationStage stage)
     {
+        ValidateReleaseProgressCode(code);
         _ = GetReleaseStageMessage(stage);
         this.RecordProgress(new ProgressKey(code, stage, null), releaseTag: null);
     }
 
     void IProductionInstallerDiagnosticSink.RecordProgress(InstallerDiagnosticCode code, TransactionStage stage)
     {
+        ValidateTransactionProgressCode(code);
         _ = GetTransactionStageMessage(stage);
         this.RecordProgress(new ProgressKey(code, null, stage), releaseTag: null);
     }
@@ -512,11 +540,13 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         };
         if (!writer.TryWrite(value))
         {
-            this.IncrementCoalescedEvents();
-            if (lane == DiagnosticLane.Terminal)
+            if (lane == DiagnosticLane.Progress)
+                this.IncrementCoalescedEvents();
+            else
             {
                 this.IncrementRawLogOmittedEntries();
-                this.MarkUnavailable();
+                if (lane == DiagnosticLane.Terminal)
+                    this.MarkUnavailable();
             }
         }
         else
@@ -527,6 +557,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     {
         try
         {
+            await this.WriterStartGate.ConfigureAwait(false);
             while (true)
             {
                 bool wrote = false;
@@ -744,6 +775,34 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
             or InstallerDiagnosticCode.RecoveryPruneTerminal)
         {
             throw new ArgumentException("An exact typed terminal projection is required for this diagnostic code.", nameof(code));
+        }
+    }
+
+    private static void ValidateUntypedProgressCode(InstallerDiagnosticCode code)
+    {
+        if (code is not (InstallerDiagnosticCode.ReleaseDownloading
+            or InstallerDiagnosticCode.ReleaseVerifying
+            or InstallerDiagnosticCode.ExecutionProgress
+            or InstallerDiagnosticCode.ExecutionRecoveryProgress
+            or InstallerDiagnosticCode.RecoveryPruneProgress))
+        {
+            throw new ArgumentException("A reviewed progress diagnostic code is required.", nameof(code));
+        }
+    }
+
+    private static void ValidateReleaseProgressCode(InstallerDiagnosticCode code)
+    {
+        if (code is not (InstallerDiagnosticCode.ReleaseDownloading or InstallerDiagnosticCode.ReleaseVerifying))
+            throw new ArgumentException("A reviewed release-progress diagnostic code is required.", nameof(code));
+    }
+
+    private static void ValidateTransactionProgressCode(InstallerDiagnosticCode code)
+    {
+        if (code is not (InstallerDiagnosticCode.ExecutionProgress
+            or InstallerDiagnosticCode.ExecutionRecoveryProgress
+            or InstallerDiagnosticCode.RecoveryPruneProgress))
+        {
+            throw new ArgumentException("A reviewed transaction-progress diagnostic code is required.", nameof(code));
         }
     }
 
@@ -1008,6 +1067,12 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         DiagnosticProjection? Projection = null
     );
     private sealed record DiagnosticProjection(string EventCode, InstallerLogLevel Level, string Message);
+    private sealed record SanitizedCopyProjection(
+        string Text,
+        InstallerDiagnosticHealth Health,
+        int DisplayedEntryCount,
+        int DisplayOmittedEntryCount
+    );
 }
 
 /// <summary>A safe refusal raised before mutation when the required private diagnostic record is unavailable.</summary>

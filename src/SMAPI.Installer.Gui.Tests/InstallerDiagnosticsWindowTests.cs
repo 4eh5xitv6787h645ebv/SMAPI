@@ -102,6 +102,27 @@ internal sealed class InstallerDiagnosticsWindowTests
     }
 
     [AvaloniaTest]
+    public void ViewerHealthAndCountsMatchTheExactRenderedCaptureAboveTheEntryCap()
+    {
+        InstallerDiagnosticSession session = this.CreateSession();
+        for (int index = 0; index < 129; index++)
+            session.EnsureReadyForMutation();
+
+        InstallerDiagnosticsWindow window = new(session, _ => Task.CompletedTask);
+        string text = window.FindControl<TextBox>("DiagnosticText")!.Text!;
+        int renderedEntryLines = text.Split('\n').Count(line => line.StartsWith("1970-01-01T00:00:00.0000000+00:00 [", StringComparison.Ordinal));
+        string counts = window.FindControl<TextBlock>("SnapshotCountText")!.Text!;
+
+        renderedEntryLines.Should().Be(InstallerDiagnosticSession.MaximumSanitizedCopyEntries);
+        counts.Should().StartWith($"{renderedEntryLines} displayed entries")
+            .And.Contain("2 omitted from the display window");
+        window.FindControl<TextBlock>("SnapshotHealthText")!.Text.Should().Be("bounded; some events were omitted or coalesced");
+        text.Should().Contain($"Displayed entries in this copy: {renderedEntryLines}")
+            .And.Contain("Display-window omissions: 2")
+            .And.NotContain("Snapshot health: complete within configured bounds");
+    }
+
+    [AvaloniaTest]
     public async Task CopyWritesOneBoundedStableSnapshotWithoutReadingClipboard()
     {
         InstallerDiagnosticSession session = this.CreateSession();
