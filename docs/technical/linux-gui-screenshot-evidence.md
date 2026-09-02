@@ -11,9 +11,11 @@ Each caption and provenance entry must identify one of these evidence classes.
 
 A controlled fixture is not a mockup. Design renders, AI-generated images, manually constructed UI facsimiles, and the sealed safe-demo session are never production evidence. The private trusted modpack and save are neither required nor permitted in screenshot inputs.
 
+All 57 entries, including controlled fixtures, must run the exact same reviewed production GUI and backend. The manifest has one top-level production identity: source commit and tree, fork-specific release tag, public package URL and SHA-256, and GUI/backend binary SHA-256 values. Every entry repeats and must exactly match that identity; fixture authority is limited to its public/synthetic inputs or injected failure and cannot substitute another build.
+
 ## Capture matrix
 
-One image may cover adjacent states when every state remains legible and the caption is exact. A contact sheet may cover environment or scale variants only when its individual source PNGs are also retained, hashed, and recorded.
+One image may cover adjacent states when every state remains legible and the caption is exact; shared filenames must have identical pixel, capture, environment, runtime, editing, and privacy provenance. A contact sheet may cover environment or scale variants only when its individual source PNGs are also retained, hashed, and recorded with their own complete environment, capture method/time, and original-resolution privacy review.
 
 ### Detection and selection
 
@@ -114,6 +116,8 @@ The main user guide should keep roughly 18–22 representative images: detection
 
 Every individual source image must remain available even when the guide displays a contact sheet. The repository should contain a machine-readable manifest for automated hash and coverage checks plus a readable provenance record. Both the repository guide and GitHub Pages must use descriptive alt text and captions which identify the visible state and evidence class.
 
+The evidence assets directory is a closed inventory. It contains only `README.md`, `manifest.schema.json`, `manifest.json`, and each referenced final or retained-original PNG directly in that directory. Nested directories, orphan files, undeclared PNGs, and other file types are forbidden.
+
 ## Privacy and provenance
 
 Capture only the application window unless packaged root refusal or a manual console fallback specifically requires a terminal. Use a dedicated generic isolated account and public release data. No capture may expose a desktop background, panel, notification, terminal history, username, real home/game/Mods/save path, mod or save name, private fixture identity, authentication token, cookie, signed query URL, clipboard, or raw environment.
@@ -124,18 +128,20 @@ The manifest or provenance record for every PNG must include:
 
 - screenshot ID, filename, descriptive alt text, caption, and evidence class;
 - exact source commit and tree;
-- exact release tag and package SHA-256 for real package evidence;
+- exact release tag, public package URL, and package SHA-256 matching the top-level reviewed identity, including for controlled-fixture captures;
 - GUI and backend binary hashes;
 - fixture or fault-injection description, without private fixture data;
 - operation and durable state before and after a real lifecycle capture;
 - distribution, architecture, desktop environment, session type, X11/XWayland backend, display scale, theme, and resolution;
 - Avalonia, .NET SDK, and .NET runtime versions;
 - capture timestamp with timezone, capture tool and command, PNG dimensions, and final PNG SHA-256;
-- crop/edit statement and original-source hash when a contact sheet or lossless crop is used;
+- crop/edit statement and each original source's hash, dimensions, complete environment, capture timestamp/method, and privacy review when a contact sheet or lossless crop is used;
 - original-resolution privacy inspection and the reviewer;
 - qualification run/log reference and public release link where applicable.
 
-Strip incidental image metadata before the final hash. If privacy inspection finds personal or private data, discard the image and recapture it; do not commit the unsafe source. Captions and alt text should describe what is visible and avoid claiming that pixels prove filesystem safety, provenance, or accessibility.
+Final and retained-original files must be static, noninterlaced, 8-bit RGB or RGBA PNGs within the documented dimension, pixel, file-size, and decoded-byte bounds. Only the validator's minimal structural/color chunk allowlist is permitted; strip color profiles, text, EXIF, time, custom ancillary metadata, and other incidental chunks before the final hash. The validator bounded-decompresses the complete IDAT stream and verifies its exact scanline size and end-of-stream. If privacy inspection finds personal or private data, discard the image and recapture it; do not commit the unsafe source. Captions and alt text should describe what is visible and avoid claiming that pixels prove filesystem safety, provenance, or accessibility.
+
+The retained-source matrices are exact, not minimum examples: A4 has exactly 100%, 125%, 150%, and 200% source environments; A5 has exactly `light`, `dark`, and `high_contrast`; A6 has exactly `GNOME` and `KDE` with session/backend `x11`/`x11`; and A7 has exactly `GNOME` and `KDE` with session/backend `wayland`/`xwayland`.
 
 ## Completion gates
 

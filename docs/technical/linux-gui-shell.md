@@ -37,6 +37,48 @@ theme again. The light, dark, and explicit high-contrast palettes have automated
 keyboard focus, error text/boundaries, and the manual terminal-help card; real X11/XWayland and
 AT-SPI qualification remain part of exact-package desktop testing.
 
+## Use the production workflow
+
+Close Stardew Valley and back up saves and `Mods` before beginning. From one complete verified
+public package, run `bash "install on Linux (graphical).sh"` as the normal desktop user. The GUI is
+deliberately staged; reaching a later screen never means an earlier read-only action changed files.
+
+1. **Verify a release.** Choose a reviewed public prerelease and select **Download and verify**, or
+   choose **Use local package folder…** and freshly select one folder containing the exact six
+   release files. Integrity and GitHub provenance are separate visible results. A failed or cancelled
+   check authorizes no game discovery or mutation.
+2. **Choose the game.** Review automatically detected folders, or use **Choose game folder…** for a
+   manual selection. Validation is read-only. Continue with **Review plan** only after the folder is
+   reported as valid.
+3. **Inspect one operation.** Select **Install**, **Update**, **Repair**, **Uninstall**, or **Backup**,
+   then choose **Inspect plan**. The plan shows observed state, authenticated current/target release
+   relationship, exact operations, risks, and conflicts. If modified receipt-owned files are
+   eligible for replacement, every additive approval starts unchecked; there is no Select all.
+   Applying those choices only refreshes the read-only plan.
+4. **Confirm, then run.** **Confirm reviewed plan** still changes no files and opens a separate final
+   screen. Recheck the safety boundary, leave Cancel selected if anything is unexpected, and use the
+   explicit **Run** action once. Do not start the game, replace the selected folder, or run another
+   installer while a mutation is active. The final screen distinguishes the durable result from
+   backend-settlement warnings and offers recovery when the exact recorded state requires it.
+
+Operation-specific expectations:
+
+| Operation | When to use it | What to verify in the read-only plan |
+| --- | --- | --- |
+| Install | No managed fork installation is present. | A fresh target release, launcher handling, created files, and no unresolved collision. |
+| Update | A receipt-authenticated fork installation should move to the verified target. | Current and target releases, upgrade or explicit downgrade risk, retained unrelated files, and every requested replacement. |
+| Repair | The receipt-authenticated target release has missing or modified managed files. | Missing files to restore; modified files remain blocked unless individually approved. |
+| Uninstall | Remove receipt-owned SMAPI files and restore the observed launcher where possible. | Destructive removal list, launcher restoration, and preserved unrelated game files, Mods, saves, and reports. |
+| Backup | Create a user checkpoint of the authenticated managed installation. | The checkpoint source release and bounded receipt-owned contents; it is not a backup of Mods or saves. |
+| Rollback | Restore one exact authenticated recovery generation. | Use **Load or refresh history**, select one point, and **Inspect rollback**. No point is selected automatically. Confirm only after reviewing the restored release/state and downgrade risk. |
+
+If startup detects an interrupted mutation, follow the offered authenticated recovery before asking
+for a fresh plan. Recovery admission is explicit and cannot be cancelled after it starts. Recovery
+history cleanup is also a separate reviewed flow: select generations individually, preview cleanup,
+confirm with Cancel focused by default, and then run it. The sanitized diagnostic viewer is useful
+for safe next steps, but the local private log and every displayed path or report should still be
+reviewed before sharing.
+
 Run the focused tests with:
 
 ```sh

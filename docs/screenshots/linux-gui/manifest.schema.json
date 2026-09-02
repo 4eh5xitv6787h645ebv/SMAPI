@@ -8,6 +8,7 @@
   "required": [
     "schema_version",
     "screenshot_spec",
+    "production_identity",
     "captures"
   ],
   "properties": {
@@ -16,6 +17,9 @@
     },
     "screenshot_spec": {
       "const": "docs/technical/linux-gui-screenshot-evidence.md"
+    },
+    "production_identity": {
+      "$ref": "#/$defs/productionIdentity"
     },
     "captures": {
       "type": "array",
@@ -40,15 +44,56 @@
       "minLength": 1,
       "maxLength": 4096
     },
-    "nullableNonEmpty": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/nonEmpty"
-        },
-        {
-          "type": "null"
-        }
-      ]
+    "productionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "source_tree", "release_tag", "package_url", "package_sha256", "public_release_url", "gui_binary_sha256", "backend_binary_sha256"],
+      "properties": {
+        "source_commit": { "$ref": "#/$defs/gitObject" },
+        "source_tree": { "$ref": "#/$defs/gitObject" },
+        "release_tag": { "$ref": "#/$defs/nonEmpty" },
+        "package_url": { "$ref": "#/$defs/nonEmpty" },
+        "package_sha256": { "$ref": "#/$defs/sha256" },
+        "public_release_url": { "$ref": "#/$defs/nonEmpty" },
+        "gui_binary_sha256": { "$ref": "#/$defs/sha256" },
+        "backend_binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["distribution", "architecture", "desktop_environment", "session_type", "display_backend", "display_scale_percent", "theme", "resolution"],
+      "properties": {
+        "distribution": { "$ref": "#/$defs/nonEmpty" },
+        "architecture": { "$ref": "#/$defs/nonEmpty" },
+        "desktop_environment": { "$ref": "#/$defs/nonEmpty" },
+        "session_type": { "enum": ["x11", "wayland"] },
+        "display_backend": { "enum": ["x11", "xwayland"] },
+        "display_scale_percent": { "type": "integer", "minimum": 50, "maximum": 400 },
+        "theme": { "enum": ["light", "dark", "high_contrast"] },
+        "resolution": { "type": "string", "pattern": "^[1-9][0-9]{1,4}x[1-9][0-9]{1,4}$" }
+      }
+    },
+    "sourceCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "tool", "command"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "tool": { "$ref": "#/$defs/nonEmpty" },
+        "command": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "privacyReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewer", "inspected_original_resolution", "notes"],
+      "properties": {
+        "status": { "const": "pass" },
+        "reviewer": { "$ref": "#/$defs/nonEmpty" },
+        "inspected_original_resolution": { "const": true },
+        "notes": { "$ref": "#/$defs/nonEmpty" }
+      }
     },
     "capture": {
       "type": "object",
@@ -125,23 +170,19 @@
         "release": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["tag", "package_sha256", "public_release_url"],
+          "required": ["tag", "package_url", "package_sha256", "public_release_url"],
           "properties": {
             "tag": {
-              "$ref": "#/$defs/nullableNonEmpty"
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "package_url": {
+              "$ref": "#/$defs/nonEmpty"
             },
             "package_sha256": {
-              "oneOf": [
-                {
-                  "$ref": "#/$defs/sha256"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "$ref": "#/$defs/sha256"
             },
             "public_release_url": {
-              "$ref": "#/$defs/nullableNonEmpty"
+              "$ref": "#/$defs/nonEmpty"
             }
           }
         },
@@ -178,47 +219,7 @@
           }
         },
         "environment": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "distribution",
-            "architecture",
-            "desktop_environment",
-            "session_type",
-            "display_backend",
-            "display_scale_percent",
-            "theme",
-            "resolution"
-          ],
-          "properties": {
-            "distribution": {
-              "$ref": "#/$defs/nonEmpty"
-            },
-            "architecture": {
-              "$ref": "#/$defs/nonEmpty"
-            },
-            "desktop_environment": {
-              "$ref": "#/$defs/nonEmpty"
-            },
-            "session_type": {
-              "enum": ["x11", "wayland"]
-            },
-            "display_backend": {
-              "enum": ["x11", "xwayland"]
-            },
-            "display_scale_percent": {
-              "type": "integer",
-              "minimum": 50,
-              "maximum": 400
-            },
-            "theme": {
-              "enum": ["light", "dark", "high_contrast"]
-            },
-            "resolution": {
-              "type": "string",
-              "pattern": "^[1-9][0-9]{1,4}x[1-9][0-9]{1,4}$"
-            }
-          }
+          "$ref": "#/$defs/environment"
         },
         "runtime": {
           "type": "object",
@@ -295,7 +296,7 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["filename", "sha256", "width", "height"],
+                "required": ["filename", "sha256", "width", "height", "environment", "capture", "privacy_review"],
                 "properties": {
                   "filename": {
                     "type": "string",
@@ -314,7 +315,10 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 32768
-                  }
+                  },
+                  "environment": { "$ref": "#/$defs/environment" },
+                  "capture": { "$ref": "#/$defs/sourceCapture" },
+                  "privacy_review": { "$ref": "#/$defs/privacyReview" }
                 }
               }
             }
@@ -363,23 +367,7 @@
           ]
         },
         "privacy_review": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["status", "reviewer", "inspected_original_resolution", "notes"],
-          "properties": {
-            "status": {
-              "const": "pass"
-            },
-            "reviewer": {
-              "$ref": "#/$defs/nonEmpty"
-            },
-            "inspected_original_resolution": {
-              "const": true
-            },
-            "notes": {
-              "$ref": "#/$defs/nonEmpty"
-            }
-          }
+          "$ref": "#/$defs/privacyReview"
         },
         "qualification_reference": {
           "$ref": "#/$defs/nonEmpty"
