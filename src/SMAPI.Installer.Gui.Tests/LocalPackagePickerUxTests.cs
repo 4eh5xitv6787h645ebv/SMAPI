@@ -170,6 +170,45 @@ internal sealed class LocalPackagePickerUxTests
     }
 
     [AvaloniaTest]
+    public async Task PickerFailureThenReviewedDownloadClearsErrorAndFocusesVerifiedContinue()
+    {
+        ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
+        ReleaseVerificationViewModelTests.FakeReleaseService reviewed = new([candidate])
+        {
+            CompletePreparation = true
+        };
+        WorkflowHarness harness = this.CreateWorkflow(
+            pickLocalReleaseFolder: _ => throw new InvalidOperationException("desktop portal failed"),
+            releaseService: reviewed
+        );
+        ReleaseVerificationWindow window = harness.Workflow.CreateInitialWindow();
+        try
+        {
+            window.Show();
+            ReleaseVerificationViewModel viewModel = (ReleaseVerificationViewModel)window.DataContext!;
+            await WaitUntilAsync(() => viewModel.IsDownloadActionVisible);
+
+            PressAccessKey(window, PhysicalKey.L);
+            await WaitUntilAsync(() => viewModel.Heading == "The desktop folder picker could not open");
+            viewModel.IsErrorVisible.Should().BeTrue();
+
+            PressAccessKey(window, PhysicalKey.W);
+            await WaitUntilAsync(() => viewModel.IsVerifiedVisible);
+
+            viewModel.Heading.Should().Be("Release verified — ready to review");
+            viewModel.IsErrorVisible.Should().BeFalse();
+            viewModel.LiveAnnouncement.Should().NotContain("folder picker could not open");
+            window.FindControl<Button>("ContinueButton")!.IsFocused.Should().BeTrue();
+            harness.LocalService.Calls.Should().Be(0);
+        }
+        finally
+        {
+            window.Close();
+            await WaitUntilAsync(() => !window.IsVisible);
+        }
+    }
+
+    [AvaloniaTest]
     public async Task FailedLocalAttemptCanSwitchBackToRetainedReviewedCatalogCandidate()
     {
         ReviewedReleaseCandidate candidate = ReleaseVerificationViewModelTests.Candidate();
@@ -185,10 +224,19 @@ internal sealed class LocalPackagePickerUxTests
             ReleaseVerificationViewModel viewModel = (ReleaseVerificationViewModel)window.DataContext!;
             await WaitUntilAsync(() => viewModel.IsDownloadActionVisible);
 
-            PressAccessKey(window, PhysicalKey.L);
-            await WaitUntilAsync(() => viewModel.Heading == "The selected local release folder was not accepted");
+            for (int attempt = 1; attempt <= ReleaseVerificationController.MaximumAttempts; attempt++)
+            {
+                PressAccessKey(window, PhysicalKey.L);
+                await WaitUntilAsync(() =>
+                    harness.LocalService.Calls == attempt
+                    && harness.ClientFactoryCalls == attempt
+                    && harness.Client.DisposeCalls == attempt
+                    && viewModel.Heading == "The selected local release folder was not accepted"
+                );
+            }
 
-            viewModel.IsReleaseSelectorEnabled.Should().BeTrue();
+            viewModel.IsLocalPackageActionVisible.Should().BeFalse("the bounded local attempt limit was reached");
+            viewModel.IsReleaseSelectorEnabled.Should().BeTrue("local failures must not poison the retained public catalog");
             viewModel.SelectedRelease = candidate;
             await WaitUntilAsync(() => viewModel.IsDownloadActionVisible);
 

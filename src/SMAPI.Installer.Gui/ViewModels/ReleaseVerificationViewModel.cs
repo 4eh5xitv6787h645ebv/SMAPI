@@ -106,6 +106,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         {
             if (value is null || ReferenceEquals(value, this.selectedRelease))
                 return;
+            this.ClearLocalPackagePickerFailure();
             this.Controller.SelectRelease(value);
         }
     }
@@ -161,8 +162,20 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
         )
         || (
             this.snapshot.Source == ReleasePackageSource.LocalFolder
-            && this.snapshot.CanChooseLocal
             && this.snapshot.Releases.Count > 0
+            && (
+                this.snapshot.State == ReleaseVerificationState.Cancelled
+                || (
+                    this.snapshot.State == ReleaseVerificationState.Failed
+                    && (
+                        this.snapshot.Error == ReleaseVerificationError.PreparationFailed
+                        || (
+                            this.snapshot.Error == ReleaseVerificationError.PackageRejected
+                            && !this.snapshot.RejectionIsTerminal
+                        )
+                    )
+                )
+            )
         );
 
     public bool IsDownloadActionVisible => this.snapshot.State == ReleaseVerificationState.Ready
@@ -319,6 +332,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     private Task StartVerificationAsync()
     {
+        this.ClearLocalPackagePickerFailure();
         return this.Controller.StartAsync();
     }
 
@@ -342,6 +356,7 @@ internal sealed class ReleaseVerificationViewModel : ObservableObject, IAsyncDis
 
     private Task RetryAsync()
     {
+        this.ClearLocalPackagePickerFailure();
         if (
             this.snapshot.State == ReleaseVerificationState.NoCompatibleRelease
             || this.snapshot.Error == ReleaseVerificationError.CatalogUnavailable
