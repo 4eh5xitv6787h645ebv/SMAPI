@@ -12,12 +12,13 @@ internal static class GuiComposition
     /// <summary>Create the selected top-level window.</summary>
     public static Window CreateMainWindow(GuiLaunchMode mode)
     {
-        return CreateMainWindow(mode, window => window.Show());
+        return mode switch
+        {
+            GuiLaunchMode.Demo => new MainWindow(),
+            GuiLaunchMode.Production => throw new InvalidOperationException("Production composition requires an initialized private diagnostic session."),
+            _ => throw new ArgumentOutOfRangeException(nameof(mode))
+        };
     }
-
-    /// <summary>Create the selected top-level window and provide the production next-window activation boundary.</summary>
-    internal static Window CreateMainWindow(GuiLaunchMode mode, Action<Window> activateNextWindow)
-        => CreateMainWindow(mode, activateNextWindow, null);
 
     /// <summary>Create the selected top-level window with the production-only diagnostic owner.</summary>
     internal static Window CreateMainWindow(
@@ -27,17 +28,20 @@ internal static class GuiComposition
     )
     {
         ArgumentNullException.ThrowIfNull(activateNextWindow);
-        if (mode == GuiLaunchMode.Demo && diagnosticSession is not null)
-            throw new ArgumentException("Demo mode must not receive production diagnostics.", nameof(diagnosticSession));
-        return CreateMainWindow(
-            mode,
-            () => CreateReleaseVerificationWindow(activateNextWindow, diagnosticSession),
-            () => new MainWindow()
-        );
+        return mode switch
+        {
+            GuiLaunchMode.Production => CreateReleaseVerificationWindow(
+                activateNextWindow,
+                diagnosticSession ?? throw new ArgumentNullException(nameof(diagnosticSession), "Production composition requires private diagnostics.")
+            ),
+            GuiLaunchMode.Demo when diagnosticSession is null => new MainWindow(),
+            GuiLaunchMode.Demo => throw new ArgumentException("Demo mode must not receive production diagnostics.", nameof(diagnosticSession)),
+            _ => throw new ArgumentOutOfRangeException(nameof(mode))
+        };
     }
 
     /// <summary>Create the selected top-level window through explicit factories for deterministic composition tests.</summary>
-    internal static Window CreateMainWindow(
+    internal static Window CreateMainWindowFromFactoriesForTesting(
         GuiLaunchMode mode,
         Func<Window> createProduction,
         Func<Window> createDemo
@@ -56,14 +60,14 @@ internal static class GuiComposition
 
     private static ReleaseVerificationWindow CreateReleaseVerificationWindow(
         Action<Window> activateNextWindow,
-        InstallerDiagnosticSession? diagnosticSession
+        InstallerDiagnosticSession diagnosticSession
     )
     {
         ProductionInstallerWorkflow workflow = new(
             new ReviewedGitHubReleaseService(),
             ProcessInstallerProtocolClient.CreateForCurrentProcess,
             activateNextWindow,
-            diagnosticSession: diagnosticSession
+            diagnosticSession
         );
         return workflow.CreateInitialWindow();
     }

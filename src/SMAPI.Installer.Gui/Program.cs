@@ -108,6 +108,10 @@ internal static class Program
 
     public static AppBuilder BuildAvaloniaApp(GuiLaunchMode mode, InstallerDiagnosticSession? diagnosticSession = null)
     {
+        if (mode == GuiLaunchMode.Production && diagnosticSession is null)
+            throw new ArgumentNullException(nameof(diagnosticSession), "Production desktop startup requires private diagnostics.");
+        if (mode == GuiLaunchMode.Demo && diagnosticSession is not null)
+            throw new ArgumentException("Demo mode must not receive production diagnostics.", nameof(diagnosticSession));
         return AppBuilder.Configure(() => new App(mode, diagnosticSession))
             .UsePlatformDetect()
             .LogToTrace();

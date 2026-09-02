@@ -1,0 +1,85 @@
+<Window
+    x:Class="StardewModdingAPI.Installer.Gui.InstallerDiagnosticsWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="SMAPI Linux Installer — Private diagnostics"
+    Width="760"
+    Height="620"
+    MinWidth="420"
+    MinHeight="420"
+    WindowStartupLocation="CenterOwner">
+  <Window.Styles>
+    <Style Selector="Border.keyboard-focus:focus-visible">
+      <Setter Property="BorderBrush" Value="#FFE082" />
+      <Setter Property="BorderThickness" Value="3" />
+    </Style>
+  </Window.Styles>
+  <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+    <Grid x:Name="PageGrid" Margin="28" RowDefinitions="Auto,Auto,*,Auto,Auto" RowSpacing="16">
+      <StackPanel Grid.Row="0" Spacing="4">
+        <TextBlock AutomationProperties.HeadingLevel="1" FontSize="28" FontWeight="Bold" Text="Private diagnostic log" TextWrapping="Wrap" />
+        <TextBlock Classes="muted" Text="Snapshot captured when this window opened. Close and reopen it to refresh." TextWrapping="Wrap" />
+      </StackPanel>
+
+      <Border
+          x:Name="PrivacyRegion"
+          Grid.Row="1"
+          Classes="keyboard-focus"
+          Focusable="True"
+          TabIndex="0"
+          Padding="14"
+          AutomationProperties.Name="Private diagnostics. Review this snapshot before sharing. Local paths, backend messages, URLs, package and release identifiers, digests, and private workload names are excluded."
+          Background="#3B3216"
+          BorderBrush="#FFD166"
+          BorderThickness="2"
+          CornerRadius="8">
+        <StackPanel Spacing="6">
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Private — review before sharing" TextWrapping="Wrap" />
+          <TextBlock Text="This view excludes local paths, backend messages, URLs, package identifiers, digests, and private workload names. Review the copied text yourself before sending it to anyone." TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <TextBox
+          x:Name="DiagnosticText"
+          Grid.Row="2"
+          AcceptsReturn="True"
+          IsReadOnly="True"
+          MinHeight="240"
+          TabIndex="1"
+          TextWrapping="Wrap"
+          ScrollViewer.VerticalScrollBarVisibility="Auto"
+          AutomationProperties.Name="Sanitized installer diagnostic snapshot" />
+
+      <Border
+          x:Name="CopyStatusRegion"
+          Grid.Row="3"
+          MinHeight="24"
+          AutomationProperties.LiveSetting="Polite"
+          AutomationProperties.Name="{Binding #CopyStatusText.Text}">
+        <TextBlock x:Name="CopyStatusText" Classes="muted" TextWrapping="Wrap" />
+      </Border>
+
+      <WrapPanel Grid.Row="4" Orientation="Horizontal">
+        <Button
+            x:Name="CopyButton"
+            Classes="primary focus-ring"
+            Margin="0,0,12,8"
+            TabIndex="2"
+            AutomationProperties.AccessKey="Alt+Y"
+            AutomationProperties.HelpText="Writes this bounded sanitized snapshot to the clipboard once. The installer never reads clipboard contents."
+            AutomationProperties.Name="Copy sanitized diagnostics"
+            Click="OnCopyClicked"
+            Content="Cop_y sanitized diagnostics" />
+        <Button
+            x:Name="CloseButton"
+            Classes="focus-ring"
+            Margin="0,0,12,8"
+            TabIndex="3"
+            AutomationProperties.AccessKey="Alt+X"
+            AutomationProperties.Name="Close diagnostic viewer"
+            Click="OnCloseClicked"
+            Content="E_xit" />
+      </WrapPanel>
+    </Grid>
+  </ScrollViewer>
+</Window>

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -29,7 +30,8 @@ internal sealed class InstallerDiagnosticSessionTests
         InstallerLog log = this.CreateLog(operationId);
         string path = log.Path;
         DateTimeOffset now = DateTimeOffset.UnixEpoch;
-        await using (InstallerDiagnosticSession session = new(log, operationId, () => now))
+        InstallerDiagnosticSession session = new(log, operationId, () => now);
+        await using (session)
         {
             session.Record(InstallerDiagnosticCode.ReleaseCatalogLoading);
             session.Record(InstallerDiagnosticCode.ReleaseFailed, ProtocolPrePlanErrorCode.PackageRejected, "fork-linux-v1-alpha.2");
@@ -39,12 +41,14 @@ internal sealed class InstallerDiagnosticSessionTests
         string[] lines = File.ReadAllLines(path);
         lines.Should().HaveCount(4);
         lines[0].Should().Contain("session.started");
-        lines[1].Should().Contain("release.failed");
-        lines[1].Should().Contain("protocol.preplan.package-rejected");
-        lines[1].Should().Contain("fork-linux-v1-alpha.2");
-        lines[2].Should().Contain("release.catalog.loading");
+        string middle = string.Join('\n', lines[1], lines[2]);
+        middle.Should().Contain("release.failed");
+        middle.Should().Contain("protocol.preplan.package-rejected");
+        middle.Should().Contain("fork-linux-v1-alpha.2");
+        middle.Should().Contain("release.catalog.loading");
         lines[3].Should().Contain("session.completed");
         lines.Should().OnlyContain(line => !line.Contains(operationId.ToString(), StringComparison.OrdinalIgnoreCase) || line.Contains(operationId.ToString("N"), StringComparison.Ordinal));
+        session.CreateSanitizedCopyText().Should().NotContain("fork-linux-v1-alpha.2", "release identifiers are excluded from the viewer projection");
     }
 
     [Test]
@@ -66,6 +70,54 @@ internal sealed class InstallerDiagnosticSessionTests
         session.Entries.Count.Should().BeLessThanOrEqualTo(InstallerDiagnosticSession.MaximumDisplayEntries);
         session.Entries.Should().Contain(entry => entry.EventCode == "execution.terminal" && entry.StableErrorCode == "protocol.terminal.io-failure");
         new FileInfo(log.Path).Length.Should().BeLessThanOrEqualTo(64 * 1024);
+    }
+
+    [Test]
+    public async Task SingleLaneStateFlood_UsesOneBoundedWriterWakeAndSettles()
+    {
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = this.CreateLog(operationId, maximumFileBytes: 64 * 1024);
+        InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+
+        Action flood = () =>
+        {
+            for (int index = 0; index < 1_000_000; index++)
+                session.Record(InstallerDiagnosticCode.ReleaseCatalogLoading);
+        };
+        flood.ExecutionTime().Should().BeLessThan(TimeSpan.FromSeconds(5));
+        session.MarkCompleted();
+        await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        session.Entries.Count.Should().BeLessThanOrEqualTo(InstallerDiagnosticSession.MaximumDisplayEntries);
+        session.CoalescedEventCount.Should().BeGreaterThan(0);
+        File.ReadLines(log.Path).Last().Should().Contain("session.completed");
+    }
+
+    [Test]
+    public async Task ConcurrentRecordAndDispose_NeverLeaksAncillaryWakeFailures()
+    {
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = this.CreateLog(operationId, maximumFileBytes: 64 * 1024);
+        InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+        ConcurrentQueue<Exception> failures = new();
+
+        Task producer = Task.Run(() =>
+        {
+            try
+            {
+                for (int index = 0; index < 250_000; index++)
+                    session.Record(InstallerDiagnosticCode.ReleaseCatalogLoading);
+            }
+            catch (Exception ex)
+            {
+                failures.Enqueue(ex);
+            }
+        });
+        Task disposer = Task.Run(async () => await session.DisposeAsync());
+
+        await Task.WhenAll(producer, disposer).WaitAsync(TimeSpan.FromSeconds(5));
+
+        failures.Should().BeEmpty();
     }
 
     [Test]
@@ -102,6 +154,20 @@ internal sealed class InstallerDiagnosticSessionTests
             .WithMessage("Private installer diagnostics are unavailable; no operation was started.");
         session.IsAvailable.Should().BeFalse();
         File.ReadAllText(outside).Should().Be("preserve");
+    }
+
+    [Test]
+    public async Task EnsureReadyForMutation_FullBoundedLogFailsClosed()
+    {
+        Guid operationId = Guid.NewGuid();
+        InstallerLog log = this.CreateLog(operationId, maximumFileBytes: 2048, maximumEntryCount: 1);
+        await using InstallerDiagnosticSession session = new(log, operationId, () => DateTimeOffset.UnixEpoch);
+
+        Action action = session.EnsureReadyForMutation;
+
+        action.Should().Throw<InstallerDiagnosticsUnavailableException>();
+        session.IsAvailable.Should().BeFalse();
+        File.ReadAllText(log.Path).Should().Contain("log.truncated");
     }
 
     [Test]

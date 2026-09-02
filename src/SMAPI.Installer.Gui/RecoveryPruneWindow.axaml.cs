@@ -1,6 +1,7 @@
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Threading;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui;
@@ -14,10 +15,11 @@ internal sealed partial class RecoveryPruneWindow : Window, IAsyncDisposable
     private bool CloseApproved;
     private bool CloseCheckActive;
 
-    public RecoveryPruneWindow(RecoveryPruneViewModel viewModel)
+    public RecoveryPruneWindow(RecoveryPruneViewModel viewModel, InstallerDiagnosticSession? diagnosticSession = null)
     {
         this.InitializeComponent();
         this.ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        this.DiagnosticsAccess.Attach(diagnosticSession);
         this.DataContext = viewModel;
         this.Opened += this.OnOpened;
         this.Closing += this.OnClosing;

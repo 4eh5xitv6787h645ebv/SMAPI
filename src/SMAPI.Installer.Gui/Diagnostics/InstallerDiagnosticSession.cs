@@ -69,8 +69,7 @@ internal sealed record InstallerDiagnosticEntry(
     InstallerLogLevel Level,
     string EventCode,
     string Message,
-    string? StableErrorCode,
-    string? ReleaseTag
+    string? StableErrorCode
 );
 
 /// <summary>The bounded diagnostic writer state exposed to the local viewer.</summary>
@@ -112,12 +111,14 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
     private readonly Channel<PendingDiagnostic> Normal;
     private readonly Channel<PendingDiagnostic> Progress;
     private readonly Channel<PendingDiagnostic> Terminal;
+    private readonly SemaphoreSlim WakeSignal = new(0, 1);
     private readonly CancellationTokenSource Lifetime = new();
     private readonly object Sync = new();
     private readonly List<InstallerDiagnosticEntry> EntriesValue = [];
     private readonly HashSet<ProgressKey> ObservedProgress = [];
     private readonly Task Writer;
     private int coalescedEvents;
+    private int clipboardWriteActive;
     private long revision;
     private int omittedEntries;
     private bool unavailable;
@@ -138,7 +139,8 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
 
         // This synchronous fixed record proves the private log can be created and written before the production
         // frontend starts Avalonia, networking, a backend process, game discovery, or mutation.
-        this.WriteCore(new(InstallerDiagnosticCode.SessionStarted, null, null));
+        if (!this.WriteCore(new(InstallerDiagnosticCode.SessionStarted, null, null)))
+            throw new InstallerDiagnosticsUnavailableException();
         this.Writer = Task.Run(this.RunWriterAsync);
     }
 
@@ -233,7 +235,10 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         IReadOnlyList<InstallerDiagnosticEntry> entries = snapshot.Entries.Count <= MaximumSanitizedCopyEntries
             ? snapshot.Entries
             : snapshot.Entries.Skip(snapshot.Entries.Count - MaximumSanitizedCopyEntries).ToArray();
-        int omitted = checked(snapshot.OmittedEntryCount + snapshot.Entries.Count - entries.Count);
+        int additionalOmissions = snapshot.Entries.Count - entries.Count;
+        int omitted = snapshot.OmittedEntryCount > int.MaxValue - additionalOmissions
+            ? int.MaxValue
+            : snapshot.OmittedEntryCount + additionalOmissions;
         if (omitted > 0 || snapshot.CoalescedEventCount > 0)
         {
             AppendBounded(
@@ -245,8 +250,6 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         foreach (InstallerDiagnosticEntry entry in entries)
         {
             string line = $"{entry.Timestamp.ToUniversalTime():O} [{GetLevelLabel(entry.Level)}] {entry.EventCode}: {entry.Message}";
-            if (entry.ReleaseTag is not null)
-                line += $" release={entry.ReleaseTag}";
             if (entry.StableErrorCode is not null)
                 line += $" error={entry.StableErrorCode}";
             if (!TryAppendBounded(result, line + "\n", Encoding.UTF8.GetByteCount(SanitizedCopyTruncationMarker)))
@@ -257,6 +260,16 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         }
         return result.ToString();
     }
+
+    /// <summary>Acquire the one cross-window clipboard-write authority for this production session.</summary>
+    internal bool TryAcquireClipboardWriteAuthority()
+        => Interlocked.CompareExchange(ref this.clipboardWriteActive, 1, 0) == 0;
+
+    internal bool IsClipboardWriteActive => Volatile.Read(ref this.clipboardWriteActive) != 0;
+
+    /// <summary>Release clipboard authority only after the platform provider has actually settled.</summary>
+    internal void ReleaseClipboardWriteAuthority()
+        => Volatile.Write(ref this.clipboardWriteActive, 0);
 
     /// <summary>Queue a fixed state event without blocking the publishing controller.</summary>
     public void Record(InstallerDiagnosticCode code, string? releaseTag = null)
@@ -300,7 +313,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
                 return;
             if (!this.ObservedProgress.Add(key))
             {
-                Interlocked.Increment(ref this.coalescedEvents);
+                this.IncrementCoalescedEvents();
                 return;
             }
         }
@@ -321,7 +334,11 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
 
         try
         {
-            this.WriteCore(new(InstallerDiagnosticCode.MutationLoggingVerified, null, null));
+            if (!this.WriteCore(new(InstallerDiagnosticCode.MutationLoggingVerified, null, null)))
+            {
+                this.MarkUnavailable();
+                throw new InstallerDiagnosticsUnavailableException();
+            }
         }
         catch (Exception ex) when (ex is not InstallerDiagnosticsUnavailableException)
         {
@@ -356,15 +373,17 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         this.Terminal.Writer.TryComplete();
         this.Normal.Writer.TryComplete();
         this.Progress.Writer.TryComplete();
+        this.SignalWriter();
         try
         {
             await this.Writer.ConfigureAwait(false);
             try
             {
-                this.WriteCore(
+                if (!this.WriteCore(
                     new(endedNormally ? InstallerDiagnosticCode.SessionCompleted : InstallerDiagnosticCode.SessionEndedUnexpectedly, null, null),
                     isLogTerminal: true
-                );
+                ))
+                    this.MarkUnavailable();
             }
             catch
             {
@@ -375,6 +394,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         {
             this.Lifetime.Cancel();
             this.Lifetime.Dispose();
+            this.WakeSignal.Dispose();
             try
             {
                 this.Log.Dispose();
@@ -412,10 +432,12 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         };
         if (!writer.TryWrite(value))
         {
-            Interlocked.Increment(ref this.coalescedEvents);
+            this.IncrementCoalescedEvents();
             if (lane == DiagnosticLane.Terminal)
                 this.MarkUnavailable();
         }
+        else
+            this.SignalWriter();
     }
 
     private async Task RunWriterAsync()
@@ -450,10 +472,7 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
                     break;
                 }
 
-                Task<bool> terminalReady = this.Terminal.Reader.WaitToReadAsync(this.Lifetime.Token).AsTask();
-                Task<bool> normalReady = this.Normal.Reader.WaitToReadAsync(this.Lifetime.Token).AsTask();
-                Task<bool> progressReady = this.Progress.Reader.WaitToReadAsync(this.Lifetime.Token).AsTask();
-                await Task.WhenAny(terminalReady, normalReady, progressReady).ConfigureAwait(false);
+                await this.WakeSignal.WaitAsync(this.Lifetime.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (this.Lifetime.IsCancellationRequested)
@@ -465,7 +484,32 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
         }
     }
 
-    private void WriteCore(PendingDiagnostic pending, bool isLogTerminal = false)
+    private void SignalWriter()
+    {
+        try
+        {
+            if (this.WakeSignal.CurrentCount == 0)
+            {
+                try { this.WakeSignal.Release(); }
+                catch (SemaphoreFullException) { }
+            }
+        }
+        catch (ObjectDisposedException) { }
+    }
+
+    private void IncrementCoalescedEvents()
+    {
+        int observed;
+        do
+        {
+            observed = Volatile.Read(ref this.coalescedEvents);
+            if (observed == int.MaxValue)
+                return;
+        }
+        while (Interlocked.CompareExchange(ref this.coalescedEvents, observed + 1, observed) != observed);
+    }
+
+    private bool WriteCore(PendingDiagnostic pending, bool isLogTerminal = false)
     {
         DiagnosticProjection projection = Project(pending);
         DateTimeOffset timestamp = this.GetNow();
@@ -494,14 +538,16 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
                 if (this.EntriesValue.Count == MaximumDisplayEntries)
                 {
                     this.EntriesValue.RemoveAt(0);
-                    this.omittedEntries++;
+                    if (this.omittedEntries < int.MaxValue)
+                        this.omittedEntries++;
                     this.truncated = true;
                 }
-                this.EntriesValue.Add(new(timestamp, projection.Level, projection.EventCode, projection.Message, pending.StableErrorCode, pending.ReleaseTag));
+                this.EntriesValue.Add(new(timestamp, projection.Level, projection.EventCode, projection.Message, pending.StableErrorCode));
                 this.revision++;
             }
         }
-        this.Changed?.Invoke(this, EventArgs.Empty);
+        this.RaiseChangedSafely();
+        return written;
     }
 
     private void MarkUnavailable()
@@ -515,7 +561,19 @@ internal sealed class InstallerDiagnosticSession : IProductionInstallerDiagnosti
                 this.revision++;
         }
         if (changed)
+            this.RaiseChangedSafely();
+    }
+
+    private void RaiseChangedSafely()
+    {
+        try
+        {
             this.Changed?.Invoke(this, EventArgs.Empty);
+        }
+        catch
+        {
+            // Diagnostic presentation is ancillary and can't change logging or installer control flow.
+        }
     }
 
     private static string? GetStablePrePlanCode(ProtocolPrePlanErrorCode? value) => value switch

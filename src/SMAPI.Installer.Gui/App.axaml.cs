@@ -18,28 +18,17 @@ public sealed partial class App : Application
     }
 
     internal App(GuiLaunchMode launchMode)
-        : this(launchMode, (InstallerDiagnosticSession?)null)
+        : this(
+            launchMode,
+            launchMode == GuiLaunchMode.Demo
+                ? (InstallerDiagnosticSession?)null
+                : throw new ArgumentException("Production app composition requires private diagnostics.", nameof(launchMode))
+        )
     {
     }
 
     internal App(GuiLaunchMode launchMode, InstallerDiagnosticSession? diagnosticSession)
         : this(launchMode, diagnosticSession, (mode, session, activateNext) => GuiComposition.CreateMainWindow(mode, activateNext, session))
-    {
-    }
-
-    internal App(
-        GuiLaunchMode launchMode,
-        Func<GuiLaunchMode, Window> createMainWindow
-    )
-        : this(launchMode, null, (mode, _, _) => createMainWindow(mode))
-    {
-    }
-
-    internal App(
-        GuiLaunchMode launchMode,
-        Func<GuiLaunchMode, Action<Window>, Window> createMainWindow
-    )
-        : this(launchMode, null, (mode, _, activateNext) => createMainWindow(mode, activateNext))
     {
     }
 
@@ -51,6 +40,8 @@ public sealed partial class App : Application
     {
         if (!Enum.IsDefined(launchMode))
             throw new ArgumentOutOfRangeException(nameof(launchMode));
+        if (launchMode == GuiLaunchMode.Production && diagnosticSession is null)
+            throw new ArgumentNullException(nameof(diagnosticSession), "Production app composition requires private diagnostics.");
         if (launchMode == GuiLaunchMode.Demo && diagnosticSession is not null)
             throw new ArgumentException("Demo mode must not receive production diagnostics.", nameof(diagnosticSession));
         this.LaunchMode = launchMode;

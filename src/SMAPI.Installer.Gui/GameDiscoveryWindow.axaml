@@ -3,6 +3,7 @@
     x:DataType="vm:GameDiscoveryViewModel"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:StardewModdingAPI.Installer.Gui"
     xmlns:vm="using:StardewModdingAPI.Installer.Gui.ViewModels"
     Title="SMAPI Linux Installer — Choose game folder"
     Width="980"
@@ -30,6 +31,7 @@
             Text="Choose your Stardew Valley folder"
             TextWrapping="Wrap" />
         <TextBlock Classes="muted" FontSize="16" Text="Read-only Linux game detection and validation" TextWrapping="Wrap" />
+        <local:InstallerDiagnosticsAccess x:Name="DiagnosticsAccess" />
       </StackPanel>
 
       <Border Grid.Row="1" Classes="card">

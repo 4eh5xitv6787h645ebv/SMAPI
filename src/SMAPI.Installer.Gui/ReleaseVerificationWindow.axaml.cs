@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using StardewModdingAPI.Installer.Gui.Diagnostics;
 using StardewModdingAPI.Installer.Gui.ViewModels;
 
 namespace StardewModdingAPI.Installer.Gui;
@@ -14,10 +15,11 @@ internal sealed partial class ReleaseVerificationWindow : Window, IAsyncDisposab
     private bool CloseApproved;
     private bool CloseStarted;
 
-    internal ReleaseVerificationWindow(ReleaseVerificationViewModel viewModel)
+    internal ReleaseVerificationWindow(ReleaseVerificationViewModel viewModel, InstallerDiagnosticSession? diagnosticSession = null)
     {
         this.InitializeComponent();
         this.ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        this.DiagnosticsAccess.Attach(diagnosticSession);
         this.DataContext = viewModel;
         this.Opened += this.OnOpened;
         this.Closing += this.OnClosing;

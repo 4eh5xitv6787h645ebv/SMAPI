@@ -40,22 +40,74 @@ internal sealed class ProductionInstallerWorkflow
         IReviewedReleaseService releaseService,
         Func<IInstallerProtocolClient> clientFactory,
         Action<Window> activateNextWindow,
+        InstallerDiagnosticSession diagnosticSession,
         Func<GameDiscoveryViewModel, GameDiscoveryWindow>? discoveryWindowFactory = null,
         Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
         Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
         Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null,
-        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null,
-        InstallerDiagnosticSession? diagnosticSession = null
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null
+    )
+        : this(
+            releaseService,
+            clientFactory,
+            activateNextWindow,
+            discoveryWindowFactory,
+            pickFolder,
+            planWindowFactory,
+            executionWindowFactory,
+            recoveryPruneWindowFactory,
+            diagnosticSession ?? throw new ArgumentNullException(nameof(diagnosticSession)),
+            allowMissingDiagnostics: false
+        )
+    {
+    }
+
+    /// <summary>Create the diagnostics-free workflow seam used only by deterministic controller/window tests.</summary>
+    internal static ProductionInstallerWorkflow CreateWithoutDiagnosticsForTesting(
+        IReviewedReleaseService releaseService,
+        Func<IInstallerProtocolClient> clientFactory,
+        Action<Window> activateNextWindow,
+        Func<GameDiscoveryViewModel, GameDiscoveryWindow>? discoveryWindowFactory = null,
+        Func<GameDiscoveryWindow, Task<string?>>? pickFolder = null,
+        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory = null,
+        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory = null,
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory = null
+    ) => new(
+        releaseService,
+        clientFactory,
+        activateNextWindow,
+        discoveryWindowFactory,
+        pickFolder,
+        planWindowFactory,
+        executionWindowFactory,
+        recoveryPruneWindowFactory,
+        diagnosticSession: null,
+        allowMissingDiagnostics: true
+    );
+
+    private ProductionInstallerWorkflow(
+        IReviewedReleaseService releaseService,
+        Func<IInstallerProtocolClient> clientFactory,
+        Action<Window> activateNextWindow,
+        Func<GameDiscoveryViewModel, GameDiscoveryWindow>? discoveryWindowFactory,
+        Func<GameDiscoveryWindow, Task<string?>>? pickFolder,
+        Func<PlanReviewViewModel, PlanReviewWindow>? planWindowFactory,
+        Func<ExecutionViewModel, ExecutionWindow>? executionWindowFactory,
+        Func<RecoveryPruneViewModel, RecoveryPruneWindow>? recoveryPruneWindowFactory,
+        InstallerDiagnosticSession? diagnosticSession,
+        bool allowMissingDiagnostics
     )
     {
+        if (!allowMissingDiagnostics && diagnosticSession is null)
+            throw new ArgumentNullException(nameof(diagnosticSession));
         this.ReleaseService = releaseService ?? throw new ArgumentNullException(nameof(releaseService));
         this.ClientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
         this.ActivateNextWindow = activateNextWindow ?? throw new ArgumentNullException(nameof(activateNextWindow));
-        this.DiscoveryWindowFactory = discoveryWindowFactory ?? (viewModel => new(viewModel));
+        this.DiscoveryWindowFactory = discoveryWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
         this.PickFolder = pickFolder ?? PickFolderAsync;
-        this.PlanWindowFactory = planWindowFactory ?? (viewModel => new(viewModel));
-        this.ExecutionWindowFactory = executionWindowFactory ?? (viewModel => new(viewModel));
-        this.RecoveryPruneWindowFactory = recoveryPruneWindowFactory ?? (viewModel => new(viewModel));
+        this.PlanWindowFactory = planWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
+        this.ExecutionWindowFactory = executionWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
+        this.RecoveryPruneWindowFactory = recoveryPruneWindowFactory ?? (viewModel => new(viewModel, diagnosticSession));
         this.DiagnosticSession = diagnosticSession;
         this.DiagnosticObserver = diagnosticSession is null ? null : new(diagnosticSession);
     }
@@ -70,7 +122,7 @@ internal sealed class ProductionInstallerWorkflow
         this.ObserveReleaseController(this.ReleaseController);
         this.ReleaseController.Changed += this.OnReleaseDiagnosticChanged;
         this.ReleaseViewModel = new(this.ReleaseController);
-        this.ReleaseWindow = new(this.ReleaseViewModel);
+        this.ReleaseWindow = new(this.ReleaseViewModel, this.DiagnosticSession);
         this.ReleaseViewModel.ContinueRequested += this.OnContinueRequested;
         return this.ReleaseWindow;
     }
