@@ -95,6 +95,8 @@ public sealed record ProtocolPlanDigest
         ProtocolReleaseIdentity? currentRelease,
         ProtocolReleaseIdentity? targetRelease,
         ObservedInstallState observedState,
+        int recoveryUsedGenerationCount,
+        int recoveryMaximumGenerationCount,
         IReadOnlyList<ProtocolPlanOperation> operations,
         IReadOnlyList<ProtocolPlanConflict> conflicts,
         IReadOnlyList<ProtocolPlanCandidate> candidates,
@@ -111,6 +113,10 @@ public sealed record ProtocolPlanDigest
         WriteRelease(writer, "current_release", currentRelease);
         WriteRelease(writer, "target_release", targetRelease);
         writer.WriteString("observed_state", JsonNamingPolicy.CamelCase.ConvertName(observedState.ToString()));
+        writer.WriteStartObject("recovery_capacity");
+        writer.WriteNumber("used_generation_count", recoveryUsedGenerationCount);
+        writer.WriteNumber("maximum_generation_count", recoveryMaximumGenerationCount);
+        writer.WriteEndObject();
         writer.WriteStartArray("operations");
         foreach (ProtocolPlanOperation item in operations)
         {

@@ -229,7 +229,7 @@
 
       <Border x:Name="ManualFallbackCard" Grid.Row="3" Classes="card">
         <StackPanel Spacing="8">
-          <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Manual installation remains available" />
+          <TextBlock x:Name="ManualFallbackHeading" AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Manual installation remains available" />
           <TextBlock
               x:Name="ManualFallbackText"
               AutomationProperties.Name="Manual terminal installation help"

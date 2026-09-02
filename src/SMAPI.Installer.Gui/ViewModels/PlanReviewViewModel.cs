@@ -126,6 +126,16 @@ internal sealed record PlanReviewSummaryRow(
     public string AccessibleName => $"{this.Label}. {this.CountText}. {this.Detail}";
 }
 
+internal sealed record PlanReviewFactRow(string Label, string Value)
+{
+    public string AccessibleName => $"{this.Label}: {this.Value}";
+}
+
+internal sealed record PlanReviewPathFactRow(string DisplayPath, string ObservedState, string PlannedAction)
+{
+    public string AccessibleName => $"{this.DisplayPath}. Observed state: {this.ObservedState}. Planned action: {this.PlannedAction}.";
+}
+
 /// <summary>Presentation-only adapter for one bounded, game-bound plan-inspection session.</summary>
 internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
 {
@@ -174,6 +184,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     private string conflictSummary = "No plan has been inspected.";
     private string candidateSummary = "No plan has been inspected.";
     private string additionalNoticeDetail = "No plan has been inspected.";
+    private string pathFactSummary = "No plan has been inspected.";
+    private IReadOnlyList<PlanReviewFactRow> safetyRows = Array.Empty<PlanReviewFactRow>();
+    private IReadOnlyList<PlanReviewPathFactRow> pathFactRows = Array.Empty<PlanReviewPathFactRow>();
     private IReadOnlyList<PlanReviewSummaryRow> riskRows = Array.Empty<PlanReviewSummaryRow>();
     private IReadOnlyList<PlanReviewSummaryRow> operationRows = Array.Empty<PlanReviewSummaryRow>();
     private IReadOnlyList<PlanReviewSummaryRow> conflictRows = Array.Empty<PlanReviewSummaryRow>();
@@ -263,9 +276,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         private set => this.SetProperty(ref this.liveAnnouncement, value);
     }
 
-    public string GameDetail => "Validated Stardew Valley game folder";
+    public string GameDetail => $"Selected game: {this.Controller.GameDisplayName}";
 
-    public string GameAccessibleName => "Bound game folder";
+    public string GameAccessibleName => $"Bound selected game: {this.Controller.GameDisplayName}";
 
     public string ReleaseDetail => $"Verified release: {this.Controller.VerifiedRelease.Tag}\nVersion: {this.Controller.VerifiedRelease.EmbeddedVersion}";
 
@@ -331,6 +344,24 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     {
         get => this.additionalNoticeDetail;
         private set => this.SetProperty(ref this.additionalNoticeDetail, value);
+    }
+
+    public string PathFactSummary
+    {
+        get => this.pathFactSummary;
+        private set => this.SetProperty(ref this.pathFactSummary, value);
+    }
+
+    public IReadOnlyList<PlanReviewFactRow> SafetyRows
+    {
+        get => this.safetyRows;
+        private set => this.SetProperty(ref this.safetyRows, value);
+    }
+
+    public IReadOnlyList<PlanReviewPathFactRow> PathFactRows
+    {
+        get => this.pathFactRows;
+        private set => this.SetProperty(ref this.pathFactRows, value);
     }
 
     public IReadOnlyList<PlanReviewSummaryRow> RiskRows
@@ -487,6 +518,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
     public bool HasRiskRows => this.RiskRows.Count > 0;
 
     public bool HasOperationRows => this.OperationRows.Count > 0;
+    public bool HasPathFactRows => this.PathFactRows.Count > 0;
 
     public bool HasConflictRows => this.ConflictRows.Count > 0;
 
@@ -804,6 +836,9 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
             this.ConflictSummary = "No plan has been inspected.";
             this.CandidateSummary = "No plan has been inspected.";
             this.AdditionalNoticeDetail = "No plan has been inspected.";
+            this.PathFactSummary = "No plan has been inspected.";
+            this.SafetyRows = Array.Empty<PlanReviewFactRow>();
+            this.PathFactRows = Array.Empty<PlanReviewPathFactRow>();
             this.RiskRows = Array.Empty<PlanReviewSummaryRow>();
             this.OperationRows = Array.Empty<PlanReviewSummaryRow>();
             this.ConflictRows = Array.Empty<PlanReviewSummaryRow>();
@@ -818,6 +853,14 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.SafetyDetail = plan.Operation == InstallerOperation.Rollback
             ? "Recommended default: Cancel. This preview is bound to the exact selected recovery point. Confirm plan seals it but does not change files; a separate explicit Run action is still required."
             : "Recommended default: Cancel. Candidate approval only requests a refreshed read-only preview. Confirm plan seals the exact current preview but does not change files; a separate explicit Run action is still required.";
+        this.SafetyRows = CreateSafetyRows(plan);
+        this.PathFactRows = Array.AsReadOnly(plan.PathFacts.Select(CreatePathFactRow).ToArray());
+        int totalPathFacts = checked(this.PathFactRows.Count + plan.AdditionalPathFactCount);
+        this.PathFactSummary = totalPathFacts == 0
+            ? "No missing or explicitly approved modified managed-path details are required for this plan."
+            : plan.AdditionalPathFactCount == 0
+                ? $"{totalPathFacts} managed-path detail(s) are shown."
+                : $"Showing {this.PathFactRows.Count} of {totalPathFacts} managed-path detail(s); {plan.AdditionalPathFactCount} additional detail(s) are omitted by the fixed display bound.";
         this.RiskRows = Array.AsReadOnly(plan.Risks
             .Select(risk => GetRiskRow(risk))
             .ToArray());
@@ -848,6 +891,58 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.AdditionalNoticeDetail = plan.AdditionalNoticeCount == 0
             ? "No additional backend notices were reported."
             : $"Additional backend notices observed: {plan.AdditionalNoticeCount}. This summary projection does not expose their text.";
+    }
+
+    private static IReadOnlyList<PlanReviewFactRow> CreateSafetyRows(PlanReviewPlan plan)
+    {
+        int retain = plan.OperationCounts.SingleOrDefault(item => item.Kind == PlanOperationKind.Retain)?.Count ?? 0;
+        int preserve = plan.OperationCounts.SingleOrDefault(item => item.Kind == PlanOperationKind.Preserve)?.Count ?? 0;
+        List<PlanReviewFactRow> rows =
+        [
+            new("Recovery location", ".smapi-installer/recovery inside the selected game folder"),
+            new("Recovery capacity", $"{plan.RecoveryCapacity.Used} of {plan.RecoveryCapacity.Maximum} slots used; {plan.RecoveryCapacity.Remaining} remaining"),
+            new("Pre-change recovery point", plan.RecoveryCapacity.CanCreate ? "A committed run will create one recovery point" : "Unavailable until recovery history is pruned"),
+            new("Confirmed game-file scope", "Only game-file paths in the exact confirmed plan are targeted; they are derived from verified package content, receipt-authenticated ownership or launcher state, and exact approvals. Installer-internal recovery and ownership state is also written under .smapi-installer"),
+            new("Other game files", "Outside this confirmed plan and not targeted"),
+            new("Retain actions", retain.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new("Explicit preserve actions", preserve.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        ];
+        if (plan.Operation == InstallerOperation.Backup)
+            rows.Add(new("Backup scope", "Installer-managed state only; Mods and saves are not included"));
+        return rows.AsReadOnly();
+    }
+
+    private static PlanReviewPathFactRow CreatePathFactRow(PlanReviewPathFact fact)
+    {
+        return fact.FactKind switch
+        {
+            PlanReviewPathFactKind.MissingReceiptOwned => new(
+                fact.DisplayPath,
+                "Missing receipt-owned file",
+                "Create from the verified package"
+            ),
+            PlanReviewPathFactKind.ApprovedModifiedReceiptOwned => new(
+                fact.DisplayPath,
+                "Explicitly approved modified receipt-owned file",
+                fact.PlannedAction switch
+                {
+                    PlanOperationKind.Replace => "Include in the pre-change recovery point, then replace with verified package content",
+                    PlanOperationKind.Remove => "Include in the pre-change recovery point, then remove",
+                    _ => throw new ArgumentOutOfRangeException(nameof(fact))
+                }
+            ),
+            PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher => new(
+                fact.DisplayPath,
+                "Explicitly approved installed launcher with a changed recorded identity",
+                fact.PlannedAction switch
+                {
+                    PlanOperationKind.Replace => "Include in the pre-change recovery point, then replace with verified package content",
+                    PlanOperationKind.Restore => "Include in the pre-change recovery point, then restore authenticated launcher content",
+                    _ => throw new ArgumentOutOfRangeException(nameof(fact))
+                }
+            ),
+            _ => throw new ArgumentOutOfRangeException(nameof(fact))
+        };
     }
 
     private void ApplyCandidateChoices(PlanReviewSnapshot value)
@@ -1207,6 +1302,7 @@ internal sealed class PlanReviewViewModel : ObservableObject, IAsyncDisposable
         this.OnPropertyChanged(nameof(this.IsExitVisible));
         this.OnPropertyChanged(nameof(this.HasRiskRows));
         this.OnPropertyChanged(nameof(this.HasOperationRows));
+        this.OnPropertyChanged(nameof(this.HasPathFactRows));
         this.OnPropertyChanged(nameof(this.HasConflictRows));
         this.OnPropertyChanged(nameof(this.HasCandidateRows));
         this.OnPropertyChanged(nameof(this.IsCandidateReviewVisible));

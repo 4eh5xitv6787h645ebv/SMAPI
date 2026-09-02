@@ -385,6 +385,11 @@ public sealed class ProtocolSessionStateMachine : IDisposable
 
     private PlanEvent SetCurrentPlan(ProtocolCommandId commandId, InspectedInstallationState inspection, ProtocolPackageId? packageId, ProtocolRecoveryAuthority? recovery)
     {
+        if (inspection.RecoveryCapacity != inspection.Plan.RecoveryCapacity)
+            throw new ProtocolException("The inspected recovery capacity doesn't match the exact plan.");
+        bool capacityReached = inspection.Plan.Conflicts.Any(conflict => conflict.Code == PlanConflictCode.RecoveryCapacityReached);
+        if (capacityReached != !inspection.RecoveryCapacity.CanCreateGeneration)
+            throw new ProtocolException("The plan recovery-capacity conflict doesn't match the exact observed capacity.");
         InstallerOperation operation = ToProtocol(inspection.Action); ProtocolGameRootIdentity root = ToProtocol(inspection.GameRoot, inspection.OperationGeneration);
         ProtocolPlanOperation[] operations = inspection.Plan.Operations.Select(item => new ProtocolPlanOperation(item.Kind, item.Path.Value, item.ExpectedCurrentSha256?.Value, item.ResultSha256?.Value)).ToArray();
         ProtocolPlanConflict[] conflicts = inspection.Plan.Conflicts.Select(item => new ProtocolPlanConflict(item.Code, item.Path?.Value)).ToArray();
@@ -397,9 +402,10 @@ public sealed class ProtocolSessionStateMachine : IDisposable
         string summary = inspection.Plan.CanExecute ? $"{operation} is ready for confirmation." : $"{operation} is blocked by {conflicts.Length} observed conflict(s).";
         string[] warnings = conflicts.Select(conflict => conflict.Path is null ? $"{conflict.Code}." : $"{conflict.Code}: {conflict.Path}.").ToArray();
         ProtocolPlanDigest execution = ProtocolPlanDigest.Parse(inspection.ConfirmationDigest.Value); ProtocolPlanId id = ProtocolPlanId.CreateRandom();
-        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(execution, operation, packageId, recovery, root, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), ToProtocol(inspection.ObservedState), operations, conflicts, candidates, summary, warnings, true);
+        RecoveryCapacityState capacity = inspection.RecoveryCapacity;
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(execution, operation, packageId, recovery, root, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), ToProtocol(inspection.ObservedState), capacity.UsedGenerationCount, capacity.MaximumGenerationCount, operations, conflicts, candidates, summary, warnings, true);
         ProtocolPlanRisk[] risks = GetPlanRisks(operation, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), candidates);
-        PlanEvent result = new PlanEvent(this.SessionId, id, digest, execution, operation, packageId, recovery, root, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), ToProtocol(inspection.ObservedState), operations.Length, conflicts.Length, candidates.Length, warnings.Length, inspection.Plan.CanExecute, risks, ProtocolRecommendedDefault.Cancel, summary, true) { CommandId = commandId }.AttachPageData(operations, conflicts, candidates, warnings); ProtocolJsonSerializer.SerializeLine(result);
+        PlanEvent result = new PlanEvent(this.SessionId, id, digest, execution, operation, packageId, recovery, root, ToProtocol(inspection.CurrentRelease), ToProtocol(inspection.ExpectedResultRelease), ToProtocol(inspection.ObservedState), capacity.UsedGenerationCount, capacity.MaximumGenerationCount, operations.Length, conflicts.Length, candidates.Length, warnings.Length, inspection.Plan.CanExecute, risks, ProtocolRecommendedDefault.Cancel, summary, true) { CommandId = commandId }.AttachPageData(operations, conflicts, candidates, warnings); ProtocolJsonSerializer.SerializeLine(result);
         this.CurrentInspection?.Dispose(); this.CurrentInspection = inspection; this.CurrentPlan = result; this.CurrentOperations = operations; this.CurrentConflicts = conflicts; this.CurrentCandidates = candidates; this.CurrentWarnings = warnings; this.Candidates.Clear(); foreach ((ProtocolCandidateId candidateId, ModifiedFileReplacementCandidate candidate) in candidateAuthorities) this.Candidates.Add(candidateId, candidate); this.CurrentPlanCanExecute = inspection.Plan.CanExecute; this.CurrentPrunePlan = null; this.CurrentCorePrunePlan = null; this.ExecutionStartedForCurrentPlan = false; this.LastProgressSequence = -1; this.State = ProtocolSessionState.PlanIssued; return result;
     }
 

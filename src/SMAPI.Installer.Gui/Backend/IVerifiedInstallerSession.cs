@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using StardewModdingAPI.Installer.Core.Ownership;
 using StardewModdingAPI.Installer.Core.Protocol.V1;
 
 namespace StardewModdingAPI.Installer.Gui.Backend;
@@ -276,6 +277,41 @@ internal static class InstallerDisplayText
                 index++;
         }
         return escaped?.ToString() ?? value;
+    }
+
+    /// <summary>Whether a display value is the exact escape projection of one canonical managed relative path.</summary>
+    public static bool IsEscapedCanonicalRelativePath(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return false;
+        StringBuilder decoded = new(value.Length);
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value[index];
+            if (current != '\\')
+            {
+                decoded.Append(current);
+                continue;
+            }
+            if (index + 5 >= value.Length
+                || value[index + 1] != 'u'
+                || !int.TryParse(value.AsSpan(index + 2, 4), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out int codeUnit))
+            {
+                return false;
+            }
+            decoded.Append((char)codeUnit);
+            index += 5;
+        }
+        string raw = decoded.ToString();
+        try
+        {
+            NormalizedRelativePath parsed = NormalizedRelativePath.Parse(raw);
+            return string.Equals(Escape(parsed.Value), value, StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     private static void AppendEscapedCodeUnit(StringBuilder target, char value)

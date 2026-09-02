@@ -24,6 +24,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
     internal const int MaximumObservedStderrBytes = 64 * 1024;
     internal const int MaximumPlanPageCount = 512;
     internal const int MaximumPlanAggregateUtf8Bytes = 16 * 1024 * 1024;
+    internal const int MaximumVisiblePlanPathFacts = 12;
     // One million events exceeds the 640,000-unit legal maximum-capacity recovery envelope while still bounding a
     // hostile packaged sibling. The aggregate byte gate is independent, includes newlines, and is tested at N/N+1.
     internal const int MaximumExecutionProgressEvents = 1_000_000;
@@ -519,7 +520,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
 
                 (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates) projection;
-                try { projection = ProjectPlan(plan, collections); }
+                try { projection = ProjectPlan(plan, collections, []); }
                 catch { return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false); }
                 (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates) = projection;
                 aggregate.Token.ThrowIfCancellationRequested();
@@ -529,7 +530,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                if (!this.TryRetainPlanBinding(new(canonicalGamePath, InstallerOperation.Rollback, null, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, candidates, projected.Confirmation)))
+                if (!this.TryRetainPlanBinding(new(canonicalGamePath, InstallerOperation.Rollback, null, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, candidates, [], projected.Confirmation)))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
@@ -610,7 +611,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
 
                 (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates) projection;
-                try { projection = ProjectPlan(plan, collections); }
+                try { projection = ProjectPlan(plan, collections, []); }
                 catch { return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false); }
                 (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates) = projection;
                 aggregate.Token.ThrowIfCancellationRequested();
@@ -620,7 +621,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                if (!this.TryRetainPlanBinding(new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, candidates, projected.Confirmation)))
+                if (!this.TryRetainPlanBinding(new(canonicalGamePath, operation, requestPackageId, verifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, candidates, [], projected.Confirmation)))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
@@ -711,8 +712,11 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                 PlanCollections collections = await this.FetchAllPlanPagesAsync(plan, session, aggregate.Token).ConfigureAwait(false);
                 if (!ValidateCompletePlan(plan, collections) || !ValidateCandidateReplacement(binding, selectedCandidates, collections.Candidates))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
+                RetainedApprovedPathFact[] approvedPathFacts;
+                try { approvedPathFacts = ExtendApprovedPathFacts(binding.ApprovedPathFacts, selectedCandidates, collections.Operations); }
+                catch { return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false); }
                 (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> replacementCandidates) projection;
-                try { projection = ProjectPlan(plan, collections); }
+                try { projection = ProjectPlan(plan, collections, approvedPathFacts); }
                 catch { return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false); }
                 (InstallerReadOnlyPlanSuccess projected, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> replacementCandidates) = projection;
                 aggregate.Token.ThrowIfCancellationRequested();
@@ -722,7 +726,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                 aggregate.Token.ThrowIfCancellationRequested();
                 if (this.SessionFault.Task.IsCompletedSuccessfully)
                     throw await this.SessionFault.Task.ConfigureAwait(false);
-                if (!this.TryRetainPlanBinding(new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, replacementCandidates, projected.Confirmation)))
+                if (!this.TryRetainPlanBinding(new(binding.CanonicalGamePath, binding.Operation, binding.PackageId, binding.VerifiedRelease, plan.GameRoot, plan.PlanId, plan.PlanDigest, plan.OperationCount, replacementCandidates, approvedPathFacts, projected.Confirmation)))
                     return await this.FailProtocolAsync<InstallerReadOnlyPlanResult>().ConfigureAwait(false);
                 return projected;
             }
@@ -1563,6 +1567,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
             || collections.Candidates.Select(item => item.CandidateId).Distinct().Count() != collections.Candidates.Count
             || collections.Candidates.Select(item => item.Path).Distinct(StringComparer.Ordinal).Count() != collections.Candidates.Count
             || collections.Warnings.Distinct(StringComparer.Ordinal).Count() != collections.Warnings.Count
+            || collections.Conflicts.Any(item => item.Code == PlanConflictCode.RecoveryCapacityReached) != !plan.CanCreateRecoveryGeneration
         )
             return false;
 
@@ -1578,6 +1583,8 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
                 plan.CurrentRelease,
                 plan.TargetRelease,
                 plan.ObservedState,
+                plan.RecoveryUsedGenerationCount,
+                plan.RecoveryMaximumGenerationCount,
                 collections.Operations,
                 collections.Conflicts,
                 collections.Candidates,
@@ -1820,13 +1827,39 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
         return true;
     }
 
-    private static (InstallerReadOnlyPlanSuccess Plan, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> Candidates) ProjectPlan(PlanEvent plan, PlanCollections collections)
+    private static (InstallerReadOnlyPlanSuccess Plan, Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> Candidates) ProjectPlan(
+        PlanEvent plan,
+        PlanCollections collections,
+        IReadOnlyList<RetainedApprovedPathFact> approvedPathFacts
+    )
     {
         InstallerPlanOperationCount[] operations = collections.Operations
             .GroupBy(item => item.Kind)
             .OrderBy(group => group.Key)
             .Select(group => new InstallerPlanOperationCount(group.Key, group.Count()))
             .ToArray();
+        InstallerPlanPathFact[] allPathFacts = approvedPathFacts
+            .Select(item => new InstallerPlanPathFact(
+                InstallerDisplayText.Escape(item.Path),
+                item.FactKind,
+                item.PlannedAction
+            ))
+            .Concat(plan.Operation == InstallerOperation.Repair
+                ? collections.Operations
+                    .Where(item => item.Kind == PlanOperationKind.Create)
+                    .Select(item => new InstallerPlanPathFact(
+                        InstallerDisplayText.Escape(item.Path),
+                        InstallerPlanPathFactKind.MissingReceiptOwned,
+                        PlanOperationKind.Create
+                    ))
+                : [])
+            .OrderBy(item => item.FactKind == InstallerPlanPathFactKind.MissingReceiptOwned ? 1 : 0)
+            .ThenBy(item => item.DisplayPath, StringComparer.Ordinal)
+            .ThenBy(item => item.PlannedAction)
+            .ToArray();
+        if (allPathFacts.Select(item => item.DisplayPath).Distinct(StringComparer.Ordinal).Count() != allPathFacts.Length)
+            throw new InvalidOperationException("The receipt-owned path facts contain a duplicate path.");
+        InstallerPlanPathFact[] visiblePathFacts = allPathFacts.Take(MaximumVisiblePlanPathFacts).ToArray();
         InstallerPlanConflictCount[] conflicts = collections.Conflicts
             .GroupBy(item => item.Code)
             .OrderBy(group => group.Key)
@@ -1862,10 +1895,65 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
             collections.Warnings.Count
         )
         {
+            RecoveryCapacity = new(plan.RecoveryUsedGenerationCount, plan.RecoveryMaximumGenerationCount),
+            PathFacts = Array.AsReadOnly(visiblePathFacts),
+            AdditionalPathFactCount = allPathFacts.Length - visiblePathFacts.Length,
             Candidates = Array.AsReadOnly(projectedCandidates),
             Confirmation = plan.CanExecute ? new InstallerPlanConfirmation() : null
         };
         return (result, candidateIds);
+    }
+
+    private static RetainedApprovedPathFact[] ExtendApprovedPathFacts(
+        IReadOnlyList<RetainedApprovedPathFact> retained,
+        IReadOnlyList<ProtocolPlanCandidate> selected,
+        IReadOnlyList<ProtocolPlanOperation> finalOperations
+    )
+    {
+        List<RetainedApprovedPathFact> result = new(retained);
+        foreach (ProtocolPlanCandidate candidate in selected)
+        {
+            (InstallerPlanPathFactKind Kind, PlanOperationKind Action)? fact = (candidate.Reason, candidate.Disposition) switch
+            {
+                (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace) => (InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace),
+                (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove) => (InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Remove),
+                (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace) => (InstallerPlanPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Replace),
+                (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore) => (InstallerPlanPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore),
+                _ => null
+            };
+            if (fact is not { } exactFact)
+                continue;
+            result.Add(new(
+                candidate.Path,
+                exactFact.Kind,
+                exactFact.Action,
+                candidate.ObservedSha256,
+                candidate.ProposedResultSha256
+            ));
+        }
+        RetainedApprovedPathFact[] ordered = result
+            .OrderBy(item => item.Path, StringComparer.Ordinal)
+            .ThenBy(item => item.FactKind)
+            .ThenBy(item => item.PlannedAction)
+            .ToArray();
+        if (ordered.Length > ProtocolJsonSerializer.MaxPlanCandidates
+            || ordered.Select(item => item.Path).Distinct(StringComparer.Ordinal).Count() != ordered.Length)
+        {
+            throw new InvalidOperationException("The approved receipt-owned path facts exceeded their exact bounds.");
+        }
+        foreach (RetainedApprovedPathFact item in ordered)
+        {
+            if (finalOperations.Count(operation =>
+                operation.Kind == item.PlannedAction
+                && string.Equals(operation.Path, item.Path, StringComparison.Ordinal)
+                && string.Equals(operation.ExpectedCurrentSha256, item.ExpectedCurrentSha256, StringComparison.Ordinal)
+                && string.Equals(operation.ResultSha256, item.ResultSha256, StringComparison.Ordinal)
+            ) != 1)
+            {
+                throw new InvalidOperationException("An approved receipt-owned path did not match the exact refreshed plan.");
+            }
+        }
+        return ordered;
     }
 
     private static InstallerPlanRelease? ProjectRelease(ProtocolReleaseIdentity? release) =>
@@ -1906,6 +1994,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
         public ProtocolPlanDigest PlanDigest { get; }
         public int OperationCount { get; }
         public Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> Candidates { get; }
+        public IReadOnlyList<RetainedApprovedPathFact> ApprovedPathFacts { get; }
         public InstallerPlanConfirmation? Confirmation { get; }
 
         public RetainedPlanBinding(
@@ -1918,6 +2007,7 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
             ProtocolPlanDigest planDigest,
             int operationCount,
             Dictionary<InstallerReadOnlyPlanCandidate, ProtocolPlanCandidate> candidates,
+            IReadOnlyList<RetainedApprovedPathFact> approvedPathFacts,
             InstallerPlanConfirmation? confirmation
         )
         {
@@ -1930,9 +2020,18 @@ internal sealed partial class ProcessInstallerProtocolClient : IInstallerProtoco
             this.PlanDigest = planDigest;
             this.OperationCount = operationCount;
             this.Candidates = candidates;
+            this.ApprovedPathFacts = Array.AsReadOnly(approvedPathFacts.ToArray());
             this.Confirmation = confirmation;
         }
     }
+
+    private sealed record RetainedApprovedPathFact(
+        string Path,
+        InstallerPlanPathFactKind FactKind,
+        PlanOperationKind PlannedAction,
+        string ExpectedCurrentSha256,
+        string? ResultSha256
+    );
 
     private sealed record RetainedConfirmedPlanBinding(
         InstallerOperation Operation,

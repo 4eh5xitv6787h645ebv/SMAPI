@@ -5,6 +5,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Headless.NUnit;
 using Avalonia.Input;
+using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using FluentAssertions;
@@ -42,8 +43,8 @@ internal sealed partial class PlanReviewPresentationTests
         AutomationProperties.GetAccessKey(operations).Should().Be("Alt+O");
         ControlAutomationPeer.CreatePeerForElement(status).GetLiveSetting().Should().Be(AutomationLiveSetting.Polite);
         AutomationPeer gamePeer = ControlAutomationPeer.CreatePeerForElement(game);
-        gamePeer.GetName().Should().Be("Validated Stardew Valley game folder").And.NotContain(privatePath);
-        ControlAutomationPeer.CreatePeerForElement(gameContext).GetName().Should().Be("Bound game folder").And.NotContain(privatePath);
+        gamePeer.GetName().Should().Be("Selected game: Stardew Valley").And.NotContain(privatePath);
+        ControlAutomationPeer.CreatePeerForElement(gameContext).GetName().Should().Be("Bound selected game: Stardew Valley").And.NotContain(privatePath);
         ControlAutomationPeer.CreatePeerForElement(boundary).GetName().Should()
             .Contain("Review first").And.Contain("separate final Run screen").And.Contain("changes no files");
         relationship.IsEffectivelyVisible.Should().BeFalse();
@@ -511,11 +512,11 @@ internal sealed partial class PlanReviewPresentationTests
     [TestCase(2.00)]
     public async Task MaximalPlanRendersAcrossDesktopScaleWithoutHorizontalPageScroll(double scale)
     {
-        const double PhysicalViewportWidth = 1400;
+        const double PhysicalViewportWidth = 840;
         InstallerReadOnlyPlanSuccess maximal = CreateMaximalPlan();
         FakePlanSession session = new() { Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(maximal) };
         PlanReviewViewModel viewModel = CreateViewModel(session);
-        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Install);
+        viewModel.SelectedOperation = Choice(viewModel, InstallerOperation.Repair);
         await viewModel.InspectCommand.ExecuteAsync();
         Dispatcher.UIThread.RunJobs();
         PlanReviewWindow window = new(viewModel);
@@ -523,6 +524,48 @@ internal sealed partial class PlanReviewPresentationTests
         ScrollViewer scroll = AssertRenderedLayout(window, PhysicalViewportWidth / scale);
 
         scroll.Extent.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        TextBlock candidateHeading = window.FindControl<TextBlock>("CandidateSummaryHeading")!;
+        candidateHeading.TextWrapping.Should().Be(TextWrapping.Wrap);
+        candidateHeading.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        viewModel.PathFactRows.Should().HaveCount(ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts);
+        viewModel.PathFactSummary.Should().Contain("8 additional detail(s)");
+        viewModel.PathFactRows.Should().Contain(row => row.DisplayPath.Contains("\\u202E", StringComparison.Ordinal));
+        StackPanel managedPaths = window.FindControl<StackPanel>("ReceiptOwnedPathRegion")!;
+        Border safety = window.FindControl<Border>("PlanSafetyRegion")!;
+        ControlAutomationPeer.CreatePeerForElement(safety).GetName().Should().Be("Plan safety and recovery");
+        ControlAutomationPeer.CreatePeerForElement(managedPaths).GetName().Should().Be("Managed file details");
+        string[] safetyPeerNames = safety.GetVisualDescendants().OfType<Grid>()
+            .Select(ControlAutomationPeer.CreatePeerForElement)
+            .Where(peer => peer is not null && !string.IsNullOrEmpty(peer.GetName()))
+            .Select(peer => peer!.GetName())
+            .ToArray();
+        safetyPeerNames.Should().Equal(viewModel.SafetyRows.Select(row => row.AccessibleName));
+        string[] pathPeerNames = managedPaths.GetVisualDescendants().OfType<Border>()
+            .Select(ControlAutomationPeer.CreatePeerForElement)
+            .Where(peer => peer is not null && !string.IsNullOrEmpty(peer.GetName()))
+            .Select(peer => peer!.GetName())
+            .ToArray();
+        pathPeerNames.Should().Equal(viewModel.PathFactRows.Select(row => row.AccessibleName));
+        safetyPeerNames.Concat(pathPeerNames).Should().OnlyContain(name =>
+            !name.Contains("/games/", StringComparison.Ordinal)
+            && !name.Contains("digest", StringComparison.OrdinalIgnoreCase)
+            && !name.Contains("backend", StringComparison.OrdinalIgnoreCase)
+            && !name.Contains(new string('a', 32), StringComparison.Ordinal)
+        );
+        TextBlock longPath = managedPaths.GetVisualDescendants().OfType<TextBlock>()
+            .Single(text => text.Text?.Contains("\\u202E", StringComparison.Ordinal) == true);
+        longPath.TextWrapping.Should().Be(TextWrapping.Wrap);
+        longPath.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        longPath.Bounds.Height.Should().BeGreaterThan(24, "the maximal escaped managed path must wrap to multiple readable lines");
+        scroll.Extent.Height.Should().BeGreaterThan(scroll.Viewport.Height);
+        scroll.Offset = new Avalonia.Vector(0, scroll.Extent.Height);
+        Dispatcher.UIThread.RunJobs();
+        AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        Dispatcher.UIThread.RunJobs();
+        scroll.Offset.Y.Should().BeGreaterThan(0);
+        Button finalVisibleAction = window.FindControl<Button>("StartFreshInspectionButton")!;
+        finalVisibleAction.IsEffectivelyVisible.Should().BeTrue();
+        finalVisibleAction.Bounds.Height.Should().BeGreaterThan(0);
         window.Close();
         await WaitUntilAsync(() => !window.IsVisible);
     }
@@ -943,15 +986,35 @@ internal sealed partial class PlanReviewPresentationTests
             CandidateCapability("mods/unknown-two.dll", true, FileReplacementCandidateReason.UnknownCollision),
             CandidateCapability("mods/modified.dll", false)
         ];
-        return CandidatePlan(InstallerOperation.Install, candidates) with
+        return CandidatePlan(InstallerOperation.Repair, candidates) with
         {
             HasBlockingConflicts = true,
             Confirmation = null,
             Risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval],
-            OperationCounts = Enum.GetValues<PlanOperationKind>().Select(kind => new InstallerPlanOperationCount(kind, 1)).ToArray(),
+            OperationCounts = Enum.GetValues<PlanOperationKind>().Select(kind => new InstallerPlanOperationCount(kind, 20)).ToArray(),
+            RecoveryCapacity = new(ProtocolJsonSerializer.MaxRecoveryGenerations, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            PathFacts = MaximalPathFacts(),
+            AdditionalPathFactCount = 8,
             ConflictCounts = Enum.GetValues<PlanConflictCode>().Select(code => new InstallerPlanConflictCount(code, 1)).ToArray(),
             AdditionalNoticeCount = 256
         };
+    }
+
+    private static InstallerPlanPathFact[] MaximalPathFacts()
+    {
+        List<InstallerPlanPathFact> facts =
+        [
+            new("StardewValley", InstallerPlanPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore)
+        ];
+        facts.AddRange(Enumerable.Range(1, 10).Select(index => new InstallerPlanPathFact(
+            index == 10
+                ? $"smapi-internal/{new string('x', 220)}\\u202E.dll"
+                : $"smapi-internal/{index:D2}-owned.dll",
+            InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned,
+            PlanOperationKind.Replace
+        )));
+        facts.Add(new("smapi-internal/00-missing.dll", InstallerPlanPathFactKind.MissingReceiptOwned, PlanOperationKind.Create));
+        return facts.ToArray();
     }
 
     private static ScrollViewer AssertRenderedLayout(PlanReviewWindow window, double width)

@@ -28,7 +28,7 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolPlanOperation[] operations = [new(PlanOperationKind.Create, "a", null, HashA)];
         ProtocolPlanConflict[] conflicts = [];
         ProtocolPlanId plan = ProtocolPlanId.CreateRandom();
-        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, 0, ProtocolJsonSerializer.MaxRecoveryGenerations, operations, conflicts, candidates, "Repair.", [], true);
         ProtocolPrunePlanId prune = ProtocolPrunePlanId.CreateRandom();
         string[] cleanup = ["22222222222222222222222222222222"];
         ProtocolPlanDigest pruneDigest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [retainedRecovery], [recovery], cleanup, "Prune.", [], true);
@@ -204,11 +204,50 @@ internal sealed class ProtocolJsonSerializerTests
     public void PlanSummaryAndPages_ValidateStructuredDataIndependentlyOfPagedDigestAuthority()
     {
         PlanEvent plan = CreatePlan();
-        new PlanEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, 1, 1, 1, 0, true, plan.Risks, ProtocolRecommendedDefault.Cancel, plan.Summary, true)
+        new PlanEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.RecoveryUsedGenerationCount, plan.RecoveryMaximumGenerationCount, 1, 1, 1, 0, true, plan.Risks, ProtocolRecommendedDefault.Cancel, plan.Summary, true)
             .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*executability*");
         ProtocolPlanCandidate invalid = plan.Candidates[0] with { ProposedResultSha256 = null };
         new PlanPageEvent(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [invalid], [])
             .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*Only removal candidates*");
+    }
+
+    [Test]
+    public void PlanRecoveryCapacity_IsExactBoundedAndDigestBound()
+    {
+        PlanEvent plan = CreatePlan();
+        string line = ProtocolJsonSerializer.SerializeLine(plan);
+        line.Should().Contain("\"recoveryUsedGenerationCount\":0");
+        line.Should().Contain($"\"recoveryMaximumGenerationCount\":{ProtocolJsonSerializer.MaxRecoveryGenerations}");
+        PlanEvent roundTrip = ProtocolJsonSerializer.DeserializeEventLine(line).Should().BeOfType<PlanEvent>().Subject;
+        roundTrip.RecoveryUsedGenerationCount.Should().Be(0);
+        roundTrip.RecoveryRemainingGenerationCount.Should().Be(ProtocolJsonSerializer.MaxRecoveryGenerations);
+
+        ProtocolPlanDigest changed = ProtocolPlanDigest.Compute(
+            plan.ExecutionBindingDigest,
+            plan.Operation,
+            plan.PackageId,
+            plan.RecoveryAuthority,
+            plan.GameRoot,
+            plan.CurrentRelease,
+            plan.TargetRelease,
+            plan.ObservedState,
+            1,
+            ProtocolJsonSerializer.MaxRecoveryGenerations,
+            plan.Operations,
+            plan.Conflicts,
+            plan.Candidates,
+            plan.Summary,
+            plan.Warnings,
+            plan.RequiresConfirmation
+        );
+        changed.Should().NotBe(plan.PlanDigest);
+
+        foreach ((int used, int maximum) in new[] { (-1, 64), (65, 64), (0, 0), (0, 63), (0, 65) })
+        {
+            PlanEvent invalid = CopyPlanCapacity(plan, used, maximum);
+            invalid.Invoking(ProtocolJsonSerializer.SerializeLine)
+                .Should().Throw<ProtocolException>().WithMessage("*recovery-capacity facts*");
+        }
     }
 
     [Test]
@@ -310,7 +349,7 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolRecoveryGeneration generation = new(selection, "11111111111111111111111111111111", InstallerOperation.Backup, true, true);
         ProtocolRecoveryAuthority authority = new(catalog, selection, GameRoot, HashA, generation);
         ProtocolPlanOperation[] operations = [new(PlanOperationKind.Restore, "a", null, HashA)];
-        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, authority, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, authority, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, 0, ProtocolJsonSerializer.MaxRecoveryGenerations, operations, [], [], "Rollback.", [], true);
         PlanEvent plan = new(session, ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Rollback, null, authority, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
         ProtocolJsonSerializer.SerializeLine(plan).Should().NotBeEmpty();
         ProtocolRecoveryAuthority missingRestoreOutcome = authority with { Generation = generation with { RestoreRelease = null, RestoresUninstalledState = false } };
@@ -318,12 +357,12 @@ internal sealed class ProtocolJsonSerializerTests
             .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*either one exact restore release or an uninstalled result*");
 
         ProtocolRecoveryAuthority wrongRoot = authority with { GameRoot = GameRoot with { Inode = 99 } };
-        ProtocolPlanDigest wrongRootDigest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, wrongRoot, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
+        ProtocolPlanDigest wrongRootDigest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, wrongRoot, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, 0, ProtocolJsonSerializer.MaxRecoveryGenerations, operations, [], [], "Rollback.", [], true);
         new PlanEvent(session, ProtocolPlanId.CreateRandom(), wrongRootDigest, ExecutionDigest, InstallerOperation.Rollback, null, wrongRoot, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true)
             .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*outer plan game root*");
         ProtocolRecoveryGeneration badGeneration = generation with { OriginOperation = InstallerOperation.Update, IsUserCheckpoint = true };
         ProtocolRecoveryAuthority badCheckpoint = authority with { Generation = badGeneration };
-        ProtocolPlanDigest badCheckpointDigest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, badCheckpoint, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true);
+        ProtocolPlanDigest badCheckpointDigest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Rollback, null, badCheckpoint, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, 0, ProtocolJsonSerializer.MaxRecoveryGenerations, operations, [], [], "Rollback.", [], true);
         new PlanEvent(session, ProtocolPlanId.CreateRandom(), badCheckpointDigest, ExecutionDigest, InstallerOperation.Rollback, null, badCheckpoint, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, [], [], "Rollback.", [], true)
             .Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*checkpoint flag*");
     }
@@ -389,7 +428,7 @@ internal sealed class ProtocolJsonSerializerTests
     {
         PlanEvent plan = CreatePlan();
         ProtocolJsonSerializer.SerializeLine(plan).Should().Be(ProtocolJsonSerializer.SerializeLine(plan));
-        ProtocolPlanDigest.Compute(plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, plan.Candidates, plan.Summary, plan.Warnings, true).Should().Be(plan.PlanDigest);
+        ProtocolPlanDigest.Compute(plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.RecoveryUsedGenerationCount, plan.RecoveryMaximumGenerationCount, plan.Operations, plan.Conflicts, plan.Candidates, plan.Summary, plan.Warnings, true).Should().Be(plan.PlanDigest);
         string line = ProtocolJsonSerializer.SerializeLine(new InspectPlanRequest(plan.SessionId, "/game", InstallerOperation.Repair, plan.PackageId, null));
         FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeRequestLine(line.Replace("\"repair\"", "\"Repair\"", StringComparison.Ordinal))).Should().Throw<ProtocolException>().WithMessage("*canonical camel case*");
     }
@@ -521,11 +560,109 @@ internal sealed class ProtocolJsonSerializerTests
         candidatePage(plan.Candidates[0] with { Reason = (FileReplacementCandidateReason)999 }).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*isn't defined*");
         ProtocolPlanCandidate impossible = plan.Candidates[0] with { Reason = FileReplacementCandidateReason.OfficialLauncherBackup };
         candidatePage(impossible).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*core-defined pair*");
-        ProtocolPlanCandidate misleadingRetain = plan.Candidates[0] with { Reason = FileReplacementCandidateReason.OfficialLauncherBackup, Disposition = FileReplacementCandidateDisposition.TrustRetained };
+        ProtocolPlanCandidate misleadingRetain = plan.Candidates[0] with
+        {
+            Reason = FileReplacementCandidateReason.OfficialLauncherBackup,
+            Disposition = FileReplacementCandidateDisposition.TrustRetained,
+            Path = "StardewValley-original"
+        };
         candidatePage(misleadingRetain).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact observed digest*");
+        ProtocolPlanCandidate falseLauncher = plan.Candidates[0] with { Reason = FileReplacementCandidateReason.ModifiedInstalledLauncher, Path = "smapi-internal/not-the-launcher" };
+        candidatePage(falseLauncher).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact launcher path*");
+        ProtocolPlanCandidate falseLauncherBackup = plan.Candidates[0] with
+        {
+            Reason = FileReplacementCandidateReason.OfficialLauncherBackup,
+            Disposition = FileReplacementCandidateDisposition.TrustRetained,
+            Path = "smapi-internal/not-the-launcher-backup",
+            ProposedResultSha256 = plan.Candidates[0].ObservedSha256
+        };
+        candidatePage(falseLauncherBackup).Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*exact backup path*");
         ProtocolRecoveryCatalogId catalog = ProtocolRecoveryCatalogId.CreateRandom(); ProtocolRecoverySelectionId only = ProtocolRecoverySelectionId.CreateRandom(); ProtocolPrunePlanId id = ProtocolPrunePlanId.CreateRandom();
         ProtocolPlanDigest digest = ProtocolPlanDigest.ComputePrune(ExecutionDigest, catalog, GameRoot, HashA, 1, [only], [], [], "No-op.", [], true);
         FluentActions.Invoking(() => ProtocolJsonSerializer.SerializeLine(new PrunePlanEvent(session, id, digest, ExecutionDigest, catalog, GameRoot, HashA, 1, [only], [], [], "No-op.", [], true))).Should().Throw<ProtocolException>().WithMessage("*no-op*");
+    }
+
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.LegacyInstaller, FileReplacementCandidateDisposition.Replace, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.UnknownCollision, FileReplacementCandidateDisposition.Replace, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.OfficialLauncherBackup, FileReplacementCandidateDisposition.TrustRetained, "StardewValley")]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.LegacyInstaller, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.UnknownCollision, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore, "StardewValley-original")]
+    [TestCase(FileReplacementCandidateReason.OfficialOrLegacyLauncher, FileReplacementCandidateDisposition.Replace, "StardewValley-original")]
+    public void ReservedLauncherPathsRejectEveryOtherCandidateReason(
+        FileReplacementCandidateReason reason,
+        FileReplacementCandidateDisposition disposition,
+        string path
+    )
+    {
+        PlanEvent plan = CreatePlan();
+        string? proposedResult = disposition switch
+        {
+            FileReplacementCandidateDisposition.Remove => null,
+            FileReplacementCandidateDisposition.TrustRetained => plan.Candidates[0].ObservedSha256,
+            _ => plan.Candidates[0].ProposedResultSha256
+        };
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with
+        {
+            Reason = reason,
+            Disposition = disposition,
+            Path = path,
+            ProposedResultSha256 = proposedResult
+        };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+
+        page.Invoking(ProtocolJsonSerializer.SerializeLine).Should().Throw<ProtocolException>().WithMessage("*launcher*");
+    }
+
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace)]
+    [TestCase(FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore)]
+    [TestCase(FileReplacementCandidateReason.OfficialOrLegacyLauncher, FileReplacementCandidateDisposition.Replace)]
+    public void InstalledLauncherPathAcceptsOnlyCoreDefinedLauncherPairs(
+        FileReplacementCandidateReason reason,
+        FileReplacementCandidateDisposition disposition
+    )
+    {
+        PlanEvent plan = CreatePlan();
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with { Reason = reason, Disposition = disposition, Path = "StardewValley" };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(page)).Should().BeEquivalentTo(page);
+    }
+
+    [Test]
+    public void OfficialLauncherBackupPathAcceptsOnlyItsCoreDefinedPair()
+    {
+        PlanEvent plan = CreatePlan();
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with
+        {
+            Reason = FileReplacementCandidateReason.OfficialLauncherBackup,
+            Disposition = FileReplacementCandidateDisposition.TrustRetained,
+            Path = "StardewValley-original",
+            ProposedResultSha256 = plan.Candidates[0].ObservedSha256
+        };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+
+        ProtocolJsonSerializer.DeserializeEventLine(ProtocolJsonSerializer.SerializeLine(page)).Should().BeEquivalentTo(page);
+    }
+
+    [Test]
+    public void DeserializationRejectsReceiptOwnedCandidateAtReservedLauncherPath()
+    {
+        PlanEvent plan = CreatePlan();
+        ProtocolPlanCandidate candidate = plan.Candidates[0] with
+        {
+            Reason = FileReplacementCandidateReason.ModifiedReceiptOwned,
+            Disposition = FileReplacementCandidateDisposition.Replace
+        };
+        PlanPageEvent page = new(plan.SessionId, plan.PlanId, plan.PlanDigest, ProtocolPlanPageKind.Candidates, 0, 1, null, [], [], [candidate], []);
+        string line = ProtocolJsonSerializer.SerializeLine(page).Replace("\"path\":\"legacy\"", "\"path\":\"StardewValley\"", StringComparison.Ordinal);
+
+        FluentActions.Invoking(() => ProtocolJsonSerializer.DeserializeEventLine(line)).Should().Throw<ProtocolException>().WithMessage("*installed-launcher candidate reason*");
     }
 
     [Test]
@@ -581,14 +718,14 @@ internal sealed class ProtocolJsonSerializerTests
         ProtocolSessionId session = ProtocolSessionId.CreateRandom(); ProtocolPackageId package = ProtocolPackageId.CreateRandom(); ProtocolCandidateId candidateId = ProtocolCandidateId.CreateRandom();
         ProtocolPlanOperation[] operations = [new(PlanOperationKind.Create, "a", null, HashA)]; ProtocolPlanConflict[] conflicts = [];
         ProtocolPlanCandidate[] candidates = [new(candidateId, FileReplacementCandidateReason.LegacyInstaller, FileReplacementCandidateDisposition.Replace, "legacy", HashA, 1, 420, HashB, false, "Observed.")];
-        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, 0, ProtocolJsonSerializer.MaxRecoveryGenerations, operations, conflicts, candidates, "Repair.", [], true);
         return new(session, ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Repair, package, null, GameRoot, CreateRelease(), CreateRelease(), ObservedInstallState.KnownModified, operations, conflicts, candidates, "Repair.", [], true);
     }
 
     private static PlanEvent CreateBackupPlan(ProtocolReleaseIdentity? current, ProtocolReleaseIdentity? target, ObservedInstallState state)
     {
         ProtocolPlanOperation[] operations = [new(PlanOperationKind.Backup, "StardewModdingAPI.dll", HashA, HashA)];
-        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Backup, null, null, GameRoot, current, target, state, operations, [], [], "Backup.", [], true);
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(ExecutionDigest, InstallerOperation.Backup, null, null, GameRoot, current, target, state, 0, ProtocolJsonSerializer.MaxRecoveryGenerations, operations, [], [], "Backup.", [], true);
         return new(ProtocolSessionId.CreateRandom(), ProtocolPlanId.CreateRandom(), digest, ExecutionDigest, InstallerOperation.Backup, null, null, GameRoot, current, target, state, operations, [], [], "Backup.", [], true);
     }
 
@@ -597,12 +734,37 @@ internal sealed class ProtocolJsonSerializerTests
 
     private static PlanEvent RecomputePlanWithCandidates(PlanEvent plan, ProtocolPlanCandidate[] candidates)
     {
-        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, candidates, plan.Summary, plan.Warnings, plan.RequiresConfirmation);
+        ProtocolPlanDigest digest = ProtocolPlanDigest.Compute(plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.RecoveryUsedGenerationCount, plan.RecoveryMaximumGenerationCount, plan.Operations, plan.Conflicts, candidates, plan.Summary, plan.Warnings, plan.RequiresConfirmation);
         return new(plan.SessionId, plan.PlanId, digest, plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, plan.GameRoot, plan.CurrentRelease, plan.TargetRelease, plan.ObservedState, plan.Operations, plan.Conflicts, candidates, plan.Summary, plan.Warnings, plan.RequiresConfirmation);
     }
 
     private static PlanEvent CopyPlan(PlanEvent plan, ProtocolGameRootIdentity? gameRoot = null, ProtocolReleaseIdentity? currentRelease = null, ProtocolReleaseIdentity? targetRelease = null, ObservedInstallState? observedState = null, ProtocolPlanOperation[]? operations = null, ProtocolPlanConflict[]? conflicts = null, string[]? warnings = null) =>
         new(plan.SessionId, plan.PlanId, plan.PlanDigest, plan.ExecutionBindingDigest, plan.Operation, plan.PackageId, plan.RecoveryAuthority, gameRoot ?? plan.GameRoot, currentRelease ?? plan.CurrentRelease, targetRelease ?? plan.TargetRelease, observedState ?? plan.ObservedState, operations ?? plan.Operations, conflicts ?? plan.Conflicts, plan.Candidates, plan.Summary, warnings ?? plan.Warnings, true);
+
+    private static PlanEvent CopyPlanCapacity(PlanEvent plan, int used, int maximum) => new(
+        plan.SessionId,
+        plan.PlanId,
+        plan.PlanDigest,
+        plan.ExecutionBindingDigest,
+        plan.Operation,
+        plan.PackageId,
+        plan.RecoveryAuthority,
+        plan.GameRoot,
+        plan.CurrentRelease,
+        plan.TargetRelease,
+        plan.ObservedState,
+        used,
+        maximum,
+        plan.OperationCount,
+        plan.ConflictCount,
+        plan.CandidateCount,
+        plan.WarningCount,
+        plan.CanExecute,
+        plan.Risks,
+        plan.RecommendedDefault,
+        plan.Summary,
+        plan.RequiresConfirmation
+    );
 
     private static ProtocolReleaseIdentity CreateRelease() => new(
         "https://github.com/4eh5xitv6787h645ebv/SMAPI", "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2", "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2",

@@ -40,6 +40,25 @@ internal sealed record PlanReviewReleaseLabels(
     PlanReviewReleaseRelationship? Relationship
 );
 
+internal sealed record PlanReviewRecoveryCapacity(int Used, int Maximum)
+{
+    public int Remaining => this.Maximum - this.Used;
+    public bool CanCreate => this.Used < this.Maximum;
+}
+
+internal enum PlanReviewPathFactKind
+{
+    MissingReceiptOwned,
+    ApprovedModifiedReceiptOwned,
+    ApprovedModifiedInstalledLauncher
+}
+
+internal sealed record PlanReviewPathFact(
+    string DisplayPath,
+    PlanReviewPathFactKind FactKind,
+    PlanOperationKind PlannedAction
+);
+
 internal enum PlanReviewRecoveryState
 {
     NotLoaded,
@@ -110,6 +129,9 @@ internal sealed record PlanReviewPlan(
     int AdditionalNoticeCount
 ) : PlanReviewResult
 {
+    public PlanReviewRecoveryCapacity RecoveryCapacity { get; init; } = new(0, ProtocolJsonSerializer.MaxRecoveryGenerations);
+    public IReadOnlyList<PlanReviewPathFact> PathFacts { get; init; } = [];
+    public int AdditionalPathFactCount { get; init; }
     public IReadOnlyList<PlanReviewCandidate> Candidates { get; init; } = [];
     public PlanReviewReleaseLabels? TargetReleaseLabels { get; init; }
 }
@@ -240,6 +262,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
     {
         this.Session = session ?? throw new ArgumentNullException(nameof(session));
         this.VerifiedRelease = ProjectVerifiedRelease(session.Release);
+        this.GameDisplayName = ValidateGameDisplayName(session.Game);
         this.SessionFaultNotification = session.SessionFaulted
             ?? throw new InvalidOperationException("The plan-review session had no fault notification.");
         this.SessionWatcher = this.WatchSessionAsync();
@@ -248,6 +271,8 @@ internal sealed class PlanReviewController : IAsyncDisposable
     public event EventHandler? Changed;
 
     public PlanReviewRelease VerifiedRelease { get; }
+
+    public string GameDisplayName { get; }
 
     public PlanReviewSnapshot Snapshot
     {
@@ -510,7 +535,16 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 confirmation,
                 new ExecutionPlanPresentation(
                     exactPlan.Operation,
+                    this.GameDisplayName,
+                    ProjectExecutionRelease(exactPlan.CurrentRelease),
+                    exactPlan.TargetRelease is { } target
+                        ? new ExecutionReleaseTarget(ProjectExecutionRelease(target)!)
+                        : new ExecutionUninstalledTarget(),
+                    exactPlan.TargetReleaseLabels?.Relationship,
+                    exactPlan.RecoveryCapacity,
                     Array.AsReadOnly(exactPlan.OperationCounts.ToArray()),
+                    Array.AsReadOnly(exactPlan.PathFacts.ToArray()),
+                    exactPlan.AdditionalPathFactCount,
                     Array.AsReadOnly(exactPlan.Risks.ToArray()),
                     exactPlan.AdditionalNoticeCount
                 ),
@@ -526,6 +560,9 @@ internal sealed class PlanReviewController : IAsyncDisposable
         _ = this.RunConfirmationAsync(operation);
         return operation.Completion.Task;
     }
+
+    private static ExecutionReleasePresentation? ProjectExecutionRelease(PlanReviewRelease? release)
+        => release is null ? null : new(release.Tag, release.EmbeddedVersion);
 
     /// <summary>Transfer the confirmed owner exactly once after confirmation has fully committed.</summary>
     public ConfirmedPlanHandoff TakeConfirmedHandoff()
@@ -1435,6 +1472,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
 
         ArgumentNullException.ThrowIfNull(plan.Risks);
         ArgumentNullException.ThrowIfNull(plan.OperationCounts);
+        ArgumentNullException.ThrowIfNull(plan.PathFacts);
         ArgumentNullException.ThrowIfNull(plan.ConflictCounts);
         ArgumentNullException.ThrowIfNull(plan.CandidateCounts);
         if (plan.Risks.Count > Enum.GetValues<ProtocolPlanRisk>().Length
@@ -1458,6 +1496,14 @@ internal sealed class PlanReviewController : IAsyncDisposable
                 throw new InvalidOperationException("The plan operation summary was invalid.");
             return new PlanReviewOperationCount(item.Kind, item.Count);
         }).ToArray();
+        if (plan.RecoveryCapacity is not { } sourceCapacity
+            || sourceCapacity.Maximum != ProtocolJsonSerializer.MaxRecoveryGenerations
+            || sourceCapacity.Used < 0
+            || sourceCapacity.Used > sourceCapacity.Maximum)
+        {
+            throw new InvalidOperationException("The plan recovery capacity was invalid.");
+        }
+        PlanReviewRecoveryCapacity capacity = new(sourceCapacity.Used, sourceCapacity.Maximum);
         PlanReviewConflictCount[] conflicts = plan.ConflictCounts.Select(item =>
         {
             if (item is null || !Enum.IsDefined(item.Code) || item.Count <= 0)
@@ -1472,11 +1518,14 @@ internal sealed class PlanReviewController : IAsyncDisposable
         }).ToArray();
 
         if (operations.Select(item => item.Kind).Distinct().Count() != operations.Length
+            || !operations.Select(item => item.Kind).SequenceEqual(operations.Select(item => item.Kind).Order())
             || conflicts.Select(item => item.Code).Distinct().Count() != conflicts.Length
             || candidates.Select(item => (item.Reason, item.Disposition, item.ProvisionallyIncluded)).Distinct().Count() != candidates.Length)
         {
             throw new InvalidOperationException("The plan summary contained duplicate groups.");
         }
+        if (conflicts.Any(item => item.Code == PlanConflictCode.RecoveryCapacityReached) != !capacity.CanCreate)
+            throw new InvalidOperationException("The plan recovery-capacity conflict was inconsistent.");
         int operationTotal = operations.Aggregate(0, (sum, item) => checked(sum + item.Count));
         int conflictTotal = conflicts.Aggregate(0, (sum, item) => checked(sum + item.Count));
         int candidateTotal = candidates.Aggregate(0, (sum, item) => checked(sum + item.Count));
@@ -1488,6 +1537,7 @@ internal sealed class PlanReviewController : IAsyncDisposable
         {
             throw new InvalidOperationException("The plan summary counts were invalid.");
         }
+        PlanReviewPathFact[] pathFacts = ProjectPathFacts(plan.PathFacts, plan.AdditionalPathFactCount, plan.Operation, operations);
         ValidateRisks(plan.Operation, current, target, candidateTotal, risks);
 
         (PlanReviewCandidate[] detailedCandidates, Dictionary<PlanReviewCandidate, InstallerReadOnlyPlanCandidate> authorities) = ProjectCandidates(plan.Candidates);
@@ -1529,10 +1579,91 @@ internal sealed class PlanReviewController : IAsyncDisposable
             plan.AdditionalNoticeCount
         )
         {
+            RecoveryCapacity = capacity,
+            PathFacts = Array.AsReadOnly(pathFacts),
+            AdditionalPathFactCount = plan.AdditionalPathFactCount,
             Candidates = Array.AsReadOnly(detailedCandidates),
             TargetReleaseLabels = targetLabels
         };
         return new(result, authorities, plan.Confirmation);
+    }
+
+    private static PlanReviewPathFact[] ProjectPathFacts(
+        IReadOnlyList<InstallerPlanPathFact> source,
+        int additionalCount,
+        InstallerOperation operation,
+        IReadOnlyList<PlanReviewOperationCount> operationCounts
+    )
+    {
+        int count;
+        try { count = source.Count; }
+        catch { throw new InvalidOperationException("The receipt-owned path facts could not be read safely."); }
+        if (count is < 0 or > ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts
+            || additionalCount is < 0 or > MaximumOperationCount
+            || additionalCount > 0 && count != ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts)
+        {
+            throw new InvalidOperationException("The receipt-owned path facts exceeded their display bounds.");
+        }
+        int totalPathFactCount = checked(count + additionalCount);
+        int totalOperationCount = operationCounts.Aggregate(0, (sum, item) => checked(sum + item.Count));
+        if (totalPathFactCount > totalOperationCount)
+            throw new InvalidOperationException("The managed-path facts exceeded the exact plan operations.");
+
+        List<PlanReviewPathFact> projected = new(count);
+        HashSet<string> paths = new(StringComparer.Ordinal);
+        (int Priority, string Path, PlanOperationKind Action)? previous = null;
+        Dictionary<PlanOperationKind, int> visibleByAction = [];
+        for (int index = 0; index < count; index++)
+        {
+            InstallerPlanPathFact item;
+            try { item = source[index]; }
+            catch { throw new InvalidOperationException("The receipt-owned path facts could not be read safely."); }
+            if (item is null
+                || string.IsNullOrEmpty(item.DisplayPath)
+                || item.DisplayPath.Length > MaximumEscapedCandidatePathLength
+                || !InstallerDisplayText.IsEscapedCanonicalRelativePath(item.DisplayPath)
+                || !paths.Add(item.DisplayPath))
+            {
+                throw new InvalidOperationException("A receipt-owned path fact was invalid.");
+            }
+            PlanReviewPathFactKind kind = item.FactKind switch
+            {
+                InstallerPlanPathFactKind.MissingReceiptOwned when operation == InstallerOperation.Repair && item.PlannedAction == PlanOperationKind.Create => PlanReviewPathFactKind.MissingReceiptOwned,
+                InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned when item.PlannedAction is PlanOperationKind.Replace or PlanOperationKind.Remove => PlanReviewPathFactKind.ApprovedModifiedReceiptOwned,
+                InstallerPlanPathFactKind.ApprovedModifiedInstalledLauncher when item.PlannedAction is PlanOperationKind.Replace or PlanOperationKind.Restore => PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher,
+                _ => throw new InvalidOperationException("A receipt-owned path fact did not match the exact plan semantics.")
+            };
+            int priority = kind == PlanReviewPathFactKind.MissingReceiptOwned ? 1 : 0;
+            (int Priority, string Path, PlanOperationKind Action) key = (priority, item.DisplayPath, item.PlannedAction);
+            if (previous is { } old && (key.Priority < old.Priority
+                || key.Priority == old.Priority && StringComparer.Ordinal.Compare(key.Path, old.Path) < 0
+                || key.Priority == old.Priority && key.Path == old.Path && key.Action < old.Action))
+            {
+                throw new InvalidOperationException("The receipt-owned path facts were not deterministic.");
+            }
+            previous = key;
+            visibleByAction[item.PlannedAction] = visibleByAction.GetValueOrDefault(item.PlannedAction) + 1;
+            projected.Add(new(item.DisplayPath, kind, item.PlannedAction));
+        }
+        foreach ((PlanOperationKind action, int visibleCount) in visibleByAction)
+        {
+            int plannedCount = operationCounts.SingleOrDefault(item => item.Kind == action)?.Count ?? 0;
+            if (visibleCount > plannedCount)
+                throw new InvalidOperationException("The receipt-owned path facts exceeded their matching plan actions.");
+        }
+        return projected.ToArray();
+    }
+
+    private static string ValidateGameDisplayName(VerifiedGamePresentation game)
+    {
+        ArgumentNullException.ThrowIfNull(game);
+        if (string.IsNullOrWhiteSpace(game.DisplayName)
+            || game.DisplayName.Length > MaximumEscapedCandidatePathLength
+            || !string.Equals(game.DisplayName, InstallerDisplayText.Escape(game.DisplayName), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The selected game label was invalid.");
+        }
+        return game.DisplayName;
     }
 
     private static (

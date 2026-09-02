@@ -749,6 +749,27 @@ Local-package verification is now production-composed. The exact reviewed merge 
 - [x] Merge and close final Phase 4 integration/release-preparation [PR #250](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/250) into `develop` at [`052699e8`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/052699e8ccba0d13f9d4f02e0bb199aa04cec605).
 - [x] Publish a publicly downloadable GUI package tied to exact reviewed commit [`052699e8`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/052699e8ccba0d13f9d4f02e0bb199aa04cec605) through immutable tag [`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2`](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2) ([successful tag workflow](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33669816773)).
 - [x] Verify the freshly downloaded six-asset public GUI package from a clean isolated environment: exact before/after inventory, public sizes/digests, strict checksums, metadata/manifest authority, both local-bundle attestations, package structure, packaged GUI smoke, and disposable install/update/uninstall/failure lifecycle passed ([sanitized evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5515036792)).
+
+### Post-alpha.2 authentic-screenshot audit corrections
+
+- [x] Audit the exact public alpha.2 GUI across qualified GNOME and KDE sessions before capture, keep private capture material out of the repository, and record the confirmed gaps and corrective-release boundary in a [sanitized audit](linux-gui-alpha2-visible-evidence-audit.md).
+- [x] Bind exact recovery-capacity facts into Protocol V1 plan digests and reject capacity/conflict disagreement at Core, process, plan-review, and immutable execution boundaries.
+- [x] Show the selected safe game label, current and intended releases, exact operation counts including zero, recovery location/capacity, managed game-file scope, installer-internal state writes, backup exclusions, and bounded typed managed-path evidence before execution.
+- [x] Retain accumulated candidate approvals privately by exact canonical path, type, action, expected hash, and result hash; revalidate the complete tuple against every refreshed exact plan before projecting escaped display text.
+- [x] Distinguish receipt-owned files from the installed launcher, enforce exact launcher reason/path semantics at the protocol boundary, and reject noncanonical or colliding escaped-path presentations.
+- [x] Separate intended-plan facts from exact durable results; show resulting state, committed counts, and an identity-free backup checkpoint only after a successful committed outcome.
+- [x] Wrap section headings and maximal managed-path evidence at 420 DIP and 100–200% scale without horizontal overflow.
+- [x] Pass 1,179/1,179 complete Core tests, 958/958 complete GUI tests, focused hostile refresh/path/count/relationship tests, warning-free affected-project and test-project Release builds, changed-file formatting, repeated mixed-order Avalonia coverage, and diff checks ([PR #254 local evidence](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254)).
+- [x] Obtain clean independent architecture/correctness and security/privacy re-reviews of the exact corrective code head after addressing every actionable finding ([independent review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254#issuecomment-5516334680); [exact-head final gate](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254#issuecomment-5516406776)).
+- [x] Obtain independent UX/accessibility and final test-gate reviews of the exact corrective diff ([independent review record](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254#issuecomment-5516334680); [exact-head final gate](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254#issuecomment-5516406776)).
+- [x] Open focused fork [PR #254](https://github.com/4eh5xitv6787h645ebv/SMAPI/pull/254) for the visible-plan-evidence corrective slice at reviewed implementation head [`b4e41d9b`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/b4e41d9b80ebb0bc26c765a7f7d4f6e5392d0192).
+- [x] Pass both required hosted workflows on exact reviewed corrective head [`b4601c91`](https://github.com/4eh5xitv6787h645ebv/SMAPI/commit/b4601c91472a3dbe05466dab4bff308cfeb6e589) ([Linux qualification `33682703261`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33682703261); [deterministic performance gates `33682703274`](https://github.com/4eh5xitv6787h645ebv/SMAPI/actions/runs/33682703274)).
+- [ ] Merge the corrective pull request into `develop`, close it, and delete its branch locally and on origin.
+- [ ] Complete the typed release-verification failure, diagnostics-boundary, and expanded manual-help corrective slices through focused reviewed pull requests.
+- [ ] Publish a replacement exact-commit Linux GUI prerelease and repeat clean isolated public-package qualification.
+- [ ] Capture, privacy-review, hash, manifest, and publish all 57 authentic production screenshot states from the corrected public package across the required GNOME/KDE and X11/XWayland matrix.
+- [ ] Publish the screenshot-led repository and GitHub Pages documentation and verify every required page and asset returns HTTP 200.
+
 - [ ] Verify `develop` equals `origin/develop` after the phase.
 
 ## Phase 5 — Improved Mod Health Report recommendations

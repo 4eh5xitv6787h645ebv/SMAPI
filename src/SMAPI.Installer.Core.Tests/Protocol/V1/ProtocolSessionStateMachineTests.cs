@@ -61,6 +61,58 @@ internal sealed class ProtocolSessionStateMachineTests
     }
 
     [Test]
+    public void IssuePlan_BindsExactRecoveryCapacityAndRejectsDuplicatedModelDrift()
+    {
+        RecoveryCapacityState oneSlotLeft = new(63, ProtocolJsonSerializer.MaxRecoveryGenerations);
+        ProtocolSessionStateMachine availableMachine = Ready();
+        PlanEvent available = availableMachine.IssuePlan(
+            new(availableMachine.SessionId, "/game", InstallerOperation.Uninstall, null, null),
+            Inspection(InstallationAction.Uninstall, planRecoveryCapacity: oneSlotLeft, inspectionRecoveryCapacity: oneSlotLeft)
+        );
+        available.RecoveryUsedGenerationCount.Should().Be(63);
+        available.RecoveryMaximumGenerationCount.Should().Be(ProtocolJsonSerializer.MaxRecoveryGenerations);
+        available.RecoveryRemainingGenerationCount.Should().Be(1);
+        available.CanCreateRecoveryGeneration.Should().BeTrue();
+
+        RecoveryCapacityState full = new(64, ProtocolJsonSerializer.MaxRecoveryGenerations);
+        ProtocolSessionStateMachine fullMachine = Ready();
+        PlanEvent blocked = fullMachine.IssuePlan(
+            new(fullMachine.SessionId, "/game", InstallerOperation.Uninstall, null, null),
+            Inspection(
+                InstallationAction.Uninstall,
+                conflicts: [new(PlanConflictCode.RecoveryCapacityReached)],
+                planRecoveryCapacity: full,
+                inspectionRecoveryCapacity: full
+            )
+        );
+        blocked.RecoveryUsedGenerationCount.Should().Be(64);
+        blocked.CanCreateRecoveryGeneration.Should().BeFalse();
+
+        ProtocolSessionStateMachine mismatchMachine = Ready();
+        FluentActions.Invoking(() => mismatchMachine.IssuePlan(
+            new(mismatchMachine.SessionId, "/game", InstallerOperation.Uninstall, null, null),
+            Inspection(InstallationAction.Uninstall, planRecoveryCapacity: oneSlotLeft, inspectionRecoveryCapacity: new(62, 64))
+        )).Should().Throw<ProtocolException>().WithMessage("*doesn't match the exact plan*");
+
+        ProtocolSessionStateMachine missingConflictMachine = Ready();
+        FluentActions.Invoking(() => missingConflictMachine.IssuePlan(
+            new(missingConflictMachine.SessionId, "/game", InstallerOperation.Uninstall, null, null),
+            Inspection(InstallationAction.Uninstall, planRecoveryCapacity: full, inspectionRecoveryCapacity: full)
+        )).Should().Throw<ProtocolException>().WithMessage("*conflict doesn't match*");
+
+        ProtocolSessionStateMachine forgedConflictMachine = Ready();
+        FluentActions.Invoking(() => forgedConflictMachine.IssuePlan(
+            new(forgedConflictMachine.SessionId, "/game", InstallerOperation.Uninstall, null, null),
+            Inspection(
+                InstallationAction.Uninstall,
+                conflicts: [new(PlanConflictCode.RecoveryCapacityReached)],
+                planRecoveryCapacity: oneSlotLeft,
+                inspectionRecoveryCapacity: oneSlotLeft
+            )
+        )).Should().Throw<ProtocolException>().WithMessage("*conflict doesn't match*");
+    }
+
+    [Test]
     public void PlanPages_PullEveryMaximumBoundOperationUnderTheWireLimitAndRejectInvalidOffsetsOrStates()
     {
         ProtocolSessionStateMachine machine = Ready();
@@ -681,7 +733,9 @@ internal sealed class ProtocolSessionStateMachineTests
         object? repairAuthority = null,
         PlannedOperation[]? operations = null,
         InstallationReleaseIdentity? currentRelease = null,
-        InstallationReleaseIdentity? expectedResultRelease = null
+        InstallationReleaseIdentity? expectedResultRelease = null,
+        RecoveryCapacityState? planRecoveryCapacity = null,
+        RecoveryCapacityState? inspectionRecoveryCapacity = null
     )
     {
         PlannedOperation operation = action switch
@@ -690,7 +744,8 @@ internal sealed class ProtocolSessionStateMachineTests
             InstallationAction.Backup => new(PlanOperationKind.Retain, NormalizedRelativePath.Parse("StardewModdingAPI.dll"), Sha256Digest.Parse(HashA), Sha256Digest.Parse(HashA)),
             _ => new(PlanOperationKind.Create, NormalizedRelativePath.Parse("StardewModdingAPI.dll"), null, Sha256Digest.Parse(HashB))
         };
-        InstallationPlan plan = new(action, operations ?? [operation], conflicts ?? [], ObservedInstallationState.KnownModified, new RecoveryCapacityState(0, 64));
+        RecoveryCapacityState planCapacity = planRecoveryCapacity ?? new RecoveryCapacityState(0, 64);
+        InstallationPlan plan = new(action, operations ?? [operation], conflicts ?? [], ObservedInstallationState.KnownModified, planCapacity);
         Sha256Digest planSha = Sha256Digest.Hash(System.Text.Encoding.UTF8.GetBytes(plan.ToCanonicalJson()));
         BoundInstallationPlan binding = new(action, Root, 7, planSha, package?.ManifestSha256, null, null, recovery?.SnapshotSha256, null, recovery?.GenerationId, recovery?.AuthorizedHeadPointerSha256, package, recovery);
         return new(
@@ -702,7 +757,7 @@ internal sealed class ProtocolSessionStateMachineTests
             currentRelease ?? (action == InstallationAction.Install ? null : CreateRelease()),
             expectedResultRelease ?? (action is InstallationAction.Uninstall or InstallationAction.Backup ? null : CreateRelease()),
             ObservedInstallationState.KnownModified,
-            new RecoveryCapacityState(0, 64),
+            inspectionRecoveryCapacity ?? planCapacity,
             candidates,
             approvals
         );

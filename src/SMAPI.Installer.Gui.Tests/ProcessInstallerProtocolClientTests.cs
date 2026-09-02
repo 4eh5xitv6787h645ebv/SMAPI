@@ -3256,6 +3256,17 @@ public sealed class ProcessInstallerProtocolClientTests
         typeof(InstallerReadOnlyPlanCandidate).IsAssignableTo(typeof(IEquatable<InstallerReadOnlyPlanCandidate>)).Should().BeFalse();
     }
 
+    [TestCase("folder/ordinary.dll", true)]
+    [TestCase("folder/bi\\u202Edi.dll", true)]
+    [TestCase("/absolute.dll", false)]
+    [TestCase("../outside.dll", false)]
+    [TestCase("folder/false\\u0041escape.dll", false)]
+    [TestCase("folder\\literal-backslash.dll", false)]
+    public void ManagedPathDisplayValidationAcceptsOnlyExactCanonicalEscapeProjections(string value, bool expected)
+    {
+        InstallerDisplayText.IsEscapedCanonicalRelativePath(value).Should().Be(expected);
+    }
+
     [Test]
     public void CandidateProjectionRejectsAnInvalidSurrogatePath()
     {
@@ -3278,6 +3289,32 @@ public sealed class ProcessInstallerProtocolClientTests
             Candidates = [CreateCandidate('4', path, false)]
         };
         ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [TestCase("StardewValley")]
+    [TestCase("StardewValley-original")]
+    public async Task InspectPlanFailStopsReceiptOwnedCandidateAtReservedLauncherPath(string reservedPath)
+    {
+        const string OrdinaryPath = "smapi-internal/receipt-owned.dll";
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            Candidates = [CreateCandidate('4', OrdinaryPath, false)]
+        };
+        byte[]? Respond(ProtocolRequest request)
+        {
+            byte[]? response = script.Respond(request);
+            return request is GetPlanPageRequest && response is not null
+                ? Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(response).Replace($"\"path\":\"{OrdinaryPath}\"", $"\"path\":\"{reservedPath}\"", StringComparison.Ordinal))
+                : response;
+        }
+        ScriptedProcess process = new(Respond);
         await using ProcessInstallerProtocolClient client = Create(process);
         await OpenVerifiedSessionAsync(client);
 
@@ -3332,6 +3369,180 @@ public sealed class ProcessInstallerProtocolClientTests
         script.ApprovalRejection = new(Session, ProtocolPrePlanErrorCode.CandidateApprovalFailed, "Changed safely.", ProtocolNextAction.InspectAgain, false, null);
         (await client.ApprovePlanCandidatesAsync([replacement.Candidates[0]]))
             .Should().BeOfType<InstallerReadOnlyPlanRejection>("pre-wire validation failures must preserve the current exact binding");
+    }
+
+    [Test]
+    public async Task RepairProjectsDigestVerifiedCapacityAndBoundedMissingReceiptOwnedPaths()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Repair)
+        {
+            RecoveryUsedGenerationCount = 63,
+            Operations = Enumerable.Range(0, ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts + 1)
+                .Select(index => CreateOperation(PlanOperationKind.Create, $"smapi-internal/missing-{index:D2}.dll", null, '7'))
+                .ToArray()
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        InstallerReadOnlyPlanSuccess plan = (await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Repair))
+            .Should().BeOfType<InstallerReadOnlyPlanSuccess>().Subject;
+
+        plan.RecoveryCapacity.Should().Be(new InstallerPlanRecoveryCapacity(63, ProtocolJsonSerializer.MaxRecoveryGenerations));
+        plan.RecoveryCapacity.Remaining.Should().Be(1);
+        plan.PathFacts.Should().HaveCount(ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts);
+        plan.PathFacts.Should().OnlyContain(fact => fact.FactKind == InstallerPlanPathFactKind.MissingReceiptOwned && fact.PlannedAction == PlanOperationKind.Create);
+        plan.PathFacts.Select(fact => fact.DisplayPath).Should().BeInAscendingOrder(StringComparer.Ordinal);
+        plan.AdditionalPathFactCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task ApprovedModifiedReceiptOwnedPathsSurviveMultipleAdditiveRefreshesWithoutAuthorityData()
+    {
+        ProtocolPlanCandidate first = CreateCandidate('4', "smapi-internal/first.dll", false);
+        ProtocolPlanCandidate second = CreateCandidate('5', "smapi-internal/second.dll", false);
+        ReadOnlyPlanScript script = new(InstallerOperation.Repair)
+        {
+            Candidates = [first, second],
+            ReplacementGenerations =
+            [
+                [second with { CandidateId = ProtocolCandidateId.Parse(new string('7', 32)) }],
+                []
+            ]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess initial = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Repair);
+
+        InstallerReadOnlyPlanSuccess middle = (InstallerReadOnlyPlanSuccess)await client.ApprovePlanCandidatesAsync([initial.Candidates[0]]);
+        InstallerReadOnlyPlanSuccess final = (InstallerReadOnlyPlanSuccess)await client.ApprovePlanCandidatesAsync([middle.Candidates.Single()]);
+
+        middle.PathFacts.Should().ContainSingle().Which.Should().Be(new InstallerPlanPathFact(
+            "smapi-internal/first.dll",
+            InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned,
+            PlanOperationKind.Replace
+        ));
+        final.PathFacts.Should().Equal(
+            new InstallerPlanPathFact("smapi-internal/first.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace),
+            new InstallerPlanPathFact("smapi-internal/second.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace)
+        );
+        final.AdditionalPathFactCount.Should().Be(0);
+    }
+
+    [TestCase("disappeared")]
+    [TestCase("action")]
+    [TestCase("expected-hash")]
+    [TestCase("result-hash")]
+    public async Task AccumulatedApprovalFailsClosedWhenItsExactOperationChangesOnALaterRefresh(string mutation)
+    {
+        ProtocolPlanCandidate first = CreateCandidate('4', "smapi-internal/first.dll", false);
+        ProtocolPlanCandidate second = CreateCandidate('5', "smapi-internal/second.dll", false);
+        ReadOnlyPlanScript script = new(InstallerOperation.Repair)
+        {
+            Candidates = [first, second],
+            ReplacementGenerations =
+            [
+                [second with { CandidateId = ProtocolCandidateId.Parse(new string('7', 32)) }],
+                []
+            ],
+            ApprovalOperationsFactory = (generation, operations) => generation != 2
+                ? operations
+                : operations
+                    .Where(operation => mutation != "disappeared" || operation.Path != first.Path)
+                    .Select(operation => operation.Path != first.Path
+                        ? operation
+                        : mutation switch
+                        {
+                            "action" => operation with { Kind = PlanOperationKind.Remove, ResultSha256 = null },
+                            "expected-hash" => operation with { ExpectedCurrentSha256 = new string('8', 64) },
+                            "result-hash" => operation with { ResultSha256 = new string('9', 64) },
+                            _ => operation
+                        })
+                    .OrderBy(operation => operation.Path, StringComparer.Ordinal)
+                    .ThenBy(operation => operation.Kind)
+                    .ThenBy(operation => operation.ResultSha256, StringComparer.Ordinal)
+                    .ToArray()
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess initial = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Repair);
+        InstallerReadOnlyPlanSuccess middle = (InstallerReadOnlyPlanSuccess)await client.ApprovePlanCandidatesAsync([initial.Candidates[0]]);
+
+        Func<Task> action = () => client.ApprovePlanCandidatesAsync([middle.Candidates.Single()]);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task MixedLauncherReceiptOwnedAndMissingFactsHaveTypedDeterministicPresentation()
+    {
+        ProtocolPlanCandidate launcher = CreateCandidate('4', "StardewValley", false) with
+        {
+            Reason = FileReplacementCandidateReason.ModifiedInstalledLauncher,
+            Disposition = FileReplacementCandidateDisposition.Restore
+        };
+        ProtocolPlanCandidate receiptOwned = CreateCandidate('5', "smapi-internal/z-owned.dll", false);
+        ReadOnlyPlanScript script = new(InstallerOperation.Repair)
+        {
+            Operations = [CreateOperation(PlanOperationKind.Create, "smapi-internal/m-missing.dll", null, '5')],
+            Candidates = [launcher, receiptOwned],
+            ReplacementCandidates = []
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+        InstallerReadOnlyPlanSuccess initial = (InstallerReadOnlyPlanSuccess)await client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Repair);
+
+        InstallerReadOnlyPlanSuccess final = (InstallerReadOnlyPlanSuccess)await client.ApprovePlanCandidatesAsync(initial.Candidates);
+
+        final.PathFacts.Should().Equal(
+            new InstallerPlanPathFact("StardewValley", InstallerPlanPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore),
+            new InstallerPlanPathFact("smapi-internal/z-owned.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace),
+            new InstallerPlanPathFact("smapi-internal/m-missing.dll", InstallerPlanPathFactKind.MissingReceiptOwned, PlanOperationKind.Create)
+        );
+    }
+
+    [Test]
+    public async Task InspectPlanFailStopsPathsWhoseLiteralEscapeCouldCollideWithEscapedDisplayText()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Install)
+        {
+            Candidates =
+            [
+                CreateCandidate('4', "folder/bi\u202Edi.dll", false),
+                CreateCandidate('5', "folder/bi\\u202Edi.dll", false)
+            ]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Install);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
+    }
+
+    [Test]
+    public async Task CapacityConflictMismatchFailsClosedEvenWithARecomputedDigest()
+    {
+        ReadOnlyPlanScript script = new(InstallerOperation.Uninstall)
+        {
+            RecoveryUsedGenerationCount = 0,
+            Conflicts = [new(PlanConflictCode.RecoveryCapacityReached, null)],
+            Warnings = [$"{PlanConflictCode.RecoveryCapacityReached}."]
+        };
+        ScriptedProcess process = new(script.Respond);
+        await using ProcessInstallerProtocolClient client = Create(process);
+        await OpenVerifiedSessionAsync(client);
+
+        Func<Task> action = () => client.InspectPlanAsync(ReadOnlyPlanScript.GamePath, InstallerOperation.Uninstall);
+
+        await action.Should().ThrowAsync<InstallerProtocolClientException>();
+        process.Terminated.Should().BeTrue();
     }
 
     [Test]
@@ -4857,6 +5068,8 @@ public sealed class ProcessInstallerProtocolClientTests
         public ProtocolPlanOperation[] Operations { get; set; } = [];
         public ProtocolPlanConflict[] Conflicts { get; set; } = [];
         public ProtocolPlanCandidate[] Candidates { get; set; } = [];
+        public int? RecoveryUsedGenerationCount { get; set; }
+        public int RecoveryMaximumGenerationCount { get; set; } = ProtocolJsonSerializer.MaxRecoveryGenerations;
         public string[] Warnings { get; set; } = [];
         public ProtocolPlanRisk[]? RisksOverride { get; init; }
         public int PageSize { get; init; } = 128;
@@ -4866,6 +5079,7 @@ public sealed class ProcessInstallerProtocolClientTests
         public PrePlanRejectedEvent? ApprovalRejection { get; set; }
         public ProtocolPlanCandidate[]? ReplacementCandidates { get; set; }
         public ProtocolPlanCandidate[][]? ReplacementGenerations { get; set; }
+        public Func<int, ProtocolPlanOperation[], ProtocolPlanOperation[]>? ApprovalOperationsFactory { get; set; }
         public Func<int, ProtocolPlanCandidate[]>? InspectionCandidatesFactory { get; set; }
         public bool ReusePlanIdOnApproval { get; set; }
         public bool ReusePlanDigestOnApproval { get; set; }
@@ -4950,7 +5164,28 @@ public sealed class ProcessInstallerProtocolClientTests
 
         private byte[] CreateApprovalResponse(SelectPlanCandidatesRequest request)
         {
+            ProtocolPlanCandidate[] approved = this.Candidates
+                .Where(candidate => request.SelectedCandidateIds.Contains(candidate.CandidateId))
+                .ToArray();
+            this.Operations = this.Operations
+                .Concat(approved.Select(candidate => (Candidate: candidate, Action: (candidate.Reason, candidate.Disposition) switch
+                    {
+                        (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Replace) => PlanOperationKind.Replace,
+                        (FileReplacementCandidateReason.ModifiedReceiptOwned, FileReplacementCandidateDisposition.Remove) => PlanOperationKind.Remove,
+                        (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Replace) => PlanOperationKind.Replace,
+                        (FileReplacementCandidateReason.ModifiedInstalledLauncher, FileReplacementCandidateDisposition.Restore) => PlanOperationKind.Restore,
+                        _ => (PlanOperationKind?)null
+                    }))
+                    .Where(item => item.Action is not null)
+                    .Where(item => !this.Operations.Any(operation => operation.Kind == item.Action && string.Equals(operation.Path, item.Candidate.Path, StringComparison.Ordinal)))
+                    .Select(item => new ProtocolPlanOperation(item.Action!.Value, item.Candidate.Path, item.Candidate.ObservedSha256, item.Candidate.ProposedResultSha256)))
+                .OrderBy(operation => operation.Path, StringComparer.Ordinal)
+                .ThenBy(operation => operation.Kind)
+                .ThenBy(operation => operation.ResultSha256, StringComparer.Ordinal)
+                .ToArray();
             this.ApprovalGeneration++;
+            if (this.ApprovalOperationsFactory is not null)
+                this.Operations = this.ApprovalOperationsFactory(this.ApprovalGeneration, this.Operations);
             if (!this.ReusePlanIdOnApproval)
                 this.PlanId = ProtocolPlanId.Parse(new string((char)('a' + (this.ApprovalGeneration - 1) * 2), 32));
             if (this.ReplacementGenerations is not null)
@@ -5083,6 +5318,10 @@ public sealed class ProcessInstallerProtocolClientTests
                 _ => null
             };
             ObservedInstallState observed = this.ObservedState;
+            int recoveryUsed = this.RecoveryUsedGenerationCount
+                ?? (this.Conflicts.Any(conflict => conflict.Code == PlanConflictCode.RecoveryCapacityReached)
+                    ? ProtocolJsonSerializer.MaxRecoveryGenerations
+                    : 0);
             ProtocolPlanRisk[] risks = this.RisksOverride ?? this.GetExpectedRisks(current, target);
             if (this.HeaderFault == PlanHeaderFault.WrongRisk)
                 risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval];
@@ -5096,6 +5335,8 @@ public sealed class ProcessInstallerProtocolClientTests
                 current,
                 target,
                 observed,
+                recoveryUsed,
+                this.RecoveryMaximumGenerationCount,
                 this.Operations,
                 this.Conflicts,
                 this.Candidates,
@@ -5118,6 +5359,8 @@ public sealed class ProcessInstallerProtocolClientTests
                 current,
                 target,
                 observed,
+                recoveryUsed,
+                this.RecoveryMaximumGenerationCount,
                 this.Operations.Length,
                 this.Conflicts.Length,
                 this.Candidates.Length,

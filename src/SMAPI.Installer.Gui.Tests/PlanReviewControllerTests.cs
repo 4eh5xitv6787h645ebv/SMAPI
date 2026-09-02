@@ -737,6 +737,13 @@ internal sealed class PlanReviewControllerTests
         ConfirmedPlanHandoff handoff = controller.TakeConfirmedHandoff();
         handoff.Session.Should().BeSameAs(confirmed);
         handoff.Presentation.Operation.Should().Be(InstallerOperation.Install);
+        handoff.Presentation.GameDisplayName.Should().Be(session.Game.DisplayName);
+        handoff.Presentation.CurrentRelease.Should().BeNull();
+        handoff.Presentation.IntendedResult.Should().Be(new ExecutionReleaseTarget(new(
+            session.Release.Tag,
+            session.Release.EmbeddedVersion
+        )));
+        handoff.Presentation.RecoveryCapacity.Should().Be(new PlanReviewRecoveryCapacity(0, ProtocolJsonSerializer.MaxRecoveryGenerations));
         handoff.Presentation.OperationCounts.Should().BeEmpty();
         Action secondTake = () => controller.TakeConfirmedHandoff();
         secondTake.Should().Throw<ObjectDisposedException>();
@@ -1325,6 +1332,10 @@ internal sealed class PlanReviewControllerTests
     {
         List<ProtocolPlanRisk> risks = [ProtocolPlanRisk.ModifiedOrUnknownFileApproval];
         List<InstallerPlanOperationCount> operations = [new(PlanOperationKind.Replace, 1)];
+        List<InstallerPlanPathFact> pathFacts =
+        [
+            new("smapi-internal/example.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace)
+        ];
         List<InstallerPlanConflictCount> conflicts = [];
         List<InstallerPlanCandidateCount> candidates =
         [
@@ -1339,6 +1350,8 @@ internal sealed class PlanReviewControllerTests
         {
             Risks = risks,
             OperationCounts = operations,
+            RecoveryCapacity = new(63, ProtocolJsonSerializer.MaxRecoveryGenerations),
+            PathFacts = pathFacts,
             ConflictCounts = conflicts,
             CandidateCounts = candidates,
             Candidates = [CandidateCapability("mods/example.dll", provisional: true)]
@@ -1360,9 +1373,16 @@ internal sealed class PlanReviewControllerTests
             false,
             999
         );
+        pathFacts[0] = new("mutated.dll", InstallerPlanPathFactKind.MissingReceiptOwned, PlanOperationKind.Create);
 
         projected.Risks.Should().Equal(ProtocolPlanRisk.ModifiedOrUnknownFileApproval);
         projected.OperationCounts.Should().Equal(new PlanReviewOperationCount(PlanOperationKind.Replace, 1));
+        projected.RecoveryCapacity.Should().Be(new PlanReviewRecoveryCapacity(63, ProtocolJsonSerializer.MaxRecoveryGenerations));
+        projected.PathFacts.Should().Equal(new PlanReviewPathFact(
+            "smapi-internal/example.dll",
+            PlanReviewPathFactKind.ApprovedModifiedReceiptOwned,
+            PlanOperationKind.Replace
+        ));
         projected.CandidateCounts.Should().Equal(new PlanReviewCandidateCount(
             FileReplacementCandidateReason.ModifiedReceiptOwned,
             FileReplacementCandidateDisposition.Replace,
@@ -1377,6 +1397,39 @@ internal sealed class PlanReviewControllerTests
             && candidate.BackendProvisionallyIncluded
         );
         projected.Risks.Should().BeAssignableTo<System.Collections.ObjectModel.ReadOnlyCollection<ProtocolPlanRisk>>();
+    }
+
+    [Test]
+    public async Task ExactManagedPathFactTotalAndMixedTypedOrderingSurviveProjection()
+    {
+        InstallerPlanPathFact[] pathFacts =
+        [
+            new("StardewValley", InstallerPlanPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore),
+            new("smapi-internal/z-owned.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace),
+            new("smapi-internal/m-missing.dll", InstallerPlanPathFactKind.MissingReceiptOwned, PlanOperationKind.Create)
+        ];
+        InstallerReadOnlyPlanSuccess source = CreatePlan(InstallerOperation.Repair) with
+        {
+            OperationCounts =
+            [
+                new(PlanOperationKind.Restore, 1),
+                new(PlanOperationKind.Create, 1),
+                new(PlanOperationKind.Replace, 1)
+            ],
+            PathFacts = pathFacts
+        };
+        FakePlanSession session = new() { Inspection = (_, _) => Task.FromResult<InstallerReadOnlyPlanResult>(source) };
+        await using PlanReviewController controller = new(session);
+        controller.SelectOperation(InstallerOperation.Repair);
+
+        await controller.InspectAsync();
+
+        PlanReviewPlan projected = controller.Snapshot.Result.Should().BeOfType<PlanReviewPlan>().Subject;
+        projected.PathFacts.Should().Equal(
+            new PlanReviewPathFact("StardewValley", PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Restore),
+            new PlanReviewPathFact("smapi-internal/z-owned.dll", PlanReviewPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace),
+            new PlanReviewPathFact("smapi-internal/m-missing.dll", PlanReviewPathFactKind.MissingReceiptOwned, PlanOperationKind.Create)
+        );
     }
 
     [Test]
@@ -1642,6 +1695,24 @@ internal sealed class PlanReviewControllerTests
             ("rollback risk", valid with { Risks = [ProtocolPlanRisk.Rollback] }),
             ("zero operation group", valid with { OperationCounts = [new(PlanOperationKind.Create, 0)] }),
             ("duplicate operation group", valid with { OperationCounts = [new(PlanOperationKind.Create, 1), new(PlanOperationKind.Create, 2)] }),
+            ("absolute managed path", valid with
+            {
+                OperationCounts = [new(PlanOperationKind.Replace, 1)],
+                PathFacts = [new("/private/path.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace)]
+            }),
+            ("noncanonical managed path escape", valid with
+            {
+                OperationCounts = [new(PlanOperationKind.Replace, 1)],
+                PathFacts = [new("smapi-internal/false\\u0041escape.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace)]
+            }),
+            ("managed path omissions exceed exact operations", valid with
+            {
+                OperationCounts = [new(PlanOperationKind.Replace, ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts)],
+                PathFacts = Enumerable.Range(0, ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts)
+                    .Select(index => new InstallerPlanPathFact($"smapi-internal/approved-{index:D2}.dll", InstallerPlanPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace))
+                    .ToArray(),
+                AdditionalPathFactCount = 1
+            }),
             ("blocking mismatch", valid with { HasBlockingConflicts = true, ConflictCounts = [] }),
             ("duplicate conflict group", valid with { HasBlockingConflicts = true, ConflictCounts = [new(PlanConflictCode.UnknownCollision, 1), new(PlanConflictCode.UnknownCollision, 2)] }),
             ("duplicate candidate group", valid with { CandidateCounts = [CandidateCount(1), CandidateCount(2)] }),

@@ -26,11 +26,29 @@
         <local:InstallerDiagnosticsAccess x:Name="DiagnosticsAccess" />
       </StackPanel>
 
-      <Border Grid.Row="1" Padding="14" Background="{DynamicResource InstallerInfoBackgroundBrush}" BorderBrush="{DynamicResource InstallerInfoBorderBrush}" BorderThickness="1" CornerRadius="8">
+      <Border
+          x:Name="ConfirmedPlanRegion"
+          Grid.Row="1"
+          Padding="14"
+          AutomationProperties.Name="Confirmed plan identity and safety"
+          Background="{DynamicResource InstallerInfoBackgroundBrush}"
+          BorderBrush="{DynamicResource InstallerInfoBorderBrush}"
+          BorderThickness="1"
+          CornerRadius="8">
         <StackPanel Spacing="6">
-          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Safety boundary" />
+          <TextBlock AutomationProperties.HeadingLevel="2" FontWeight="SemiBold" Text="Confirmed plan identity and safety" TextWrapping="Wrap" />
           <TextBlock Text="{Binding BoundaryDetail}" TextWrapping="Wrap" />
           <TextBlock Classes="muted" Text="{Binding PlanDetail}" TextWrapping="Wrap" />
+          <ItemsControl ItemsSource="{Binding ConfirmationRows}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ExecutionFactRow">
+                <Grid Margin="0,3" ColumnDefinitions="2*,3*" AutomationProperties.Name="{Binding AccessibleName}">
+                  <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
         </StackPanel>
       </Border>
 

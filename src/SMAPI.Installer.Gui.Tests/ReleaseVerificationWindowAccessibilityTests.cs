@@ -90,6 +90,10 @@ internal sealed class ReleaseVerificationWindowAccessibilityTests
         ScrollViewer scroll = AssertRenderedLayout(window, 420);
         window.IsNarrowLayout.Should().BeTrue();
         window.FindControl<Grid>("PageGrid")!.Margin.Left.Should().Be(14);
+        TextBlock heading = window.FindControl<TextBlock>("ManualFallbackHeading")!;
+        heading.TextWrapping.Should().Be(TextWrapping.Wrap);
+        heading.Bounds.Width.Should().BeLessThanOrEqualTo(scroll.Viewport.Width + 1);
+        heading.Bounds.Height.Should().BeGreaterThan(24, "the long section heading must wrap at 420 DIP / 200% instead of clipping");
 
         window.Close();
     }

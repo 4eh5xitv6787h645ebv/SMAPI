@@ -25,9 +25,24 @@ internal enum ExecutionState
     Disposed
 }
 
+internal sealed record ExecutionReleasePresentation(string Tag, string Version);
+
+internal abstract record ExecutionResultTarget;
+
+internal sealed record ExecutionReleaseTarget(ExecutionReleasePresentation Release) : ExecutionResultTarget;
+
+internal sealed record ExecutionUninstalledTarget : ExecutionResultTarget;
+
 internal sealed record ExecutionPlanPresentation(
     InstallerOperation Operation,
+    string GameDisplayName,
+    ExecutionReleasePresentation? CurrentRelease,
+    ExecutionResultTarget IntendedResult,
+    PlanReviewReleaseRelationship? Relationship,
+    PlanReviewRecoveryCapacity RecoveryCapacity,
     IReadOnlyList<PlanReviewOperationCount> OperationCounts,
+    IReadOnlyList<PlanReviewPathFact> PathFacts,
+    int AdditionalPathFactCount,
     IReadOnlyList<ProtocolPlanRisk> Risks,
     int AdditionalNoticeCount
 );
@@ -84,7 +99,7 @@ internal sealed class ExecutionController : IAsyncDisposable
     public ExecutionController(IConfirmedInstallerSession session, ExecutionPlanPresentation plan)
     {
         this.Session = session ?? throw new ArgumentNullException(nameof(session));
-        this.Plan = ValidatePlan(plan);
+        this.Plan = ValidatePlan(session, plan);
         this.SessionFaultNotification = session.SessionFaulted
             ?? throw new InvalidOperationException("The confirmed installer session had no fault notification.");
         this.SessionWatcher = this.WatchSessionAsync();
@@ -542,19 +557,45 @@ internal sealed class ExecutionController : IAsyncDisposable
         );
     }
 
-    private static ExecutionPlanPresentation ValidatePlan(ExecutionPlanPresentation plan)
+    private static ExecutionPlanPresentation ValidatePlan(IConfirmedInstallerSession session, ExecutionPlanPresentation plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
         if (!Enum.IsDefined(plan.Operation))
             throw new ArgumentOutOfRangeException(nameof(plan));
-        if (plan.OperationCounts is null || plan.Risks is null || plan.AdditionalNoticeCount is < 0 or > 256)
+        if (plan.OperationCounts is null
+            || plan.PathFacts is null
+            || plan.Risks is null
+            || plan.AdditionalNoticeCount is < 0 or > 256
+            || plan.AdditionalPathFactCount is < 0 or > 20_000)
             throw new ArgumentException("The confirmed plan presentation is invalid.", nameof(plan));
+        if (string.IsNullOrWhiteSpace(plan.GameDisplayName)
+            || plan.GameDisplayName.Length > 4096 * 6
+            || !string.Equals(plan.GameDisplayName, session.Game.DisplayName, StringComparison.Ordinal)
+            || !string.Equals(plan.GameDisplayName, InstallerDisplayText.Escape(plan.GameDisplayName), StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The confirmed game label is invalid.", nameof(plan));
+        }
+        ValidateRelease(plan.CurrentRelease, nameof(plan));
+        if (plan.IntendedResult is ExecutionReleaseTarget releaseTarget)
+            ValidateRelease(releaseTarget.Release, nameof(plan));
+        else if (plan.IntendedResult is not ExecutionUninstalledTarget)
+            throw new ArgumentException("The confirmed intended result is invalid.", nameof(plan));
+        ValidateResultSemantics(session, plan);
+        if (plan.RecoveryCapacity is not { } capacity
+            || capacity.Maximum != ProtocolJsonSerializer.MaxRecoveryGenerations
+            || capacity.Used < 0
+            || capacity.Used > capacity.Maximum)
+        {
+            throw new ArgumentException("The confirmed recovery capacity is invalid.", nameof(plan));
+        }
 
         PlanReviewOperationCount[] operationCounts;
+        PlanReviewPathFact[] pathFacts;
         ProtocolPlanRisk[] planRisks;
         try
         {
             operationCounts = plan.OperationCounts.ToArray();
+            pathFacts = plan.PathFacts.ToArray();
             planRisks = plan.Risks.ToArray();
         }
         catch
@@ -562,15 +603,69 @@ internal sealed class ExecutionController : IAsyncDisposable
             throw new ArgumentException("The confirmed plan presentation could not be read safely.", nameof(plan));
         }
 
+        if (pathFacts.Length > ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts
+            || plan.AdditionalPathFactCount > 0 && pathFacts.Length != ProcessInstallerProtocolClient.MaximumVisiblePlanPathFacts)
+        {
+            throw new ArgumentException("The confirmed receipt-owned path facts are outside their bounds.", nameof(plan));
+        }
+        HashSet<string> factPaths = new(StringComparer.Ordinal);
+        (int Priority, string Path, PlanOperationKind Action)? previousFact = null;
+        Dictionary<PlanOperationKind, int> visibleFactsByAction = [];
+        foreach (PlanReviewPathFact fact in pathFacts)
+        {
+            if (fact is null)
+                throw new ArgumentException("The confirmed receipt-owned path facts are invalid.", nameof(plan));
+            bool valid = !string.IsNullOrEmpty(fact.DisplayPath)
+                && fact.DisplayPath.Length <= 4096 * 6
+                && InstallerDisplayText.IsEscapedCanonicalRelativePath(fact.DisplayPath)
+                && factPaths.Add(fact.DisplayPath)
+                && (fact.FactKind, fact.PlannedAction, plan.Operation) switch
+                {
+                    (PlanReviewPathFactKind.MissingReceiptOwned, PlanOperationKind.Create, InstallerOperation.Repair) => true,
+                    (PlanReviewPathFactKind.ApprovedModifiedReceiptOwned, PlanOperationKind.Replace or PlanOperationKind.Remove, _) => true,
+                    (PlanReviewPathFactKind.ApprovedModifiedInstalledLauncher, PlanOperationKind.Replace or PlanOperationKind.Restore, _) => true,
+                    _ => false
+                };
+            if (!valid)
+                throw new ArgumentException("The confirmed receipt-owned path facts are invalid.", nameof(plan));
+            int priority = fact.FactKind == PlanReviewPathFactKind.MissingReceiptOwned ? 1 : 0;
+            (int Priority, string Path, PlanOperationKind Action) key = (priority, fact.DisplayPath, fact.PlannedAction);
+            if (previousFact is { } old && (key.Priority < old.Priority
+                || key.Priority == old.Priority && StringComparer.Ordinal.Compare(key.Path, old.Path) < 0
+                || key.Priority == old.Priority && key.Path == old.Path && key.Action < old.Action))
+            {
+                throw new ArgumentException("The confirmed receipt-owned path facts are not deterministic.", nameof(plan));
+            }
+            previousFact = key;
+            visibleFactsByAction[fact.PlannedAction] = visibleFactsByAction.GetValueOrDefault(fact.PlannedAction) + 1;
+        }
+
         int aggregate = 0;
         HashSet<PlanOperationKind> kinds = [];
+        PlanOperationKind? previousKind = null;
         foreach (PlanReviewOperationCount item in operationCounts)
         {
-            if (item is null || !Enum.IsDefined(item.Kind) || item.Count is < 0 or > 20_000 || !kinds.Add(item.Kind))
+            if (item is null
+                || !Enum.IsDefined(item.Kind)
+                || item.Count is <= 0 or > 20_000
+                || !kinds.Add(item.Kind)
+                || previousKind is { } oldKind && item.Kind <= oldKind)
+            {
                 throw new ArgumentException("The confirmed plan operation summary is invalid.", nameof(plan));
+            }
+            previousKind = item.Kind;
             aggregate = checked(aggregate + item.Count);
             if (aggregate > 20_000)
                 throw new ArgumentException("The confirmed plan operation summary is too large.", nameof(plan));
+        }
+        int totalPathFactCount = checked(pathFacts.Length + plan.AdditionalPathFactCount);
+        if (totalPathFactCount > aggregate)
+            throw new ArgumentException("The confirmed managed-path facts exceed the exact plan operations.", nameof(plan));
+        foreach ((PlanOperationKind action, int visibleCount) in visibleFactsByAction)
+        {
+            int plannedCount = operationCounts.SingleOrDefault(item => item.Kind == action)?.Count ?? 0;
+            if (visibleCount > plannedCount)
+                throw new ArgumentException("The confirmed managed-path facts exceed their matching plan actions.", nameof(plan));
         }
 
         if (plan.Operation == InstallerOperation.Rollback)
@@ -595,8 +690,75 @@ internal sealed class ExecutionController : IAsyncDisposable
         return plan with
         {
             OperationCounts = Array.AsReadOnly(operationCounts),
+            PathFacts = Array.AsReadOnly(pathFacts),
             Risks = Array.AsReadOnly(planRisks)
         };
+    }
+
+    private static void ValidateRelease(ExecutionReleasePresentation? release, string parameterName)
+    {
+        if (release is null)
+            return;
+        if (string.IsNullOrWhiteSpace(release.Tag)
+            || string.IsNullOrWhiteSpace(release.Version)
+            || release.Tag.Length > 512
+            || release.Version.Length > 512
+            || !string.Equals(release.Tag, InstallerDisplayText.Escape(release.Tag), StringComparison.Ordinal)
+            || !string.Equals(release.Version, InstallerDisplayText.Escape(release.Version), StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A confirmed release label is invalid.", parameterName);
+        }
+        try
+        {
+            ForkReleaseIdentity identity = ForkReleaseIdentity.Parse(release.Tag);
+            if (!string.Equals(release.Version, identity.EmbeddedVersion, StringComparison.Ordinal))
+                throw new ArgumentException("A confirmed release label is invalid.", parameterName);
+        }
+        catch (Exception error) when (error is ArgumentException or PackageSecurityException)
+        {
+            throw new ArgumentException("A confirmed release label is invalid.", parameterName);
+        }
+    }
+
+    private static void ValidateResultSemantics(IConfirmedInstallerSession session, ExecutionPlanPresentation plan)
+    {
+        ExecutionReleasePresentation verified = new(session.Release.Tag, session.Release.EmbeddedVersion);
+        ExecutionReleasePresentation? target = (plan.IntendedResult as ExecutionReleaseTarget)?.Release;
+        if (plan.Relationship is { } relationship && !Enum.IsDefined(relationship))
+            throw new ArgumentException("The confirmed release/result relationship is invalid.", nameof(plan));
+        PlanReviewReleaseRelationship? expectedRelationship = GetExpectedRelationship(plan.CurrentRelease, target);
+        bool valid = plan.Operation switch
+        {
+            InstallerOperation.Install => plan.CurrentRelease is null && target == verified,
+            InstallerOperation.Update or InstallerOperation.Repair => plan.CurrentRelease is not null && target == verified,
+            InstallerOperation.Uninstall => plan.CurrentRelease is not null && plan.IntendedResult is ExecutionUninstalledTarget && plan.Relationship is null,
+            InstallerOperation.Backup => plan.CurrentRelease is not null && target == plan.CurrentRelease && plan.Relationship == PlanReviewReleaseRelationship.Current,
+            InstallerOperation.Rollback => target is not null || plan.IntendedResult is ExecutionUninstalledTarget,
+            _ => false
+        };
+        if (!valid || plan.Relationship != expectedRelationship)
+            throw new ArgumentException("The confirmed release/result relationship is invalid.", nameof(plan));
+        bool downgrade = plan.Risks?.Contains(ProtocolPlanRisk.Downgrade) == true;
+        if (downgrade != (plan.Relationship == PlanReviewReleaseRelationship.Downgrade))
+            throw new ArgumentException("The confirmed downgrade label is inconsistent.", nameof(plan));
+    }
+
+    private static PlanReviewReleaseRelationship? GetExpectedRelationship(
+        ExecutionReleasePresentation? current,
+        ExecutionReleasePresentation? target
+    )
+    {
+        if (current is null || target is null)
+            return null;
+        if (current == target)
+            return PlanReviewReleaseRelationship.Current;
+        int comparison = ForkReleaseIdentity.Compare(
+            ForkReleaseIdentity.Parse(target.Tag),
+            ForkReleaseIdentity.Parse(current.Tag)
+        );
+        return comparison < 0
+            ? PlanReviewReleaseRelationship.Downgrade
+            : PlanReviewReleaseRelationship.Upgrade;
     }
 
     private static bool RequiresRecovery(InstallerExecutionResult? result)
