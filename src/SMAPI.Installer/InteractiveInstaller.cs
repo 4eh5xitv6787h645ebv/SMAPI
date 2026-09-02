@@ -172,6 +172,11 @@ internal class InteractiveInstaller
                 gamePathArg = args[pathIndex];
             }
         }
+        if (!allowUserInput && gamePathArg == null)
+        {
+            this.PrintError("You must specify --game-path when running with --no-prompt.");
+            return false;
+        }
 
         /****
         ** Check if correct installer
