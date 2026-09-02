@@ -14,12 +14,12 @@ want the broadly supported cross-platform release.
 The fork uses identifiers which cannot collide with inherited official SMAPI tags or look like an
 official stable release:
 
-| Item | First alpha |
-| --- | --- |
-| Embedded version | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1` |
-| Git tag | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1` |
-| Release title | `Experimental SMAPI Linux Fork 4.5.3 alpha 1` |
-| Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip` |
+| Item | Published alpha 1 | Planned graphical alpha 2 |
+| --- | --- | --- |
+| Embedded version | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1` | `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2` |
+| Git tag | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1` | `fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2` |
+| Release title | `Experimental SMAPI Linux Fork 4.5.3 alpha 1` | `Experimental SMAPI Linux Fork 4.5.3 alpha 2` |
+| Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.1-linux-x64-installer.zip` | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip` |
 
 Later alphas increment the final number. A published tag is never reused or moved. The public
 release assets are built from the exact tag commit by GitHub Actions; the build records its source
@@ -51,9 +51,9 @@ coreutils (`stat` and `timeout`) and GNU diffutils (`cmp`). The published alpha.
 perform those capability checks and still creates or refreshes its net6 dependency metadata at
 launch when needed.
 
-### Unreleased graphical package candidate
+### Planned alpha 2 graphical package
 
-Source and Actions candidates built after the reviewed Phase 4 packaging change contain a separate
+The reviewed alpha 2 source and non-authoritative Actions candidates contain a separate
 `install on Linux (graphical).sh` entry point and the unchanged `install on Linux.sh` terminal
 fallback in the same ZIP. The GUI is a self-contained, untrimmed Linux x86_64 application; its
 single-file native runtime is extracted into a private per-run temporary directory which the
@@ -65,13 +65,13 @@ directory under the configured temporary root. The supported first desktop path 
 not Avalonia's experimental native Wayland backend; headless and native-Wayland-only sessions retain
 the terminal launcher.
 
-Those candidates also create one bounded private graphical-installer diagnostic session before
+Alpha 2 candidates also create one bounded private graphical-installer diagnostic session before
 Avalonia, release-catalog networking, game discovery, or backend startup. Every production screen
 can open a stable sanitized snapshot through **View diagnostic log**. This is unreleased
 next-alpha/source behavior; the published alpha.1 has neither the graphical launcher nor this
 viewer.
 
-No published release contains that candidate yet. Do not treat a branch artifact as a tagged
+Alpha 2 is not published yet. Do not treat a branch artifact as a tagged
 release, substitute it for the alpha.1 instructions below, or use it as production screenshot or
 clean-machine qualification evidence. A future public GUI alpha must be tagged from an exact
 reviewed commit, publish and attest the complete six-asset set, and pass fresh-download verification.
@@ -92,10 +92,10 @@ The checksum command must report `OK`. The attestation must identify this reposi
 `linux-alpha-release.yml` workflow. Inspect `build-metadata.json` and confirm that its package name,
 SHA-256, release tag, and full source commit match the release page.
 
-### Unreleased next-alpha six-asset set
+### Planned alpha 2 six-asset set
 
-The published alpha.1 above has three assets and no install-manifest companion. A future tagged
-next-alpha build from source containing the Phase 4 package-authority work will instead publish an
+The published alpha.1 above has three assets and no install-manifest companion. The tagged alpha 2
+build from the exact reviewed Phase 4 package-authority commit will instead publish an
 exact six-file set. Its four primary package/metadata assets are:
 
 - the finalized installer ZIP;

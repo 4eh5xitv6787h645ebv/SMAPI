@@ -74,13 +74,22 @@ jobs:
                 shell: bash
                 run: |
                     set -euo pipefail
-                    dotnet restore src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj
+                    dotnet restore src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
                     dotnet build src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
                         --configuration Release \
-                        --no-restore
+                        --no-restore \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true
                     dotnet test src/SMAPI.Installer.Gui.Tests/SMAPI.Installer.Gui.Tests.csproj \
                         --configuration Release \
                         --no-build \
+                        -p:GamePath="$RUNNER_TEMP/StardewValley" \
+                        -p:CopyToGameFolder=false \
+                        -p:AllowMissingPrunePackageData=true \
                         -- RunConfiguration.TreatNoTestsAsError=true
                     build/scripts/test-linux-gui-demo-smoke.sh
 

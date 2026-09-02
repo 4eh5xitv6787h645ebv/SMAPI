@@ -231,7 +231,9 @@
         <StackPanel Spacing="8">
           <TextBlock AutomationProperties.HeadingLevel="2" Classes="section-title" Text="Manual installation remains available" />
           <TextBlock
-              Text="If no compatible graphical-installer release is listed, use the documented manual console installer from a verified public package. The graphical installer does not run as root and does not inspect your game during this release-verification step."
+              x:Name="ManualFallbackText"
+              AutomationProperties.Name="Manual terminal installation help"
+              Text="Close the game and verify all six public release files before extracting the installer ZIP. From that same package, run bash &quot;install on Linux.sh&quot; as your normal desktop user; never use sudo. The terminal path supports the same install and uninstall rules, and the release guide documents headless commands, rollback, and last-resort manual extraction. The graphical installer does not inspect your game during this release-verification step."
               TextWrapping="Wrap" />
         </StackPanel>
       </Border>

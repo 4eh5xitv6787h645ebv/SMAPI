@@ -65,9 +65,12 @@ Common safe next steps are:
 | Diagnostic logging cannot start or cannot prove readiness | Close any other graphical installer session. Do not remove its lock, use root, or loosen file permissions broadly. Check free space and that the normal user owns the XDG state location, then start a fresh session. New mutating work remains blocked when readiness cannot be recorded. |
 | The native Wayland path does not start reliably | Use an X11 or XWayland session, or use the retained terminal launcher. Native Wayland remains experimental. |
 
-The same package candidate retains `install on Linux.sh` as the non-GUI terminal fallback. The
-current published alpha and its exact verification, terminal, headless, rollback, and last-resort
-manual extraction instructions remain in the [Linux alpha release guide](linux-alpha-release.md).
+The same package candidate retains `install on Linux.sh` as the non-GUI terminal fallback. Close
+the game, verify the complete public release set, extract the installer ZIP, and run
+`bash "install on Linux.sh"` as the normal desktop user from that same package. Never use `sudo`.
+The current published alpha and its exact verification, terminal, headless, rollback, limitations,
+and last-resort manual extraction instructions remain in the
+[Linux alpha release guide](linux-alpha-release.md).
 
 ## Current boundary and packaging status
 
@@ -75,4 +78,15 @@ The view model accepts only the exact internal sealed `DemoInstallerFrontendSess
 
 Production composition now connects reviewed release acquisition to the exact packaged sibling backend and transfers single-owner authorities through discovery, plan review, explicit confirmation, execution, rollback, interrupted recovery, and recovery-history cleanup. Those routes still leave path ownership, trust, confirmation, transactions, backup, rollback, and recovery policy in Core.
 
-The current focused packaging work adds the self-contained GUI to a non-authoritative Actions candidate while retaining the existing console launcher. Production now creates a bounded private diagnostic session before desktop or network startup and exposes its sanitized snapshot from all five workflow screens. This does not make the historical safe-demo screenshot production evidence, publish a tagged GUI release, or satisfy clean-machine lifecycle, trusted-workload, X11/XWayland, AT-SPI, detailed-log real-lifecycle/screenshot qualification, or screenshot requirements. Release relationship/local-package UX and the remaining qualification work are separate blockers before the next public alpha is frozen.
+The current alpha 2 preparation adds the self-contained GUI to a non-authoritative Actions
+candidate while retaining the existing console launcher. Production creates a bounded private
+diagnostic session before desktop or network startup and exposes its sanitized snapshot from every
+workflow screen. It can select reviewed public releases or import one freshly selected local folder
+containing the exact six release files; both routes reach the same authenticated package authority.
+Installed/current, upgrade, and downgrade relationships are shown only after the selected game and
+its receipt have been inspected, never inferred from an unauthenticated catalog label.
+
+This does not make the historical safe-demo screenshot production evidence or publish a tagged GUI
+release. The remaining blockers are exact-commit alpha 2 qualification and publication, clean public
+package lifecycle and trusted-workload qualification, genuine X11/XWayland and AT-SPI checks, and the
+complete authenticated screenshot evidence set.

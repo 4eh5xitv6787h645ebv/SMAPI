@@ -7,23 +7,45 @@ title: Release notes
 
 # Release notes
 
-## Unreleased Linux graphical installer candidate
+## Planned Linux fork 4.5.3 alpha 2
 
-This development-only candidate is not part of the published alpha.1 and is not publicly available
-as a tagged graphical release. It keeps the existing terminal launcher in the same candidate ZIP.
+This exact `4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2` candidate is not public until its
+reviewed commit is qualified, tagged, and published by the release workflow. Do not substitute a
+pull-request or Actions artifact for the eventual six-file public release set. The existing
+terminal launcher remains in the same candidate ZIP as the graphical installer.
 
+* Added a maintainable Avalonia Linux desktop frontend around the shared transactional installer
+  Core and strict out-of-process protocol. The GUI never implements its own game-file mutation
+  rules and never requires root for a normal user installation.
+* Added reviewed public-release selection and a native local-package folder path. Both routes require
+  the exact six release files and use the same checksum, metadata, manifest, release-identity, and
+  GitHub-attestation verification before game discovery or mutation. Local paths are not displayed,
+  logged, or retained for retry.
+* Added validated game discovery and manual selection; read-only install, update, repair, uninstall,
+  backup, rollback, and recovery planning; explicit destructive confirmations; transactional
+  execution and cancellation; automatic interrupted-operation recovery; and authenticated recovery
+  history cleanup.
+* Added visible release/download/verification, inspection, execution, rollback, and recovery progress
+  with typed path-free errors and exact durable-state outcomes. Modified, legacy, unknown, linked,
+  special, and ambiguous launcher entries remain blocked unless the reviewed workflow exposes an
+  exact permitted decision.
+* Added keyboard-only operation, unique access keys, readable focus, safe Cancel defaults for
+  destructive actions, screen-reader names/live status, vertical scrolling without horizontal page
+  scrolling, and tested 420-DIP plus 100%, 125%, 150%, and 200% layouts. The supported first desktop
+  path is X11 or XWayland; experimental native Wayland is not advertised as supported.
 * Added one bounded, local-only private diagnostic session before graphical desktop or network
-  startup, with fail-closed startup and pre-mutation readiness checks.
-* Added **View diagnostic log** to all five production workflow screens. The keyboard-accessible
-  viewer shows an immutable sanitized snapshot, supports bounded write-only clipboard copies,
-  and excludes local paths, URLs, credentials, backend prose, operation/release/package/protocol
-  identifiers, digests, and private workload names.
-* Hardened private JSONL permissions, identity checks, byte/count rotation, truncation, concurrency,
-  progress coalescing, and terminal-event retention. No telemetry or automatic upload was added.
-* Documented graphical diagnostics, troubleshooting, X11/XWayland support boundaries, and the
-  retained terminal, headless, and last-resort manual fallback paths in the
-  [graphical installer guide](technical/linux-gui-shell.md) and
-  [Linux alpha guide](technical/linux-alpha-release.md).
+  startup, with fail-closed startup and pre-mutation readiness checks. **View diagnostic log** is
+  available on every production screen and exposes only a bounded sanitized snapshot; no telemetry
+  or automatic upload was added.
+* Kept the console, headless, and last-resort manual paths documented. The graphical and console
+  launchers ship from the same exact verified package.
+* Added exact-package, protocol, filesystem, failure, cancellation, recovery, accessibility, privacy,
+  and launcher qualification. Authentic production screenshots and clean public-artifact results
+  remain pending until the tagged alpha 2 package exists.
+
+See the [graphical installer guide](technical/linux-gui-shell.md),
+[Linux alpha guide](technical/linux-alpha-release.md), and
+[screenshot evidence contract](technical/linux-gui-screenshot-evidence.md).
 
 ## Linux fork 4.5.3 alpha 1
 
