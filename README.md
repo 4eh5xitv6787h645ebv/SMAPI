@@ -1,7 +1,7 @@
 # SMAPI — Linux Performance Fork
 
 [![Documentation](https://img.shields.io/badge/docs-live-5b8def?style=for-the-badge)](https://4eh5xitv6787h645ebv.github.io/SMAPI/)
-[![Linux alpha](https://img.shields.io/badge/release-Linux_alpha_1-c44536?style=for-the-badge)](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)
+[![Linux alpha](https://img.shields.io/badge/release-Linux_alpha_2-c44536?style=for-the-badge)](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2)
 [![Upstream](https://img.shields.io/badge/upstream-SMAPI_4.5.2-43a047?style=for-the-badge)](https://github.com/Pathoschild/SMAPI)
 ![Platform](https://img.shields.io/badge/focus-Linux_desktop-f0a202?style=for-the-badge)
 ![Status](https://img.shields.io/badge/status-development_preview-c44536?style=for-the-badge)
@@ -12,7 +12,7 @@ avoidable framework work and adding private, local tools for finding slow or unh
 
 > [!IMPORTANT]
 > This is a development fork, not an official SMAPI release. An
-> [experimental Linux x86_64 alpha](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1)
+> [experimental Linux x86_64 alpha 2](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2)
 > is available for informed testing. Most players should still install
 > [official SMAPI](https://smapi.io/) unless they specifically want to evaluate this fork on Linux,
 > accept prerelease risk, and can follow the documented backup and rollback steps.
@@ -25,7 +25,7 @@ avoidable framework work and adding private, local tools for finding slow or unh
 | Platforms | Official Windows, macOS, and Linux support | Linux desktop is the tested project focus |
 | Current base | SMAPI 4.5.2 | SMAPI 4.5.2 plus Linux-focused changes |
 | Player diagnostics | Console and standard log | Standard tools plus `health` and `performance` reports |
-| Releases | Published tagged releases | [Experimental Linux alpha 1](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1) |
+| Releases | Published tagged releases | [Experimental Linux alpha 2 with graphical and terminal installers](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2) |
 | Support | Official SMAPI community | This repository's issue tracker |
 
 The fork audit currently tracks **95 performance and correctness findings**. Its main themes are

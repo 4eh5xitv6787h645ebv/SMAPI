@@ -34,8 +34,8 @@ Only the exact value `1` enables this override. It changes presentation colors a
 outlines only: it doesn't grant installer authority, bypass verification or confirmation, alter
 diagnostics, or require `sudo`. Remove the variable (or set any other value) to follow the system
 theme again. The light, dark, and explicit high-contrast palettes have automated checks for visible
-keyboard focus, error text/boundaries, and the manual terminal-help card; real X11/XWayland and
-AT-SPI qualification remain part of exact-package desktop testing.
+keyboard focus, error text/boundaries, and the manual terminal-help card. Real GNOME/KDE,
+X11/XWayland, AT-SPI, and scaling capture work remains pending in the exact-package desktop matrix.
 
 ## Use the production workflow
 
@@ -118,16 +118,16 @@ Common safe next steps are:
 | Symptom | Safe next step |
 | --- | --- |
 | The launcher refuses root or `sudo` | Run it again as the normal desktop user. No diagnostic log, network request, or game access starts on the refused path. |
-| No compatible graphical release is listed | The published alpha.1 lacks the six-asset authority required by the production GUI. Use the verified terminal package flow below; do not substitute an Actions candidate for a public release. |
+| No compatible graphical release is listed | Check connectivity and confirm the catalog is showing this repository's published alpha 2. Do not substitute an Actions or pull-request artifact. You can freshly select the downloaded six-file folder or use the terminal fallback. |
 | Catalog, download, or verification fails | Retry from the visible action after checking connectivity. A failed verification does not authorize game-file mutation. |
 | The backend or protocol session fails | Close the GUI, review the private diagnostic snapshot, and start a fresh session. The GUI does not reconstruct backend authority after a failed session. |
 | Diagnostic logging cannot start or cannot prove readiness | Close any other graphical installer session. Do not remove its lock, use root, or loosen file permissions broadly. Check free space and that the normal user owns the XDG state location, then start a fresh session. New mutating work remains blocked when readiness cannot be recorded. |
 | The native Wayland path does not start reliably | Use an X11 or XWayland session, or use the retained terminal launcher. Native Wayland remains experimental. |
 
-The same package candidate retains `install on Linux.sh` as the non-GUI terminal fallback. Close
+The same published alpha 2 package retains `install on Linux.sh` as the non-GUI terminal fallback. Close
 the game, verify the complete public release set, extract the installer ZIP, and run
 `bash "install on Linux.sh"` as the normal desktop user from that same package. Never use `sudo`.
-The current published alpha and its exact verification, terminal, headless, rollback, limitations,
+The current published alpha 2 and its exact verification, terminal, headless, rollback, limitations,
 and last-resort manual extraction instructions remain in the
 [Linux alpha release guide](linux-alpha-release.md).
 
@@ -137,15 +137,19 @@ The view model accepts only the exact internal sealed `DemoInstallerFrontendSess
 
 Production composition now connects reviewed release acquisition to the exact packaged sibling backend and transfers single-owner authorities through discovery, plan review, explicit confirmation, execution, rollback, interrupted recovery, and recovery-history cleanup. Those routes still leave path ownership, trust, confirmation, transactions, backup, rollback, and recovery policy in Core.
 
-The current alpha 2 preparation adds the self-contained GUI to a non-authoritative Actions
-candidate while retaining the existing console launcher. Production creates a bounded private
+The published alpha 2 adds the self-contained GUI while retaining the existing console launcher in
+the same exact verified ZIP. Production creates a bounded private
 diagnostic session before desktop or network startup and exposes its sanitized snapshot from every
 workflow screen. It can select reviewed public releases or import one freshly selected local folder
 containing the exact six release files; both routes reach the same authenticated package authority.
 Installed/current, upgrade, and downgrade relationships are shown only after the selected game and
 its receipt have been inspected, never inferred from an unauthenticated catalog label.
 
-This does not make the historical safe-demo screenshot production evidence or publish a tagged GUI
-release. The remaining blockers are exact-commit alpha 2 qualification and publication, clean public
-package lifecycle and trusted-workload qualification, genuine X11/XWayland and AT-SPI checks, and the
-complete authenticated screenshot evidence set.
+The exact reviewed source, tagged release workflow, six public assets, fresh public-download
+verification, packaged GUI smoke, and disposable install/update/uninstall/failure lifecycle have
+passed. The exact-source merge candidate also passed the authorized trusted workload, but the tag
+workflow rebuilt the public ZIP and byte-for-byte reproducibility is not claimed; the public ZIP is
+not described as having run that private workload. The historical safe-demo screenshot is still not
+production evidence. Genuine GNOME/KDE, X11/XWayland, AT-SPI, scaling, and the complete authenticated
+production screenshot set remain pending. See the
+[sanitized public qualification record](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5515036792).

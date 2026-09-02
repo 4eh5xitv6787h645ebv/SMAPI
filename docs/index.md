@@ -7,7 +7,8 @@ kicker: Unofficial SMAPI development fork
 
 <div class="notice warning" markdown="1">
 **Experimental prerelease.** This fork now publishes an
-[unofficial Linux x86_64 alpha](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1).
+[unofficial Linux x86_64 alpha 2](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2),
+with a graphical installer and retained terminal fallback.
 If you want the supported stable mod loader, install [official SMAPI](https://smapi.io/). Use the
 alpha only if you accept prerelease risk and can follow the documented backup and rollback steps.
 </div>
@@ -104,7 +105,7 @@ health view
   </a>
   <a class="doc-card" href="technical/linux-gui-shell.html">
     <strong>Linux graphical installer</strong>
-    <span>Review the planned alpha 2 graphical package, private diagnostics, troubleshooting, and retained terminal fallback.</span>
+    <span>Use the published alpha 2 graphical installer, private diagnostics, troubleshooting, and retained terminal fallback.</span>
   </a>
   <a class="doc-card" href="technical/linux-gui-screenshot-evidence.html">
     <strong>Installer screenshot evidence plan</strong>

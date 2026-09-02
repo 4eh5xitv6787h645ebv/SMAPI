@@ -21,9 +21,13 @@ to collect a benchmark.
 ## Get the alpha or source
 
 Players should download only the
-[published alpha and its checksum/metadata assets](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.1),
+[published alpha 2 and its six checksum, metadata, and provenance assets](https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.2),
 then follow the [verification, installation, upgrade, uninstall, and rollback guide](technical/linux-alpha-release.md).
 Do not use unrelated mirrors.
+
+After verifying all six files, use `install on Linux (graphical).sh` in an X11 or XWayland desktop
+session. The same ZIP retains `install on Linux.sh` for terminal-only, headless, or troubleshooting
+use. Run either path as your normal user, never with `sudo` or as root.
 
 Contributors who need a source build can clone `develop`:
 
