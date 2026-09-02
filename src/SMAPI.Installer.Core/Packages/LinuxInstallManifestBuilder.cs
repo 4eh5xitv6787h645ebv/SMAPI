@@ -155,7 +155,7 @@ public sealed class LinuxInstallManifestBuilder
             ).ConfigureAwait(false);
 
             string outerRootName = $"SMAPI {identity.EmbeddedVersion} Linux installer";
-            AssertExpectedOuterArchiveMetadata(stagedPackage, outerRootName);
+            AssertExpectedOuterArchiveMetadata(stagedPackage, outerRootName, limits);
             string outerDestination = Path.Combine(stagingRoot, "outer");
             await new BoundedZipPackage().InspectAndExtractAsync(
                 stagedPackage,
@@ -266,7 +266,11 @@ public sealed class LinuxInstallManifestBuilder
         return nestedArchive;
     }
 
-    private static void AssertExpectedOuterArchiveMetadata(string archivePath, string outerRootName)
+    private static void AssertExpectedOuterArchiveMetadata(
+        string archivePath,
+        string outerRootName,
+        ZipPackageLimits limits
+    )
     {
         using FileStream stream = new(
             archivePath,
@@ -277,6 +281,11 @@ public sealed class LinuxInstallManifestBuilder
             FileOptions.SequentialScan
         );
         using ZipArchive archive = new(stream, ZipArchiveMode.Read, leaveOpen: false, entryNameEncoding: Encoding.UTF8);
+        if (archive.Entries.Count == 0)
+            throw new PackageSecurityException("The installer package archive is empty.");
+        if (archive.Entries.Count > limits.MaxEntries)
+            throw new PackageSecurityException("The installer package contains too many entries.");
+
         AssertRequiredOuterFile(archive, $"{outerRootName}/README.txt", executable: false);
         AssertRequiredOuterFile(archive, $"{outerRootName}/install on Linux.sh", executable: true);
         AssertRequiredOuterFile(archive, $"{outerRootName}/install on Linux (graphical).sh", executable: true);

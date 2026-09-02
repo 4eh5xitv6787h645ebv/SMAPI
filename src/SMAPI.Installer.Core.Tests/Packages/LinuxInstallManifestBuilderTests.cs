@@ -129,6 +129,19 @@ public sealed class LinuxInstallManifestBuilderTests
         await build.Should().ThrowAsync<PackageSecurityException>();
     }
 
+    [Test]
+    public async Task InspectAndBuild_RejectOuterEntryCountBeforeMissingRequiredMetadata()
+    {
+        string package = this.CreatePackage(requiredFileMutation: RequiredFileMutation.MissingGraphicalLauncher);
+        ZipPackageLimits limits = new(16 * 1024 * 1024, 4, 16, 8 * 1024 * 1024, 16 * 1024 * 1024, 200);
+
+        Func<Task> inspect = () => new LinuxPackageStructuralInspector().InspectAsync(package, this.Identity, limits);
+        Func<Task> build = () => this.BuildAsync(package, limits);
+
+        await inspect.Should().ThrowAsync<PackageSecurityException>().WithMessage("*too many entries*");
+        await build.Should().ThrowAsync<PackageSecurityException>().WithMessage("*too many entries*");
+    }
+
     [TestCase("StardewModdingAPI-net6.deps.json", 420, "unexpected")]
     [TestCase("unexpected.dll", 420, "unexpected")]
     [TestCase("smapi-internal/privileged.dll", 2541, "setuid")]
