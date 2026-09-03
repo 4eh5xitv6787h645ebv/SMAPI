@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import array
 import ctypes
 import fcntl
 import hashlib
@@ -31,6 +32,15 @@ MAX_CONTRACT_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 16 * 1024
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_LEDGER_BYTES = 64 * 1024 * 1024
+OUTPUT_BYTES_LIMIT = 1024 * 1024 * 1024
+OUTPUT_QUOTA_ENV = "SMAPI_HARD_STATE_OUTPUT_QUOTA_TOKEN"
+OUTPUT_QUOTA_MARKER = ".smapi-hard-state-output-quota-v1.json"
+OUTPUT_QUOTA_PURPOSE = "smapi-hard-state-output-quota"
+OUTPUT_QUOTA_IMAGE = ".smapi-hard-state-output-quota"
+BLKGETSIZE64 = 0x80081272
+FS_IOC_GETFLAGS = 0x80086601
+FS_IOC_SETFLAGS = 0x40086602
+FS_IMMUTABLE_FL = 0x00000010
 SCHEMA_VERSION = 2
 SAFE_COMPONENT = re.compile(r"^[a-z0-9][a-z0-9._-]{7,127}$")
 PR_SET_NO_NEW_PRIVS = 38
@@ -46,14 +56,31 @@ HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 TAG = re.compile(r"^fork-4eh5xitv6787h645ebv-linux-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[1-9][0-9]*$")
 FAILED_KEYS = frozenset({"code", "kind", "ok", "schemaVersion", "status"})
-PREFLIGHT_KEYS = frozenset({
+CASE_KEYS = frozenset({
     "kind", "ok", "scenario", "schemaVersion", "status", "releaseTag", "sourceCommit",
     "sourceTree", "publicReleaseUrl", "packageSha256", "guiSha256", "backendSha256",
-    "capturePending", "durableClassificationPending", "publicAuthorityVerificationPending",
-    "atspiActionObserved", "accessibleStateObserved", "barrierObserved", "boundaryArmedObserved",
-    "boundaryCleanedObserved", "cleanupComplete", "exactWindowCaptured", "inventoryVerified",
-    "packageIdentityReverified",
+    "evidenceId", "fault", "environmentProfile", "visibleState", "durableAtCapture",
+    "durableAfter", "exactWindowCaptured", "atspiEvidenceRecorded",
+    "durableClassificationVerified", "cleanupComplete", "packageIdentityReverified",
 })
+TRUE_CASE_KEYS = frozenset({
+    "exactWindowCaptured", "atspiEvidenceRecorded", "durableClassificationVerified",
+    "cleanupComplete", "packageIdentityReverified",
+})
+ENVIRONMENT_PROFILES = frozenset({
+    "ubuntu-24.04-gnome-x11", "ubuntu-24.04-gnome-xwayland",
+    "ubuntu-24.04-kde-x11", "ubuntu-24.04-kde-xwayland",
+})
+CASE_EXPECTED = {
+    "E2-permission": ("E2", "permission", "install-failed-unchanged", "unchanged", "unchanged"),
+    "E2-read-only": ("E2", "read-only", "install-failed-unchanged", "unchanged", "unchanged"),
+    "E2-disk-full": ("E2", "disk-full", "install-failed-unchanged", "unchanged", "unchanged"),
+    "E2-cross-device": ("E2", "cross-device", "install-failed-rolled-back", "rolled-back", "rolled-back"),
+    "C2": ("C2", None, "cancellation-finishing-safely", "applied", "rolled-back"),
+    "C3": ("C3", None, "cancelled-and-rolled-back", "rolled-back", "rolled-back"),
+    "E5": ("E5", None, "backend-state-unknown-recovery-required", "recovery-required", "recovery-required"),
+    "E6": ("E6", None, "automatic-recovery-completed-fresh-inspection-required", "recovery-completed", "recovery-completed"),
+}
 REQUIRED_MEMFD_SEALS = (
     fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
 )
@@ -61,6 +88,15 @@ REQUIRED_MEMFD_SEALS = (
 
 class BrokerError(Exception):
     pass
+
+
+def no_duplicate_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise BrokerError()
+        value[key] = item
+    return value
 
 
 class CapabilityHeader(ctypes.Structure):
@@ -352,8 +388,13 @@ def read_bootstrap(contract_path: Path, output: Path) -> tuple[dict[str, Any], b
             or any(getattr(metadata, field) != getattr(after, field) for field in fields)
         ):
             raise BrokerError()
-        contract = json.loads(bytes(raw).decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        contract = json.loads(
+            bytes(raw).decode("utf-8"), object_pairs_hook=no_duplicate_object,
+        )
+        canonical = (json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if bytes(raw) != canonical:
+            raise BrokerError()
+    except (OSError, UnicodeError, json.JSONDecodeError, BrokerError):
         raise BrokerError() from None
     finally:
         if descriptor >= 0:
@@ -460,6 +501,16 @@ def child_environment(uid: int) -> dict[str, str]:
         value = os.environ.get(name)
         if value is not None:
             result[name] = value
+    session_type = os.environ.get("XDG_SESSION_TYPE")
+    if session_type is not None:
+        if session_type not in {"x11", "wayland"}:
+            raise BrokerError()
+        result["XDG_SESSION_TYPE"] = session_type
+    current_desktop = os.environ.get("XDG_CURRENT_DESKTOP")
+    if current_desktop is not None:
+        if current_desktop not in {"GNOME", "ubuntu:GNOME", "KDE", "KDE:Plasma"}:
+            raise BrokerError()
+        result["XDG_CURRENT_DESKTOP"] = current_desktop
     runtime = Path(f"/run/user/{uid}")
     try:
         metadata = runtime.lstat()
@@ -500,6 +551,521 @@ def make_namespace_private() -> None:
     )
     if result.returncode != 0:
         raise BrokerError()
+
+
+def _run_root_command(command: list[str], timeout: int = 30) -> None:
+    """Run one fixed privileged filesystem command without inheriting caller-controlled state."""
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/sbin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise BrokerError() from None
+    if result.returncode != 0:
+        raise BrokerError()
+
+
+def _mountinfo_unescape(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return chr(int(match.group(1), 8))
+
+    return re.sub(r"\\([0-7]{3})", replace, value)
+
+
+def mounted_output_record(output: Path) -> tuple[str, str, frozenset[str], tuple[int, int]]:
+    """Return the single exact mount record for output, rejecting aliases and ambiguity."""
+    try:
+        records: list[tuple[str, str, frozenset[str], tuple[int, int]]] = []
+        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+            before, separator, after = line.partition(" - ")
+            fields = before.split()
+            filesystem = after.split()
+            if not separator or len(fields) < 6 or len(filesystem) < 3:
+                continue
+            if _mountinfo_unescape(fields[4]) != os.fspath(output):
+                continue
+            major_text, colon, minor_text = fields[2].partition(":")
+            if not colon:
+                raise BrokerError()
+            options = frozenset(fields[5].split(",")) | frozenset(filesystem[2].split(","))
+            records.append((filesystem[0], _mountinfo_unescape(filesystem[1]), options, (int(major_text), int(minor_text))))
+        if len(records) != 1:
+            raise BrokerError()
+        return records[0]
+    except BrokerError:
+        raise
+    except (OSError, UnicodeError, ValueError):
+        raise BrokerError() from None
+
+
+def _backing_file_from_sysfs(device: tuple[int, int]) -> Path:
+    try:
+        raw = Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/backing_file").read_text(
+            encoding="utf-8",
+        ).rstrip("\n")
+    except (OSError, UnicodeError):
+        raise BrokerError() from None
+    if not raw or "\x00" in raw:
+        raise BrokerError()
+    decoded = _mountinfo_unescape(raw)
+    path = Path(decoded if decoded.startswith("/") else "/" + decoded)
+    if not path.is_absolute() or ".." in path.parts:
+        raise BrokerError()
+    return path
+
+
+def _loop_autoclear(device: tuple[int, int]) -> bool:
+    try:
+        raw = Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/autoclear").read_text(
+            encoding="ascii",
+        )
+        return raw.strip() == "1"
+    except (OSError, UnicodeError):
+        raise BrokerError() from None
+
+
+def _loop_still_backs(device: tuple[int, int], image_path: Path) -> bool:
+    path = Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/backing_file")
+    try:
+        raw = path.read_text(encoding="utf-8").rstrip("\n")
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError):
+        raise BrokerError() from None
+    decoded = _mountinfo_unescape(raw)
+    current = Path(decoded if decoded.startswith("/") else "/" + decoded)
+    return current == image_path
+
+
+def validate_output_mount_facts(
+    filesystem: str,
+    options: frozenset[str],
+    device: tuple[int, int],
+    source_status: os.stat_result,
+    block_bytes: int,
+    autoclear: bool,
+    backing: Path,
+    image_path: Path,
+    output_status: os.stat_result,
+    values: os.statvfs_result,
+    run_uid: int,
+    run_gid: int,
+    limit: int,
+) -> None:
+    if (
+        filesystem != "ext4" or not {"rw", "nosuid", "nodev"}.issubset(options) or "noexec" in options
+        or not stat.S_ISBLK(source_status.st_mode) or source_status.st_uid != 0
+        or (os.major(source_status.st_rdev), os.minor(source_status.st_rdev)) != device
+        or block_bytes != limit or not autoclear or backing != image_path
+        or not stat.S_ISDIR(output_status.st_mode) or output_status.st_uid != run_uid or output_status.st_gid != run_gid
+        or stat.S_IMODE(output_status.st_mode) != 0o700
+        or values.f_frsize <= 0 or values.f_blocks <= 0
+        or values.f_frsize * values.f_blocks > limit
+    ):
+        raise BrokerError()
+
+
+class OutputQuota:
+    """A private, kernel-enforced ext4 output bound with exact, recoverable teardown."""
+
+    def __init__(self, root: Path, output: Path, run_uid: int, run_gid: int, limit: int):
+        if limit != OUTPUT_BYTES_LIMIT or output.parent != root:
+            raise BrokerError()
+        self.root = root
+        self.output = output
+        self.run_uid = run_uid
+        self.run_gid = run_gid
+        self.limit = limit
+        self.token = os.urandom(32).hex()
+        self.root_fd = -1
+        self.root_identity: tuple[int, int] | None = None
+        self.root_restricted = False
+        self.image_fd = -1
+        self.image_name = ""
+        self.image_path: Path | None = None
+        self.image_identity: tuple[int, int, int] | None = None
+        self.output_identity: tuple[int, int] | None = None
+        self.mount_device: tuple[int, int] | None = None
+        self.mounted = False
+        self.marker_identity: os.stat_result | None = None
+        try:
+            self._prepare()
+        except BaseException:
+            self.close(preserve=False, suppress=True)
+            raise
+
+    def _prepare(self) -> None:
+        self.root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        root_status = os.fstat(self.root_fd)
+        current = self.root.lstat()
+        if (
+            (root_status.st_dev, root_status.st_ino) != (current.st_dev, current.st_ino)
+            or root_status.st_uid != self.run_uid or root_status.st_gid != self.run_gid
+            or stat.S_IMODE(root_status.st_mode) != 0o700
+        ):
+            raise BrokerError()
+        self.root_identity = (root_status.st_dev, root_status.st_ino)
+        self._restrict_root()
+        try:
+            os.stat(self.output.name, dir_fd=self.root_fd, follow_symlinks=False)
+            raise BrokerError()
+        except FileNotFoundError:
+            pass
+        prefix = self.root.parent
+        prefix_fd = os.open(prefix, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            prefix_status = os.fstat(prefix_fd)
+            if prefix_status.st_uid != 0 or stat.S_IMODE(prefix_status.st_mode) != 0o711:
+                raise BrokerError()
+            for _attempt in range(8):
+                name = f"{OUTPUT_QUOTA_IMAGE}-{os.urandom(12).hex()}.ext4"
+                try:
+                    self.image_fd = os.open(
+                        name,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=prefix_fd,
+                    )
+                    self.image_name = name
+                    self.image_path = prefix / name
+                    break
+                except FileExistsError:
+                    continue
+            if self.image_fd < 0 or self.image_path is None:
+                raise BrokerError()
+            os.posix_fallocate(self.image_fd, 0, self.limit)
+            os.fsync(self.image_fd)
+            image_status = os.fstat(self.image_fd)
+            if (
+                not stat.S_ISREG(image_status.st_mode) or image_status.st_uid != 0
+                or image_status.st_nlink != 1 or stat.S_IMODE(image_status.st_mode) != 0o600
+                or image_status.st_size != self.limit
+            ):
+                raise BrokerError()
+            self.image_identity = (image_status.st_dev, image_status.st_ino, image_status.st_size)
+        finally:
+            os.close(prefix_fd)
+
+        _run_root_command(["/usr/bin/mkfs.ext4", "-q", "-F", "-m", "0", os.fspath(self.image_path)], 120)
+        self._validate_image()
+        os.mkdir(self.output.name, 0o700, dir_fd=self.root_fd)
+        os.chown(self.output.name, self.run_uid, self.run_gid, dir_fd=self.root_fd, follow_symlinks=False)
+        underlying = os.stat(self.output.name, dir_fd=self.root_fd, follow_symlinks=False)
+        self.output_identity = (underlying.st_dev, underlying.st_ino)
+        _run_root_command([
+            "/usr/bin/mount", "-t", "ext4", "-o", "loop,nosuid,nodev",
+            os.fspath(self.image_path), os.fspath(self.output),
+        ])
+        self.mounted = True
+        os.chown(self.output, self.run_uid, self.run_gid)
+        os.chmod(self.output, 0o700)
+        self.validate()
+        self._write_marker()
+        self._restore_root()
+
+    def _restrict_root(self) -> None:
+        if self.root_fd < 0 or self.root_identity is None:
+            raise BrokerError()
+        opened = os.fstat(self.root_fd)
+        named = self.root.lstat()
+        if (
+            (opened.st_dev, opened.st_ino) != self.root_identity
+            or (named.st_dev, named.st_ino) != self.root_identity
+            or opened.st_uid != self.run_uid or opened.st_gid != self.run_gid
+            or stat.S_IMODE(opened.st_mode) != 0o700
+        ):
+            raise BrokerError()
+        os.fchmod(self.root_fd, 0o700)
+        os.fchown(self.root_fd, 0, 0)
+        self.root_restricted = True
+        repeated = os.fstat(self.root_fd)
+        if repeated.st_uid != 0 or repeated.st_gid != 0 or stat.S_IMODE(repeated.st_mode) != 0o700:
+            raise BrokerError()
+
+    def _restore_root(self) -> None:
+        if not self.root_restricted:
+            return
+        opened = os.fstat(self.root_fd)
+        named = self.root.lstat()
+        if (
+            self.root_identity is None
+            or (opened.st_dev, opened.st_ino) != self.root_identity
+            or (named.st_dev, named.st_ino) != self.root_identity
+            or opened.st_uid != 0 or opened.st_gid != 0 or stat.S_IMODE(opened.st_mode) != 0o700
+        ):
+            raise BrokerError()
+        os.fchmod(self.root_fd, 0o700)
+        os.fchown(self.root_fd, self.run_uid, self.run_gid)
+        self.root_restricted = False
+        repeated = os.fstat(self.root_fd)
+        if (
+            repeated.st_uid != self.run_uid or repeated.st_gid != self.run_gid
+            or stat.S_IMODE(repeated.st_mode) != 0o700
+        ):
+            raise BrokerError()
+
+    def _validate_image(self) -> None:
+        if self.image_fd < 0 or self.image_path is None or self.image_identity is None:
+            raise BrokerError()
+        opened = os.fstat(self.image_fd)
+        named = self.image_path.lstat()
+        current = (opened.st_dev, opened.st_ino, opened.st_size)
+        if (
+            current != self.image_identity
+            or (named.st_dev, named.st_ino, named.st_size) != self.image_identity
+            or not stat.S_ISREG(named.st_mode) or named.st_uid != 0 or named.st_nlink != 1
+            or stat.S_IMODE(named.st_mode) != 0o600
+        ):
+            raise BrokerError()
+
+    def validate(self) -> None:
+        self._validate_image()
+        filesystem, source, options, device = mounted_output_record(self.output)
+        try:
+            source_path = Path(source)
+            source_status = source_path.stat()
+            source_fd = os.open(source_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                size = array.array("Q", [0])
+                fcntl.ioctl(source_fd, BLKGETSIZE64, size, True)
+            finally:
+                os.close(source_fd)
+            backing = _backing_file_from_sysfs(device)
+            status = self.output.lstat()
+            values = os.statvfs(self.output)
+            validate_output_mount_facts(
+                filesystem, options, device, source_status, size[0], _loop_autoclear(device),
+                backing, self.image_path, status, values, self.run_uid, self.run_gid, self.limit,
+            )
+        except BrokerError:
+            raise
+        except OSError:
+            raise BrokerError() from None
+        self.mount_device = device
+
+    def _write_marker(self) -> None:
+        if self.image_identity is None or self.mount_device is None:
+            raise BrokerError()
+        status = self.output.lstat()
+        payload = {
+            "filesystem": "ext4",
+            "imageDevice": self.image_identity[0],
+            "imageInode": self.image_identity[1],
+            "imageSize": self.image_identity[2],
+            "limitBytes": self.limit,
+            "mountDeviceMajor": self.mount_device[0],
+            "mountDeviceMinor": self.mount_device[1],
+            "outputDevice": status.st_dev,
+            "outputInode": status.st_ino,
+            "purpose": OUTPUT_QUOTA_PURPOSE,
+            "schemaVersion": 1,
+            "token": self.token,
+        }
+        raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        output_fd = os.open(self.output, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                OUTPUT_QUOTA_MARKER,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o444,
+                dir_fd=output_fd,
+            )
+            if os.write(descriptor, raw) != len(raw):
+                raise BrokerError()
+            os.fsync(descriptor)
+            os.fchmod(descriptor, 0o444)
+            flags = array.array("I", [0])
+            fcntl.ioctl(descriptor, FS_IOC_GETFLAGS, flags, True)
+            flags[0] |= FS_IMMUTABLE_FL
+            fcntl.ioctl(descriptor, FS_IOC_SETFLAGS, flags, True)
+            self.marker_identity = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(self.marker_identity.st_mode) or self.marker_identity.st_uid != 0
+                or self.marker_identity.st_nlink != 1 or stat.S_IMODE(self.marker_identity.st_mode) != 0o444
+                or self.marker_identity.st_size != len(raw)
+            ):
+                raise BrokerError()
+        except BrokerError:
+            raise
+        except OSError:
+            raise BrokerError() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(output_fd)
+
+    def _remove_marker(self) -> None:
+        if self.marker_identity is None:
+            return
+        output_fd = descriptor = -1
+        try:
+            output_fd = os.open(self.output, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            descriptor = os.open(OUTPUT_QUOTA_MARKER, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=output_fd)
+            status = os.fstat(descriptor)
+            if any(getattr(status, field) != getattr(self.marker_identity, field) for field in STABLE_NAMED_FIELDS):
+                raise BrokerError()
+            flags = array.array("I", [0])
+            fcntl.ioctl(descriptor, FS_IOC_GETFLAGS, flags, True)
+            flags[0] &= ~FS_IMMUTABLE_FL
+            fcntl.ioctl(descriptor, FS_IOC_SETFLAGS, flags, True)
+            cleared = os.fstat(descriptor)
+            stable_after_flag_change = (
+                "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns",
+            )
+            if any(
+                getattr(cleared, field) != getattr(self.marker_identity, field)
+                for field in stable_after_flag_change
+            ):
+                raise BrokerError()
+            self.marker_identity = cleared
+            os.close(descriptor)
+            descriptor = -1
+            if not unlink_matching_at(output_fd, OUTPUT_QUOTA_MARKER, self.marker_identity):
+                raise BrokerError()
+            self.marker_identity = None
+        except BrokerError:
+            raise
+        except OSError:
+            raise BrokerError() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if output_fd >= 0:
+                os.close(output_fd)
+
+    def _preserve(self) -> tuple[Path, tuple[int, int]]:
+        retained_name = f".{self.output.name}.retained-{os.urandom(12).hex()}"
+        os.mkdir(retained_name, 0o700, dir_fd=self.root_fd)
+        os.chown(retained_name, self.run_uid, self.run_gid, dir_fd=self.root_fd, follow_symlinks=False)
+        retained = self.root / retained_name
+        retained_fd = os.open(retained_name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=self.root_fd)
+        opened = os.fstat(retained_fd)
+        retained_identity = (opened.st_dev, opened.st_ino)
+
+        def enter_nonroot() -> None:
+            drop_to(self.run_uid, self.run_gid)
+
+        try:
+            result = subprocess.run(
+                ["/usr/bin/cp", "-a", "--one-file-system", "--no-preserve=ownership", os.fspath(self.output) + "/.", os.fspath(retained)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                preexec_fn=enter_nonroot,
+                timeout=120,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise BrokerError()
+            repeated = os.fstat(retained_fd)
+            named = retained.lstat()
+            if (
+                (repeated.st_dev, repeated.st_ino) != retained_identity
+                or (named.st_dev, named.st_ino) != retained_identity
+                or repeated.st_uid != self.run_uid or repeated.st_gid != self.run_gid
+                or stat.S_IMODE(repeated.st_mode) != 0o700
+            ):
+                raise BrokerError()
+            return retained, retained_identity
+        except BrokerError:
+            raise
+        except (OSError, subprocess.TimeoutExpired):
+            raise BrokerError() from None
+        finally:
+            os.close(retained_fd)
+
+    def close(self, *, preserve: bool, suppress: bool = False) -> None:
+        error = False
+        retained: tuple[Path, tuple[int, int]] | None = None
+        if self.mounted:
+            try:
+                self.validate()
+                self._remove_marker()
+                if preserve:
+                    retained = self._preserve()
+            except BrokerError:
+                error = True
+            try:
+                self._restrict_root()
+            except (BrokerError, OSError):
+                error = True
+            try:
+                _run_root_command(["/usr/bin/umount", os.fspath(self.output)])
+                self.mounted = False
+                try:
+                    mounted_output_record(self.output)
+                    error = True
+                except BrokerError:
+                    pass
+                if (
+                    self.mount_device is not None and self.image_path is not None
+                    and _loop_still_backs(self.mount_device, self.image_path)
+                ):
+                    error = True
+            except BrokerError:
+                error = True
+        if not self.mounted and self.root_fd >= 0 and self.output_identity is not None:
+            try:
+                current = os.stat(self.output.name, dir_fd=self.root_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != self.output_identity or not stat.S_ISDIR(current.st_mode):
+                    raise BrokerError()
+                os.rmdir(self.output.name, dir_fd=self.root_fd)
+                if retained is not None:
+                    retained_path, retained_identity = retained
+                    current_retained = os.stat(retained_path.name, dir_fd=self.root_fd, follow_symlinks=False)
+                    if (current_retained.st_dev, current_retained.st_ino) != retained_identity:
+                        raise BrokerError()
+                    os.rename(retained_path.name, self.output.name, src_dir_fd=self.root_fd, dst_dir_fd=self.root_fd)
+                    final = os.stat(self.output.name, dir_fd=self.root_fd, follow_symlinks=False)
+                    if final.st_uid != self.run_uid or final.st_gid != self.run_gid or stat.S_IMODE(final.st_mode) != 0o700:
+                        raise BrokerError()
+            except (BrokerError, OSError):
+                error = True
+        if self.image_fd >= 0:
+            try:
+                self._validate_image()
+                os.close(self.image_fd)
+                self.image_fd = -1
+                if self.image_path is None or self.image_identity is None:
+                    raise BrokerError()
+                prefix_fd = os.open(self.image_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+                try:
+                    expected = self.image_path.lstat()
+                    if (expected.st_dev, expected.st_ino, expected.st_size) != self.image_identity:
+                        raise BrokerError()
+                    if not unlink_matching_at(prefix_fd, self.image_path.name, expected):
+                        raise BrokerError()
+                finally:
+                    os.close(prefix_fd)
+            except (BrokerError, OSError):
+                error = True
+            finally:
+                if self.image_fd >= 0:
+                    try:
+                        os.close(self.image_fd)
+                    except OSError:
+                        error = True
+                    self.image_fd = -1
+        if self.root_fd >= 0:
+            try:
+                self._restore_root()
+            except (BrokerError, OSError):
+                error = True
+            try:
+                os.close(self.root_fd)
+            except OSError:
+                error = True
+            self.root_fd = -1
+        if error and not suppress:
+            raise BrokerError()
 
 
 STABLE_NAMED_FIELDS = (
@@ -559,7 +1125,12 @@ def read_and_consume_request(request: Path, root: Path, output: Path, run_uid: i
             or any(getattr(metadata, field) != getattr(after, field) for field in STABLE_NAMED_FIELDS)
         ):
             raise BrokerError()
-        value = json.loads(bytes(raw).decode("utf-8"))
+        value = json.loads(
+            bytes(raw).decode("utf-8"), object_pairs_hook=no_duplicate_object,
+        )
+        canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if bytes(raw) != canonical:
+            raise BrokerError()
         relative = value["supervisor_socket"]["relative_path"]
         expected_prefix = f"{root.name}/{output.name}/control/"
         if not isinstance(relative, str) or not relative.startswith(expected_prefix) or "/" in relative[len(expected_prefix):]:
@@ -571,7 +1142,7 @@ def read_and_consume_request(request: Path, root: Path, output: Path, run_uid: i
         os.fsync(root_fd)
         consumed = True
         return bytes(raw), relative, metadata.st_ino
-    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, BrokerError):
         raise BrokerError() from None
     finally:
         if descriptor >= 0:
@@ -686,35 +1257,39 @@ def signal_exact(process: subprocess.Popen[bytes], signum: int) -> None:
             os.close(descriptor)
 
 
-def validate_result(result: bytes) -> bool:
+def validate_result(result: bytes, contract: dict[str, Any] | None = None) -> bool:
     if len(result) > MAX_RESULT_BYTES or result.count(b"\n") != 1 or not result.endswith(b"\n"):
         raise BrokerError()
     try:
-        value = json.loads(result.decode("ascii"))
-    except (UnicodeError, json.JSONDecodeError):
+        value = json.loads(result.decode("ascii"), object_pairs_hook=no_duplicate_object)
+    except (UnicodeError, json.JSONDecodeError, BrokerError):
         raise BrokerError() from None
     if (
         not isinstance(value, dict)
         or value.get("kind") != "linux-gui-hard-state-qualification"
-        or value.get("schemaVersion") != SCHEMA_VERSION
+        or type(value.get("schemaVersion")) is not int
+        or value["schemaVersion"] != SCHEMA_VERSION
+        or (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii") != result
     ):
         raise BrokerError()
     if set(value) == FAILED_KEYS:
         if value["ok"] is not False or value["status"] != "failed" or value["code"] not in FAILURE_CODES:
             raise BrokerError()
         return False
-    if set(value) != PREFLIGHT_KEYS:
+    if set(value) != CASE_KEYS:
         raise BrokerError()
-    booleans = PREFLIGHT_KEYS - {
-        "kind", "scenario", "schemaVersion", "status", "releaseTag", "sourceCommit", "sourceTree",
-        "publicReleaseUrl", "packageSha256", "guiSha256", "backendSha256",
-    }
+    scenario = value.get("scenario")
+    expected = CASE_EXPECTED.get(scenario) if isinstance(scenario, str) else None
     if (
-        value["ok"] is not True or value["status"] != "preflighted"
-        or any(type(value[key]) is not bool for key in booleans)
-        or value["capturePending"] is not True or value["durableClassificationPending"] is not True
-        or value["publicAuthorityVerificationPending"] is not True or value["exactWindowCaptured"] is not False
-        or value["scenario"] not in SCENARIOS
+        value["ok"] is not True or value["status"] != "captured_pending_privacy_and_public_authority"
+        or any(value[key] is not True for key in TRUE_CASE_KEYS)
+        or expected is None
+        or (
+            value["evidenceId"], value["fault"], value["visibleState"],
+            value["durableAtCapture"], value["durableAfter"],
+        ) != expected
+        or not isinstance(value["environmentProfile"], str)
+        or value["environmentProfile"] not in ENVIRONMENT_PROFILES
         or not isinstance(value["releaseTag"], str) or TAG.fullmatch(value["releaseTag"]) is None
         or value["publicReleaseUrl"] != f"https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/{value['releaseTag']}"
         or not isinstance(value["sourceCommit"], str) or HEX_40.fullmatch(value["sourceCommit"]) is None
@@ -725,13 +1300,36 @@ def validate_result(result: bytes) -> bool:
         )
     ):
         raise BrokerError()
+    if contract is not None:
+        try:
+            expected_identity = {
+                "scenario": contract["scenario"],
+                "environmentProfile": contract["capture"]["environment_profile"],
+                "releaseTag": contract["release"]["tag"],
+                "publicReleaseUrl": contract["release"]["url"],
+                "sourceCommit": contract["release"]["expected_commit"],
+                "sourceTree": contract["release"]["expected_tree"],
+                "packageSha256": contract["package"]["sha256"],
+                "guiSha256": contract["binaries"]["apphost_sha256"],
+                "backendSha256": contract["binaries"]["backend_sha256"],
+            }
+        except (KeyError, TypeError):
+            raise BrokerError() from None
+        if any(value[key] != expected for key, expected in expected_identity.items()):
+            raise BrokerError()
     return True
 
 
 def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
     if os.geteuid() != 0 or os.getuid() != 0:
         raise BrokerError()
-    _contract, contract_bytes, root, uid, gid, total = read_bootstrap(contract_path, output)
+    contract, contract_bytes, root, uid, gid, total = read_bootstrap(contract_path, output)
+    try:
+        output_limit = contract["resource_limits"]["output_bytes"]
+    except (KeyError, TypeError):
+        raise BrokerError() from None
+    if isinstance(output_limit, bool) or not isinstance(output_limit, int) or output_limit != OUTPUT_BYTES_LIMIT:
+        raise BrokerError()
     identities = {
         Path(__file__).resolve(): fixed_file_hash(Path(__file__).resolve(), 4 * 1024 * 1024),
         SUPERVISOR: fixed_file_hash(SUPERVISOR, 4 * 1024 * 1024),
@@ -740,6 +1338,7 @@ def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
     make_namespace_private()
     root_lock_fd = -1
     root_identity = (0, 0)
+    quota: OutputQuota | None = None
     scope: CgroupScope | None = None
     contract_fd = -1
     request_fd = -1
@@ -755,9 +1354,11 @@ def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
         current_root = root.lstat()
         if (current_root.st_dev, current_root.st_ino) != root_identity:
             raise BrokerError()
+        quota = OutputQuota(root, output, uid, gid, output_limit)
         scope = CgroupScope(uid)
         contract_fd = sealed_memfd("smapi-hard-state-contract", contract_bytes, MAX_CONTRACT_BYTES)
         environment = child_environment(uid)
+        environment[OUTPUT_QUOTA_ENV] = quota.token
         broker_socket, supervisor_socket = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
 
         def enter_scope_and_drop() -> None:
@@ -833,7 +1434,7 @@ def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
             raise BrokerError() from None
         if supervisor.returncode not in (0, 2, 70, 130):
             raise BrokerError()
-        succeeded = validate_result(result)
+        succeeded = validate_result(result, contract)
         if succeeded != (supervisor.returncode == 0):
             raise BrokerError()
         if controller.returncode not in ((0,) if succeeded else (0, 2, 130)):
@@ -870,6 +1471,11 @@ def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
             try:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
+                cleanup_failed = True
+        if quota is not None:
+            try:
+                quota.close(preserve=True)
+            except BrokerError:
                 cleanup_failed = True
         try:
             cleanup_residual_request(root, uid)

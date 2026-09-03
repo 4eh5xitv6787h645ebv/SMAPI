@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import array
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -53,6 +55,12 @@ MAX_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_GAME_MARKER_BYTES = 16 * 1024 * 1024
 CAPTURE_POLICY = "exact-window-v1"
 OUTPUT_BYTES_LIMIT = 1024 * 1024 * 1024
+OUTPUT_QUOTA_ENV = "SMAPI_HARD_STATE_OUTPUT_QUOTA_TOKEN"
+OUTPUT_QUOTA_MARKER = ".smapi-hard-state-output-quota-v1.json"
+OUTPUT_QUOTA_PURPOSE = "smapi-hard-state-output-quota"
+FS_IOC_GETFLAGS = 0x80086601
+FS_IMMUTABLE_FL = 0x00000010
+TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 STABLE_FILE_FIELDS = (
     "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size",
     "st_mtime_ns", "st_ctime_ns",
@@ -511,7 +519,187 @@ def create_output(root_fd: int, output: Path, expected_root: tuple[int, int]) ->
         reject("output-create")
 
 
-def validate_contract(contract: dict[str, Any], output: Path) -> str:
+def mountinfo_unescape(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return chr(int(match.group(1), 8))
+
+    return re.sub(r"\\([0-7]{3})", replace, value)
+
+
+def prepared_mount_record(output: Path) -> tuple[str, str, frozenset[str], tuple[int, int]]:
+    try:
+        records: list[tuple[str, str, frozenset[str], tuple[int, int]]] = []
+        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+            before, separator, after = line.partition(" - ")
+            fields = before.split()
+            filesystem = after.split()
+            if not separator or len(fields) < 6 or len(filesystem) < 3:
+                continue
+            if mountinfo_unescape(fields[4]) != os.fspath(output):
+                continue
+            major_text, colon, minor_text = fields[2].partition(":")
+            if not colon:
+                reject("output-quota")
+            options = frozenset(fields[5].split(",")) | frozenset(filesystem[2].split(","))
+            records.append((filesystem[0], mountinfo_unescape(filesystem[1]), options, (int(major_text), int(minor_text))))
+        if len(records) != 1:
+            reject("output-exists")
+        return records[0]
+    except InputError:
+        raise
+    except (OSError, UnicodeError, ValueError):
+        reject("output-quota")
+
+
+def loop_device_facts(source: str, device: tuple[int, int]) -> tuple[os.stat_result, int, bool, os.stat_result]:
+    try:
+        source_path = Path(source)
+        if re.fullmatch(r"/dev/loop[0-9]+", source) is None or source_path.resolve(strict=True) != source_path:
+            reject("output-quota")
+        source_status = source_path.lstat()
+        if (
+            not stat.S_ISBLK(source_status.st_mode)
+            or (os.major(source_status.st_rdev), os.minor(source_status.st_rdev)) != device
+        ):
+            reject("output-quota")
+        sysfs = Path(f"/sys/dev/block/{device[0]}:{device[1]}")
+        size_raw = (sysfs / "size").read_text(encoding="ascii")
+        autoclear_raw = (sysfs / "loop/autoclear").read_text(encoding="ascii")
+        backing_raw = (sysfs / "loop/backing_file").read_text(encoding="utf-8").rstrip("\n")
+        if re.fullmatch(r"[0-9]+\n", size_raw) is None or autoclear_raw != "1\n" or not backing_raw:
+            reject("output-quota")
+        backing_text = mountinfo_unescape(backing_raw)
+        backing = Path(backing_text if backing_text.startswith("/") else "/" + backing_text)
+        if not backing.is_absolute() or ".." in backing.parts:
+            reject("output-quota")
+        return source_status, int(size_raw) * 512, True, backing.lstat()
+    except InputError:
+        raise
+    except (OSError, UnicodeError, ValueError):
+        reject("output-quota")
+
+
+def validate_prepared_output_facts(
+    output_status: os.stat_result,
+    filesystem: str,
+    source: str,
+    options: frozenset[str],
+    device: tuple[int, int],
+    values: os.statvfs_result,
+    marker_status: os.stat_result,
+    marker_flags: int,
+    marker: dict[str, Any],
+    token: str,
+    source_status: os.stat_result,
+    source_bytes: int,
+    autoclear: bool,
+    backing_status: os.stat_result,
+) -> None:
+    if (
+        not stat.S_ISDIR(output_status.st_mode)
+        or output_status.st_uid != os.geteuid() or output_status.st_gid != os.getegid()
+        or stat.S_IMODE(output_status.st_mode) != 0o700
+        or filesystem != "ext4" or re.fullmatch(r"/dev/loop[0-9]+", source) is None
+        or not {"rw", "nosuid", "nodev"}.issubset(options) or "noexec" in options
+        or not stat.S_ISBLK(source_status.st_mode)
+        or (os.major(source_status.st_rdev), os.minor(source_status.st_rdev)) != device
+        or source_bytes != OUTPUT_BYTES_LIMIT or not autoclear
+        or values.f_frsize <= 0 or values.f_blocks <= 0
+        or values.f_frsize * values.f_blocks > OUTPUT_BYTES_LIMIT
+        or not stat.S_ISREG(marker_status.st_mode) or marker_status.st_uid != 0
+        or marker_status.st_nlink != 1 or stat.S_IMODE(marker_status.st_mode) != 0o444
+        or marker_flags & FS_IMMUTABLE_FL == 0
+        or not stat.S_ISREG(backing_status.st_mode) or backing_status.st_uid != 0
+        or backing_status.st_nlink != 1 or stat.S_IMODE(backing_status.st_mode) != 0o600
+    ):
+        reject("output-quota")
+    marker = exact_object(marker, (
+        "filesystem", "imageDevice", "imageInode", "imageSize", "limitBytes",
+        "mountDeviceMajor", "mountDeviceMinor", "outputDevice", "outputInode",
+        "purpose", "schemaVersion", "token",
+    ), "output-quota")
+    for key in (
+        "imageDevice", "imageInode", "imageSize", "limitBytes", "mountDeviceMajor",
+        "mountDeviceMinor", "outputDevice", "outputInode", "schemaVersion",
+    ):
+        if isinstance(marker[key], bool) or not isinstance(marker[key], int):
+            reject("output-quota")
+    if (
+        marker["filesystem"] != "ext4" or marker["purpose"] != OUTPUT_QUOTA_PURPOSE
+        or marker["schemaVersion"] != 1 or marker["token"] != token
+        or marker["imageDevice"] < 0 or marker["imageInode"] <= 0
+        or marker["imageSize"] != OUTPUT_BYTES_LIMIT or marker["limitBytes"] != OUTPUT_BYTES_LIMIT
+        or (marker["imageDevice"], marker["imageInode"], marker["imageSize"])
+            != (backing_status.st_dev, backing_status.st_ino, backing_status.st_size)
+        or (marker["mountDeviceMajor"], marker["mountDeviceMinor"]) != device
+        or (marker["outputDevice"], marker["outputInode"]) != (output_status.st_dev, output_status.st_ino)
+    ):
+        reject("output-quota")
+
+
+def validate_prepared_output(root_fd: int, output: Path, expected_root: tuple[int, int]) -> None:
+    token = os.environ.get(OUTPUT_QUOTA_ENV)
+    if token is None or TOKEN_RE.fullmatch(token) is None:
+        reject("output-exists")
+    output_fd = marker_fd = -1
+    try:
+        output_fd = os.open(
+            output.name,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=root_fd,
+        )
+        output_status = os.fstat(output_fd)
+        named = os.stat(output.name, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            (output_status.st_dev, output_status.st_ino) != (named.st_dev, named.st_ino)
+            or (os.fstat(root_fd).st_dev, os.fstat(root_fd).st_ino) != expected_root
+        ):
+            reject("output-quota")
+        filesystem, source, options, device = prepared_mount_record(output)
+        source_status, source_bytes, autoclear, backing_status = loop_device_facts(source, device)
+        values = os.statvfs(output_fd)
+        marker_fd = os.open(
+            OUTPUT_QUOTA_MARKER,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=output_fd,
+        )
+        marker_status = os.fstat(marker_fd)
+        raw = os.read(marker_fd, 4097)
+        repeated = os.fstat(marker_fd)
+        if (
+            not stat.S_ISREG(marker_status.st_mode) or marker_status.st_uid != 0
+            or marker_status.st_nlink != 1 or stat.S_IMODE(marker_status.st_mode) != 0o444
+            or not 0 < marker_status.st_size <= 4096 or len(raw) != marker_status.st_size
+            or any(getattr(marker_status, field) != getattr(repeated, field) for field in STABLE_FILE_FIELDS)
+        ):
+            reject("output-quota")
+        flags = array.array("I", [0])
+        fcntl.ioctl(marker_fd, FS_IOC_GETFLAGS, flags, True)
+        marker = json.loads(raw.decode("ascii"), object_pairs_hook=no_duplicate_object)
+        validate_prepared_output_facts(
+            output_status, filesystem, source, options, device, values,
+            marker_status, flags[0], marker, token,
+            source_status, source_bytes, autoclear, backing_status,
+        )
+        if os.environ.pop(OUTPUT_QUOTA_ENV, None) != token:
+            reject("output-quota")
+    except InputError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        reject("output-quota")
+    finally:
+        if marker_fd >= 0:
+            os.close(marker_fd)
+        if output_fd >= 0:
+            os.close(output_fd)
+
+
+def validate_contract(
+    contract: dict[str, Any],
+    output: Path,
+    *,
+    require_prepared_output: bool = False,
+) -> str:
     repository_root = Path(__file__).resolve().parents[2]
     contract = exact_object(
         contract,
@@ -536,7 +724,16 @@ def validate_contract(contract: dict[str, Any], output: Path) -> str:
         validate_boundaries_for_scenario(contract["isolation"]["allow_privileged_fault_setup"], scenario)
         validate_timeouts(contract["timeouts_seconds"])
         root_stat = os.fstat(root_fd)
-        create_output(root_fd, output, (root_stat.st_dev, root_stat.st_ino))
+        try:
+            os.stat(output.name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if require_prepared_output:
+                reject("output-quota")
+            create_output(root_fd, output, (root_stat.st_dev, root_stat.st_ino))
+        except OSError:
+            reject("unsafe-output")
+        else:
+            validate_prepared_output(root_fd, output, (root_stat.st_dev, root_stat.st_ino))
     finally:
         os.close(root_fd)
     return scenario

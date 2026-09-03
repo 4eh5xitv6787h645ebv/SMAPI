@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from typing import Any, Callable
@@ -167,6 +168,19 @@ def payload(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 
 class HardStateInputValidatorTests(unittest.TestCase):
+    def test_execute_admission_requires_broker_prepared_quota_output(self):
+        with tempfile.TemporaryDirectory(prefix="smapi-hard-state-validator-test-", dir=ALLOWED_TEMP_PARENT) as name:
+            fixture = Fixture(Path(name))
+            self.assertFalse(fixture.output.exists())
+            with self.assertRaises(VALIDATOR_MODULE.InputError) as raised:
+                VALIDATOR_MODULE.validate_contract(
+                    fixture.contract,
+                    fixture.output,
+                    require_prepared_output=True,
+                )
+            self.assertEqual("output-quota", raised.exception.code)
+            self.assertFalse(fixture.output.exists())
+
     def fixture(self, scenario: str = "C3") -> tuple[tempfile.TemporaryDirectory[str], Fixture]:
         temporary = tempfile.TemporaryDirectory(prefix="smapi-hard-state-test-", dir=ALLOWED_TEMP_PARENT)
         return temporary, Fixture(Path(temporary.name), scenario)
@@ -252,6 +266,74 @@ class HardStateInputValidatorTests(unittest.TestCase):
             lambda fixture: fixture.contract["resource_limits"].__setitem__("screenshots", 64),
             "resource-limits",
         )
+
+    def test_prepared_output_facts_require_exact_ext4_quota_mount_and_root_marker(self) -> None:
+        output = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_uid=os.geteuid(),
+            st_gid=os.getegid(),
+            st_dev=17,
+            st_ino=23,
+        )
+        values = SimpleNamespace(f_frsize=4096, f_blocks=250000)
+        marker_status = SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_nlink=1)
+        source_status = SimpleNamespace(st_mode=stat.S_IFBLK | 0o600, st_rdev=os.makedev(7, 4))
+        backing_status = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1,
+            st_dev=8, st_ino=9, st_size=VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT,
+        )
+        token = "a" * 64
+        marker = {
+            "filesystem": "ext4",
+            "imageDevice": 8,
+            "imageInode": 9,
+            "imageSize": VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT,
+            "limitBytes": VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT,
+            "mountDeviceMajor": 7,
+            "mountDeviceMinor": 4,
+            "outputDevice": output.st_dev,
+            "outputInode": output.st_ino,
+            "purpose": VALIDATOR_MODULE.OUTPUT_QUOTA_PURPOSE,
+            "schemaVersion": 1,
+            "token": token,
+        }
+        arguments = [
+            output, "ext4", "/dev/loop4", frozenset({"rw", "nosuid", "nodev"}),
+            (7, 4), values, marker_status, VALIDATOR_MODULE.FS_IMMUTABLE_FL, marker, token,
+            source_status, VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT, True, backing_status,
+        ]
+        VALIDATOR_MODULE.validate_prepared_output_facts(*arguments)
+        mutations = (
+            (0, SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.geteuid() + 1, st_gid=os.getegid(), st_dev=17, st_ino=23)),
+            (1, "tmpfs"),
+            (2, "/dev/sda"),
+            (3, frozenset({"rw", "nosuid"})),
+            (3, frozenset({"rw", "nosuid", "nodev", "noexec"})),
+            (5, SimpleNamespace(f_frsize=4096, f_blocks=300000)),
+            (6, SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=os.geteuid(), st_nlink=1)),
+            (7, 0),
+            (10, SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_rdev=os.makedev(7, 4))),
+            (11, VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT - 512),
+            (12, False),
+            (13, SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1, st_dev=8, st_ino=10, st_size=VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT)),
+        )
+        for index, value in mutations:
+            with self.subTest(index=index, value=value):
+                changed = list(arguments)
+                changed[index] = value
+                with self.assertRaises(VALIDATOR_MODULE.InputError) as error:
+                    VALIDATOR_MODULE.validate_prepared_output_facts(*changed)
+                self.assertEqual(error.exception.code, "output-quota")
+
+        for key, value in (("imageSize", 1), ("limitBytes", 1), ("mountDeviceMinor", 5), ("token", "b" * 64)):
+            with self.subTest(marker=key):
+                changed_marker = dict(marker)
+                changed_marker[key] = value
+                changed = list(arguments)
+                changed[8] = changed_marker
+                with self.assertRaises(VALIDATOR_MODULE.InputError) as error:
+                    VALIDATOR_MODULE.validate_prepared_output_facts(*changed)
+                self.assertEqual(error.exception.code, "output-quota")
 
     def test_rejects_reused_directory_file_and_symlink_outputs(self) -> None:
         for kind in ("directory", "file", "symlink"):

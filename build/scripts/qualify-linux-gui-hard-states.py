@@ -2462,7 +2462,11 @@ def main(arguments: list[str]) -> int:
                 if parsed.execute
                 else validator.read_contract(Path(parsed.contract))
             )
-            scenario = validator.validate_contract(contract, Path(parsed.output))
+            scenario = validator.validate_contract(
+                contract,
+                Path(parsed.output),
+                require_prepared_output=parsed.execute,
+            )
         except getattr(validator, "InputError", Exception):
             fail("admission")
         if contract.get("scenario") != scenario:
