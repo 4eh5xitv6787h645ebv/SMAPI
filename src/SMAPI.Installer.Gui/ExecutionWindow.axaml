@@ -105,7 +105,8 @@
                 TabIndex="2"
                 IsVisible="{Binding IsCancelVisible}"
                 AutomationProperties.AccessKey="Alt+C"
-                AutomationProperties.Name="Cancel or close safely"
+                AutomationProperties.Name="{Binding CancelAccessibleName}"
+                AutomationProperties.HelpText="{Binding CancelHelpText}"
                 Command="{Binding CancelCommand}"
                 Content="{Binding CancelLabel}" />
             <Button

@@ -209,6 +209,53 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
         (await new LinuxInstallerEngine().ListRecoveriesAsync(game)).Generations.Should().ContainSingle();
     }
 
+    [Test]
+    public async Task ExplicitCancellationAfterDurableAppliedEventFlowsThroughRealEngineAndRollsBack()
+    {
+        string game = await this.CreateTwoGenerationRecoveryHistory();
+        RecoveryHistory before = await new LinuxInstallerEngine().ListRecoveriesAsync(game);
+        string launcherBefore = File.ReadAllText(Path.Combine(game, "StardewValley"));
+        string runtimeBefore = File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll"));
+        PauseAfterFirstApplied fault = new();
+        using LinuxInstallerProtocolService service = CreateRealService(fault);
+        await Handshake(service);
+        PlanEvent plan = (PlanEvent)await service.HandleAsync(new InspectPlanRequest(service.SessionId, game, InstallerOperation.Backup, null, null));
+        plan.CanExecute.Should().BeTrue();
+        await service.HandleAsync(new ConfirmPlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+
+        Task<ProtocolEvent> execution = service.HandleAsync(new ExecutePlanRequest(service.SessionId, plan.PlanId, plan.PlanDigest));
+        try
+        {
+            await fault.Reached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            CancelPlanRequest request = new(service.SessionId, plan.PlanId, plan.PlanDigest);
+            CommandAcknowledgedEvent acknowledgement = (CommandAcknowledgedEvent)await service.HandleAsync(request);
+            acknowledgement.CommandId.Should().Be(request.CommandId);
+            acknowledgement.Acknowledgement.Should().Be(ProtocolAcknowledgementKind.PlanCancellationRequested);
+        }
+        finally
+        {
+            fault.Release.TrySetResult();
+        }
+
+        CancelledEvent terminal = (CancelledEvent)await execution;
+        terminal.Outcome.Should().Be(ProtocolExecutionOutcome.CancelledAndRolledBack);
+        terminal.TerminalState.Should().Be(new ProtocolTerminalState(
+            ProtocolDurableState.RolledBack,
+            null,
+            ProtocolRecoveryDisposition.Completed,
+            ProtocolNextAction.InspectAgain
+        ));
+        terminal.ExecutionSummary.InternalStateChangeCount.Should().BeGreaterThan(0);
+        terminal.ExecutionSummary.RolledBackInternalStateCount.Should().Be(terminal.ExecutionSummary.InternalStateChangeCount);
+        terminal.ExecutionSummary.ManagedFileChangeCount.Should().Be(0);
+        terminal.ExecutionSummary.RolledBackManagedFileCount.Should().Be(0);
+        service.State.Should().Be(ProtocolSessionState.Completed);
+        File.ReadAllText(Path.Combine(game, "StardewValley")).Should().Be(launcherBefore);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be(runtimeBefore);
+        RecoveryHistory after = await new LinuxInstallerEngine().ListRecoveriesAsync(game);
+        after.Generations.Select(item => item.GenerationId).Should().Equal(before.Generations.Select(item => item.GenerationId));
+    }
+
     private static LinuxInstallerProtocolService CreateRealService(ITransactionProgressSink? observedProgress = null)
         => new(
             "test",
@@ -224,6 +271,19 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
             {
                 CompositeProgress combined = new(progress, null);
                 return new LinuxInstallerProtocolEngine(new LinuxInstallerEngine(new InstallerTransactionExecutor(combined), faultInjector, combined));
+            },
+            new UnusedDiscovery(),
+            new UnusedPackageOpener()
+        );
+
+    private static LinuxInstallerProtocolService CreateRealService(ITransactionFaultInjector faultInjector)
+        => new(
+            "test",
+            progress =>
+            {
+                CompositeProgress combined = new(progress, null);
+                InstallerTransactionExecutor executor = new(combined, faultInjector);
+                return new LinuxInstallerProtocolEngine(new LinuxInstallerEngine(executor, progress: combined));
             },
             new UnusedDiscovery(),
             new UnusedPackageOpener()
@@ -327,6 +387,22 @@ internal sealed class LinuxInstallerProtocolServiceRealEngineTests
                 this.Reached.TrySetResult();
                 this.Release.Task.GetAwaiter().GetResult();
                 throw failure;
+            }
+        }
+    }
+
+    private sealed class PauseAfterFirstApplied : ITransactionFaultInjector
+    {
+        private int Paused;
+        public TaskCompletionSource Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+        public void AfterMutation(Guid transactionId, int operationIndex)
+        {
+            if (operationIndex == 0 && Interlocked.Exchange(ref this.Paused, 1) == 0)
+            {
+                this.Reached.TrySetResult();
+                this.Release.Task.GetAwaiter().GetResult();
             }
         }
     }

@@ -26,7 +26,11 @@ internal sealed class InstallerTransactionExecutor
     }
 
     /// <summary>Apply an immutable transaction plan.</summary>
-    /// <remarks>Cancellation is honored through staging and final revalidation. Once mutation begins, the executor finishes commit or rollback.</remarks>
+    /// <remarks>
+    /// Cancellation is honored through staging and final revalidation, then only between complete
+    /// mutations after each Applied journal record is durable. Individual mutations, rollback, and
+    /// commit publication are never interrupted.
+    /// </remarks>
     public TransactionResult Apply(string gameRoot, string payloadRoot, TransactionPlan plan, CancellationToken cancellationToken = default)
     {
         LinuxPrivilegeGuard.AssertNotRoot();
@@ -201,7 +205,7 @@ internal sealed class InstallerTransactionExecutor
             cancellationToken.ThrowIfCancellationRequested();
             lease.ReserveNextGeneration(lease.Generation);
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Applying);
-            replay = this.ApplyMutations(game, transaction, plan, journal, replay, eventsFile);
+            replay = this.ApplyMutations(game, transaction, plan, journal, replay, eventsFile, cancellationToken);
 
             this.Progress.Report(new(TransactionStage.Verifying, plan.Operations.Count, plan.Operations.Count));
             VerifyResults(game, plan);
@@ -755,7 +759,8 @@ internal sealed class InstallerTransactionExecutor
         TransactionPlan plan,
         TransactionJournal journal,
         TransactionJournalReplay replay,
-        LinuxAnchoredFile eventsFile
+        LinuxAnchoredFile eventsFile,
+        CancellationToken cancellationToken
     )
     {
         string transactionPrefix = $"{WorkspaceName}/{TransactionsName}/{plan.TransactionId:N}/";
@@ -805,6 +810,9 @@ internal sealed class InstallerTransactionExecutor
             this.FaultInjector.AfterMutationBeforeAppliedEvent(plan.TransactionId, index);
             replay = TransactionJournalStore.Append(transaction, eventsFile, journal, replay, TransactionJournalEventKind.Applied, index);
             this.FaultInjector.AfterMutation(plan.TransactionId, index);
+            // A requested cancellation is safe to observe only after the complete operation and its
+            // Applied record are durable. The catch path performs a non-cancellable full rollback.
+            cancellationToken.ThrowIfCancellationRequested();
         }
         return replay;
     }
