@@ -585,6 +585,7 @@ class ProcessIdentity:
     process_group: int
     executable_device: int
     executable_inode: int
+    executable_size: int
     executable_sha256: str
 
 
@@ -669,7 +670,10 @@ class BrokerChannel:
             or command_line != expected_command_line or digest != own_digest
         ):
             fail("boundary")
-        return ProcessIdentity(pid, started, process_group, executable.st_dev, executable.st_ino, digest)
+        return ProcessIdentity(
+            pid, started, process_group,
+            executable.st_dev, executable.st_ino, executable.st_size, digest,
+        )
 
     def close(self) -> None:
         self.socket.close()
@@ -717,7 +721,10 @@ def bind_process(pid: int, expected_hash: str, expected_group: int) -> ProcessId
     digest, metadata = hash_proc_executable(pid)
     if digest != expected_hash:
         fail("identity")
-    return ProcessIdentity(pid, start_time, process_group, metadata.st_dev, metadata.st_ino, digest)
+    return ProcessIdentity(
+        pid, start_time, process_group,
+        metadata.st_dev, metadata.st_ino, metadata.st_size, digest,
+    )
 
 
 def bind_any_process(pid: int, expected_group: int) -> ProcessIdentity:
@@ -731,7 +738,11 @@ def identity_matches(identity: ProcessIdentity) -> bool:
         if (process_group, start_time) != (identity.process_group, identity.start_time):
             return False
         executable = os.stat(f"/proc/{identity.pid}/exe")
-        return (executable.st_dev, executable.st_ino) == (identity.executable_device, identity.executable_inode)
+        return (
+            executable.st_dev, executable.st_ino, executable.st_size
+        ) == (
+            identity.executable_device, identity.executable_inode, identity.executable_size
+        )
     except QualificationError:
         return False
     except OSError:
@@ -1005,7 +1016,7 @@ class BoundarySession:
                 fail("boundary")
             self.controller_identity = ProcessIdentity(
                 peer_pid, peer_start, peer_group,
-                peer_executable.st_dev, peer_executable.st_ino, peer_digest,
+                peer_executable.st_dev, peer_executable.st_ino, peer_executable.st_size, peer_digest,
             )
             self.connection = connection
             self.expect("prepared", deadline)

@@ -549,7 +549,10 @@ class SupervisorTests(unittest.TestCase):
             try:
                 digest, metadata = self.module.hash_proc_executable(client.pid)
                 group, started = self.module.proc_stat(client.pid)
-                identity = self.module.ProcessIdentity(client.pid, started, group, metadata.st_dev, metadata.st_ino, digest)
+                identity = self.module.ProcessIdentity(
+                    client.pid, started, group,
+                    metadata.st_dev, metadata.st_ino, metadata.st_size, digest,
+                )
                 self.assertEqual(server.wait(identity, time.monotonic() + 2), 7)
                 server.release()
                 stdout, stderr = client.communicate(timeout=2)
@@ -724,7 +727,7 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                     pass
 
             metadata = SimpleNamespace(st_mode=stat.S_IFSOCK)
-            executable = SimpleNamespace(st_dev=1, st_ino=2)
+            executable = SimpleNamespace(st_dev=1, st_ino=2, st_size=4096)
 
             def make_channel(start_time):
                 fake = FakeSocket(start_time)
