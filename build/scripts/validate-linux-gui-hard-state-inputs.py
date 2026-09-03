@@ -4,16 +4,18 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+from types import ModuleType
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MARKER_NAME = ".smapi-linux-gui-hard-state-disposable-v1.json"
 MARKER_PURPOSE = "smapi-linux-gui-hard-state-disposable-root"
 SCENARIOS = frozenset({
@@ -49,10 +51,31 @@ LIVE_COMPONENTS = frozenset({
 MAX_CONTRACT_BYTES = 64 * 1024
 MAX_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_GAME_MARKER_BYTES = 16 * 1024 * 1024
+CAPTURE_POLICY = "exact-window-v1"
+OUTPUT_BYTES_LIMIT = 1024 * 1024 * 1024
 STABLE_FILE_FIELDS = (
     "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size",
     "st_mtime_ns", "st_ctime_ns",
 )
+CAPTURE_MODEL_PATH = Path(__file__).with_name("linux_gui_hard_state_capture_contract.py")
+
+
+def load_capture_model() -> ModuleType:
+    module_name = "smapi_linux_gui_hard_state_capture_contract"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    specification = importlib.util.spec_from_file_location(module_name, CAPTURE_MODEL_PATH)
+    if specification is None or specification.loader is None:
+        raise RuntimeError("capture contract model unavailable")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+CAPTURE_MODEL = load_capture_model()
+ENVIRONMENT_PROFILES = frozenset(profile.profile_id.value for profile in CAPTURE_MODEL.ENVIRONMENT_PROFILES)
 
 
 class InputError(Exception):
@@ -317,6 +340,23 @@ def validate_binaries(value: Any) -> None:
     fixed_text(binaries["backend_sha256"], SHA256_RE, "digest")
 
 
+def validate_capture(value: Any) -> None:
+    capture = exact_object(value, ("policy", "environment_profile"), "capture")
+    if capture["policy"] != CAPTURE_POLICY:
+        reject("capture")
+    try:
+        profile = CAPTURE_MODEL.environment_profile(capture["environment_profile"])
+    except (KeyError, TypeError, ValueError):
+        reject("capture")
+    if capture["environment_profile"] != profile.profile_id.value:
+        reject("capture")
+
+
+def validate_resource_limits(value: Any) -> None:
+    limits = exact_object(value, ("output_bytes",), "resource-limits")
+    integer(limits["output_bytes"], OUTPUT_BYTES_LIMIT, OUTPUT_BYTES_LIMIT, "resource-limits")
+
+
 def sensitive_root(path: Path, repository_root: Path) -> bool:
     if path == Path("/"):
         return True
@@ -475,7 +515,8 @@ def validate_contract(contract: dict[str, Any], output: Path) -> str:
     repository_root = Path(__file__).resolve().parents[2]
     contract = exact_object(
         contract,
-        ("schema_version", "scenario", "release", "package", "game_marker", "binaries", "isolation", "timeouts_seconds"),
+        ("schema_version", "scenario", "release", "package", "game_marker", "binaries", "capture",
+         "isolation", "timeouts_seconds", "resource_limits"),
         "contract-schema",
     )
     if contract["schema_version"] != SCHEMA_VERSION:
@@ -487,6 +528,8 @@ def validate_contract(contract: dict[str, Any], output: Path) -> str:
     validate_regular_package(contract["package"], version)
     validate_game_marker(contract["game_marker"])
     validate_binaries(contract["binaries"])
+    validate_capture(contract["capture"])
+    validate_resource_limits(contract["resource_limits"])
     output = normalized_absolute_path(str(output), "unsafe-output")
     root_fd, _root = validate_isolation(contract["isolation"], output, repository_root)
     try:

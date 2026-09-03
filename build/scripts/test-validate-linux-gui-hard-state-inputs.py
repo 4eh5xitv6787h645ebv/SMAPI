@@ -26,6 +26,12 @@ TAG = "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3"
 SCENARIOS = (
     "E2-permission", "E2-read-only", "E2-disk-full", "E2-cross-device", "C2", "C3", "E5", "E6",
 )
+ENVIRONMENT_PROFILES = (
+    "ubuntu-24.04-gnome-x11",
+    "ubuntu-24.04-gnome-xwayland",
+    "ubuntu-24.04-kde-x11",
+    "ubuntu-24.04-kde-xwayland",
+)
 PRIVATE_SENTINEL = "fixture-private-sentinel-should-never-appear"
 ALLOWED_TEMP_PARENT = Path(f"/run/user/{os.geteuid()}")
 if not ALLOWED_TEMP_PARENT.is_dir() or not os.access(ALLOWED_TEMP_PARENT, os.W_OK | os.X_OK):
@@ -53,7 +59,7 @@ class Fixture:
         os.chmod(self.root, 0o700)
         root_stat = self.root.stat()
         marker = {
-            "schema_version": 1,
+            "schema_version": 2,
             "purpose": MARKER_PURPOSE,
             "root_device": root_stat.st_dev,
             "root_inode": root_stat.st_ino,
@@ -70,7 +76,7 @@ class Fixture:
         os.chmod(self.game_marker, 0o600)
         marker_data = self.game_marker.read_bytes()
         self.contract: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "scenario": scenario,
             "release": {
                 "version": VERSION,
@@ -90,6 +96,10 @@ class Fixture:
                 "sha256": hashlib.sha256(marker_data).hexdigest(),
             },
             "binaries": {"apphost_sha256": "3" * 64, "backend_sha256": "4" * 64},
+            "capture": {
+                "policy": "exact-window-v1",
+                "environment_profile": "ubuntu-24.04-gnome-xwayland",
+            },
             "isolation": {
                 "disposable_root": str(self.root),
                 "root_device": root_stat.st_dev,
@@ -107,6 +117,7 @@ class Fixture:
                 "cleanup": 60,
                 "total": 600,
             },
+            "resource_limits": {"output_bytes": 1073741824},
         }
         self.contract_path = base / "contract.json"
         self.output = self.root / "hard-state-output-00000001"
@@ -122,7 +133,7 @@ class Fixture:
         self.contract["isolation"]["root_device"] = root_stat.st_dev
         self.contract["isolation"]["root_inode"] = root_stat.st_ino
         marker = {
-            "schema_version": 1,
+            "schema_version": 2,
             "purpose": MARKER_PURPOSE,
             "root_device": root_stat.st_dev,
             "root_inode": root_stat.st_ino,
@@ -167,7 +178,7 @@ class HardStateInputValidatorTests(unittest.TestCase):
             fixture.write()
             result = run(fixture)
             self.assertEqual(result.returncode, 2, result.stdout)
-            self.assertEqual(payload(result), {"code": code, "ok": False, "schemaVersion": 1, "status": "rejected"})
+            self.assertEqual(payload(result), {"code": code, "ok": False, "schemaVersion": 2, "status": "rejected"})
             self.assertNotIn(PRIVATE_SENTINEL, result.stdout + result.stderr)
             self.assertFalse(fixture.output.exists())
 
@@ -181,7 +192,7 @@ class HardStateInputValidatorTests(unittest.TestCase):
                     self.assertEqual(payload(result), {
                         "ok": True,
                         "scenario": scenario,
-                        "schemaVersion": 1,
+                        "schemaVersion": 2,
                         "status": "validated",
                     })
                     self.assertTrue(fixture.output.is_dir())
@@ -189,6 +200,58 @@ class HardStateInputValidatorTests(unittest.TestCase):
                     self.assertEqual(list(fixture.output.iterdir()), [])
                     self.assertNotIn(str(fixture.base), result.stdout)
                     self.assertNotIn(fixture.contract["package"]["sha256"], result.stdout)
+
+    def test_accepts_every_closed_capture_profile(self) -> None:
+        self.assertEqual(set(ENVIRONMENT_PROFILES), set(VALIDATOR_MODULE.ENVIRONMENT_PROFILES))
+        for profile in ENVIRONMENT_PROFILES:
+            with self.subTest(profile=profile):
+                temporary, fixture = self.fixture()
+                with temporary:
+                    fixture.contract["capture"]["environment_profile"] = profile
+                    fixture.write()
+                    result = run(fixture)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(payload(result)["status"], "validated")
+
+    def test_rejects_capture_and_resource_mismatch_or_extra_fields(self) -> None:
+        self.assert_rejected(
+            lambda fixture: fixture.contract.__setitem__("schema_version", 1),
+            "contract-schema",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract.__setitem__("display", ":0"),
+            "contract-schema",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("policy", "caller-window"),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("environment_profile", "ubuntu-current"),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("environment_profile", {
+                "desktop": "GNOME", "session": "wayland",
+            }),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("display", ":0"),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["resource_limits"].__setitem__("output_bytes", 1073741823),
+            "resource-limits",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["resource_limits"].__setitem__("output_bytes", 1073741824.0),
+            "resource-limits",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["resource_limits"].__setitem__("screenshots", 64),
+            "resource-limits",
+        )
 
     def test_rejects_reused_directory_file_and_symlink_outputs(self) -> None:
         for kind in ("directory", "file", "symlink"):

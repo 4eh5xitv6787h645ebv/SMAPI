@@ -5,17 +5,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
 import sys
+from types import ModuleType
 from typing import Any, NoReturn
 import zipfile
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SYNTHETIC_MARKER_FIXTURE = REPOSITORY_ROOT / "build/fixtures/linux-gui-hard-state/Stardew Valley.dll.base64"
 SYNTHETIC_MARKER_ENCODED_SHA256 = "0d73da2d4c7e7c7553033e359a6e1808c0e0be5ccd5f0f6fa781c7efc23fd0cf"
@@ -50,6 +52,28 @@ TARGETS = {
     "backend_sha256": "internal/linux/SMAPI.Installer",
 }
 TIMEOUTS = {"startup": 120, "operation": 900, "settlement": 300, "cleanup": 120, "total": 1440}
+CAPTURE_POLICY = "exact-window-v1"
+DEFAULT_ENVIRONMENT_PROFILE = "ubuntu-24.04-gnome-xwayland"
+OUTPUT_BYTES_LIMIT = 1024 * 1024 * 1024
+CAPTURE_MODEL_PATH = Path(__file__).with_name("linux_gui_hard_state_capture_contract.py")
+
+
+def load_capture_model() -> ModuleType:
+    module_name = "smapi_linux_gui_hard_state_capture_contract"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    specification = importlib.util.spec_from_file_location(module_name, CAPTURE_MODEL_PATH)
+    if specification is None or specification.loader is None:
+        raise RuntimeError("capture contract model unavailable")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+CAPTURE_MODEL = load_capture_model()
+ENVIRONMENT_PROFILES = frozenset(profile.profile_id.value for profile in CAPTURE_MODEL.ENVIRONMENT_PROFILES)
 
 
 class PreparationError(Exception):
@@ -384,9 +408,14 @@ def prepare(
     runtime_root: Path | None = None,
     required_prefix_uid: int = 0,
     synthetic_marker_fixture: Path | None = None,
+    environment_profile: str = DEFAULT_ENVIRONMENT_PROFILE,
 ) -> tuple[Path, Path]:
     if os.geteuid() == 0:
         reject("must-be-nonroot")
+    try:
+        canonical_environment_profile = CAPTURE_MODEL.environment_profile(environment_profile).profile_id.value
+    except (KeyError, TypeError, ValueError):
+        reject("capture")
     repository_root = repository_root or REPOSITORY_ROOT
     runtime_root = runtime_root or Path(f"/run/user/{os.geteuid()}")
     synthetic_marker_fixture = synthetic_marker_fixture or SYNTHETIC_MARKER_FIXTURE
@@ -459,6 +488,10 @@ def prepare(
                 "sha256": marker_digest,
             },
             "binaries": binaries,
+            "capture": {
+                "policy": CAPTURE_POLICY,
+                "environment_profile": canonical_environment_profile,
+            },
             "isolation": {
                 "disposable_root": os.fspath(case_root),
                 "root_device": root_status.st_dev,
@@ -470,6 +503,7 @@ def prepare(
                 "allow_privileged_fault_setup": scenario in E2_SCENARIOS,
             },
             "timeouts_seconds": TIMEOUTS,
+            "resource_limits": {"output_bytes": OUTPUT_BYTES_LIMIT},
         }
         contract_status = private_json_at(contract_fd, "contract.json", contract)
         contract_created = True
