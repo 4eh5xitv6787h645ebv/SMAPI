@@ -344,6 +344,36 @@ def main() -> int:
     if len(stager.hash_process_executable(os.getpid())) != 64:
         raise AssertionError("current-user process ownership/executable hashing failed")
 
+    inspected_display = ":76"
+    inspected_environment = dict(os.environ)
+    inspected_environment["DISPLAY"] = inspected_display
+    inspected_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(10)"],
+        env=inspected_environment,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert inspected_process.stdout is not None
+        if inspected_process.stdout.readline() != "ready\n":
+            raise AssertionError("live identity fixture did not become ready")
+        inspected_identity = stager.inspect_process_identity(inspected_process.pid)
+        if (
+            inspected_identity.process_id != inspected_process.pid
+            or inspected_identity.start_time <= 0
+            or inspected_identity.executable_device < 0
+            or inspected_identity.executable_inode <= 0
+            or inspected_identity.executable_size <= 0
+            or len(inspected_identity.executable_sha256) != 64
+            or inspected_identity.display != inspected_display
+        ):
+            raise AssertionError("live GUI process identity inspection returned incomplete evidence")
+    finally:
+        inspected_process.terminate()
+        inspected_process.wait(timeout=5)
+        assert inspected_process.stdout is not None
+        inspected_process.stdout.close()
+
     capture_png = make_png()[0]
     exact_title = "SMAPI Linux Installer — Local diagnostics"
     expected_pid = 4321
@@ -372,7 +402,7 @@ def main() -> int:
 
     with (
         mock.patch.object(stager.shutil, "which", side_effect=lambda name: f"/mock/{name}"),
-        mock.patch.object(stager.subprocess, "run", side_effect=fake_capture_run),
+        mock.patch.object(stager, "run_bounded", side_effect=fake_capture_run),
         mock.patch.object(stager, "hash_process_executable", side_effect=(expected_hash, expected_hash)) as hasher,
     ):
         data, tool, command = stager.capture_window("0x42", exact_title, expected_pid, expected_hash)
@@ -383,7 +413,7 @@ def main() -> int:
 
     with (
         mock.patch.object(stager.shutil, "which", side_effect=lambda name: f"/mock/{name}"),
-        mock.patch.object(stager.subprocess, "run", side_effect=fake_capture_run),
+        mock.patch.object(stager, "run_bounded", side_effect=fake_capture_run),
         mock.patch.object(stager, "hash_process_executable", return_value="b" * 64),
     ):
         try:
@@ -393,6 +423,197 @@ def main() -> int:
                 raise
         else:
             raise AssertionError("mismatched direct-capture executable hash was accepted")
+
+    display = ":77"
+    admitted = stager.ProcessIdentity(
+        process_id=expected_pid,
+        start_time=987654,
+        executable_device=2049,
+        executable_inode=7654321,
+        executable_size=123456,
+        executable_sha256=expected_hash,
+        display=display,
+    )
+
+    class FakeXSession:
+        def __init__(self, windows: dict[str, dict[str, object]]) -> None:
+            self.windows = windows
+            self.root_calls = 0
+            self.imported = False
+            self.root_override_after_import: tuple[str, ...] | None = None
+            self.geometry_after_import: tuple[int, int, int, int] | None = None
+            self.pid_after_import: int | None = None
+            self.unmapped_after_import = False
+            self.root_returncode = 0
+
+        def __call__(self, command: list[str], **_kwargs):
+            tool = Path(command[0]).name
+            if tool == "xprop" and "-root" in command:
+                self.root_calls += 1
+                ids = tuple(self.windows)
+                if self.imported and self.root_override_after_import is not None:
+                    ids = self.root_override_after_import
+                joined = ", ".join(ids)
+                output = (
+                    f"_NET_CLIENT_LIST_STACKING(WINDOW): window id # {joined}\n"
+                    f"_NET_CLIENT_LIST(WINDOW): window id # {joined}\n"
+                )
+                return subprocess.CompletedProcess(command, self.root_returncode, output, "fixture error")
+            if tool == "xwininfo":
+                window = self.windows[command[command.index("-id") + 1]]
+                geometry = window.get("geometry", (10, 20, 800, 600))
+                if self.imported and self.geometry_after_import is not None:
+                    geometry = self.geometry_after_import
+                mapped = (
+                    "IsViewable"
+                    if window.get("mapped", True) and not (self.imported and self.unmapped_after_import)
+                    else "IsUnMapped"
+                )
+                x, y, width, height = geometry
+                output = (
+                    f"Map State: {mapped}\n"
+                    f"Absolute upper-left X: {x}\nAbsolute upper-left Y: {y}\n"
+                    f"Width: {width}\nHeight: {height}\n"
+                )
+                return subprocess.CompletedProcess(command, 0, output, "")
+            if tool == "xprop" and "-id" in command:
+                window = self.windows[command[command.index("-id") + 1]]
+                title = window.get("title", "Other")
+                legacy = window.get("legacy_title", title)
+                pid = window.get("pid", expected_pid)
+                if self.imported and self.pid_after_import is not None:
+                    pid = self.pid_after_import
+                pid_lines = window.get("pid_lines", (pid,))
+                hidden = "_NET_WM_STATE_HIDDEN" if window.get("hidden", False) else ""
+                output = (
+                    f'_NET_WM_NAME(UTF8_STRING) = "{title}"\n'
+                    f'WM_NAME(STRING) = "{legacy}"\n'
+                    + "".join(f"_NET_WM_PID(CARDINAL) = {value}\n" for value in pid_lines)
+                    + f"_NET_WM_STATE(ATOM) = {hidden}\n"
+                )
+                return subprocess.CompletedProcess(command, 0, output, "")
+            if tool == "import" and "-version" in command:
+                return subprocess.CompletedProcess(command, 0, "Version: ImageMagick 7.1 fixture\n", "")
+            if tool == "import":
+                Path(command[-1].removeprefix("png32:")).write_bytes(capture_png)
+                self.imported = True
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+            raise AssertionError(f"unexpected mocked qualification command: {command}")
+
+    def run_discovery_case(
+        windows: dict[str, dict[str, object]],
+        *,
+        expected_error: str | None = None,
+        configure: Callable[[FakeXSession], None] | None = None,
+        process_identities: tuple[object, ...] | None = None,
+    ) -> None:
+        session = FakeXSession(windows)
+        if configure is not None:
+            configure(session)
+        identity_values = process_identities or (admitted,) * 8
+        with (
+            mock.patch.object(stager.shutil, "which", side_effect=lambda name: f"/mock/{name}"),
+            mock.patch.object(stager, "run_bounded", side_effect=session),
+            mock.patch.object(stager, "inspect_process_identity", side_effect=identity_values),
+            mock.patch.dict(stager.os.environ, {"DISPLAY": display}),
+        ):
+            if expected_error is None:
+                data, tool_name, command_text, selected = stager.capture_discovered_window(exact_title, admitted)
+                if data != capture_png or selected.window_id != "0x42" or "ImageMagick" not in tool_name:
+                    raise AssertionError("qualification discovery did not capture its unique exact client")
+                if "0x42" not in command_text or session.root_calls != 3:
+                    raise AssertionError("qualification discovery did not recheck root membership around capture")
+                return
+            try:
+                stager.capture_discovered_window(exact_title, admitted)
+            except stager.StagingError as exc:
+                if expected_error not in str(exc):
+                    raise AssertionError(f"expected {expected_error!r}, got {exc!r}") from exc
+            else:
+                raise AssertionError(f"qualification discovery accepted case requiring {expected_error!r}")
+
+    valid_window = {"0x42": {"title": exact_title}}
+    run_discovery_case(valid_window)
+    run_discovery_case({}, expected_error="exactly one mapped visible")
+    run_discovery_case(
+        {"0x41": {"title": exact_title}, "0x42": {"title": exact_title}},
+        expected_error="exactly one mapped visible",
+    )
+    run_discovery_case(
+        {"0x42": {"title": exact_title, "legacy_title": "conflicting legacy title"}},
+        expected_error="conflicting WM_NAME",
+    )
+    run_discovery_case(
+        {"0x42": {"title": exact_title, "pid": expected_pid + 1}},
+        expected_error="does not belong to the admitted GUI process",
+    )
+    run_discovery_case(
+        {"0x42": {"title": exact_title, "pid_lines": (expected_pid, expected_pid + 1)}},
+        expected_error="conflicting process properties",
+    )
+    run_discovery_case(
+        {"0x42": {"title": exact_title, "mapped": False}},
+        expected_error="not mapped and visible",
+    )
+    run_discovery_case(
+        valid_window,
+        configure=lambda session: setattr(session, "root_override_after_import", ()),
+        expected_error="left the root client list",
+    )
+    run_discovery_case(
+        valid_window,
+        configure=lambda session: setattr(session, "geometry_after_import", (10, 20, 801, 600)),
+        expected_error="identity or geometry changed",
+    )
+    run_discovery_case(
+        valid_window,
+        configure=lambda session: setattr(session, "pid_after_import", expected_pid + 1),
+        expected_error="identity or geometry changed",
+    )
+    run_discovery_case(
+        valid_window,
+        configure=lambda session: setattr(session, "unmapped_after_import", True),
+        expected_error="not mapped and visible",
+    )
+    run_discovery_case(
+        valid_window,
+        configure=lambda session: setattr(session, "root_returncode", 9),
+        expected_error="root client list could not be inspected safely",
+    )
+    changed_start = admitted._replace(start_time=admitted.start_time + 1)
+    run_discovery_case(
+        valid_window,
+        process_identities=(admitted, admitted, changed_start),
+        expected_error="does not match the admitted GUI process",
+    )
+    changed_exe = admitted._replace(executable_sha256="b" * 64)
+    run_discovery_case(
+        valid_window,
+        process_identities=(admitted, admitted, changed_exe),
+        expected_error="does not match the admitted GUI process",
+    )
+
+    nonzero = stager.run_bounded(
+        [sys.executable, "-c", "import sys; sys.exit(7)"], timeout=2
+    )
+    if nonzero.returncode != 7:
+        raise AssertionError("bounded command runner lost a nonzero exit status")
+    for name, command_to_run, timeout_value, expected_message in (
+        (
+            "oversize",
+            [sys.executable, "-c", f"import sys; sys.stdout.write('x'*{stager.MAX_COMMAND_OUTPUT_BYTES + 1})"],
+            2,
+            "output bound",
+        ),
+        ("timeout", [sys.executable, "-c", "import time; time.sleep(10)"], 0.05, "time bound"),
+    ):
+        try:
+            stager.run_bounded(command_to_run, timeout=timeout_value)
+        except stager.StagingError as exc:
+            if expected_message not in str(exc):
+                raise
+        else:
+            raise AssertionError(f"bounded command runner accepted {name} command")
 
     with tempfile.TemporaryDirectory(prefix="smapi-screenshot-stage-arguments.") as temporary:
         stage, source, identity, private = prepare(Path(temporary))
@@ -426,8 +647,8 @@ def main() -> int:
 
     print(
         "Linux GUI screenshot staging tests passed "
-        "(2 valid formats, E2 provenance, direct-capture identity, executable bounds, "
-        "and 18 fail-closed cases)."
+        "(2 valid formats, E2 provenance, manual/direct capture, exact qualification discovery, "
+        "process identity, bounded commands, executable bounds, and fail-closed cases)."
     )
     return 0
 
