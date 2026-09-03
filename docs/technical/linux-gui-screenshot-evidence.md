@@ -142,6 +142,13 @@ sidecar binds the PNG to one matrix ID, production identity, evidence class, env
 capture method, fault/fixture context, durable-state statements, and qualification reference without
 recording the input, identity-file, private-string-file, or staging paths.
 
+After all four E2 originals pass source-specific review, use
+`build/scripts/assemble-linux-gui-e2-contact-sheet.py` in the same private staging root. It accepts
+exactly one mode-`0600` source in the fixed `permission`, `read-only`, `disk-full`, `cross-device`
+order, never overwrites output, and creates a deterministic two-by-two RGB/RGBA contact sheet plus a
+private source-digest sidecar. The neutral gutters do not alter source pixels. The four original PNGs
+remain authoritative and must still be retained, declared, and independently privacy-reviewed.
+
 Staging is not qualification or manifest publication. The sidecar always leaves original-resolution
 privacy review pending, is forbidden from the final asset directory, and must be replaced by a
 reviewed manifest entry. The helper does not OCR rendered pixels, establish filesystem effects,
