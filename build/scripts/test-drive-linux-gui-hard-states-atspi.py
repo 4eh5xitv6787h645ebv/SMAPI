@@ -76,6 +76,78 @@ class FakeNode:
         return accepted
 
 
+class FakeReportedCount:
+    """An adversarial AT-SPI object with observable reported-count reads."""
+
+    def __init__(
+        self,
+        values: Iterable[Any],
+        *,
+        children: Iterable[Any] = (),
+        names: Iterable[str] = (),
+        raises: bool = False,
+    ):
+        self.values = tuple(values)
+        self._children = tuple(children)
+        self._names = tuple(names)
+        self.raises = raises
+        self.count_reads = 0
+        self.item_reads = 0
+        self.name_reads = 0
+
+    def _count(self) -> Any:
+        self.count_reads += 1
+        if self.raises:
+            raise RuntimeError("untrusted count failed")
+        if not self.values:
+            raise RuntimeError("missing untrusted count")
+        return self.values[min(self.count_reads - 1, len(self.values) - 1)]
+
+    @property
+    def childCount(self) -> Any:
+        return self._count()
+
+    @property
+    def nActions(self) -> Any:
+        return self._count()
+
+    def __getitem__(self, index: int) -> Any:
+        self.item_reads += 1
+        return self._children[index]
+
+    def getName(self, index: int) -> str:
+        self.name_reads += 1
+        return self._names[index]
+
+
+class FakeActionAccessible:
+    def __init__(self, action: FakeReportedCount):
+        self.action = action
+
+    def queryAction(self) -> FakeReportedCount:
+        return self.action
+
+
+class FakeNonActionAccessible:
+    def queryAction(self) -> object:
+        raise RuntimeError("AT-SPI Action interface is unavailable")
+
+
+class FakeAtspiRegistry:
+    def __init__(self, desktop: FakeReportedCount):
+        self.desktop = desktop
+
+    def getDesktop(self, index: int) -> FakeReportedCount:
+        if index != 0:
+            raise AssertionError("unexpected desktop index")
+        return self.desktop
+
+
+class FakePyatspi:
+    def __init__(self, desktop: FakeReportedCount):
+        self.Registry = FakeAtspiRegistry(desktop)
+
+
 class FakeBackend:
     def __init__(
         self,
@@ -95,6 +167,7 @@ class FakeBackend:
         wrong_observation_state_at: int | None = None,
         forbidden_observation_at: int | None = None,
         disabled_observation_at: int | None = None,
+        wrong_observation_action_interface_at: int | None = None,
     ):
         self.milestones = [tool.MILESTONES[name] for name in tool.ROUTES[route]]
         self.index = 0
@@ -112,6 +185,7 @@ class FakeBackend:
         self.wrong_observation_state_at = wrong_observation_state_at
         self.forbidden_observation_at = forbidden_observation_at
         self.disabled_observation_at = disabled_observation_at
+        self.wrong_observation_action_interface_at = wrong_observation_action_interface_at
         self.picker_open = False
         self.invoked: list[str] = []
         self.picker_paths: list[str] = []
@@ -137,6 +211,12 @@ class FakeBackend:
                     enabled=not (
                         self.disabled_observation_at == self.index
                         and requirement.require_enabled
+                    ),
+                    actions=(
+                        ("toggle",)
+                        if self.wrong_observation_action_interface_at == self.index
+                        and requirement.require_enabled
+                        else (("click",) if requirement.require_enabled else ())
                     ),
                 ))
                 if self.duplicate_observation_at == self.index and requirement_index == 0:
@@ -386,18 +466,151 @@ def test_success_observation_routes(root: Path) -> int:
         expected_types.append("completed")
         if [message["type"] for message in transport.outgoing] != expected_types:
             raise AssertionError(f"{route}: wrong capture handshake sequence")
+        capture_messages = [message for message in transport.outgoing if message["type"] == "capture-ready"]
+        observation_milestones = [item for item in milestones if item.observations]
+        for message, milestone in zip(capture_messages, observation_milestones, strict=True):
+            expected_facts = [
+                {
+                    "name": requirement.name,
+                    "role": sorted(requirement.roles)[0],
+                    "visible": True,
+                    "enabled": True,
+                    "actionInterface": requirement.require_enabled,
+                }
+                for requirement in milestone.observations
+            ]
+            if message.get("observations") != expected_facts:
+                raise AssertionError(f"{route}: wrong bounded accessibility evidence")
         if not any(event[0] == "capture-ready" for event in trace.events):
             raise AssertionError(f"{route}: did not retain a fixed capture-ready trace event")
         serialized = json.dumps(transport.outgoing, sort_keys=True)
-        forbidden = (str(root), TOKEN.hex(), "No mutation was reported", "recovery is required")
+        forbidden = (str(root), TOKEN.hex())
         if any(value in serialized for value in forbidden):
-            raise AssertionError(f"{route}: outbound protocol leaked path, token, or visible state text")
+            raise AssertionError(f"{route}: outbound protocol leaked a path or token")
         count += 1
     return count
 
 
+def test_atspi_reported_count_bounds() -> int:
+    cases = 0
+    malformed = (
+        (False, "malformed-bool"),
+        (-1, "malformed-negative"),
+        ("1", "malformed-non-int"),
+    )
+
+    for value, label in malformed + ((tool.MAX_TREE_NODES + 1, "excessive"),):
+        accessible = FakeReportedCount((value,))
+        node = tool.AtspiNode(accessible, object())
+        expected = "accessibility-tree-bound" if label == "excessive" else "accessibility-tree"
+        expect_error(
+            f"child count {label}", expected,
+            lambda node=node: tuple(node.children),
+        )
+        if accessible.item_reads:
+            raise AssertionError(f"child count {label} was indexed before validation")
+        cases += 1
+
+    changing_children = FakeReportedCount((1, 2), children=(object(),))
+    expect_error(
+        "changing child count", "accessibility-tree",
+        lambda: tuple(tool.AtspiNode(changing_children, object()).children),
+    )
+    if changing_children.item_reads:
+        raise AssertionError("changing child count was indexed before stability validation")
+    cases += 1
+
+    exceptional_children = FakeReportedCount((), raises=True)
+    expect_error(
+        "exception-producing child count", "accessibility-tree",
+        lambda: tuple(tool.AtspiNode(exceptional_children, object()).children),
+    )
+    if exceptional_children.item_reads:
+        raise AssertionError("exception-producing child count was indexed")
+    cases += 1
+
+    remaining_children = FakeReportedCount((2,), children=(object(), object()))
+    expect_error(
+        "child count exceeds remaining node budget", "accessibility-tree-bound",
+        lambda: tuple(tool.AtspiNode(remaining_children, object()).bounded_children(1)),
+    )
+    if remaining_children.item_reads:
+        raise AssertionError("child count exceeded the remaining budget after indexing")
+    cases += 1
+
+    for value, label in malformed + ((tool.MAX_ACTIONS_PER_NODE + 1, "excessive"),):
+        action = FakeReportedCount((value,))
+        node = tool.AtspiNode(FakeActionAccessible(action), object())
+        expect_error(
+            f"action count {label}", "action-interface",
+            lambda node=node: node.action_names,
+        )
+        if action.name_reads:
+            raise AssertionError(f"action count {label} was indexed before validation")
+        cases += 1
+
+    changing_actions = FakeReportedCount((1, 2), names=("click",))
+    expect_error(
+        "changing action count", "action-interface",
+        lambda: tool.AtspiNode(FakeActionAccessible(changing_actions), object()).action_names,
+    )
+    if changing_actions.name_reads:
+        raise AssertionError("changing action count was indexed before stability validation")
+    cases += 1
+
+    exceptional_actions = FakeReportedCount((), raises=True)
+    expect_error(
+        "exception-producing action count", "action-interface",
+        lambda: tool.AtspiNode(FakeActionAccessible(exceptional_actions), object()).action_names,
+    )
+    if exceptional_actions.name_reads:
+        raise AssertionError("exception-producing action count was indexed")
+    cases += 1
+
+    if tool.AtspiNode(FakeNonActionAccessible(), object()).action_names != ():
+        raise AssertionError("a static node without the optional Action interface was not admitted")
+    cases += 1
+
+    for value, label in malformed + ((tool.MAX_TREE_NODES + 1, "excessive"),):
+        desktop = FakeReportedCount((value,))
+        backend = tool.AtspiBackend()
+        backend.pyatspi = FakePyatspi(desktop)
+        expected = "accessibility-tree-bound" if label == "excessive" else "accessibility-tree"
+        expect_error(
+            f"root count {label}", expected,
+            lambda backend=backend: tuple(backend.roots()),
+        )
+        if desktop.item_reads:
+            raise AssertionError(f"root count {label} was indexed before validation")
+        cases += 1
+
+    changing_roots = FakeReportedCount((1, 2), children=(object(),))
+    changing_backend = tool.AtspiBackend()
+    changing_backend.pyatspi = FakePyatspi(changing_roots)
+    expect_error(
+        "changing root count", "accessibility-tree",
+        lambda: tuple(changing_backend.roots()),
+    )
+    if changing_roots.item_reads:
+        raise AssertionError("changing root count was indexed before stability validation")
+    cases += 1
+
+    exceptional_roots = FakeReportedCount((), raises=True)
+    exceptional_backend = tool.AtspiBackend()
+    exceptional_backend.pyatspi = FakePyatspi(exceptional_roots)
+    expect_error(
+        "exception-producing root count", "accessibility-tree",
+        lambda: tuple(exceptional_backend.roots()),
+    )
+    if exceptional_roots.item_reads:
+        raise AssertionError("exception-producing root count was indexed")
+    cases += 1
+    return cases
+
+
 def main() -> int:
     cases = 0
+    cases += test_atspi_reported_count_bounds()
     with tempfile.TemporaryDirectory(prefix="smapi-hard-state-atspi-test.") as temporary:
         root = Path(temporary)
         release = root / "release"
@@ -454,6 +667,50 @@ def main() -> int:
             "disabled required observed control", "observation-disabled",
             lambda: run_observation("e5-backend-loss", disabled_observation_at=e5_observation_index),
         )
+        expect_error(
+            "unsafe required observed control", "observation-action-interface",
+            lambda: run_observation(
+                "e5-backend-loss", wrong_observation_action_interface_at=e5_observation_index,
+            ),
+        )
+        cases += 3
+
+        evidence_milestone = tool.MILESTONES["state.e5"]
+        valid_facts = [
+            {
+                "name": requirement.name,
+                "role": sorted(requirement.roles)[0],
+                "visible": True,
+                "enabled": True,
+                "actionInterface": requirement.require_enabled,
+            }
+            for requirement in evidence_milestone.observations
+        ]
+        tampered_facts = [dict(fact) for fact in valid_facts]
+        tampered_facts[-1]["actionInterface"] = False
+        tampered_transport = MemoryTransport(())
+        tampered_protocol = tool.AuthenticatedProtocol(
+            tampered_transport, TOKEN, SESSION, nonce_factory=lambda: NONCE,
+        )
+        expect_error(
+            "tampered observation payload", "observation-payload",
+            lambda: tampered_protocol.capture_ready(0, evidence_milestone, tampered_facts),
+        )
+        if tampered_transport.outgoing:
+            raise AssertionError("tampered observation payload was transmitted")
+
+        extra_field_facts = [dict(fact) for fact in valid_facts]
+        extra_field_facts[0]["unexpected"] = True
+        extra_field_transport = MemoryTransport(())
+        extra_field_protocol = tool.AuthenticatedProtocol(
+            extra_field_transport, TOKEN, SESSION, nonce_factory=lambda: NONCE,
+        )
+        expect_error(
+            "observation payload extra field", "observation-payload",
+            lambda: extra_field_protocol.capture_ready(0, evidence_milestone, extra_field_facts),
+        )
+        if extra_field_transport.outgoing:
+            raise AssertionError("observation payload with an extra field was transmitted")
         cases += 2
 
         capture_backend = FakeBackend("e2-permission")

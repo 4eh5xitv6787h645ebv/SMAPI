@@ -10,13 +10,16 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
+import signal
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterable
+import time
+from typing import Any, Iterable, NamedTuple
 from urllib.parse import urlparse
 import zlib
 
@@ -47,6 +50,8 @@ REAL_QUALIFICATION_IDS = frozenset({
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024
+MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
+MAX_X11_CLIENTS = 512
 MAX_DIMENSION = 32768
 MAX_PIXELS = 64_000_000
 MAX_DECODED_BYTES = 256 * 1024 * 1024
@@ -56,6 +61,7 @@ GIT_OBJECT_RE = re.compile(r"^[0-9a-f]{40}$")
 TAG_RE = re.compile(r"^fork-4eh5xitv6787h645ebv-linux-v\d+\.\d+\.\d+-alpha\.[1-9]\d*$")
 RESOLUTION_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
 WINDOW_ID_RE = re.compile(r"^(?:0x[0-9a-fA-F]+|[1-9]\d*)$")
+DISPLAY_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+)?:\d+(?:\.\d+)?$")
 FORBIDDEN_TEXT_PATTERNS = (
     (
         re.compile(r"(?:(?:^|[\s'\"=(])/(?!/)|:(?!//)/)[^\s'\"<>]+"),
@@ -77,6 +83,110 @@ class StagingError(Exception):
 
 def fail(message: str) -> None:
     raise StagingError(message)
+
+
+class ProcessIdentity(NamedTuple):
+    process_id: int
+    start_time: int
+    executable_device: int
+    executable_inode: int
+    executable_size: int
+    executable_sha256: str
+    display: str
+
+
+class WindowIdentity(NamedTuple):
+    window_id: str
+    process_id: int
+    title: str
+    geometry: tuple[int, int, int, int]
+
+
+def run_bounded(
+    command: list[str],
+    *,
+    timeout: float,
+    text: bool = True,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    """Run one fixed command with a shared stdout/stderr byte ceiling and hard deadline."""
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError:
+        fail("an X11 capture command could not be started safely")
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    outputs: dict[int, bytearray] = {
+        process.stdout.fileno(): bytearray(),
+        process.stderr.fileno(): bytearray(),
+    }
+    selector.register(process.stdout, selectors.EVENT_READ)
+    selector.register(process.stderr, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    failure: str | None = None
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = "an X11 capture command exceeded its time bound"
+                break
+            events = selector.select(remaining)
+            if not events:
+                failure = "an X11 capture command exceeded its time bound"
+                break
+            for key, _mask in events:
+                try:
+                    chunk = os.read(key.fd, 65536)
+                except OSError:
+                    failure = "an X11 capture command output could not be read safely"
+                    break
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                outputs[key.fd].extend(chunk)
+                if sum(len(value) for value in outputs.values()) > MAX_COMMAND_OUTPUT_BYTES:
+                    failure = "an X11 capture command exceeded its output bound"
+                    break
+            if failure:
+                break
+        if failure is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = "an X11 capture command exceeded its time bound"
+            else:
+                try:
+                    return_code = process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    failure = "an X11 capture command exceeded its time bound"
+        if failure is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            fail(failure)
+        stdout_bytes = bytes(outputs[process.stdout.fileno()])
+        stderr_bytes = bytes(outputs[process.stderr.fileno()])
+        if text:
+            try:
+                stdout: Any = stdout_bytes.decode("utf-8")
+                stderr: Any = stderr_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                fail("an X11 capture command returned invalid UTF-8 text")
+        else:
+            stdout, stderr = stdout_bytes, stderr_bytes
+        return subprocess.CompletedProcess(command, return_code, stdout, stderr)
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
 
 
 def read_regular_file(
@@ -405,6 +515,111 @@ def hash_process_executable(process_id: int) -> str:
         os.close(descriptor)
 
 
+def read_proc_file(process_id: int, name: str, maximum: int) -> bytes:
+    try:
+        descriptor = os.open(f"/proc/{process_id}/{name}", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        fail("the selected X11 client process identity could not be inspected")
+    try:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                fail("the selected X11 client process identity exceeds its byte bound")
+    finally:
+        os.close(descriptor)
+
+
+def read_process_start_time(process_id: int) -> int:
+    try:
+        value = read_proc_file(process_id, "stat", 16384).decode("ascii")
+    except UnicodeDecodeError:
+        fail("the selected X11 client process stat identity is malformed")
+    close = value.rfind(") ")
+    if close < 2:
+        fail("the selected X11 client process stat identity is malformed")
+    fields = value[close + 2:].split()
+    if len(fields) <= 19 or not fields[19].isdigit():
+        fail("the selected X11 client process start time is malformed")
+    start_time = int(fields[19])
+    if start_time <= 0:
+        fail("the selected X11 client process start time is malformed")
+    return start_time
+
+
+def inspect_process_identity(process_id: int) -> ProcessIdentity:
+    if process_id <= 0:
+        fail("the expected GUI process ID must be positive")
+    try:
+        process = os.stat(f"/proc/{process_id}", follow_symlinks=False)
+    except OSError:
+        fail("the selected X11 client process could not be inspected")
+    if process.st_uid != os.geteuid():
+        fail("the selected X11 client process is not owned by the current user")
+    before_start = read_process_start_time(process_id)
+    environment = read_proc_file(process_id, "environ", 1024 * 1024)
+    displays = [
+        item[len(b"DISPLAY="):]
+        for item in environment.split(b"\0")
+        if item.startswith(b"DISPLAY=")
+    ]
+    if len(displays) != 1:
+        fail("the selected X11 client process has no unique DISPLAY identity")
+    try:
+        display = displays[0].decode("utf-8")
+    except UnicodeDecodeError:
+        fail("the selected X11 client process DISPLAY identity is malformed")
+    try:
+        descriptor = os.open(f"/proc/{process_id}/exe", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        fail("the selected X11 client process executable could not be retained")
+    try:
+        executable = os.fstat(descriptor)
+        executable_hash = hash_executable_descriptor(descriptor)
+        retained_after_hash = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    executable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(executable, field) != getattr(retained_after_hash, field) for field in executable_fields):
+        fail("the selected X11 client process executable identity changed while it was inspected")
+    try:
+        live_executable = os.stat(f"/proc/{process_id}/exe")
+        final_process = os.stat(f"/proc/{process_id}", follow_symlinks=False)
+    except OSError:
+        fail("the selected X11 client process identity changed while it was inspected")
+    if (
+        live_executable.st_dev != executable.st_dev
+        or live_executable.st_ino != executable.st_ino
+        or live_executable.st_size != executable.st_size
+        or final_process.st_uid != os.geteuid()
+    ):
+        fail("the selected X11 client process executable identity changed while it was inspected")
+    after_start = read_process_start_time(process_id)
+    if before_start != after_start:
+        fail("the selected X11 client process identity changed while it was inspected")
+    return ProcessIdentity(
+        process_id=process_id,
+        start_time=before_start,
+        executable_device=executable.st_dev,
+        executable_inode=executable.st_ino,
+        executable_size=executable.st_size,
+        executable_sha256=executable_hash,
+        display=display,
+    )
+
+
+def require_process_identity(expected: ProcessIdentity) -> ProcessIdentity:
+    actual = inspect_process_identity(expected.process_id)
+    if actual != expected:
+        fail("the selected X11 client process identity does not match the admitted GUI process")
+    return actual
+
+
 def parse_window_titles(output: str) -> frozenset[str]:
     titles: set[str] = set()
     for line in output.splitlines():
@@ -412,6 +627,219 @@ def parse_window_titles(output: str) -> frozenset[str]:
         if match is not None:
             titles.add(match.group(1))
     return frozenset(titles)
+
+
+def parse_client_windows(output: str) -> tuple[str, ...]:
+    windows: list[str] = []
+    saw_list = False
+    for line in output.splitlines():
+        match = re.fullmatch(
+            r"(_NET_CLIENT_LIST_STACKING|_NET_CLIENT_LIST)\([^)]*\)\s*"
+            r"(?::\s*(?:window id #\s*)?|=\s*)(.*)",
+            line,
+        )
+        if match is None:
+            continue
+        saw_list = True
+        value = match.group(2).strip()
+        if not value:
+            continue
+        for item in (part.strip() for part in value.split(",")):
+            if not re.fullmatch(r"0x[0-9a-fA-F]+", item):
+                fail("the X11 root client list is malformed")
+            normalized = f"0x{int(item, 16):x}"
+            if normalized == "0x0":
+                fail("the X11 root client list contains an invalid window ID")
+            if normalized not in windows:
+                windows.append(normalized)
+                if len(windows) > MAX_X11_CLIENTS:
+                    fail("the X11 root client list exceeds its window-count bound")
+    if not saw_list:
+        fail("the X11 root has no bounded EWMH client list")
+    return tuple(windows)
+
+
+def parse_window_pid(output: str) -> int | None:
+    values = re.findall(r"^_NET_WM_PID\(CARDINAL\)\s*=\s*([1-9]\d*)\s*$", output, re.MULTILINE)
+    if not values:
+        return None
+    if len(values) != 1:
+        fail("the selected X11 client has conflicting process properties")
+    return int(values[0])
+
+
+def parse_window_geometry(output: str) -> tuple[int, int, int, int]:
+    values: list[int] = []
+    for label in ("Absolute upper-left X", "Absolute upper-left Y", "Width", "Height"):
+        matches = re.findall(rf"^\s*{re.escape(label)}:\s*(-?\d+)\s*$", output, re.MULTILINE)
+        if len(matches) != 1:
+            fail("the selected X11 client geometry is incomplete or ambiguous")
+        values.append(int(matches[0]))
+    if values[2] <= 0 or values[3] <= 0 or values[2] > MAX_DIMENSION or values[3] > MAX_DIMENSION:
+        fail("the selected X11 client geometry is outside the capture bounds")
+    return values[0], values[1], values[2], values[3]
+
+
+def x_environment(expected_display: str) -> dict[str, str]:
+    if not DISPLAY_RE.fullmatch(expected_display):
+        fail("the expected DISPLAY identity is malformed")
+    if os.environ.get("DISPLAY") != expected_display:
+        fail("the capture process DISPLAY does not match the admitted GUI DISPLAY identity")
+    environment = dict(os.environ)
+    environment["DISPLAY"] = expected_display
+    return environment
+
+
+def inspect_window(
+    window_id: str,
+    expected_title: str,
+    *,
+    xwininfo: str,
+    xprop: str,
+    environment: dict[str, str],
+) -> WindowIdentity | None:
+    info = run_bounded(
+        [xwininfo, "-id", window_id], timeout=10, environment=environment
+    )
+    properties = run_bounded(
+        [xprop, "-id", window_id, "_NET_WM_NAME", "WM_NAME", "_NET_WM_PID", "_NET_WM_STATE"],
+        timeout=10,
+        environment=environment,
+    )
+    if info.returncode or properties.returncode:
+        fail("an enumerated X11 client could not be inspected safely")
+    titles = parse_window_titles(properties.stdout)
+    if expected_title not in titles:
+        return None
+    if titles != {expected_title}:
+        fail("the selected X11 client has conflicting WM_NAME and _NET_WM_NAME titles")
+    if "Map State: IsViewable" not in info.stdout or "_NET_WM_STATE_HIDDEN" in properties.stdout:
+        fail("the selected X11 client is not mapped and visible")
+    process_id = parse_window_pid(properties.stdout)
+    if process_id is None:
+        fail("the selected X11 client has no exact _NET_WM_PID")
+    return WindowIdentity(window_id, process_id, expected_title, parse_window_geometry(info.stdout))
+
+
+def list_client_windows(xprop: str, environment: dict[str, str]) -> tuple[str, ...]:
+    result = run_bounded(
+        [xprop, "-root", "_NET_CLIENT_LIST_STACKING", "_NET_CLIENT_LIST"],
+        timeout=10,
+        environment=environment,
+    )
+    if result.returncode:
+        fail("the X11 root client list could not be inspected safely")
+    return parse_client_windows(result.stdout)
+
+
+def discover_exact_window(
+    expected_title: str,
+    expected_process: ProcessIdentity,
+    *,
+    xwininfo: str,
+    xprop: str,
+    environment: dict[str, str],
+) -> WindowIdentity:
+    require_process_identity(expected_process)
+    candidates: list[WindowIdentity] = []
+    for window_id in list_client_windows(xprop, environment):
+        window = inspect_window(
+            window_id,
+            expected_title,
+            xwininfo=xwininfo,
+            xprop=xprop,
+            environment=environment,
+        )
+        if window is not None:
+            if window.process_id != expected_process.process_id:
+                fail("the exact-title X11 client does not belong to the admitted GUI process")
+            candidates.append(window)
+    if len(candidates) != 1:
+        fail("expected exactly one mapped visible exact-title X11 client")
+    return candidates[0]
+
+
+def revalidate_exact_window(
+    expected: WindowIdentity,
+    expected_process: ProcessIdentity,
+    *,
+    xwininfo: str,
+    xprop: str,
+    environment: dict[str, str],
+) -> None:
+    if expected.window_id not in list_client_windows(xprop, environment):
+        fail("the selected X11 client left the root client list during capture")
+    actual = inspect_window(
+        expected.window_id,
+        expected.title,
+        xwininfo=xwininfo,
+        xprop=xprop,
+        environment=environment,
+    )
+    if actual != expected:
+        fail("the selected X11 client identity or geometry changed during capture")
+    require_process_identity(expected_process)
+
+
+def capture_discovered_window(
+    expected_title: str,
+    expected_process: ProcessIdentity,
+) -> tuple[bytes, str, str, WindowIdentity]:
+    xwininfo = shutil.which("xwininfo")
+    xprop = shutil.which("xprop")
+    importer = shutil.which("import")
+    if not xwininfo or not xprop or not importer:
+        fail("window capture requires xwininfo, xprop, and ImageMagick import")
+    environment = x_environment(expected_process.display)
+    selected = discover_exact_window(
+        expected_title,
+        expected_process,
+        xwininfo=xwininfo,
+        xprop=xprop,
+        environment=environment,
+    )
+    revalidate_exact_window(
+        selected,
+        expected_process,
+        xwininfo=xwininfo,
+        xprop=xprop,
+        environment=environment,
+    )
+    descriptor, temporary_name = tempfile.mkstemp(prefix="smapi-screenshot-capture.", suffix=".png")
+    os.close(descriptor)
+    try:
+        result = run_bounded(
+            [importer, "-window", selected.window_id, f"png32:{temporary_name}"],
+            timeout=30,
+            text=False,
+            environment=environment,
+        )
+        if result.returncode:
+            fail("ImageMagick could not capture the exact selected X11 client window")
+        revalidate_exact_window(
+            selected,
+            expected_process,
+            xwininfo=xwininfo,
+            xprop=xprop,
+            environment=environment,
+        )
+        data = read_regular_file(Path(temporary_name), "captured PNG")
+        version = run_bounded([importer, "-version"], timeout=10, environment=environment)
+        tool = (
+            version.stdout.splitlines()[0].strip()
+            if version.returncode == 0 and version.stdout
+            else "ImageMagick import"
+        )
+        command = (
+            f"import -window {selected.window_id} png32:<private-temporary-file>; "
+            "canonical metadata normalization"
+        )
+        return data, tool[:160], command, selected
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
 
 
 def capture_window(
@@ -427,14 +855,10 @@ def capture_window(
     importer = shutil.which("import")
     if not xwininfo or not xprop or not importer:
         fail("window capture requires xwininfo, xprop, and ImageMagick import")
-    try:
-        info = subprocess.run([xwininfo, "-id", window_id], check=False, capture_output=True, text=True, timeout=10)
-        title = subprocess.run(
-            [xprop, "-id", window_id, "_NET_WM_NAME", "WM_NAME", "_NET_WM_PID"],
-            check=False, capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        fail("the requested X11 window could not be inspected safely")
+    info = run_bounded([xwininfo, "-id", window_id], timeout=10)
+    title = run_bounded(
+        [xprop, "-id", window_id, "_NET_WM_NAME", "WM_NAME", "_NET_WM_PID"], timeout=10
+    )
     if info.returncode or "Map State: IsViewable" not in info.stdout:
         fail("the requested X11 window is not an exact visible client window")
     if title.returncode or expected_title not in parse_window_titles(title.stdout):
@@ -447,15 +871,16 @@ def capture_window(
     descriptor, temporary_name = tempfile.mkstemp(prefix="smapi-screenshot-capture.", suffix=".png")
     os.close(descriptor)
     try:
-        result = subprocess.run(
+        result = run_bounded(
             [importer, "-window", window_id, f"png32:{temporary_name}"],
-            check=False, capture_output=True, timeout=30,
+            timeout=30,
+            text=False,
         )
         if result.returncode:
             fail("ImageMagick could not capture the exact selected X11 client window")
-        repeated = subprocess.run(
+        repeated = run_bounded(
             [xprop, "-id", window_id, "_NET_WM_NAME", "WM_NAME", "_NET_WM_PID"],
-            check=False, capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
         repeated_match = re.search(r"_NET_WM_PID\(CARDINAL\)\s*=\s*([1-9]\d*)", repeated.stdout)
         if (
@@ -468,7 +893,7 @@ def capture_window(
         if hash_process_executable(expected_process_id) != expected_gui_sha256:
             fail("the reviewed GUI process identity changed during capture")
         data = read_regular_file(Path(temporary_name), "captured PNG")
-        version = subprocess.run([importer, "-version"], check=False, capture_output=True, text=True, timeout=10)
+        version = run_bounded([importer, "-version"], timeout=10)
         tool = (
             version.stdout.splitlines()[0].strip()
             if version.returncode == 0 and version.stdout
@@ -521,8 +946,51 @@ def parse_args() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path, help="Import an existing app-window PNG; its path is never recorded.")
     source.add_argument("--window-id", help="Capture one exact visible X11/XWayland client window.")
-    parser.add_argument("--expected-window-title", help="Required exact title for --window-id.")
-    parser.add_argument("--expected-window-pid", type=int, help="Required reviewed GUI process ID for --window-id.")
+    source.add_argument(
+        "--discover-window", "--qualification-window",
+        action="store_true",
+        help="Discover the unique admitted visible X11/XWayland client without accepting an XID.",
+    )
+    parser.add_argument(
+        "--expected-window-title", "--expected-gui-title",
+        dest="expected_window_title",
+        help="Required exact GUI title for window capture.",
+    )
+    parser.add_argument(
+        "--expected-window-pid", "--expected-gui-pid",
+        dest="expected_window_pid", type=int,
+        help="Required reviewed GUI process ID for window capture.",
+    )
+    parser.add_argument(
+        "--expected-gui-process-start-time", "--expected-gui-start-time",
+        "--expected-window-process-start-time",
+        dest="expected_gui_process_start_time", type=int,
+    )
+    parser.add_argument(
+        "--expected-gui-exe-device", "--expected-gui-executable-device",
+        "--expected-window-exe-device",
+        dest="expected_gui_exe_device", type=int,
+    )
+    parser.add_argument(
+        "--expected-gui-exe-inode", "--expected-gui-executable-inode",
+        "--expected-window-exe-inode",
+        dest="expected_gui_exe_inode", type=int,
+    )
+    parser.add_argument(
+        "--expected-gui-exe-size", "--expected-gui-executable-size",
+        "--expected-window-exe-size",
+        dest="expected_gui_exe_size", type=int,
+    )
+    parser.add_argument(
+        "--expected-gui-exe-sha256", "--expected-gui-executable-sha256",
+        "--expected-window-exe-sha256",
+        dest="expected_gui_exe_sha256",
+    )
+    parser.add_argument(
+        "--expected-display", "--expected-display-identity",
+        dest="expected_display",
+        help="Exact DISPLAY identity for qualification discovery.",
+    )
     parser.add_argument("--capture-tool", help="Sanitized capture-tool description required with --input.")
     parser.add_argument("--capture-command", help="Sanitized path-free capture command required with --input.")
     parser.add_argument("--stage-directory", type=Path, required=True)
@@ -596,10 +1064,71 @@ def main() -> int:
         require_text(context_text["capture_command"], "capture command", 1200)
         scan_safe_text(identity, private_strings)
         scan_safe_text(context_text, private_strings)
-        if args.window_id:
+        qualification_values = (
+            args.expected_gui_process_start_time,
+            args.expected_gui_exe_device,
+            args.expected_gui_exe_inode,
+            args.expected_gui_exe_size,
+            args.expected_gui_exe_sha256,
+            args.expected_display,
+        )
+        if args.discover_window:
+            if (
+                not args.expected_window_title
+                or args.expected_window_pid is None
+                or any(value is None for value in qualification_values)
+                or args.capture_tool
+                or args.capture_command
+            ):
+                fail(
+                    "--discover-window requires the exact title, GUI PID/start time/executable "
+                    "device/inode/size/SHA-256, and DISPLAY, and derives its capture command"
+                )
+            if (
+                args.expected_window_pid <= 0
+                or args.expected_gui_process_start_time <= 0
+                or args.expected_gui_exe_device < 0
+                or args.expected_gui_exe_inode <= 0
+                or args.expected_gui_exe_size <= 0
+                or args.expected_gui_exe_size > MAX_EXECUTABLE_BYTES
+                or not SHA256_RE.fullmatch(args.expected_gui_exe_sha256)
+            ):
+                fail("the admitted GUI process identity is malformed or outside its bounds")
+            if args.expected_gui_exe_sha256 != identity["gui_binary_sha256"]:
+                fail("the admitted GUI executable SHA-256 does not match the reviewed production identity")
+            expected_process = ProcessIdentity(
+                process_id=args.expected_window_pid,
+                start_time=args.expected_gui_process_start_time,
+                executable_device=args.expected_gui_exe_device,
+                executable_inode=args.expected_gui_exe_inode,
+                executable_size=args.expected_gui_exe_size,
+                executable_sha256=args.expected_gui_exe_sha256,
+                display=args.expected_display,
+            )
+            input_data, capture_tool, capture_command, selected = capture_discovered_window(
+                args.expected_window_title,
+                expected_process,
+            )
+            input_mode = "discovered_exact_x11_client_window"
+            source_window = {
+                "window_id": selected.window_id,
+                "process_id": expected_process.process_id,
+                "process_start_time": expected_process.start_time,
+                "expected_title": args.expected_window_title,
+                "display": expected_process.display,
+                "executable": {
+                    "device": expected_process.executable_device,
+                    "inode": expected_process.executable_inode,
+                    "size": expected_process.executable_size,
+                    "sha256_verified": True,
+                },
+                "unique_mapped_visible_client_verified": True,
+            }
+        elif args.window_id:
             if (
                 not args.expected_window_title or not args.expected_window_pid
                 or args.capture_tool or args.capture_command
+                or any(value is not None for value in qualification_values)
             ):
                 fail(
                     "--window-id requires --expected-window-title and --expected-window-pid, "
@@ -621,6 +1150,7 @@ def main() -> int:
         else:
             if (
                 args.expected_window_title or args.expected_window_pid
+                or any(value is not None for value in qualification_values)
                 or not args.capture_tool or not args.capture_command
             ):
                 fail("--input requires --capture-tool and --capture-command, without window identity arguments")

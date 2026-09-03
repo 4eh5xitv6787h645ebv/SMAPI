@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from typing import Any, Callable
@@ -25,6 +26,12 @@ VERSION = "4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.3"
 TAG = "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3"
 SCENARIOS = (
     "E2-permission", "E2-read-only", "E2-disk-full", "E2-cross-device", "C2", "C3", "E5", "E6",
+)
+ENVIRONMENT_PROFILES = (
+    "ubuntu-24.04-gnome-x11",
+    "ubuntu-24.04-gnome-xwayland",
+    "ubuntu-24.04-kde-x11",
+    "ubuntu-24.04-kde-xwayland",
 )
 PRIVATE_SENTINEL = "fixture-private-sentinel-should-never-appear"
 ALLOWED_TEMP_PARENT = Path(f"/run/user/{os.geteuid()}")
@@ -45,6 +52,17 @@ def load_validator():
 VALIDATOR_MODULE = load_validator()
 
 
+class StatProxy:
+    def __init__(self, source: os.stat_result, **changes: Any):
+        self._source = source
+        self._changes = changes
+
+    def __getattr__(self, name: str):
+        if name in self._changes:
+            return self._changes[name]
+        return getattr(self._source, name)
+
+
 class Fixture:
     def __init__(self, base: Path, scenario: str = "C3"):
         self.base = base
@@ -53,7 +71,7 @@ class Fixture:
         os.chmod(self.root, 0o700)
         root_stat = self.root.stat()
         marker = {
-            "schema_version": 1,
+            "schema_version": 2,
             "purpose": MARKER_PURPOSE,
             "root_device": root_stat.st_dev,
             "root_inode": root_stat.st_ino,
@@ -70,7 +88,7 @@ class Fixture:
         os.chmod(self.game_marker, 0o600)
         marker_data = self.game_marker.read_bytes()
         self.contract: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "scenario": scenario,
             "release": {
                 "version": VERSION,
@@ -90,6 +108,10 @@ class Fixture:
                 "sha256": hashlib.sha256(marker_data).hexdigest(),
             },
             "binaries": {"apphost_sha256": "3" * 64, "backend_sha256": "4" * 64},
+            "capture": {
+                "policy": "exact-window-v1",
+                "environment_profile": "ubuntu-24.04-gnome-xwayland",
+            },
             "isolation": {
                 "disposable_root": str(self.root),
                 "root_device": root_stat.st_dev,
@@ -107,6 +129,7 @@ class Fixture:
                 "cleanup": 60,
                 "total": 600,
             },
+            "resource_limits": {"output_bytes": 1073741824},
         }
         self.contract_path = base / "contract.json"
         self.output = self.root / "hard-state-output-00000001"
@@ -122,7 +145,7 @@ class Fixture:
         self.contract["isolation"]["root_device"] = root_stat.st_dev
         self.contract["isolation"]["root_inode"] = root_stat.st_ino
         marker = {
-            "schema_version": 1,
+            "schema_version": 2,
             "purpose": MARKER_PURPOSE,
             "root_device": root_stat.st_dev,
             "root_inode": root_stat.st_ino,
@@ -156,6 +179,92 @@ def payload(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 
 class HardStateInputValidatorTests(unittest.TestCase):
+    def test_execute_admission_requires_broker_prepared_quota_output(self):
+        with tempfile.TemporaryDirectory(prefix="smapi-hard-state-validator-test-", dir=ALLOWED_TEMP_PARENT) as name:
+            fixture = Fixture(Path(name))
+            self.assertFalse(fixture.output.exists())
+            with self.assertRaises(VALIDATOR_MODULE.InputError) as raised:
+                VALIDATOR_MODULE.validate_contract(
+                    fixture.contract,
+                    fixture.output,
+                    require_prepared_output=True,
+                )
+            self.assertEqual("output-quota", raised.exception.code)
+            self.assertFalse(fixture.output.exists())
+
+    def test_quota_pseudo_file_reads_are_bounded_and_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="smapi-quota-pseudo-", dir=ALLOWED_TEMP_PARENT) as name:
+            path = Path(name) / "pseudo"
+            path.write_bytes(b"bounded\n")
+            self.assertEqual("bounded\n", VALIDATOR_MODULE.read_bounded_pseudo(path, 8, "ascii"))
+            path.write_bytes(b"x" * 9)
+            with self.assertRaises(VALIDATOR_MODULE.InputError) as error:
+                VALIDATOR_MODULE.read_bounded_pseudo(path, 8, "ascii")
+            self.assertEqual("output-quota", error.exception.code)
+            path.write_bytes(b"")
+            with self.assertRaises(VALIDATOR_MODULE.InputError):
+                VALIDATOR_MODULE.read_bounded_pseudo(path, 8, "ascii")
+
+    def test_prepared_output_repeats_observation_before_consuming_quota_token(self):
+        with tempfile.TemporaryDirectory(prefix="smapi-quota-repeat-", dir=ALLOWED_TEMP_PARENT) as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            output = root / "output-name"
+            output.mkdir(mode=0o700)
+            marker = output / VALIDATOR_MODULE.OUTPUT_QUOTA_MARKER
+            marker.write_text("{}\n", encoding="ascii")
+            os.chmod(marker, 0o444)
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            output_status = output.stat()
+            observation = (
+                output_status, "ext4", "/dev/loop4", frozenset({"rw", "nosuid", "nodev"}),
+                (7, 4), object(), object(), VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT, True, object(),
+            )
+            actual_fstat = VALIDATOR_MODULE.os.fstat
+
+            def root_owned_marker(descriptor):
+                value = actual_fstat(descriptor)
+                if stat.S_ISREG(value.st_mode):
+                    return StatProxy(value, st_uid=0, st_mode=stat.S_IFREG | 0o444)
+                return value
+
+            def immutable(_descriptor, _request, flags, _mutate):
+                flags[0] = VALIDATOR_MODULE.FS_IMMUTABLE_FL
+                return 0
+
+            token = "a" * 64
+            try:
+                with (
+                    mock.patch.dict(os.environ, {VALIDATOR_MODULE.OUTPUT_QUOTA_ENV: token}, clear=False),
+                    mock.patch.object(VALIDATOR_MODULE, "prepared_observation", side_effect=(observation, observation)) as observe,
+                    mock.patch.object(VALIDATOR_MODULE, "observation_signature", return_value=("stable",)),
+                    mock.patch.object(VALIDATOR_MODULE, "validate_prepared_output_facts", return_value=None) as validate_facts,
+                    mock.patch.object(VALIDATOR_MODULE.os, "fstat", side_effect=root_owned_marker),
+                    mock.patch.object(VALIDATOR_MODULE.fcntl, "ioctl", side_effect=immutable),
+                ):
+                    VALIDATOR_MODULE.validate_prepared_output(
+                        root_fd, output, (root.stat().st_dev, root.stat().st_ino),
+                    )
+                    self.assertNotIn(VALIDATOR_MODULE.OUTPUT_QUOTA_ENV, os.environ)
+                    self.assertEqual(2, observe.call_count)
+                    self.assertEqual(2, validate_facts.call_count)
+
+                os.environ[VALIDATOR_MODULE.OUTPUT_QUOTA_ENV] = token
+                with (
+                    mock.patch.object(VALIDATOR_MODULE, "prepared_observation", side_effect=(observation, observation)),
+                    mock.patch.object(VALIDATOR_MODULE, "observation_signature", side_effect=(("first",), ("second",))),
+                    mock.patch.object(VALIDATOR_MODULE, "validate_prepared_output_facts", return_value=None),
+                    mock.patch.object(VALIDATOR_MODULE.os, "fstat", side_effect=root_owned_marker),
+                    mock.patch.object(VALIDATOR_MODULE.fcntl, "ioctl", side_effect=immutable),
+                ):
+                    with self.assertRaises(VALIDATOR_MODULE.InputError):
+                        VALIDATOR_MODULE.validate_prepared_output(
+                            root_fd, output, (root.stat().st_dev, root.stat().st_ino),
+                        )
+                    self.assertEqual(token, os.environ[VALIDATOR_MODULE.OUTPUT_QUOTA_ENV])
+            finally:
+                os.environ.pop(VALIDATOR_MODULE.OUTPUT_QUOTA_ENV, None)
+                os.close(root_fd)
     def fixture(self, scenario: str = "C3") -> tuple[tempfile.TemporaryDirectory[str], Fixture]:
         temporary = tempfile.TemporaryDirectory(prefix="smapi-hard-state-test-", dir=ALLOWED_TEMP_PARENT)
         return temporary, Fixture(Path(temporary.name), scenario)
@@ -167,7 +276,7 @@ class HardStateInputValidatorTests(unittest.TestCase):
             fixture.write()
             result = run(fixture)
             self.assertEqual(result.returncode, 2, result.stdout)
-            self.assertEqual(payload(result), {"code": code, "ok": False, "schemaVersion": 1, "status": "rejected"})
+            self.assertEqual(payload(result), {"code": code, "ok": False, "schemaVersion": 2, "status": "rejected"})
             self.assertNotIn(PRIVATE_SENTINEL, result.stdout + result.stderr)
             self.assertFalse(fixture.output.exists())
 
@@ -181,7 +290,7 @@ class HardStateInputValidatorTests(unittest.TestCase):
                     self.assertEqual(payload(result), {
                         "ok": True,
                         "scenario": scenario,
-                        "schemaVersion": 1,
+                        "schemaVersion": 2,
                         "status": "validated",
                     })
                     self.assertTrue(fixture.output.is_dir())
@@ -189,6 +298,126 @@ class HardStateInputValidatorTests(unittest.TestCase):
                     self.assertEqual(list(fixture.output.iterdir()), [])
                     self.assertNotIn(str(fixture.base), result.stdout)
                     self.assertNotIn(fixture.contract["package"]["sha256"], result.stdout)
+
+    def test_accepts_every_closed_capture_profile(self) -> None:
+        self.assertEqual(set(ENVIRONMENT_PROFILES), set(VALIDATOR_MODULE.ENVIRONMENT_PROFILES))
+        for profile in ENVIRONMENT_PROFILES:
+            with self.subTest(profile=profile):
+                temporary, fixture = self.fixture()
+                with temporary:
+                    fixture.contract["capture"]["environment_profile"] = profile
+                    fixture.write()
+                    result = run(fixture)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(payload(result)["status"], "validated")
+
+    def test_rejects_capture_and_resource_mismatch_or_extra_fields(self) -> None:
+        self.assert_rejected(
+            lambda fixture: fixture.contract.__setitem__("schema_version", 1),
+            "contract-schema",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract.__setitem__("display", ":0"),
+            "contract-schema",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("policy", "caller-window"),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("environment_profile", "ubuntu-current"),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("environment_profile", {
+                "desktop": "GNOME", "session": "wayland",
+            }),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["capture"].__setitem__("display", ":0"),
+            "capture",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["resource_limits"].__setitem__("output_bytes", 1073741823),
+            "resource-limits",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["resource_limits"].__setitem__("output_bytes", 1073741824.0),
+            "resource-limits",
+        )
+        self.assert_rejected(
+            lambda fixture: fixture.contract["resource_limits"].__setitem__("screenshots", 64),
+            "resource-limits",
+        )
+
+    def test_prepared_output_facts_require_exact_ext4_quota_mount_and_root_marker(self) -> None:
+        output = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_uid=os.geteuid(),
+            st_gid=os.getegid(),
+            st_dev=17,
+            st_ino=23,
+        )
+        values = SimpleNamespace(f_frsize=4096, f_blocks=250000)
+        marker_status = SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_nlink=1)
+        source_status = SimpleNamespace(st_mode=stat.S_IFBLK | 0o600, st_rdev=os.makedev(7, 4))
+        backing_status = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1,
+            st_dev=8, st_ino=9, st_size=VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT,
+        )
+        token = "a" * 64
+        marker = {
+            "filesystem": "ext4",
+            "imageDevice": 8,
+            "imageInode": 9,
+            "imageSize": VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT,
+            "limitBytes": VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT,
+            "mountDeviceMajor": 7,
+            "mountDeviceMinor": 4,
+            "outputDevice": output.st_dev,
+            "outputInode": output.st_ino,
+            "purpose": VALIDATOR_MODULE.OUTPUT_QUOTA_PURPOSE,
+            "schemaVersion": 1,
+            "token": token,
+        }
+        arguments = [
+            output, "ext4", "/dev/loop4", frozenset({"rw", "nosuid", "nodev"}),
+            (7, 4), values, marker_status, VALIDATOR_MODULE.FS_IMMUTABLE_FL, marker, token,
+            source_status, VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT, True, backing_status,
+        ]
+        VALIDATOR_MODULE.validate_prepared_output_facts(*arguments)
+        mutations = (
+            (0, SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.geteuid() + 1, st_gid=os.getegid(), st_dev=17, st_ino=23)),
+            (1, "tmpfs"),
+            (2, "/dev/sda"),
+            (3, frozenset({"rw", "nosuid"})),
+            (3, frozenset({"rw", "nosuid", "nodev", "noexec"})),
+            (5, SimpleNamespace(f_frsize=4096, f_blocks=300000)),
+            (6, SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=os.geteuid(), st_nlink=1)),
+            (7, 0),
+            (10, SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_rdev=os.makedev(7, 4))),
+            (11, VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT - 512),
+            (12, False),
+            (13, SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1, st_dev=8, st_ino=10, st_size=VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT)),
+        )
+        for index, value in mutations:
+            with self.subTest(index=index, value=value):
+                changed = list(arguments)
+                changed[index] = value
+                with self.assertRaises(VALIDATOR_MODULE.InputError) as error:
+                    VALIDATOR_MODULE.validate_prepared_output_facts(*changed)
+                self.assertEqual(error.exception.code, "output-quota")
+
+        for key, value in (("imageSize", 1), ("limitBytes", 1), ("mountDeviceMinor", 5), ("token", "b" * 64)):
+            with self.subTest(marker=key):
+                changed_marker = dict(marker)
+                changed_marker[key] = value
+                changed = list(arguments)
+                changed[8] = changed_marker
+                with self.assertRaises(VALIDATOR_MODULE.InputError) as error:
+                    VALIDATOR_MODULE.validate_prepared_output_facts(*changed)
+                self.assertEqual(error.exception.code, "output-quota")
 
     def test_rejects_reused_directory_file_and_symlink_outputs(self) -> None:
         for kind in ("directory", "file", "symlink"):

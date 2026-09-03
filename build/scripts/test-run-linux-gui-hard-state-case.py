@@ -18,6 +18,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 BROKER = ROOT / "build/scripts/run-linux-gui-hard-state-case.py"
+CAPTURE_MODEL = ROOT / "build/scripts/linux_gui_hard_state_capture_contract.py"
 
 
 def load_broker():
@@ -27,6 +28,10 @@ def load_broker():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def canonical_json(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
 
 
 class BrokerTests(unittest.TestCase):
@@ -58,7 +63,7 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(json.loads(result.stdout), {
             "code": "broker", "kind": "linux-gui-hard-state-qualification",
-            "ok": False, "schemaVersion": 1, "status": "failed",
+            "ok": False, "schemaVersion": 2, "status": "failed",
         })
         self.assertNotIn("/private", result.stdout)
 
@@ -105,7 +110,7 @@ class BrokerTests(unittest.TestCase):
             output.mkdir(mode=0o700)
             request = root / self.module.REQUEST_NAME
             value = {"supervisor_socket": {"relative_path": "run-component/output-name/control/boundary-a.sock"}}
-            request.write_text(json.dumps(value), encoding="utf-8")
+            request.write_bytes(canonical_json(value))
             os.chmod(request, 0o600)
             raw, relative, inode = self.module.read_and_consume_request(request, root, output, os.geteuid())
             self.assertEqual(json.loads(raw), value)
@@ -122,10 +127,10 @@ class BrokerTests(unittest.TestCase):
                     os.write(descriptor, b"x")
             finally:
                 os.close(descriptor)
-            request.write_text(json.dumps(value), encoding="utf-8")
+            request.write_bytes(canonical_json(value))
             os.chmod(request, 0o600)
             value["supervisor_socket"]["relative_path"] = "run-component/output-name/control/../escape.sock"
-            request.write_text(json.dumps(value), encoding="utf-8")
+            request.write_bytes(canonical_json(value))
             with self.assertRaises(self.module.BrokerError):
                 self.module.read_and_consume_request(request, root, output, os.geteuid())
             self.assertFalse(request.exists())
@@ -138,9 +143,9 @@ class BrokerTests(unittest.TestCase):
             root.mkdir(mode=0o700)
             output.mkdir(mode=0o700)
             request = root / self.module.REQUEST_NAME
-            request.write_text(json.dumps({
+            request.write_bytes(canonical_json({
                 "supervisor_socket": {"relative_path": "run-component/output-name/control/boundary-a.sock"},
-            }), encoding="utf-8")
+            }))
             os.chmod(request, 0o600)
             actual_stat = os.stat
 
@@ -251,6 +256,27 @@ class BrokerTests(unittest.TestCase):
             with self.assertRaises(self.module.BrokerError):
                 self.module.read_bootstrap(contract, output)
 
+    def test_case_root_lock_allows_exactly_one_broker_and_rechecks_identity(self):
+        with tempfile.TemporaryDirectory(prefix="hs-root-lock-", dir="/dev/shm") as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            uid = os.geteuid()
+            gid = os.getegid()
+            first, identity = self.module.acquire_root_lock(root, uid, gid)
+            try:
+                self.assertEqual(identity, (root.stat().st_dev, root.stat().st_ino))
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.acquire_root_lock(root, uid, gid)
+            finally:
+                os.close(first)
+            second, repeated = self.module.acquire_root_lock(root, uid, gid)
+            try:
+                self.assertEqual(repeated, identity)
+            finally:
+                os.close(second)
+            with self.assertRaises(self.module.BrokerError):
+                self.module.acquire_root_lock(root, uid + 1, gid)
+
     def test_admitted_identity_requires_nonzero_system_primary_gid_everywhere(self):
         uid = os.geteuid()
         primary_gid = self.module.pwd.getpwuid(uid).pw_gid
@@ -272,6 +298,128 @@ class BrokerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="hard-state-cgroup-test-", dir="/dev/shm") as name:
             with self.assertRaises(self.module.BrokerError):
                 self.module.CgroupScope(os.geteuid(), Path(name), validate_mount=False)
+
+    def test_output_quota_facts_fail_closed_for_wrong_kernel_or_identity_evidence(self):
+        block = stat.S_IFBLK | 0o600
+        directory = stat.S_IFDIR | 0o700
+        source = SimpleNamespace(st_mode=block, st_uid=0, st_rdev=os.makedev(7, 4))
+        output = SimpleNamespace(st_mode=directory, st_uid=1000, st_gid=1001)
+        values = SimpleNamespace(f_frsize=4096, f_blocks=250000)
+        arguments = [
+            "ext4", frozenset({"rw", "nosuid", "nodev"}), (7, 4), source,
+            self.module.OUTPUT_BYTES_LIMIT, True, Path("/image"), Path("/image"),
+            output, values, 1000, 1001, self.module.OUTPUT_BYTES_LIMIT,
+        ]
+        self.module.validate_output_mount_facts(*arguments)
+        mutations = (
+            (0, "tmpfs"),
+            (1, frozenset({"rw", "nosuid"})),
+            (1, frozenset({"rw", "nosuid", "nodev", "noexec"})),
+            (2, (7, 5)),
+            (3, SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_rdev=os.makedev(7, 4))),
+            (4, self.module.OUTPUT_BYTES_LIMIT - 1),
+            (5, False),
+            (6, Path("/other-image")),
+            (8, SimpleNamespace(st_mode=directory, st_uid=1002, st_gid=1001)),
+            (9, SimpleNamespace(f_frsize=4096, f_blocks=300000)),
+        )
+        for index, value in mutations:
+            with self.subTest(index=index, value=value):
+                changed = list(arguments)
+                changed[index] = value
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.validate_output_mount_facts(*changed)
+
+    def test_pseudo_file_reads_are_bounded_and_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="hs-pseudo-read-", dir="/dev/shm") as name:
+            path = Path(name) / "pseudo"
+            path.write_bytes(b"bounded\n")
+            self.assertEqual("bounded\n", self.module._read_bounded_pseudo(path, 8, "ascii"))
+            path.write_bytes(b"x" * 9)
+            with self.assertRaises(self.module.BrokerError):
+                self.module._read_bounded_pseudo(path, 8, "ascii")
+            path.write_bytes(b"")
+            with self.assertRaises(self.module.BrokerError):
+                self.module._read_bounded_pseudo(path, 8, "ascii")
+
+    def test_logical_output_bound_rejects_sparse_links_special_files_and_excess_entries(self):
+        with tempfile.TemporaryDirectory(prefix="hs-logical-output-", dir="/dev/shm") as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            nested = root / "nested"
+            nested.mkdir(mode=0o700)
+            (root / "first").write_bytes(b"1234")
+            (nested / "second").write_bytes(b"56789")
+            self.assertEqual(9, self.module.logical_output_bytes(root, 9, os.geteuid()))
+            sparse = nested / "sparse"
+            sparse.touch(mode=0o600)
+            os.truncate(sparse, 1024 * 1024)
+            with self.assertRaises(self.module.BrokerError):
+                self.module.logical_output_bytes(root, 1024, os.geteuid())
+            sparse.unlink()
+            link = nested / "link"
+            link.symlink_to(root / "first")
+            with self.assertRaises(self.module.BrokerError):
+                self.module.logical_output_bytes(root, 1024, os.geteuid())
+            link.unlink()
+            fifo = nested / "fifo"
+            os.mkfifo(fifo, 0o600)
+            with self.assertRaises(self.module.BrokerError):
+                self.module.logical_output_bytes(root, 1024, os.geteuid())
+            fifo.unlink()
+            with mock.patch.object(self.module, "MAX_OUTPUT_ENTRIES", 1):
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.logical_output_bytes(root, 1024, os.geteuid())
+
+    def test_output_quota_cleanup_unmounts_exact_target_and_unlinks_only_bound_objects(self):
+        with tempfile.TemporaryDirectory(prefix="hs-quota-cleanup-", dir="/dev/shm") as name:
+            root = Path(name)
+            output = root / "output-name"
+            output.mkdir(mode=0o700)
+            retained = root / ".output-name.retained-test"
+            retained.mkdir(mode=0o700)
+            (retained / "result.json").write_text("{}\n", encoding="ascii")
+            retained_status = retained.stat()
+            image = root / ".quota.ext4"
+            image.write_bytes(b"image")
+            quota = self.module.OutputQuota.__new__(self.module.OutputQuota)
+            quota.root = root
+            quota.output = output
+            quota.run_uid = os.geteuid()
+            quota.run_gid = os.getegid()
+            quota.limit = self.module.OUTPUT_BYTES_LIMIT
+            quota.root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            root_status = root.stat()
+            quota.root_identity = (root_status.st_dev, root_status.st_ino)
+            quota.root_restricted = False
+            quota.image_fd = os.open(image, os.O_RDONLY)
+            image_status = image.stat()
+            quota.image_path = image
+            quota.image_identity = (image_status.st_dev, image_status.st_ino, image_status.st_size)
+            output_status = output.stat()
+            quota.output_identity = (output_status.st_dev, output_status.st_ino)
+            quota.mount_device = (7, 4)
+            quota.mounted = True
+            quota.marker_identity = None
+            commands = []
+            with (
+                mock.patch.object(quota, "validate", return_value=None),
+                mock.patch.object(quota, "_validate_image", return_value=None),
+                mock.patch.object(quota, "_restrict_root", return_value=None),
+                mock.patch.object(quota, "_restore_root", return_value=None),
+                mock.patch.object(
+                    quota, "_preserve",
+                    return_value=(retained, (retained_status.st_dev, retained_status.st_ino)),
+                ),
+                mock.patch.object(self.module, "_run_root_command", side_effect=lambda command: commands.append(command)),
+                mock.patch.object(self.module, "mounted_output_record", side_effect=self.module.BrokerError),
+                mock.patch.object(self.module, "_loop_still_backs", return_value=False),
+            ):
+                quota.close(preserve=True)
+            self.assertEqual(commands, [["/usr/bin/umount", str(output)]])
+            self.assertTrue((output / "result.json").is_file())
+            self.assertFalse(retained.exists())
+            self.assertFalse(image.exists())
 
     def test_cgroup_cleanup_uses_exact_bound_scope_kill_and_requires_empty(self):
         with tempfile.TemporaryDirectory(prefix="hard-state-cgroup-test-", dir="/dev/shm") as name:
@@ -297,47 +445,125 @@ class BrokerTests(unittest.TestCase):
             self.assertFalse(scope_path.exists())
 
     def test_child_environment_is_closed_and_does_not_copy_secrets(self):
-        old = os.environ.get("SMAPI_TEST_PRIVATE_TOKEN")
-        os.environ["SMAPI_TEST_PRIVATE_TOKEN"] = "private-value"
-        try:
+        with mock.patch.dict(os.environ, {
+            "SMAPI_TEST_PRIVATE_TOKEN": "private-value",
+            "XDG_SESSION_TYPE": "wayland",
+            "XDG_CURRENT_DESKTOP": "ubuntu:GNOME",
+        }, clear=True):
             result = self.module.child_environment(os.geteuid())
-        finally:
-            if old is None:
-                os.environ.pop("SMAPI_TEST_PRIVATE_TOKEN", None)
-            else:
-                os.environ["SMAPI_TEST_PRIVATE_TOKEN"] = old
         self.assertNotIn("SMAPI_TEST_PRIVATE_TOKEN", result)
         self.assertEqual(result["PATH"], "/usr/bin:/bin")
+        self.assertEqual(result["XDG_SESSION_TYPE"], "wayland")
+        self.assertEqual(result["XDG_CURRENT_DESKTOP"], "ubuntu:GNOME")
+        for key, value in (("XDG_SESSION_TYPE", "tty"), ("XDG_CURRENT_DESKTOP", "GNOME;TOKEN=secret")):
+            with self.subTest(key=key), mock.patch.dict(os.environ, {key: value}, clear=True):
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.child_environment(os.geteuid())
 
     def test_result_schema_is_closed_and_failed_child_never_becomes_success(self):
         failure = {
             "code": "boundary", "kind": "linux-gui-hard-state-qualification",
-            "ok": False, "schemaVersion": 1, "status": "failed",
+            "ok": False, "schemaVersion": 2, "status": "failed",
         }
-        self.assertFalse(self.module.validate_result((json.dumps(failure, separators=(",", ":")) + "\n").encode("ascii")))
+        self.assertFalse(self.module.validate_result(canonical_json(failure)))
         failure["details"] = "/private/leak"
         with self.assertRaises(self.module.BrokerError):
-            self.module.validate_result((json.dumps(failure) + "\n").encode("ascii"))
+            self.module.validate_result(canonical_json(failure))
 
-        success = {key: False for key in self.module.PREFLIGHT_KEYS}
+        success = {key: False for key in self.module.CASE_KEYS}
         success.update({
             "kind": "linux-gui-hard-state-qualification", "ok": True,
-            "scenario": "C3", "schemaVersion": 1, "status": "preflighted",
+            "scenario": "C3", "schemaVersion": 2,
+            "status": "captured_pending_privacy_and_public_authority",
             "releaseTag": "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3", "sourceCommit": "1" * 40, "sourceTree": "2" * 40,
             "publicReleaseUrl": "https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3", "packageSha256": "3" * 64,
             "guiSha256": "4" * 64, "backendSha256": "5" * 64,
-            "capturePending": True, "durableClassificationPending": True,
-            "publicAuthorityVerificationPending": True, "exactWindowCaptured": False,
+            "evidenceId": "C3", "fault": None,
+            "environmentProfile": "ubuntu-24.04-gnome-xwayland",
+            "visibleState": "cancelled-and-rolled-back",
+            "durableAtCapture": "rolled-back", "durableAfter": "rolled-back",
+            "exactWindowCaptured": True, "atspiEvidenceRecorded": True,
+            "durableClassificationVerified": True, "cleanupComplete": True,
+            "packageIdentityReverified": True,
         })
-        self.assertTrue(self.module.validate_result((json.dumps(success) + "\n").encode("ascii")))
+        self.assertTrue(self.module.validate_result(canonical_json(success)))
+        for key, invalid in (
+            ("evidenceId", "C2"),
+            ("durableAtCapture", "applied"),
+            ("environmentProfile", "ubuntu-current"),
+            ("exactWindowCaptured", False),
+        ):
+            with self.subTest(key=key):
+                changed = dict(success)
+                changed[key] = invalid
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.validate_result(canonical_json(changed))
         success["unexpected"] = True
         with self.assertRaises(self.module.BrokerError):
-            self.module.validate_result((json.dumps(success) + "\n").encode("ascii"))
+            self.module.validate_result(canonical_json(success))
+
+        for malformed in (
+            canonical_json({**success, "schemaVersion": 2.0}),
+            b'{"code":"boundary","code":"capture","kind":"linux-gui-hard-state-qualification","ok":false,"schemaVersion":2,"status":"failed"}\n',
+            (json.dumps(failure, indent=2) + "\n").encode("ascii"),
+        ):
+            with self.assertRaises(self.module.BrokerError):
+                self.module.validate_result(malformed)
+
+        success.pop("unexpected")
+        contract = {
+            "scenario": "C3",
+            "capture": {"environment_profile": "ubuntu-24.04-gnome-xwayland"},
+            "release": {
+                "tag": success["releaseTag"], "url": success["publicReleaseUrl"],
+                "expected_commit": success["sourceCommit"], "expected_tree": success["sourceTree"],
+            },
+            "package": {"sha256": success["packageSha256"]},
+            "binaries": {
+                "apphost_sha256": success["guiSha256"],
+                "backend_sha256": success["backendSha256"],
+            },
+        }
+        self.assertTrue(self.module.validate_result(canonical_json(success), contract))
+        for path, replacement in (
+            (("scenario",), "C2"),
+            (("capture", "environment_profile"), "ubuntu-24.04-kde-x11"),
+            (("release", "expected_commit"), "9" * 40),
+            (("package", "sha256"), "9" * 64),
+        ):
+            changed = json.loads(json.dumps(contract))
+            target = changed
+            for component in path[:-1]:
+                target = target[component]
+            target[path[-1]] = replacement
+            with self.subTest(contract_path=path), self.assertRaises(self.module.BrokerError):
+                self.module.validate_result(canonical_json(success), changed)
+
+    def test_root_broker_closed_case_mapping_matches_the_nonroot_shared_capture_model(self):
+        spec = importlib.util.spec_from_file_location("broker_test_capture_model", CAPTURE_MODEL)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        model = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = model
+        spec.loader.exec_module(model)
+        expected = {
+            item.scenario.value: (
+                item.evidence_id.value,
+                None if item.fault is None else item.fault.value,
+                item.visible_state.value,
+                item.durable_at_capture.value,
+                item.durable_after.value,
+            )
+            for item in model.CAPTURE_SPECS
+        }
+        profiles = {item.profile_id.value for item in model.ENVIRONMENT_PROFILES}
+        self.assertEqual(self.module.CASE_EXPECTED, expected)
+        self.assertEqual(self.module.ENVIRONMENT_PROFILES, profiles)
 
     def test_main_propagates_valid_child_failure_without_leaking_or_returning_success(self):
         failure = (
             b'{"code":"boundary","kind":"linux-gui-hard-state-qualification",'
-            b'"ok":false,"schemaVersion":1,"status":"failed"}\n'
+            b'"ok":false,"schemaVersion":2,"status":"failed"}\n'
         )
         writes = []
 
@@ -364,13 +590,13 @@ class BrokerTests(unittest.TestCase):
             control.mkdir(parents=True, mode=0o700)
             os.chmod(root, 0o700)
             request = root / self.module.REQUEST_NAME
-            request.write_text(json.dumps({
+            request.write_bytes(canonical_json({
                 "supervisor_socket": {"relative_path": "run-component/output-name/control/boundary.sock"},
-            }), encoding="utf-8")
+            }))
             os.chmod(request, 0o600)
             failure = (
                 b'{"code":"boundary","kind":"linux-gui-hard-state-qualification",'
-                b'"ok":false,"schemaVersion":1,"status":"failed"}\n'
+                b'"ok":false,"schemaVersion":2,"status":"failed"}\n'
             )
             launched = []
 
@@ -423,9 +649,10 @@ class BrokerTests(unittest.TestCase):
             with (
                 mock.patch.object(self.module.os, "geteuid", return_value=0),
                 mock.patch.object(self.module.os, "getuid", return_value=0),
-                mock.patch.object(self.module, "read_bootstrap", return_value=({}, b"{}", root, run_uid, run_gid, 25)),
+                mock.patch.object(self.module, "read_bootstrap", return_value=({"resource_limits": {"output_bytes": self.module.OUTPUT_BYTES_LIMIT}}, b"{}", root, run_uid, run_gid, 25)),
                 mock.patch.object(self.module, "fixed_file_hash", return_value="a" * 64),
                 mock.patch.object(self.module, "make_namespace_private", return_value=None),
+                mock.patch.object(self.module, "OutputQuota") as quota_type,
                 mock.patch.object(self.module, "CgroupScope", return_value=scope),
                 mock.patch.object(self.module, "child_environment", return_value={"PATH": "/usr/bin:/bin"}),
                 mock.patch.object(self.module.socket, "socketpair", return_value=(FakeSocket(), FakeSocket())),
@@ -462,31 +689,37 @@ class BrokerTests(unittest.TestCase):
                 ledger_cleanup.assert_called_once_with(root.parent, mock.ANY)
                 request_cleanup.assert_called_once_with(root, run_uid)
                 self.assertTrue(scope.cleaned)
+                quota_type.return_value.close.assert_called_once_with(preserve=True)
 
     def test_sealed_contract_failure_still_removes_the_new_cgroup_scope(self):
-        root = Path("/safe-prefix/run-component")
+        with tempfile.TemporaryDirectory(prefix="hs-sealed-failure-", dir="/dev/shm") as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            run_uid = os.geteuid()
+            run_gid = os.getegid()
 
-        class FakeScope:
-            cleaned = False
+            class FakeScope:
+                cleaned = False
 
-            def kill_and_remove(self, _deadline):
-                self.cleaned = True
+                def kill_and_remove(self, _deadline):
+                    self.cleaned = True
 
-        scope = FakeScope()
-        with (
-            mock.patch.object(self.module.os, "geteuid", return_value=0),
-            mock.patch.object(self.module.os, "getuid", return_value=0),
-            mock.patch.object(self.module, "read_bootstrap", return_value=({}, b"{}", root, 1000, 1000, 25)),
-            mock.patch.object(self.module, "fixed_file_hash", return_value="a" * 64),
-            mock.patch.object(self.module, "make_namespace_private", return_value=None),
-            mock.patch.object(self.module, "CgroupScope", return_value=scope),
-            mock.patch.object(self.module, "sealed_memfd", side_effect=self.module.BrokerError),
-            mock.patch.object(self.module, "cleanup_residual_request", return_value=None),
-            mock.patch.object(self.module, "cleanup_controller_ledgers", return_value=None),
-        ):
-            with self.assertRaises(self.module.BrokerError):
-                self.module.run_case(Path("/contract"), root / "output-name")
-        self.assertTrue(scope.cleaned)
+            scope = FakeScope()
+            with (
+                mock.patch.object(self.module.os, "geteuid", return_value=0),
+                mock.patch.object(self.module.os, "getuid", return_value=0),
+                mock.patch.object(self.module, "read_bootstrap", return_value=({"resource_limits": {"output_bytes": self.module.OUTPUT_BYTES_LIMIT}}, b"{}", root, run_uid, run_gid, 25)),
+                mock.patch.object(self.module, "fixed_file_hash", return_value="a" * 64),
+                mock.patch.object(self.module, "make_namespace_private", return_value=None),
+                mock.patch.object(self.module, "OutputQuota"),
+                mock.patch.object(self.module, "CgroupScope", return_value=scope),
+                mock.patch.object(self.module, "sealed_memfd", side_effect=self.module.BrokerError),
+                mock.patch.object(self.module, "cleanup_residual_request", return_value=None),
+                mock.patch.object(self.module, "cleanup_controller_ledgers", return_value=None),
+            ):
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.run_case(Path("/contract"), root / "output-name")
+            self.assertTrue(scope.cleaned)
 
 
 if __name__ == "__main__":

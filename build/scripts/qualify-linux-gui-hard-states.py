@@ -25,6 +25,7 @@ import time
 from types import ModuleType
 from typing import Any, NoReturn
 import zipfile
+import zlib
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -32,7 +33,11 @@ VALIDATOR_PATH = REPOSITORY_ROOT / "build/scripts/validate-linux-gui-hard-state-
 BARRIER_SOURCE = REPOSITORY_ROOT / "build/scripts/linux-gui-hard-state-barrier.c"
 OPERATOR_HELPER = REPOSITORY_ROOT / "build/scripts/drive-linux-gui-hard-states-atspi.py"
 CONTROLLER_HELPER = REPOSITORY_ROOT / "build/scripts/arm-linux-gui-hard-state-boundary.py"
-SCHEMA_VERSION = 1
+STAGER_HELPER = REPOSITORY_ROOT / "build/scripts/stage-linux-gui-screenshot.py"
+CAPTURE_MODEL_PATH = REPOSITORY_ROOT / "build/scripts/linux_gui_hard_state_capture_contract.py"
+CLASSIFIER_PATH = REPOSITORY_ROOT / "build/scripts/classify-linux-gui-hard-state.py"
+ENVIRONMENT_VERIFIER_PATH = REPOSITORY_ROOT / "build/scripts/verify-linux-gui-capture-environment.py"
+SCHEMA_VERSION = 2
 BARRIER_SCENARIOS = frozenset({"C2", "C3", "E5", "E6"})
 E2_SCENARIOS = frozenset({"E2-permission", "E2-read-only", "E2-disk-full", "E2-cross-device"})
 FAILURE_CODES = frozenset({
@@ -58,6 +63,61 @@ OBSERVATION_MILESTONES = frozenset({
     "state.e2-permission", "state.e2-read-only", "state.e2-disk-full", "state.e2-cross-device",
     "state.c2", "terminal.c3", "state.e5", "terminal.e6",
 })
+OBSERVATION_FACT_KEYS = frozenset({"name", "role", "visible", "enabled", "actionInterface"})
+EXPECTED_OBSERVATIONS: dict[str, tuple[tuple[str, frozenset[str], bool], ...]] = {
+    "state.e2-permission": (
+        ("Install failed before changing files", frozenset({"heading"}), False),
+        ("No mutation was reported. Check user permissions for the game folder; do not run as root.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Unchanged", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Not required", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e2-read-only": (
+        ("Install failed before changing files", frozenset({"heading"}), False),
+        ("No mutation was reported. Check that the game filesystem is writable by your user; do not run as root.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Unchanged", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Not required", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e2-disk-full": (
+        ("Install failed before changing files", frozenset({"heading"}), False),
+        ("No mutation was reported. Free disk space, then start a fresh verified session.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Unchanged", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Not required", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e2-cross-device": (
+        ("Install failed and changes were rolled back", frozenset({"heading"}), False),
+        ("The exact terminal reports rollback completed. Keep the game and installer recovery workspace on a supported filesystem boundary.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Rolled back", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Completed", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.c2": (
+        ("Cancellation requested — finishing safely", frozenset({"heading"}), False),
+        ("Rollback runs without further cancellation once it begins. The result may be unchanged, fully rolled back, committed if the final safe checkpoint already passed, or recovery-required if rollback cannot finish. Keep this window open for the exact durable result.", frozenset({"label", "static", "text"}), False),
+        ("Operation cancellation already requested", frozenset({"push button", "button"}), True),
+    ),
+    "terminal.c3": (
+        ("Cancellation completed and changes were rolled back", frozenset({"heading"}), False),
+        ("The exact terminal reports a rolled-back durable state.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Rolled back", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Completed", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e5": (
+        ("Installer state could not be confirmed; recovery is required", frozenset({"heading"}), False),
+        ("A recovery session could not be prepared here. Close this screen and start a fresh installer session; do not retry the original operation.", frozenset({"label", "static", "text"}), False),
+        ("Close installer without starting recovery", frozenset({"push button", "button"}), True),
+    ),
+    "terminal.e6": (
+        ("Recovery completed; inspect again", frozenset({"heading"}), False),
+        ("The prior interrupted state was recovered. Start a fresh verified session and inspect the operation again.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Recovery completed", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Completed", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+}
 PICKER_FIELDS = {"release.local-folder": "release_folder", "game.choose-folder": "game_folder"}
 MAX_ARCHIVE_ENTRIES = 20_000
 MAX_ARCHIVE_ENTRY_BYTES = 512 * 1024 * 1024
@@ -110,6 +170,37 @@ def load_validator() -> ModuleType:
     except BaseException:
         fail("admission")
     return module
+
+
+def load_support_module(name: str, path: Path) -> ModuleType:
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        fail("identity")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        fail("identity")
+    return module
+
+
+def load_capture_model() -> ModuleType:
+    return load_support_module("linux_gui_hard_state_capture_contract", CAPTURE_MODEL_PATH)
+
+
+def load_classifier() -> ModuleType:
+    load_capture_model()
+    return load_support_module("smapi_linux_gui_hard_state_classifier", CLASSIFIER_PATH)
+
+
+def load_environment_verifier() -> ModuleType:
+    load_capture_model()
+    return load_support_module("smapi_linux_gui_capture_environment", ENVIRONMENT_VERIFIER_PATH)
 
 
 def read_sealed_bytes(descriptor: int, maximum: int) -> bytes:
@@ -578,6 +669,137 @@ def write_private_json(path: Path, value: Any) -> None:
     private_file(path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
 
 
+def read_bounded_regular(
+    path: Path,
+    maximum: int,
+    allow_empty: bool = False,
+    require_private_mode: bool = True,
+) -> bytes:
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_uid != os.geteuid()
+            or (
+                stat.S_IMODE(before.st_mode) != 0o600
+                if require_private_mode else bool(stat.S_IMODE(before.st_mode) & 0o022)
+            )
+            or before.st_size > maximum or (before.st_size == 0 and not allow_empty)
+        ):
+            fail("capture")
+        data = bytearray()
+        while len(data) < before.st_size:
+            block = os.read(descriptor, min(1024 * 1024, before.st_size - len(data)))
+            if not block:
+                fail("capture")
+            data.extend(block)
+        if os.read(descriptor, 1):
+            fail("capture")
+        after = os.fstat(descriptor)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in fields):
+            fail("capture")
+        return bytes(data)
+    except QualificationError:
+        raise
+    except OSError:
+        fail("capture")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def strict_json(raw: bytes, *, ascii_only: bool = False) -> Any:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                fail("capture")
+            result[key] = value
+        return result
+
+    try:
+        text = raw.decode("ascii" if ascii_only else "utf-8", errors="strict")
+        return json.loads(
+            text,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda _value: fail("capture"),
+        )
+    except QualificationError:
+        raise
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        fail("capture")
+
+
+def validate_canonical_png(data: bytes) -> tuple[int, int, str]:
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        fail("capture")
+    offset = len(signature)
+    chunks: list[tuple[bytes, bytes]] = []
+    while offset < len(data):
+        if len(chunks) >= 3 or len(data) - offset < 12:
+            fail("capture")
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            fail("capture")
+        payload = data[offset + 8:offset + 8 + length]
+        expected_crc = struct.unpack(">I", data[offset + 8 + length:end])[0]
+        if zlib.crc32(payload, zlib.crc32(kind)) & 0xffffffff != expected_crc:
+            fail("capture")
+        chunks.append((kind, payload))
+        offset = end
+    if tuple(kind for kind, _payload in chunks) != (b"IHDR", b"IDAT", b"IEND"):
+        fail("capture")
+    header, compressed, end_payload = (payload for _kind, payload in chunks)
+    if len(header) != 13 or end_payload:
+        fail("capture")
+    width, height, depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", header)
+    channels = 3 if color_type == 2 else 4 if color_type == 6 else 0
+    if (
+        not 0 < width <= 32768 or not 0 < height <= 32768
+        or width * height > 64_000_000 or depth != 8 or channels == 0
+        or compression != 0 or filtering != 0 or interlace != 0
+    ):
+        fail("capture")
+    expected_size = height * (1 + width * channels)
+    if expected_size > 256 * 1024 * 1024:
+        fail("capture")
+    decompressor = zlib.decompressobj()
+    try:
+        scanlines = decompressor.decompress(compressed, expected_size + 1)
+        scanlines += decompressor.flush(max(0, expected_size + 1 - len(scanlines)))
+    except (ValueError, zlib.error):
+        fail("capture")
+    row_size = width * channels
+    if (
+        len(scanlines) != expected_size or not decompressor.eof
+        or decompressor.unused_data or decompressor.unconsumed_tail
+        or any(scanlines[row * (row_size + 1)] != 0 for row in range(height))
+    ):
+        fail("capture")
+    pixels = b"".join(
+        scanlines[row * (row_size + 1) + 1:(row + 1) * (row_size + 1)]
+        for row in range(height)
+    )
+    canonical = (
+        signature
+        + struct.pack(">I", len(header)) + b"IHDR" + header
+        + struct.pack(">I", zlib.crc32(header, zlib.crc32(b"IHDR")) & 0xffffffff)
+        + struct.pack(">I", len(compressed)) + b"IDAT" + compressed
+        + struct.pack(">I", zlib.crc32(compressed, zlib.crc32(b"IDAT")) & 0xffffffff)
+        + struct.pack(">I", 0) + b"IEND"
+        + struct.pack(">I", zlib.crc32(b"", zlib.crc32(b"IEND")) & 0xffffffff)
+    )
+    if canonical != data or zlib.compress(scanlines, 9) != compressed:
+        fail("capture")
+    return width, height, hashlib.sha256(pixels).hexdigest()
+
+
 @dataclass(frozen=True)
 class ProcessIdentity:
     pid: int
@@ -585,7 +807,400 @@ class ProcessIdentity:
     process_group: int
     executable_device: int
     executable_inode: int
+    executable_size: int
     executable_sha256: str
+
+
+def read_runtime_metadata(package_root: Path) -> tuple[str, str, str]:
+    deps_path = package_root / "internal/linux/SMAPI.Installer.Gui.deps.json"
+    runtime_path = package_root / "internal/linux/SMAPI.Installer.Gui.runtimeconfig.json"
+    try:
+        deps = json.loads(
+            read_bounded_regular(deps_path, 32 * 1024 * 1024, require_private_mode=False).decode("utf-8")
+        )
+        runtime = json.loads(
+            read_bounded_regular(runtime_path, 1024 * 1024, require_private_mode=False).decode("utf-8")
+        )
+        libraries = deps["libraries"]
+        runtime_target = deps["runtimeTarget"]["name"]
+        included = runtime["runtimeOptions"]["includedFrameworks"]
+        avalonia_versions = {
+            key.split("/", 1)[1]
+            for key in libraries
+            if isinstance(key, str) and key.startswith("Avalonia/") and "/" in key
+        }
+        frameworks = [
+            item["version"] for item in included
+            if isinstance(item, dict) and item.get("name") == "Microsoft.NETCore.App"
+        ]
+        if (
+            not isinstance(libraries, dict) or len(avalonia_versions) != 1
+            or not isinstance(runtime_target, str)
+            or re.fullmatch(r"\.NETCoreApp,Version=v[0-9]+\.[0-9]+/linux-x64", runtime_target) is None
+            or len(frameworks) != 1 or not isinstance(frameworks[0], str)
+            or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", frameworks[0]) is None
+        ):
+            fail("capture")
+        avalonia = next(iter(avalonia_versions))
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?", avalonia) is None:
+            fail("capture")
+        return (
+            f"Avalonia {avalonia}",
+            "not required by self-contained release package",
+            f"Microsoft.NETCore.App {frameworks[0]}",
+        )
+    except QualificationError:
+        raise
+    except (KeyError, TypeError, UnicodeError, json.JSONDecodeError):
+        fail("capture")
+
+
+class CaptureCoordinator:
+    """Bind one durable classification and exact-window PNG to one closed scenario milestone."""
+
+    def __init__(
+        self,
+        contract: dict[str, Any],
+        output: Path,
+        package_root: Path,
+        game: Path,
+        before_entries: list[dict[str, Any]],
+        gui: ProcessIdentity,
+        gui_sha256: str,
+        backend_sha256: str,
+        environment: dict[str, str],
+    ):
+        model = load_capture_model()
+        classifier = load_classifier()
+        try:
+            spec = model.capture_spec(contract["scenario"])
+            profile = model.environment_profile(contract["capture"]["environment_profile"])
+        except (KeyError, TypeError, ValueError):
+            fail("capture")
+        if environment.get("DISPLAY") is None:
+            fail("capture")
+        try:
+            environment_facts = load_environment_verifier().verify_capture_environment(
+                profile.profile_id.value,
+                _environment_reader=lambda: environment,
+            )
+        except BaseException:
+            fail("capture")
+        self.contract = contract
+        self.output = output
+        self.package_root = package_root
+        self.game = game
+        self.before_entries = before_entries
+        self.gui = gui
+        self.gui_sha256 = gui_sha256
+        self.backend_sha256 = backend_sha256
+        self.environment = environment
+        self.environment_facts = environment_facts
+        self.spec = spec
+        self.profile = profile
+        self.classifier = classifier
+        self.capture_milestone = spec.capture_milestone.value
+        self.required_terminal_milestone = spec.required_terminal_milestone.value
+        self.barrier_observed = False
+        self.backend_loss_observed = False
+        self.fresh_session_observed = False
+        self.captured = False
+        self.durable_at_capture: str | None = None
+
+    def _classification_digest(self, values: list[dict[str, Any]], *, capture: bool) -> str:
+        scenario = self.contract["scenario"]
+        if scenario in E2_SCENARIOS:
+            return e2_terminal_digest(scenario, values) if capture else e2_restored_digest(scenario, values)
+        return restoration_digest(values)
+
+    def _classify(self, phase: str, before_digest: str, current_digest: str) -> str:
+        try:
+            summary = self.classifier.inspect_transaction_store(self.game)
+            durable = self.classifier.classify_scenario(
+                self.contract["scenario"], phase=phase,
+                before_digest=before_digest, current_digest=current_digest,
+                barrier_observed=self.barrier_observed,
+                backend_loss_observed=self.backend_loss_observed,
+                fresh_session_observed=self.fresh_session_observed,
+                summary=summary,
+            )
+        except BaseException:
+            fail("state")
+        expected = self.spec.durable_at_capture if phase == "capture" else self.spec.durable_after
+        if durable is not expected:
+            fail("state")
+        return durable.value
+
+    def _production_identity(self) -> dict[str, str]:
+        package_name = Path(self.contract["package"]["path"]).name
+        tag = self.contract["release"]["tag"]
+        return {
+            "source_commit": self.contract["release"]["expected_commit"],
+            "source_tree": self.contract["release"]["expected_tree"],
+            "release_tag": tag,
+            "package_url": f"https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/download/{tag}/{package_name}",
+            "package_sha256": self.contract["package"]["sha256"],
+            "public_release_url": self.contract["release"]["url"],
+            "gui_binary_sha256": self.gui_sha256,
+            "backend_binary_sha256": self.backend_sha256,
+        }
+
+    def _stage(self, deadline: float) -> None:
+        control = self.output / "capture-control"
+        stage = self.output / "capture"
+        private_directory(control)
+        private_directory(stage)
+        identity_path = control / "production-identity.json"
+        private_strings_path = control / "private-strings.txt"
+        write_private_json(identity_path, self._production_identity())
+        private_values = {
+            os.fspath(self.output), os.fspath(self.game),
+            os.fspath(Path(self.contract["package"]["path"])), socket.gethostname(),
+        }
+        private_file(
+            private_strings_path,
+            ("\n".join(sorted(value for value in private_values if len(value) >= 4)) + "\n").encode("utf-8"),
+        )
+        avalonia, dotnet_sdk, dotnet_runtime = read_runtime_metadata(self.package_root)
+        facts = self.environment_facts
+        arguments = [
+            sys.executable, os.fspath(STAGER_HELPER), "--discover-window",
+            "--expected-window-title", self.spec.window_title,
+            "--expected-window-pid", str(self.gui.pid),
+            "--expected-gui-process-start-time", str(self.gui.start_time),
+            "--expected-gui-exe-device", str(self.gui.executable_device),
+            "--expected-gui-exe-inode", str(self.gui.executable_inode),
+            "--expected-gui-exe-size", str(self.gui.executable_size),
+            "--expected-gui-exe-sha256", self.gui_sha256,
+            "--expected-display", self.environment["DISPLAY"],
+            "--stage-directory", os.fspath(stage),
+            "--filename", f"{self.spec.output_basename}.png",
+            "--evidence-id", self.spec.evidence_id.value,
+            "--evidence-class", "real_qualification",
+            "--production-identity", os.fspath(identity_path),
+            "--private-strings-file", os.fspath(private_strings_path),
+            "--fixture-or-injection", self.spec.boundary_trigger.value,
+            "--operation", self.spec.operation.value,
+            "--durable-before", self.spec.durable_before.value,
+            "--durable-after", self.spec.durable_at_capture.value,
+            "--qualification-reference", self.spec.docs_anchor,
+            "--distribution", f"{facts.distribution} {facts.distribution_version}",
+            "--architecture", facts.architecture,
+            "--desktop-environment", facts.desktop,
+            "--session-type", facts.session,
+            "--display-backend", facts.window_backend,
+            "--display-scale-percent", str(facts.scale_percent),
+            "--theme", facts.theme,
+            "--resolution", f"{facts.resolution_width}x{facts.resolution_height}",
+            "--avalonia", avalonia,
+            "--dotnet-sdk", dotnet_sdk,
+            "--dotnet-runtime", dotnet_runtime,
+        ]
+        if self.spec.fault is not None:
+            arguments.extend(("--fault", self.spec.fault.value))
+        helper_before, _ = hash_trusted_helper(STAGER_HELPER, 4 * 1024 * 1024)
+        stdout_path = control / "stager.stdout.log"
+        stderr_path = control / "stager.stderr.log"
+        stdout = open(stdout_path, "xb", buffering=0)
+        stderr = open(stderr_path, "xb", buffering=0)
+        os.chmod(stdout.fileno(), 0o600)
+        os.chmod(stderr.fileno(), 0o600)
+        try:
+            try:
+                result = subprocess.run(
+                    arguments, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                    env=self.environment, timeout=max(0.01, deadline - time.monotonic()), check=False,
+                    preexec_fn=lambda: resource.setrlimit(
+                        resource.RLIMIT_FSIZE,
+                        (64 * 1024 * 1024, 64 * 1024 * 1024),
+                    ),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                fail("capture")
+        finally:
+            stdout.close()
+            stderr.close()
+        helper_after, _ = hash_trusted_helper(STAGER_HELPER, 4 * 1024 * 1024)
+        if helper_after != helper_before or not identity_matches(self.gui) or result.returncode != 0:
+            fail("capture")
+        stdout_bytes = read_bounded_regular(stdout_path, 64 * 1024)
+        if read_bounded_regular(stderr_path, 64 * 1024, allow_empty=True):
+            fail("capture")
+        emitted = strict_json(stdout_bytes, ascii_only=True)
+        expected_png = f"{self.spec.output_basename}.png"
+        expected_record = f"{self.spec.output_basename}.capture.json"
+        if (
+            stdout_bytes.count(b"\n") != 1 or not stdout_bytes.endswith(b"\n")
+            or not isinstance(emitted, dict)
+            or set(emitted) != {"filename", "record", "sha256", "pixel_sha256", "width", "height"}
+            or emitted["filename"] != expected_png or emitted["record"] != expected_record
+            or set(os.listdir(stage)) != {expected_png, expected_record}
+        ):
+            fail("capture")
+        png = read_bounded_regular(stage / expected_png, 64 * 1024 * 1024)
+        record_raw = read_bounded_regular(stage / expected_record, 1024 * 1024)
+        record = strict_json(record_raw)
+        if not isinstance(record, dict):
+            fail("capture")
+        width, height, pixel_sha256 = validate_canonical_png(png)
+        expected_identity = self._production_identity()
+        capture = record.get("capture")
+        source_window = capture.get("source_window") if isinstance(capture, dict) else None
+        environment_record = record.get("environment")
+        runtime_record = record.get("runtime")
+        normalization = record.get("normalization")
+        privacy = record.get("privacy_review")
+        executable = source_window.get("executable") if isinstance(source_window, dict) else None
+        expected_environment = {
+            "distribution": f"{facts.distribution} {facts.distribution_version}",
+            "architecture": facts.architecture,
+            "desktop_environment": facts.desktop,
+            "session_type": facts.session,
+            "display_backend": facts.window_backend,
+            "display_scale_percent": facts.scale_percent,
+            "theme": facts.theme,
+            "resolution": f"{facts.resolution_width}x{facts.resolution_height}",
+        }
+        expected_runtime = {
+            "avalonia": avalonia,
+            "dotnet_sdk": dotnet_sdk,
+            "dotnet_runtime": dotnet_runtime,
+        }
+        expected_keys = {
+            "staging_schema_version", "status", "id", "filename", "evidence_class",
+            "production_identity", "fixture_or_injection", "operation", "durable_state",
+            "environment", "runtime", "capture", "normalization", "privacy_review",
+            "qualification_reference",
+        } | ({"fault"} if self.spec.fault is not None else set())
+        if (
+            set(record) != expected_keys
+            or record_raw != (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            or record.get("staging_schema_version") != 1
+            or hashlib.sha256(png).hexdigest() != emitted["sha256"]
+            or emitted["pixel_sha256"] != pixel_sha256
+            or emitted["width"] != width or emitted["height"] != height
+            or record.get("status") != "staged_pending_original_resolution_privacy_review"
+            or record.get("id") != self.spec.evidence_id.value
+            or record.get("filename") != expected_png
+            or record.get("evidence_class") != "real_qualification"
+            or record.get("production_identity") != expected_identity
+            or record.get("fixture_or_injection") != self.spec.boundary_trigger.value
+            or record.get("operation") != self.spec.operation.value
+            or record.get("durable_state") != {
+                "before": self.spec.durable_before.value,
+                "after": self.spec.durable_at_capture.value,
+            }
+            or environment_record != expected_environment
+            or runtime_record != expected_runtime
+            or record.get("qualification_reference") != self.spec.docs_anchor
+            or not isinstance(capture, dict)
+            or set(capture) != {
+                "timestamp", "tool", "command", "input_mode", "source_window",
+                "width", "height", "sha256", "decoded_pixel_sha256",
+            }
+            or not isinstance(capture.get("timestamp"), str)
+            or re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})",
+                capture["timestamp"],
+            ) is None
+            or not isinstance(capture.get("tool"), str) or not 0 < len(capture["tool"]) <= 160
+            or capture.get("input_mode") != "discovered_exact_x11_client_window"
+            or capture.get("width") != width or capture.get("height") != height
+            or capture.get("sha256") != emitted["sha256"]
+            or capture.get("decoded_pixel_sha256") != pixel_sha256
+            or not isinstance(source_window, dict)
+            or set(source_window) != {
+                "window_id", "process_id", "process_start_time", "expected_title",
+                "display", "executable", "unique_mapped_visible_client_verified",
+            }
+            or not isinstance(source_window.get("window_id"), str)
+            or re.fullmatch(r"(?:0x[0-9a-fA-F]+|[1-9][0-9]*)", source_window["window_id"]) is None
+            or source_window.get("process_id") != self.gui.pid
+            or source_window.get("process_start_time") != self.gui.start_time
+            or source_window.get("expected_title") != self.spec.window_title
+            or source_window.get("display") != self.environment["DISPLAY"]
+            or source_window.get("unique_mapped_visible_client_verified") is not True
+            or not isinstance(executable, dict)
+            or executable != {
+                "device": self.gui.executable_device,
+                "inode": self.gui.executable_inode,
+                "size": self.gui.executable_size,
+                "sha256_verified": True,
+            }
+            or capture.get("command") != (
+                f"import -window {source_window.get('window_id')} png32:<private-temporary-file>; "
+                "canonical metadata normalization"
+            )
+            or normalization != {
+                "application_pixels_altered": False,
+                "input_chunks": ["IHDR", "IDAT", "IEND"],
+                "output_chunks": ["IHDR", "IDAT", "IEND"],
+                "statement": (
+                    "Incidental PNG metadata was removed; decoded RGB/RGBA application pixels "
+                    "are byte-identical."
+                ),
+            }
+            or privacy != {
+                "status": "pending",
+                "requirement": "Inspect the staged PNG at original resolution before manifest promotion.",
+            }
+            or (self.spec.fault is None and "fault" in record)
+            or (self.spec.fault is not None and record.get("fault") != self.spec.fault.value)
+        ):
+            fail("capture")
+
+    def capture(self, milestone: str, _observations: list[dict[str, Any]], deadline: float) -> None:
+        if self.captured or milestone != self.capture_milestone or not identity_matches(self.gui):
+            fail("capture")
+        current, _digest = inventory(
+            self.game,
+            allow_cross_device=self.contract["scenario"] == "E2-cross-device",
+            opaque_paths=(
+                frozenset({"smapi-internal"})
+                if self.contract["scenario"] == "E2-permission" else frozenset()
+            ),
+        )
+        self.durable_at_capture = self._classify(
+            "capture",
+            self._classification_digest(self.before_entries, capture=True),
+            self._classification_digest(current, capture=True),
+        )
+        self._stage(deadline)
+        self.captured = True
+
+    def rebind_fresh_session(
+        self,
+        gui: ProcessIdentity,
+        environment: dict[str, str],
+    ) -> None:
+        if (
+            self.contract["scenario"] != "E6" or self.captured
+            or identity_matches(self.gui) or environment.get("DISPLAY") is None
+        ):
+            fail("capture")
+        self.gui = gui
+        self.environment = environment
+        try:
+            self.environment_facts = load_environment_verifier().verify_capture_environment(
+                self.profile.profile_id.value,
+                _environment_reader=lambda: environment,
+            )
+        except BaseException:
+            fail("capture")
+        self.fresh_session_observed = True
+
+    def verify_after(
+        self,
+        before_entries: list[dict[str, Any]],
+        current_entries: list[dict[str, Any]],
+    ) -> str:
+        if not self.captured or self.durable_at_capture != self.spec.durable_at_capture.value:
+            fail("capture")
+        return self._classify(
+            "after",
+            self._classification_digest(before_entries, capture=False),
+            self._classification_digest(current_entries, capture=False),
+        )
 
 
 class BrokerChannel:
@@ -669,7 +1284,10 @@ class BrokerChannel:
             or command_line != expected_command_line or digest != own_digest
         ):
             fail("boundary")
-        return ProcessIdentity(pid, started, process_group, executable.st_dev, executable.st_ino, digest)
+        return ProcessIdentity(
+            pid, started, process_group,
+            executable.st_dev, executable.st_ino, executable.st_size, digest,
+        )
 
     def close(self) -> None:
         self.socket.close()
@@ -717,7 +1335,10 @@ def bind_process(pid: int, expected_hash: str, expected_group: int) -> ProcessId
     digest, metadata = hash_proc_executable(pid)
     if digest != expected_hash:
         fail("identity")
-    return ProcessIdentity(pid, start_time, process_group, metadata.st_dev, metadata.st_ino, digest)
+    return ProcessIdentity(
+        pid, start_time, process_group,
+        metadata.st_dev, metadata.st_ino, metadata.st_size, digest,
+    )
 
 
 def bind_any_process(pid: int, expected_group: int) -> ProcessIdentity:
@@ -731,7 +1352,11 @@ def identity_matches(identity: ProcessIdentity) -> bool:
         if (process_group, start_time) != (identity.process_group, identity.start_time):
             return False
         executable = os.stat(f"/proc/{identity.pid}/exe")
-        return (executable.st_dev, executable.st_ino) == (identity.executable_device, identity.executable_inode)
+        return (
+            executable.st_dev, executable.st_ino, executable.st_size
+        ) == (
+            identity.executable_device, identity.executable_inode, identity.executable_size
+        )
     except QualificationError:
         return False
     except OSError:
@@ -1005,7 +1630,7 @@ class BoundarySession:
                 fail("boundary")
             self.controller_identity = ProcessIdentity(
                 peer_pid, peer_start, peer_group,
-                peer_executable.st_dev, peer_executable.st_ino, peer_digest,
+                peer_executable.st_dev, peer_executable.st_ino, peer_executable.st_size, peer_digest,
             )
             self.connection = connection
             self.expect("prepared", deadline)
@@ -1087,6 +1712,25 @@ def signed_message(token: bytes, value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def validate_observation_facts(milestone: str, value: Any) -> list[dict[str, Any]]:
+    expected = EXPECTED_OBSERVATIONS.get(milestone)
+    if not isinstance(value, list) or expected is None or len(value) != len(expected):
+        fail("operator")
+    result: list[dict[str, Any]] = []
+    for fact, (name, roles, action_interface) in zip(value, expected, strict=True):
+        if (
+            not isinstance(fact, dict) or set(fact) != OBSERVATION_FACT_KEYS
+            or fact.get("name") != name or fact.get("role") not in roles
+            or fact.get("visible") is not True
+            or type(fact.get("enabled")) is not bool
+            or fact.get("actionInterface") is not action_interface
+            or (action_interface and fact.get("enabled") is not True)
+        ):
+            fail("operator")
+        result.append(dict(fact))
+    return result
+
+
 class AtspiSession:
     """Authenticated controller for the separately reviewed AT-SPI action helper."""
 
@@ -1100,6 +1744,7 @@ class AtspiSession:
         environment: dict[str, str],
         suffix: str,
         deadline: float,
+        capture_coordinator: Any | None = None,
     ):
         if route not in AT_SPI_ROUTES or not re.fullmatch(r"[a-z0-9_-]{1,24}", suffix):
             fail("operator")
@@ -1137,6 +1782,9 @@ class AtspiSession:
         self.buffer = bytearray()
         self.sequence = 0
         self.observation_count = 0
+        self.capture_coordinator = capture_coordinator
+        self.capture_count = 0
+        self.reached_milestones: set[str] = set()
         try:
             self.process = subprocess.Popen(
                 [
@@ -1240,19 +1888,35 @@ class AtspiSession:
             body["operation"] = "install"
         self.send(body)
         response_keys = {"type", "version", "session", "sequence", "milestone"}
-        first = self.verify(self.receive(deadline), response_keys)
+        first = self.verify(
+            self.receive(deadline),
+            response_keys | ({"observations"} if milestone in OBSERVATION_MILESTONES else set()),
+        )
         if milestone in OBSERVATION_MILESTONES:
             capture_ready = {
                 "type": "capture-ready", "version": 1, "session": self.session_id,
                 "sequence": self.sequence, "milestone": milestone,
             }
-            if first != capture_ready or not identity_matches(self.gui):
+            observations = validate_observation_facts(milestone, first.get("observations"))
+            if (
+                {key: value for key, value in first.items() if key != "observations"} != capture_ready
+                or not identity_matches(self.gui)
+            ):
                 fail("operator")
             self.observation_count += 1
             write_private_json(
                 self.output / f"atspi-{self.suffix}-observation-{self.sequence:02d}.json",
-                {"milestone": milestone, "schemaVersion": 1, "sequence": self.sequence},
+                {
+                    "milestone": milestone, "observations": observations,
+                    "schemaVersion": 1, "sequence": self.sequence,
+                },
             )
+            if (
+                self.capture_coordinator is not None
+                and milestone == self.capture_coordinator.capture_milestone
+            ):
+                self.capture_coordinator.capture(milestone, observations, deadline)
+                self.capture_count += 1
             self.send({**capture_ready, "type": "continue"})
             reached = self.verify(self.receive(deadline), response_keys)
         else:
@@ -1262,11 +1926,17 @@ class AtspiSession:
             "sequence": self.sequence, "milestone": milestone,
         }:
             fail("operator")
+        self.reached_milestones.add(milestone)
         self.sequence += 1
 
     def complete(self, deadline: float) -> None:
         if self.sequence != len(AT_SPI_ROUTES[self.route]):
             fail("operator")
+        if self.capture_coordinator is not None and (
+            self.capture_count != 1
+            or self.capture_coordinator.required_terminal_milestone not in self.reached_milestones
+        ):
+            fail("capture")
         body = {"type": "complete", "version": 1, "session": self.session_id, "sequence": self.sequence}
         self.send(body)
         completed = self.verify(self.receive(deadline), {"type", "version", "session", "sequence"})
@@ -1348,7 +2018,10 @@ def compile_barrier(output: Path) -> Path:
 
 def minimal_environment(output: Path, barrier: Path | None, game: Path, control: Path, pid_file: Path) -> dict[str, str]:
     environment: dict[str, str] = {}
-    for key in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS", "XAUTHORITY", "LANG", "LC_ALL"):
+    for key in (
+        "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS",
+        "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "LANG", "LC_ALL",
+    ):
         if key in os.environ:
             environment[key] = os.environ[key]
     runtime_value = os.environ.get("XDG_RUNTIME_DIR")
@@ -1550,6 +2223,7 @@ def execute_case(contract: dict[str, Any], output: Path, broker_channel: BrokerC
     launcher: subprocess.Popen[bytes] | None = None
     identities: list[ProcessIdentity] = []
     operator: AtspiSession | None = None
+    capture_coordinator: CaptureCoordinator | None = None
     boundary_armed_observed = False
     boundary_cleaned_observed = False
     accessible_state_observed = False
@@ -1563,7 +2237,14 @@ def execute_case(contract: dict[str, Any], output: Path, broker_channel: BrokerC
         identities.append(gui)
         operator_environment = {key: value for key, value in environment.items() if not key.startswith("SMAPI_LINUX_GUI_HARD_STATE_") and key != "LD_PRELOAD"}
         route, restart_route = qualification_routes(scenario)
-        operator = AtspiSession(route, gui, gui_hash, control, output, operator_environment, "operation", total_deadline)
+        capture_coordinator = CaptureCoordinator(
+            contract, output, package_root, game, before, gui, gui_hash, backend_hash,
+            operator_environment,
+        )
+        operator = AtspiSession(
+            route, gui, gui_hash, control, output, operator_environment, "operation",
+            total_deadline, None if scenario == "E6" else capture_coordinator,
+        )
         advance_operation_to_confirmation(operator, total_deadline, package.parent, game)
         backend = find_bound_descendant(gui.pid, backend_hash, process_group, min(total_deadline, time.monotonic() + timeouts["startup"]))
         identities.append(backend)
@@ -1577,6 +2258,7 @@ def execute_case(contract: dict[str, Any], output: Path, broker_channel: BrokerC
         if barrier_server is not None:
             barrier_server.wait(backend, min(total_deadline, time.monotonic() + timeouts["operation"]))
             barrier_observed = True
+            capture_coordinator.barrier_observed = True
             if scenario in ("C2", "C3"):
                 if operator is None:
                     fail("operator")
@@ -1597,6 +2279,7 @@ def execute_case(contract: dict[str, Any], output: Path, broker_channel: BrokerC
                     time.sleep(0.05)
                 if identity_matches(backend):
                     fail("cleanup")
+                capture_coordinator.backend_loss_observed = True
                 if operator is None:
                     fail("operator")
                 operator.advance("state.e5", total_deadline, package.parent, game)
@@ -1630,9 +2313,11 @@ def execute_case(contract: dict[str, Any], output: Path, broker_channel: BrokerC
                     }
                     if restart_route is None:
                         fail("operator")
+                    capture_coordinator.rebind_fresh_session(gui, operator_environment)
                     operator = AtspiSession(
                         restart_route, gui, gui_hash, control, output,
                         operator_environment, "automatic-recovery", total_deadline,
+                        capture_coordinator,
                     )
                     advance_operation_to_confirmation(operator, total_deadline, package.parent, game)
                     backend = find_bound_descendant(
@@ -1684,16 +2369,28 @@ def execute_case(contract: dict[str, Any], output: Path, broker_channel: BrokerC
             if e2_restored_digest(scenario, expected) != e2_restored_digest(scenario, restored):
                 fail("inventory")
             inventory_verified = True
+        if capture_coordinator is None:
+            fail("capture")
+        expected_before = (
+            underlying_before
+            if scenario in ("E2-read-only", "E2-disk-full") else before
+        )
+        durable_after = capture_coordinator.verify_after(expected_before, restored)
         enforce_output_bound(output)
         return {
-            "atspiActionObserved": True,
-            "accessibleStateObserved": accessible_state_observed,
-            "barrierObserved": barrier_observed,
-            "boundaryArmedObserved": boundary_armed_observed,
-            "boundaryCleanedObserved": boundary_cleaned_observed,
+            "evidenceId": capture_coordinator.spec.evidence_id.value,
+            "fault": (
+                None if capture_coordinator.spec.fault is None
+                else capture_coordinator.spec.fault.value
+            ),
+            "environmentProfile": capture_coordinator.profile.profile_id.value,
+            "visibleState": capture_coordinator.spec.visible_state.value,
+            "durableAtCapture": capture_coordinator.durable_at_capture,
+            "durableAfter": durable_after,
+            "atspiEvidenceRecorded": accessible_state_observed,
             "cleanupComplete": True,
-            "exactWindowCaptured": False,
-            "inventoryVerified": inventory_verified,
+            "exactWindowCaptured": capture_coordinator.captured,
+            "durableClassificationVerified": inventory_verified or scenario == "E5",
             "packageIdentityReverified": True,
         }
     finally:
@@ -1718,7 +2415,7 @@ def success_aggregate(contract: dict[str, Any], status: str, details: dict[str, 
         "schemaVersion": SCHEMA_VERSION,
         "status": status,
     }
-    if status == "preflighted":
+    if status == "captured_pending_privacy_and_public_authority":
         result.update({
             "releaseTag": contract["release"]["tag"],
             "sourceCommit": contract["release"]["expected_commit"],
@@ -1727,9 +2424,6 @@ def success_aggregate(contract: dict[str, Any], status: str, details: dict[str, 
             "packageSha256": contract["package"]["sha256"],
             "guiSha256": contract["binaries"]["apphost_sha256"],
             "backendSha256": contract["binaries"]["backend_sha256"],
-            "capturePending": True,
-            "durableClassificationPending": True,
-            "publicAuthorityVerificationPending": True,
         })
         result.update(details or {})
     return result
@@ -1792,7 +2486,11 @@ def main(arguments: list[str]) -> int:
                 if parsed.execute
                 else validator.read_contract(Path(parsed.contract))
             )
-            scenario = validator.validate_contract(contract, Path(parsed.output))
+            scenario = validator.validate_contract(
+                contract,
+                Path(parsed.output),
+                require_prepared_output=parsed.execute,
+            )
         except getattr(validator, "InputError", Exception):
             fail("admission")
         if contract.get("scenario") != scenario:
@@ -1805,7 +2503,7 @@ def main(arguments: list[str]) -> int:
             details = execute_case(contract, Path(parsed.output), broker_channel)
         finally:
             broker_channel.close()
-        emit(success_aggregate(contract, "preflighted", details))
+        emit(success_aggregate(contract, "captured_pending_privacy_and_public_authority", details))
         return 0
     except QualificationError as error:
         emit(failure_aggregate(error.code))

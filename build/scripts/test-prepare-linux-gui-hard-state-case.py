@@ -75,7 +75,7 @@ class Fixture:
                     archive.writestr(name, content)
         os.chmod(self.package, 0o600)
 
-    def prepare(self):
+    def prepare(self, environment_profile: str = "ubuntu-24.04-gnome-xwayland"):
         return self.module.prepare(
             case_root=self.case_root,
             package=self.package,
@@ -87,6 +87,7 @@ class Fixture:
             repository_root=REPOSITORY_ROOT,
             runtime_root=self.runtime,
             required_prefix_uid=os.geteuid(),
+            environment_profile=environment_profile,
         )
 
 
@@ -122,14 +123,39 @@ class PreparationTests(unittest.TestCase):
                 contract = json.loads(contract_path.read_text(encoding="ascii"))
                 self.assertEqual(set(contract), {
                     "schema_version", "scenario", "release", "package", "game_marker",
-                    "binaries", "isolation", "timeouts_seconds",
+                    "binaries", "capture", "isolation", "timeouts_seconds", "resource_limits",
                 })
+                self.assertEqual(contract["schema_version"], 2)
                 self.assertEqual(contract["scenario"], scenario)
+                self.assertEqual(contract["capture"], {
+                    "policy": "exact-window-v1",
+                    "environment_profile": "ubuntu-24.04-gnome-xwayland",
+                })
+                self.assertEqual(contract["resource_limits"], {"output_bytes": 1073741824})
                 self.assertIs(contract["isolation"]["allow_privileged_fault_setup"], scenario.startswith("E2-"))
                 self.assertEqual(contract["package"]["sha256"], hashlib.sha256(fixture.package.read_bytes()).hexdigest())
                 self.assertEqual(contract["binaries"]["apphost_sha256"], hashlib.sha256(b"gui-apphost\n").hexdigest())
                 self.assertEqual(contract["binaries"]["backend_sha256"], hashlib.sha256(b"backend-apphost\n").hexdigest())
                 self.assertEqual(self.validator.validate_contract(contract, output), scenario)
+
+    def test_prepares_each_closed_environment_profile_and_rejects_unknown_profile(self):
+        for profile in sorted(self.module.ENVIRONMENT_PROFILES):
+            with self.subTest(profile=profile), self.temporary() as name:
+                fixture = Fixture(Path(name), self.module)
+                contract_path, output = fixture.prepare(profile)
+                contract = json.loads(contract_path.read_text(encoding="ascii"))
+                self.assertEqual(contract["capture"], {
+                    "policy": "exact-window-v1",
+                    "environment_profile": profile,
+                })
+                self.assertEqual(self.validator.validate_contract(contract, output), "C3")
+
+        with self.temporary() as name:
+            fixture = Fixture(Path(name), self.module)
+            with self.assertRaisesRegex(self.module.PreparationError, "capture"):
+                fixture.prepare("caller-supplied-profile")
+            self.assertEqual(list(fixture.case_root.iterdir()), [])
+            self.assertEqual(list(fixture.runtime.iterdir()), [])
 
     def test_requires_nonroot_and_exact_root_prefix_contract(self):
         with self.temporary() as name:
@@ -315,13 +341,31 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(self.module.main([]), 0)
         emit.assert_called_once_with({
             "contractPath": os.fspath(contract), "ok": True, "outputPath": os.fspath(output),
-            "schemaVersion": 1, "status": "prepared",
+            "schemaVersion": 2, "status": "prepared",
         })
+
+    def test_cli_requires_one_explicit_closed_environment_profile(self):
+        base = [
+            "--case-root", "/srv/smapi-hard-state/smapi-hard-state-" + "a" * 32,
+            "--package", f"/run/user/1000/SMAPI-{VERSION}-linux-x64-installer.zip",
+            "--expected-package-sha256", "3" * 64,
+            "--version", VERSION,
+            "--commit", COMMIT,
+            "--tree", TREE,
+            "--scenario", "C3",
+        ]
+        for profile in sorted(self.module.ENVIRONMENT_PROFILES):
+            with self.subTest(profile=profile):
+                values = self.module.parse_arguments([*base, "--environment-profile", profile])
+                self.assertEqual(values["environment_profile"], profile)
+        with self.assertRaisesRegex(self.module.PreparationError, "usage"):
+            self.module.parse_arguments(base)
 
     def test_cli_rejects_unknown_arguments_with_one_sanitized_json_line(self):
         for arguments in (
             ["--unknown", "/private/fixture/token"],
             ["--game-marker", "/private/copied/Stardew Valley.dll"],
+            ["--environment-profile", "ubuntu-24.04-gnome-x11"],
             ["--case-r", "/private/fixture/token"],
             ["--case-root", "/x"] * 8,
         ):
@@ -335,7 +379,7 @@ class PreparationTests(unittest.TestCase):
                 lines = result.stdout.splitlines()
                 self.assertEqual(len(lines), 1)
                 self.assertEqual(json.loads(lines[0]), {
-                    "code": "usage", "ok": False, "schemaVersion": 1, "status": "rejected",
+                    "code": "usage", "ok": False, "schemaVersion": 2, "status": "rejected",
                 })
                 self.assertNotIn("private", result.stdout)
                 self.assertNotIn("token", result.stdout)

@@ -13,6 +13,7 @@ import socket
 import stat
 import signal
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import zipfile
+import zlib
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +54,7 @@ class Fixture:
             "purpose": "smapi-linux-gui-hard-state-disposable-root",
             "root_device": root_stat.st_dev,
             "root_inode": root_stat.st_ino,
-            "schema_version": 1,
+            "schema_version": 2,
         }
         marker_path = self.root / VALIDATOR_MARKER
         marker_path.write_text(json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8")
@@ -66,7 +68,7 @@ class Fixture:
         os.chmod(self.game_marker, 0o600)
         self.output = self.root / "hard-state-output-00000001"
         self.contract = {
-            "schema_version": 1,
+            "schema_version": 2,
             "scenario": scenario,
             "release": {
                 "version": VERSION,
@@ -86,6 +88,10 @@ class Fixture:
                 "sha256": hashlib.sha256(self.game_marker.read_bytes()).hexdigest(),
             },
             "binaries": {"apphost_sha256": "3" * 64, "backend_sha256": "4" * 64},
+            "capture": {
+                "policy": "exact-window-v1",
+                "environment_profile": "ubuntu-24.04-gnome-xwayland",
+            },
             "isolation": {
                 "disposable_root": str(self.root),
                 "root_device": root_stat.st_dev,
@@ -97,6 +103,7 @@ class Fixture:
                 "allow_privileged_fault_setup": scenario.startswith("E2-"),
             },
             "timeouts_seconds": {"startup": 5, "operation": 10, "settlement": 5, "cleanup": 5, "total": 25},
+            "resource_limits": {"output_bytes": 1024 * 1024 * 1024},
         }
         self.contract_path = base / "contract.json"
         self.write()
@@ -153,7 +160,7 @@ class SupervisorTests(unittest.TestCase):
                     "kind": "linux-gui-hard-state-qualification",
                     "ok": True,
                     "scenario": scenario,
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "status": "admitted",
                 })
                 self.assertNotIn(str(fixture.base), result.stdout)
@@ -212,14 +219,20 @@ class SupervisorTests(unittest.TestCase):
                     "package": {"path": str(package), "sha256": "1" * 64},
                     "release": {"version": VERSION},
                     "binaries": {"apphost_sha256": "2" * 64, "backend_sha256": "3" * 64},
+                    "capture": {
+                        "policy": "exact-window-v1",
+                        "environment_profile": "ubuntu-24.04-gnome-xwayland",
+                    },
                     "game_marker": {"path": str(base / "marker"), "size_bytes": 32, "sha256": "4" * 64},
                     "isolation": {"disposable_root": str(base)},
                     "timeouts_seconds": {"startup": 5, "operation": 10, "settlement": 5, "cleanup": 5, "total": 25},
+                    "resource_limits": {"output_bytes": 1024 * 1024 * 1024},
                 }
                 sessions = []
                 boundaries = []
                 barriers = []
                 next_pid = iter(range(4101, 4120))
+                capture_model = self.module.load_capture_model()
 
                 class FakeLauncher:
                     def __init__(self):
@@ -258,21 +271,58 @@ class SupervisorTests(unittest.TestCase):
                         self.events.append("close")
 
                 class FakeAtspi:
-                    def __init__(self, route, _gui, _hash, _control, _output, _environment, suffix, _deadline):
+                    def __init__(
+                        self, route, _gui, _hash, _control, _output, _environment,
+                        suffix, _deadline, capture_coordinator=None,
+                    ):
                         self.route = route
                         self.suffix = suffix
+                        self.capture_coordinator = capture_coordinator
                         self.milestones = []
                         self.completed = False
                         sessions.append(self)
 
                     def advance(self, milestone, *_args):
                         self.milestones.append(milestone)
+                        if (
+                            self.capture_coordinator is not None
+                            and milestone == self.capture_coordinator.capture_milestone
+                        ):
+                            self.capture_coordinator.capture(milestone, [], 0)
 
                     def complete(self, _deadline):
                         self.completed = True
 
                     def close(self, *_args, **_kwargs):
                         pass
+
+                class FakeCaptureCoordinator:
+                    def __init__(self, capture_contract, *_args):
+                        self.spec = capture_model.capture_spec(capture_contract["scenario"])
+                        self.profile = capture_model.environment_profile(
+                            capture_contract["capture"]["environment_profile"],
+                        )
+                        self.capture_milestone = self.spec.capture_milestone.value
+                        self.required_terminal_milestone = self.spec.required_terminal_milestone.value
+                        self.barrier_observed = False
+                        self.backend_loss_observed = False
+                        self.fresh_session_observed = False
+                        self.captured = False
+                        self.durable_at_capture = None
+
+                    def capture(self, milestone, _observations, _deadline):
+                        if self.captured or milestone != self.capture_milestone:
+                            raise AssertionError("wrong synthetic capture milestone")
+                        self.captured = True
+                        self.durable_at_capture = self.spec.durable_at_capture.value
+
+                    def rebind_fresh_session(self, _gui, _environment):
+                        self.fresh_session_observed = True
+
+                    def verify_after(self, _before, _after):
+                        if not self.captured:
+                            raise AssertionError("synthetic case did not capture")
+                        return self.spec.durable_after.value
 
                 def fake_hash(path, *_args, **_kwargs):
                     if path == package:
@@ -324,6 +374,7 @@ class SupervisorTests(unittest.TestCase):
                         "find_bound_descendant": fake_descendant,
                         "bind_exact_app_tree": lambda *_args: [],
                         "AtspiSession": FakeAtspi,
+                        "CaptureCoordinator": FakeCaptureCoordinator,
                         "private_file": lambda *_args: None,
                         "pidfd_signal": lambda *_args: None,
                         "identity_matches": lambda *_args: False,
@@ -351,7 +402,12 @@ class SupervisorTests(unittest.TestCase):
                         tuple(sessions[1].milestones),
                         self.module.BASE_LOCAL_ROUTE + ("terminal.e6",),
                     )
-                self.assertEqual(result["inventoryVerified"], scenario != "E5")
+                self.assertTrue(result["exactWindowCaptured"])
+                self.assertTrue(result["durableClassificationVerified"])
+                self.assertEqual(
+                    result["durableAtCapture"],
+                    capture_model.capture_spec(scenario).durable_at_capture.value,
+                )
 
     def test_e2_inventory_projections_bind_each_real_boundary_view(self):
         base = [
@@ -539,7 +595,10 @@ class SupervisorTests(unittest.TestCase):
             try:
                 digest, metadata = self.module.hash_proc_executable(client.pid)
                 group, started = self.module.proc_stat(client.pid)
-                identity = self.module.ProcessIdentity(client.pid, started, group, metadata.st_dev, metadata.st_ino, digest)
+                identity = self.module.ProcessIdentity(
+                    client.pid, started, group,
+                    metadata.st_dev, metadata.st_ino, metadata.st_size, digest,
+                )
                 self.assertEqual(server.wait(identity, time.monotonic() + 2), 7)
                 server.release()
                 stdout, stderr = client.communicate(timeout=2)
@@ -571,7 +630,14 @@ for sequence,milestone in enumerate(milestones):
  command=receive(s); assert command["sequence"]==sequence and command["milestone"]==milestone
  if milestone=="plan.inspect": assert command["operation"]=="install"
  if milestone.startswith("state."):
-  send(s,{"type":"capture-ready","version":1,"session":a.session_id,"sequence":sequence,"milestone":milestone})
+  observations=[
+   {"name":"Install failed before changing files","role":"heading","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"No mutation was reported. Check user permissions for the game folder; do not run as root.","role":"text","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"Durable state: Unchanged","role":"panel","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"Recovery disposition: Not required","role":"panel","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"Next safe action: Inspect a fresh plan","role":"panel","visible":True,"enabled":True,"actionInterface":False},
+  ]
+  send(s,{"type":"capture-ready","version":1,"session":a.session_id,"sequence":sequence,"milestone":milestone,"observations":observations})
   continued=receive(s); assert continued["type"]=="continue" and continued["milestone"]==milestone
  send(s,{"type":"reached","version":1,"session":a.session_id,"sequence":sequence,"milestone":milestone})
 done=receive(s); send(s,{"type":"completed","version":1,"session":a.session_id,"sequence":done["sequence"]})
@@ -591,24 +657,286 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
             sleeper = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
             previous = self.module.OPERATOR_HELPER
             try:
+                capture_events = []
+
+                class Capture:
+                    capture_milestone = "state.e2-permission"
+                    required_terminal_milestone = "state.e2-permission"
+
+                    def capture(self, milestone, observations, _deadline):
+                        capture_events.append((milestone, observations))
+
                 self.module.OPERATOR_HELPER = helper
                 digest, _ = self.module.hash_proc_executable(sleeper.pid)
                 gui = self.module.bind_process(sleeper.pid, digest, sleeper.pid)
                 session = self.module.AtspiSession(
                     "e2-permission", gui, digest, control, output,
                     {"PATH": "/usr/bin:/bin"}, "synthetic", time.monotonic() + 5,
+                    Capture(),
                 )
                 for milestone in self.module.AT_SPI_ROUTES["e2-permission"]:
                     session.advance(milestone, time.monotonic() + 5, package, game)
                 session.complete(time.monotonic() + 5)
                 self.assertEqual(session.observation_count, 1)
+                self.assertEqual(session.capture_count, 1)
+                self.assertEqual(capture_events[0][0], "state.e2-permission")
+                self.assertEqual(len(capture_events[0][1]), 5)
                 self.assertTrue((output / "atspi-synthetic.trace.jsonl").is_file())
+                retained = json.loads((output / "atspi-synthetic-observation-07.json").read_text(encoding="utf-8"))
+                self.assertEqual(retained["observations"][0]["name"], "Install failed before changing files")
                 self.assertEqual(stat.S_IMODE((control / "atspi-synthetic.token").stat().st_mode), 0o600)
             finally:
                 self.module.OPERATOR_HELPER = previous
                 if sleeper.poll() is None:
                     sleeper.kill()
                 sleeper.wait()
+
+    def test_capture_failure_never_releases_the_observation_hold(self):
+        milestone = "state.e2-permission"
+        facts = [
+            {
+                "name": name,
+                "role": sorted(roles)[0],
+                "visible": True,
+                "enabled": True,
+                "actionInterface": action_interface,
+            }
+            for name, roles, action_interface in self.module.EXPECTED_OBSERVATIONS[milestone]
+        ]
+
+        class RefusingCapture:
+            capture_milestone = milestone
+            required_terminal_milestone = milestone
+
+            def capture(self, *_args):
+                raise self_module.QualificationError("capture")
+
+        self_module = self.module
+        session = self.module.AtspiSession.__new__(self.module.AtspiSession)
+        session.route = "e2-permission"
+        session.sequence = len(self.module.BASE_LOCAL_ROUTE)
+        session.gui = object()
+        session.session_id = "hard_state_" + "a" * 24
+        session.capture_coordinator = RefusingCapture()
+        session.capture_count = 0
+        session.observation_count = 0
+        session.reached_milestones = set()
+        session.suffix = "refusal"
+        session.output = Path("/private/not-written")
+        sent = []
+        response = {
+            "type": "capture-ready", "version": 1, "session": session.session_id,
+            "sequence": session.sequence, "milestone": milestone, "observations": facts,
+        }
+        session.send = sent.append
+        session.receive = lambda _deadline: response
+        session.verify = lambda value, _keys: value
+        with (
+            mock.patch.object(self.module, "identity_matches", return_value=True),
+            mock.patch.object(self.module, "write_private_json"),
+            self.assertRaises(self.module.QualificationError) as raised,
+        ):
+            session.advance(milestone, time.monotonic() + 1, Path("/release"), Path("/game"))
+        self.assertEqual(raised.exception.code, "capture")
+        self.assertEqual([message["type"] for message in sent], ["advance"])
+
+    def test_capture_coordinator_derives_and_binds_exact_stager_inputs(self):
+        with self.temporary() as name:
+            base = Path(name)
+            output = base / "output"
+            package_root = base / "package-root"
+            game = base / "game"
+            for path in (output, package_root, game):
+                path.mkdir(mode=0o700)
+            package_path = base / f"SMAPI-{VERSION}-linux-x64-installer.zip"
+            package_path.write_bytes(b"package")
+            os.chmod(package_path, 0o600)
+            contract = {
+                "scenario": "E2-permission",
+                "release": {
+                    "tag": TAG,
+                    "url": f"https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/{TAG}",
+                    "expected_commit": "1" * 40,
+                    "expected_tree": "2" * 40,
+                },
+                "package": {"path": str(package_path), "sha256": "3" * 64},
+                "binaries": {"apphost_sha256": "4" * 64, "backend_sha256": "5" * 64},
+                "capture": {"environment_profile": "ubuntu-24.04-gnome-xwayland"},
+            }
+            gui = self.module.ProcessIdentity(1234, 5678, 1234, 8, 9, 10, "4" * 64)
+            verified_environment = SimpleNamespace(
+                distribution="Ubuntu", distribution_version="24.04.4 LTS",
+                architecture="amd64", desktop="GNOME", session="wayland",
+                window_backend="xwayland", scale_percent=100, theme="light",
+                resolution_width=1920, resolution_height=1080,
+            )
+            environment_verifier = SimpleNamespace(
+                verify_capture_environment=mock.Mock(return_value=verified_environment),
+            )
+            with mock.patch.object(self.module, "load_environment_verifier", return_value=environment_verifier):
+                coordinator = self.module.CaptureCoordinator(
+                    contract, output, package_root, game, [], gui, "4" * 64, "5" * 64,
+                    {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
+                )
+            environment_verifier.verify_capture_environment.assert_called_once_with(
+                "ubuntu-24.04-gnome-xwayland",
+                _environment_reader=mock.ANY,
+            )
+            observed_arguments = []
+
+            def fake_run(arguments, **options):
+                observed_arguments.extend(arguments)
+                values = {
+                    arguments[index]: arguments[index + 1]
+                    for index in range(2, len(arguments) - 1)
+                    if arguments[index].startswith("--") and not arguments[index + 1].startswith("--")
+                }
+                stage = Path(values["--stage-directory"])
+                filename = values["--filename"]
+                pixels = b"\x10\x20\x30\xff"
+                header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+
+                def chunk(kind, payload):
+                    checksum = zlib.crc32(payload, zlib.crc32(kind)) & 0xffffffff
+                    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+                png = (
+                    b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+                    + chunk(b"IDAT", zlib.compress(b"\0" + pixels, 9)) + chunk(b"IEND", b"")
+                )
+                png_path = stage / filename
+                png_path.write_bytes(png)
+                os.chmod(png_path, 0o600)
+                identity = coordinator._production_identity()
+                record = {
+                    "status": "staged_pending_original_resolution_privacy_review",
+                    "id": "E2",
+                    "filename": filename,
+                    "evidence_class": "real_qualification",
+                    "production_identity": identity,
+                    "fixture_or_injection": "filesystem-eacces",
+                    "operation": "install",
+                    "durable_state": {"before": "unchanged", "after": "unchanged"},
+                    "environment": {
+                        "distribution": "Ubuntu 24.04.4 LTS",
+                        "architecture": "amd64",
+                        "desktop_environment": "GNOME",
+                        "session_type": "wayland",
+                        "display_backend": "xwayland",
+                        "display_scale_percent": 100,
+                        "theme": "light",
+                        "resolution": "1920x1080",
+                    },
+                    "runtime": {
+                        "avalonia": "Avalonia 12.1.1",
+                        "dotnet_sdk": "self-contained",
+                        "dotnet_runtime": "Microsoft.NETCore.App 10.0.8",
+                    },
+                    "qualification_reference": coordinator.spec.docs_anchor,
+                    "fault": "permission",
+                    "staging_schema_version": 1,
+                    "capture": {
+                        "timestamp": "2026-09-03T12:00:00+08:00",
+                        "tool": "ImageMagick 7",
+                        "command": "import -window 0x123 png32:<private-temporary-file>; canonical metadata normalization",
+                        "input_mode": "discovered_exact_x11_client_window",
+                        "source_window": {
+                            "window_id": "0x123",
+                            "process_id": gui.pid,
+                            "process_start_time": gui.start_time,
+                            "expected_title": coordinator.spec.window_title,
+                            "display": ":99",
+                            "executable": {
+                                "device": gui.executable_device,
+                                "inode": gui.executable_inode,
+                                "size": gui.executable_size,
+                                "sha256_verified": True,
+                            },
+                            "unique_mapped_visible_client_verified": True,
+                        },
+                        "width": 1,
+                        "height": 1,
+                        "sha256": hashlib.sha256(png).hexdigest(),
+                        "decoded_pixel_sha256": hashlib.sha256(pixels).hexdigest(),
+                    },
+                    "normalization": {
+                        "application_pixels_altered": False,
+                        "input_chunks": ["IHDR", "IDAT", "IEND"],
+                        "output_chunks": ["IHDR", "IDAT", "IEND"],
+                        "statement": "Incidental PNG metadata was removed; decoded RGB/RGBA application pixels are byte-identical.",
+                    },
+                    "privacy_review": {
+                        "status": "pending",
+                        "requirement": "Inspect the staged PNG at original resolution before manifest promotion.",
+                    },
+                }
+                record_name = f"{filename[:-4]}.capture.json"
+                record_path = stage / record_name
+                record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                os.chmod(record_path, 0o600)
+                emitted = {
+                    "filename": filename,
+                    "record": record_name,
+                    "sha256": hashlib.sha256(png).hexdigest(),
+                    "pixel_sha256": hashlib.sha256(pixels).hexdigest(),
+                    "width": 1,
+                    "height": 1,
+                }
+                options["stdout"].write((json.dumps(emitted) + "\n").encode("ascii"))
+                return SimpleNamespace(returncode=0)
+
+            with (
+                mock.patch.object(self.module, "read_runtime_metadata", return_value=("Avalonia 12.1.1", "self-contained", "Microsoft.NETCore.App 10.0.8")),
+                mock.patch.object(self.module, "hash_trusted_helper", return_value=("7" * 64, SimpleNamespace())),
+                mock.patch.object(self.module, "identity_matches", return_value=True),
+                mock.patch.object(self.module.subprocess, "run", side_effect=fake_run),
+            ):
+                coordinator._stage(time.monotonic() + 2)
+            self.assertIn("--discover-window", observed_arguments)
+            self.assertNotIn("--window-id", observed_arguments)
+            self.assertEqual(observed_arguments[observed_arguments.index("--expected-window-pid") + 1], "1234")
+            self.assertEqual(set((output / "capture").iterdir()), {
+                output / "capture/e2-permission.png",
+                output / "capture/e2-permission.capture.json",
+            })
+
+            def missing_environment(arguments, **options):
+                result = fake_run(arguments, **options)
+                stage = Path(arguments[arguments.index("--stage-directory") + 1])
+                path = stage / "e2-permission.capture.json"
+                value = json.loads(path.read_text(encoding="utf-8"))
+                value.pop("environment")
+                path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                return result
+
+            def corrupt_png(arguments, **options):
+                result = fake_run(arguments, **options)
+                stage = Path(arguments[arguments.index("--stage-directory") + 1])
+                path = stage / "e2-permission.png"
+                value = bytearray(path.read_bytes())
+                value[-1] ^= 1
+                path.write_bytes(value)
+                os.chmod(path, 0o600)
+                return result
+
+            for index, tampered_run in enumerate((missing_environment, corrupt_png)):
+                with self.subTest(tamper=index):
+                    rejected_output = base / f"rejected-{index}"
+                    rejected_output.mkdir(mode=0o700)
+                    with mock.patch.object(self.module, "load_environment_verifier", return_value=environment_verifier):
+                        rejected = self.module.CaptureCoordinator(
+                            contract, rejected_output, package_root, game, [], gui,
+                            "4" * 64, "5" * 64, {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
+                        )
+                    with (
+                        mock.patch.object(self.module, "read_runtime_metadata", return_value=("Avalonia 12.1.1", "self-contained", "Microsoft.NETCore.App 10.0.8")),
+                        mock.patch.object(self.module, "hash_trusted_helper", return_value=("7" * 64, SimpleNamespace())),
+                        mock.patch.object(self.module, "identity_matches", return_value=True),
+                        mock.patch.object(self.module.subprocess, "run", side_effect=tampered_run),
+                        self.assertRaises(self.module.QualificationError) as raised,
+                    ):
+                        rejected._stage(time.monotonic() + 2)
+                    self.assertEqual(raised.exception.code, "capture")
 
     def test_boundary_session_binds_same_namespace_peer_and_fixed_stages(self):
         with tempfile.TemporaryDirectory(prefix="hs-", dir="/dev/shm") as name:
@@ -714,7 +1042,7 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                     pass
 
             metadata = SimpleNamespace(st_mode=stat.S_IFSOCK)
-            executable = SimpleNamespace(st_dev=1, st_ino=2)
+            executable = SimpleNamespace(st_dev=1, st_ino=2, st_size=4096)
 
             def make_channel(start_time):
                 fake = FakeSocket(start_time)
