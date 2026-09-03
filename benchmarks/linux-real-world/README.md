@@ -46,3 +46,62 @@ The scripts reject private sources or outputs which overlap the repository, dete
 Both product assemblies run on the native game's .NET 6 runtime through the same byte-identical official 4.5.2 apphost and game-derived runtime-deps file, copied and hashed during preparation. This also completes official SMAPI's required first-launch deps update before any measured process. Tiered compilation is disabled identically because the complete workload triggers a reproducible native .NET 6 JIT crash during mod entry when it is enabled; that wrapper setting is recorded as a limitation and is not a claim about default-launch performance. The outer Python/taskset/bubblewrap wrapper and arguments are otherwise identical, so the fork dispatcher isn't part of this code-path comparison. SMAPI log startup boundaries have one-second resolution, while probe-entry-to-game-launch and game-launch-to-save-load boundaries use the monotonic high-resolution clock. The probe cannot observe native launcher/runtime work before mod entry. The selected config keys common to both commits are canonicalized to official values and hashed; fork-only diagnostics keys are disabled except in explicitly labeled enabled samples.
 
 One-machine results are descriptive evidence for this hardware and workload. They are not universal FPS claims. Official preflight calibration on the headless llvmpipe renderer produced 643 steady and 32 transition draw records while completing 10,589 steady and 605 transition updates; this established the 300/10 draw acceptance floor with headroom. Published draw cadence is a renderer diagnostic, not desktop FPS. At the 300-observation floor, draw p99 is supported by only roughly the worst three observations and is less stable than update p99. Filesystem caches cannot be globally reset safely, shared-host noise cannot be eliminated completely, and five pairs are too few for broad population claims; publish per-run distributions and variation rather than treating pooled ticks as independent machines.
+
+## Exact candidate-package trusted-workload smoke
+
+`qualify_candidate.py` applies the same archive profiles, immutable tree manifests, benchmark probe
+acceptance, startup/workload-identity checks, 180-second steady-state scenario, transitions, and
+isolated Xvfb/bubblewrap runner to one already-built Linux workflow candidate. It does not discover
+or download any fixture, accept a live game/save path, or prepare a build from source. Every private
+input path is mandatory. Private files must be current-user-owned, single-link ordinary files with
+no group/world permissions; the prepared root and the output parent must be current-user-owned
+mode-0700 directories. The output must be a new child outside the repository and known live
+Steam/save roots.
+
+Run it as the normal user after the exact merge-commit workflow candidate has passed the ordinary
+package gates:
+
+```bash
+python3 benchmarks/linux-real-world/qualify_candidate.py \
+  --candidate-zip "$candidate_zip" \
+  --release-version "$release_version" \
+  --release-commit "$release_commit" \
+  --prepared-root "$private_prepared_root" \
+  --workload-baseline "$private_workload_baseline" \
+  --modpack-archive "$private_modpack_archive" \
+  --save-archive "$private_save_archive" \
+  --output-root "$new_private_output" \
+  --cpu-list "$isolated_cpu_list"
+```
+
+The prepared root is the unchanged Phase 1 benchmark root containing `metadata.json` and the four
+gold trees. The separate baseline must be its accepted official-preflight workload identity. The
+adapter re-audits both original archives, verifies the prepared harness hashes and four trees,
+copies the candidate through a no-follow descriptor, runs the structural package gate, installs it
+into a clone of the prepared game, and verifies both installed SMAPI assemblies byte-for-byte
+against `install.dat`. It then runs one diagnostics-disabled candidate sample in new game, Mods,
+save, home, XDG, runtime, and temporary roots. The original archives, prepared root, metadata, and
+baseline are rechecked after the run.
+
+Successful stdout is exactly one JSON object with an explicit aggregate allowlist: public release
+identity and candidate digest; `installedSmapiAssembliesMatched` and workload-identity match
+booleans; public game version; aggregate loaded/skipped counts; steady/transition duration and sample counts; invalid
+state counters; overflow/normal-exit facts; and verified-source counts. It never includes input or
+output paths, the private workload fingerprint, save/mod identities, raw logs, configurations, or
+timestamps. Failure stderr is only `schema`, `result`, and one fixed path-free code. Detailed package,
+archive, installer, Xvfb, driver, console, probe, and SMAPI evidence remains mode-private below the
+caller-owned output root and must never be committed or uploaded.
+
+Before any shell package checker runs, the adapter bounds the candidate's compressed file size,
+entry count, individual and total expanded sizes, and aggregate compression ratio; rejects unsafe
+paths, entry types, encryption, and unsupported compression; and requires the expected Linux
+package profile. All child stdout/stderr, including clone failures, stays in mode-`0600` private
+logs. Interrupting the adapter terminates and reaps active process groups and Xvfb, then emits only
+the fixed path-free `interrupted` failure object.
+
+This is one trusted smoke sample, not an A/B performance comparison, universal performance claim,
+public-artifact attestation, GUI lifecycle test, or proof that the supplied `--release-commit` was
+the candidate's source commit. Establish that association from the workflow run and its provenance
+before invoking this adapter; repeat public checksum/provenance and graphical/manual install,
+update, repair, backup, rollback, and uninstall qualification against the six published assets
+separately.
