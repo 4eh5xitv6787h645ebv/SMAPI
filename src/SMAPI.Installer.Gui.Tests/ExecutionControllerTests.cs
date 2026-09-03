@@ -781,11 +781,11 @@ internal sealed class ExecutionControllerTests
         viewModel.ApplySnapshotForTesting(Snapshot(10, ExecutionState.Running));
         Dispatcher.UIThread.RunJobs();
         AutomationProperties.GetName(cancel).Should().Be("Request safe operation cancellation");
-        AutomationProperties.GetHelpText(cancel).Should().Contain("unchanged").And.Contain("rolled back").And.Contain("committed");
+        AutomationProperties.GetHelpText(cancel).Should().Contain("unchanged").And.Contain("rolled back").And.Contain("committed").And.Contain("recovery-required");
         viewModel.ApplySnapshotForTesting(Snapshot(11, ExecutionState.CancellationRequested));
         Dispatcher.UIThread.RunJobs();
         AutomationProperties.GetName(cancel).Should().Be("Operation cancellation already requested");
-        viewModel.Message.Should().Contain("unchanged").And.Contain("rolled back").And.Contain("committed");
+        viewModel.Message.Should().Contain("without further cancellation").And.Contain("unchanged").And.Contain("rolled back").And.Contain("committed").And.Contain("recovery-required");
         viewModel.ApplySnapshotForTesting(Snapshot(12, ExecutionState.RecoveryRequired, canRecover: true));
         Dispatcher.UIThread.RunJobs();
         AutomationProperties.GetName(cancel).Should().Be("Close installer without starting recovery");

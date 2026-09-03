@@ -2411,6 +2411,67 @@ public sealed class ProcessInstallerProtocolClientTests
     }
 
     [Test]
+    public async Task CancelledAndRolledBackTerminalProjectsExactTypedCountsWithoutBackendTextOrAuthority()
+    {
+        const string privateSummary = "/home/private-user/cancellation summary";
+        const string privateLog = "/home/private-user/cancellation.log";
+        ReadOnlyPlanScript script = new(InstallerOperation.Backup);
+        ScriptedProcess process = new(request => request switch
+        {
+            ExecutePlanRequest => null,
+            CancelPlanRequest cancel => Serialize(new CommandAcknowledgedEvent(
+                Session,
+                ProtocolAcknowledgementKind.PlanCancellationRequested,
+                script.PlanId,
+                null
+            )
+            {
+                CommandId = cancel.CommandId
+            }),
+            _ => script.Respond(request)
+        });
+        await using ProcessInstallerProtocolClient client = Create(process);
+        InstallerConfirmedPlanAuthority authority = await PrepareConfirmedPlanAsync(client, script);
+        InstallerExecutionOperation execution = await client.ExecutePlanAsync(authority);
+
+        await execution.RequestCancellationAsync();
+        ExecutePlanRequest execute = process.Requests.OfType<ExecutePlanRequest>().Single();
+        process.Publish(Serialize(new CancelledEvent(
+            Session,
+            script.PlanId,
+            script.PlanDigest,
+            ProtocolExecutionOutcome.CancelledAndRolledBack,
+            new(ProtocolDurableState.RolledBack, null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain),
+            new(0, 0, 2, 2, 0, 0),
+            privateSummary,
+            privateLog
+        )
+        {
+            CommandId = execute.CommandId
+        }));
+
+        InstallerExecutionTerminalResult result = (await execution.Completion)
+            .Should().BeOfType<InstallerExecutionTerminalResult>().Subject;
+
+        result.Should().BeEquivalentTo(new InstallerExecutionTerminalResult(
+            ProtocolExecutionOutcome.CancelledAndRolledBack,
+            ProtocolDurableState.RolledBack,
+            null,
+            ProtocolRecoveryDisposition.Completed,
+            ProtocolNextAction.InspectAgain,
+            new(0, 0, 2, 2, 0, 0),
+            InstallerBackendSettlement.ConfirmedClosed
+        ));
+        result.ToString().Should().NotContain(privateSummary).And.NotContain(privateLog)
+            .And.NotContain(script.PlanId.Value).And.NotContain(script.PlanDigest.Value);
+        typeof(InstallerExecutionTerminalResult).GetProperties().Should().NotContain(property =>
+            property.PropertyType == typeof(string)
+            || property.Name.Contains("Digest", StringComparison.OrdinalIgnoreCase)
+            || property.Name.EndsWith("Id", StringComparison.OrdinalIgnoreCase));
+        process.Requests.OfType<CancelPlanRequest>().Should().ContainSingle();
+    }
+
+    [Test]
     public async Task DuplicateProgressSequenceFailStopsToConservativeRecoveryRequiredResult()
     {
         ReadOnlyPlanScript script = new(InstallerOperation.Backup);

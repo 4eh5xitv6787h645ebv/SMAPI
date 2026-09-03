@@ -68,10 +68,11 @@ deliberately staged; reaching a later screen never means an earlier read-only ac
 
 The execution screen keeps cancellation explicit while an operation is starting or running, but a
 request is never an immediate process kill. It may be observed before game-file mutation or only at
-a safe boundary after one complete mutation and its `Applied` journal record are durable; in the
-latter case the installer finishes the existing non-cancellable full rollback before reporting the
-result. If the request loses the final commit race, the operation finishes committing and reports
-that exact outcome. Keep the window open until its durable terminal state is visible.
+a safe boundary after one complete mutation and its `Applied` journal record are durable. In the
+latter case the installer attempts the existing full rollback without accepting another cancellation.
+If rollback cannot finish, the exact terminal reports recovery required instead of claiming the
+changes were restored. If the request loses the final commit race, the operation finishes committing
+and reports that exact outcome. Keep the window open until its durable terminal state is visible.
 
 Operation-specific expectations:
 
