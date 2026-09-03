@@ -37,6 +37,10 @@ public package.
 * Made the interactive Linux console wrapper reject supplied options with status 2 instead of
   silently dropping them, and made prompt-free requests without `--game-path` fail before game
   discovery. Headless use still requires the exact direct-apphost command documented in the guide.
+* Added a production-reachable safe cancellation checkpoint after each complete mutation and its
+  durable `Applied` journal record. A cancellation observed there uses the existing non-cancellable
+  full rollback path; individual renames, rollback, and commit publication are never interrupted,
+  and a request which loses the final commit race is still reported as committed.
 
 These changes are in source only until a replacement exact-commit prerelease is published and
 qualified. The alpha 2 package below does not gain them retroactively. The corrected description of

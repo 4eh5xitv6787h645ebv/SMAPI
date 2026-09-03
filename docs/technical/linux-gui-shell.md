@@ -66,6 +66,13 @@ deliberately staged; reaching a later screen never means an earlier read-only ac
    installer while a mutation is active. The final screen distinguishes the durable result from
    backend-settlement warnings and offers recovery when the exact recorded state requires it.
 
+The execution screen keeps cancellation explicit while an operation is starting or running, but a
+request is never an immediate process kill. It may be observed before game-file mutation or only at
+a safe boundary after one complete mutation and its `Applied` journal record are durable; in the
+latter case the installer finishes the existing non-cancellable full rollback before reporting the
+result. If the request loses the final commit race, the operation finishes committing and reports
+that exact outcome. Keep the window open until its durable terminal state is visible.
+
 Operation-specific expectations:
 
 | Operation | When to use it | What to verify in the read-only plan |

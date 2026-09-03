@@ -157,6 +157,79 @@ public sealed class TransactionOutcomeTests
         }
     }
 
+    [TestCase("create")]
+    [TestCase("replace")]
+    [TestCase("remove")]
+    public void DetailedOutcome_RequestedCancellationAfterDurableAppliedEventRollsBack(string operationKind)
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        string path = operationKind == "create"
+            ? "smapi-internal/new-parent/StardewModdingAPI.dll"
+            : "StardewModdingAPI.dll";
+        if (operationKind is "replace" or "remove")
+            Write(game, path, "old");
+        if (operationKind is "create" or "replace")
+            Write(payload, "new", "new");
+        TransactionFileOperation operation = operationKind == "remove"
+            ? new(TransactionOperationKind.RemoveFile, path, Hash("old"))
+            : Write(path, operationKind == "replace" ? Hash("old") : null, "new", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[] { operation });
+        using CancellationTokenSource source = new();
+        InstallerTransactionExecutor executor = new(faultInjector: new CancelAfterApplied(source, 0));
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, executor, source.Token);
+
+        outcome.Status.Should().Be(
+            TransactionOutcomeStatus.CancelledAndRolledBack,
+            "the durable-boundary cancellation should roll back; actual error was {0} ({1})",
+            outcome.ErrorCode,
+            outcome.SafeMessage
+        );
+        outcome.DurableStatus.Should().Be(TransactionStatus.RolledBack);
+        outcome.Cancellation.Should().Be(TransactionCancellationDisposition.ObservedAfterMutationAndRolledBack);
+        outcome.ChangedPaths.Should().Equal(new TransactionPathChange(path, operation.Kind));
+        outcome.RolledBackPaths.Should().Equal(outcome.ChangedPaths);
+        if (operationKind == "create")
+        {
+            File.Exists(Path.Combine(game, path)).Should().BeFalse();
+            System.IO.Directory.Exists(Path.Combine(game, "smapi-internal")).Should().BeFalse();
+        }
+        else
+            File.ReadAllText(Path.Combine(game, path)).Should().Be("old");
+    }
+
+    [Test]
+    public void DetailedOutcome_RequestedCancellationAtAppliedBoundaryPreventsNextMutation()
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        Write(game, "StardewModdingAPI.dll", "first-old");
+        Write(game, "StardewModdingAPI.xml", "second-old");
+        Write(payload, "first", "first-new");
+        Write(payload, "second", "second-new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[]
+        {
+            Write("StardewModdingAPI.dll", Hash("first-old"), "first", "first-new"),
+            Write("StardewModdingAPI.xml", Hash("second-old"), "second", "second-new")
+        });
+        using CancellationTokenSource source = new();
+        InstallerTransactionExecutor executor = new(faultInjector: new CancelAfterApplied(source, 0));
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, executor, source.Token);
+
+        outcome.Status.Should().Be(
+            TransactionOutcomeStatus.CancelledAndRolledBack,
+            "the durable-boundary cancellation should stop before the second mutation; actual error was {0} ({1})",
+            outcome.ErrorCode,
+            outcome.SafeMessage
+        );
+        outcome.ChangedPaths.Should().Equal(new TransactionPathChange("StardewModdingAPI.dll", TransactionOperationKind.WriteFile));
+        outcome.RolledBackPaths.Should().Equal(outcome.ChangedPaths);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("first-old");
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second-old");
+    }
+
     [Test]
     public void DetailedOutcome_ObservesMutationBeforeAppliedJournalEvent()
     {
@@ -373,11 +446,17 @@ public sealed class TransactionOutcomeTests
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
     }
 
-    private static TransactionExecutionOutcome ApplyDetailed(string game, string payload, TransactionPlan plan, InstallerTransactionExecutor executor)
+    private static TransactionExecutionOutcome ApplyDetailed(
+        string game,
+        string payload,
+        TransactionPlan plan,
+        InstallerTransactionExecutor executor,
+        CancellationToken cancellationToken = default
+    )
     {
         using InstallerOperationLease lease = InstallerOperationLease.Acquire(game);
         using LinuxAnchoredFileSystem payloadRoot = new(payload);
-        return executor.ApplyLockedWithOutcome(lease, payloadRoot, plan, lease.RootIdentity, lease.Generation);
+        return executor.ApplyLockedWithOutcome(lease, payloadRoot, plan, lease.RootIdentity, lease.Generation, cancellationToken);
     }
 
     private string Directory()
@@ -413,6 +492,26 @@ public sealed class TransactionOutcomeTests
         public AfterMutationFailure(Exception failure) => this.Failure = failure;
         public void BeforeMutation(Guid transactionId, int operationIndex) { }
         public void AfterMutation(Guid transactionId, int operationIndex) => throw this.Failure;
+    }
+
+    private sealed class CancelAfterApplied : ITransactionFaultInjector
+    {
+        private readonly CancellationTokenSource Source;
+        private readonly int OperationIndex;
+
+        public CancelAfterApplied(CancellationTokenSource source, int operationIndex)
+        {
+            this.Source = source;
+            this.OperationIndex = operationIndex;
+        }
+
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+
+        public void AfterMutation(Guid transactionId, int operationIndex)
+        {
+            if (operationIndex == this.OperationIndex)
+                this.Source.Cancel();
+        }
     }
 
     private sealed class PostCommitFailure : ITransactionFaultInjector

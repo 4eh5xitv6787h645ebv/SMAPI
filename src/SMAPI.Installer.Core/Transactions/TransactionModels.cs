@@ -335,7 +335,7 @@ public interface ITransactionFaultInjector
     /// <summary>Called after an operation intent is durable and before its first mutation.</summary>
     void BeforeMutation(Guid transactionId, int operationIndex);
 
-    /// <summary>Called after an operation mutation is durable.</summary>
+    /// <summary>Called after an operation mutation and its applied journal event are durable.</summary>
     void AfterMutation(Guid transactionId, int operationIndex);
 
     /// <summary>Called after filesystem mutation but before its applied journal event is appended.</summary>
