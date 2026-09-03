@@ -230,6 +230,7 @@ class SupervisorTests(unittest.TestCase):
                 boundaries = []
                 barriers = []
                 next_pid = iter(range(4101, 4120))
+                capture_model = self.module.load_capture_model()
 
                 class FakeLauncher:
                     def __init__(self):
@@ -268,21 +269,58 @@ class SupervisorTests(unittest.TestCase):
                         self.events.append("close")
 
                 class FakeAtspi:
-                    def __init__(self, route, _gui, _hash, _control, _output, _environment, suffix, _deadline):
+                    def __init__(
+                        self, route, _gui, _hash, _control, _output, _environment,
+                        suffix, _deadline, capture_coordinator=None,
+                    ):
                         self.route = route
                         self.suffix = suffix
+                        self.capture_coordinator = capture_coordinator
                         self.milestones = []
                         self.completed = False
                         sessions.append(self)
 
                     def advance(self, milestone, *_args):
                         self.milestones.append(milestone)
+                        if (
+                            self.capture_coordinator is not None
+                            and milestone == self.capture_coordinator.capture_milestone
+                        ):
+                            self.capture_coordinator.capture(milestone, [], 0)
 
                     def complete(self, _deadline):
                         self.completed = True
 
                     def close(self, *_args, **_kwargs):
                         pass
+
+                class FakeCaptureCoordinator:
+                    def __init__(self, capture_contract, *_args):
+                        self.spec = capture_model.capture_spec(capture_contract["scenario"])
+                        self.profile = capture_model.environment_profile(
+                            capture_contract["capture"]["environment_profile"],
+                        )
+                        self.capture_milestone = self.spec.capture_milestone.value
+                        self.required_terminal_milestone = self.spec.required_terminal_milestone.value
+                        self.barrier_observed = False
+                        self.backend_loss_observed = False
+                        self.fresh_session_observed = False
+                        self.captured = False
+                        self.durable_at_capture = None
+
+                    def capture(self, milestone, _observations, _deadline):
+                        if self.captured or milestone != self.capture_milestone:
+                            raise AssertionError("wrong synthetic capture milestone")
+                        self.captured = True
+                        self.durable_at_capture = self.spec.durable_at_capture.value
+
+                    def rebind_fresh_session(self, _gui, _environment):
+                        self.fresh_session_observed = True
+
+                    def verify_after(self, _before, _after):
+                        if not self.captured:
+                            raise AssertionError("synthetic case did not capture")
+                        return self.spec.durable_after.value
 
                 def fake_hash(path, *_args, **_kwargs):
                     if path == package:
@@ -334,6 +372,7 @@ class SupervisorTests(unittest.TestCase):
                         "find_bound_descendant": fake_descendant,
                         "bind_exact_app_tree": lambda *_args: [],
                         "AtspiSession": FakeAtspi,
+                        "CaptureCoordinator": FakeCaptureCoordinator,
                         "private_file": lambda *_args: None,
                         "pidfd_signal": lambda *_args: None,
                         "identity_matches": lambda *_args: False,
@@ -361,7 +400,12 @@ class SupervisorTests(unittest.TestCase):
                         tuple(sessions[1].milestones),
                         self.module.BASE_LOCAL_ROUTE + ("terminal.e6",),
                     )
-                self.assertEqual(result["inventoryVerified"], scenario != "E5")
+                self.assertTrue(result["exactWindowCaptured"])
+                self.assertTrue(result["durableClassificationVerified"])
+                self.assertEqual(
+                    result["durableAtCapture"],
+                    capture_model.capture_spec(scenario).durable_at_capture.value,
+                )
 
     def test_e2_inventory_projections_bind_each_real_boundary_view(self):
         base = [
@@ -611,17 +655,30 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
             sleeper = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
             previous = self.module.OPERATOR_HELPER
             try:
+                capture_events = []
+
+                class Capture:
+                    capture_milestone = "state.e2-permission"
+                    required_terminal_milestone = "state.e2-permission"
+
+                    def capture(self, milestone, observations, _deadline):
+                        capture_events.append((milestone, observations))
+
                 self.module.OPERATOR_HELPER = helper
                 digest, _ = self.module.hash_proc_executable(sleeper.pid)
                 gui = self.module.bind_process(sleeper.pid, digest, sleeper.pid)
                 session = self.module.AtspiSession(
                     "e2-permission", gui, digest, control, output,
                     {"PATH": "/usr/bin:/bin"}, "synthetic", time.monotonic() + 5,
+                    Capture(),
                 )
                 for milestone in self.module.AT_SPI_ROUTES["e2-permission"]:
                     session.advance(milestone, time.monotonic() + 5, package, game)
                 session.complete(time.monotonic() + 5)
                 self.assertEqual(session.observation_count, 1)
+                self.assertEqual(session.capture_count, 1)
+                self.assertEqual(capture_events[0][0], "state.e2-permission")
+                self.assertEqual(len(capture_events[0][1]), 5)
                 self.assertTrue((output / "atspi-synthetic.trace.jsonl").is_file())
                 retained = json.loads((output / "atspi-synthetic-observation-07.json").read_text(encoding="utf-8"))
                 self.assertEqual(retained["observations"][0]["name"], "Install failed before changing files")
@@ -631,6 +688,149 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                 if sleeper.poll() is None:
                     sleeper.kill()
                 sleeper.wait()
+
+    def test_capture_failure_never_releases_the_observation_hold(self):
+        milestone = "state.e2-permission"
+        facts = [
+            {
+                "name": name,
+                "role": sorted(roles)[0],
+                "visible": True,
+                "enabled": True,
+                "actionInterface": action_interface,
+            }
+            for name, roles, action_interface in self.module.EXPECTED_OBSERVATIONS[milestone]
+        ]
+
+        class RefusingCapture:
+            capture_milestone = milestone
+            required_terminal_milestone = milestone
+
+            def capture(self, *_args):
+                raise self_module.QualificationError("capture")
+
+        self_module = self.module
+        session = self.module.AtspiSession.__new__(self.module.AtspiSession)
+        session.route = "e2-permission"
+        session.sequence = len(self.module.BASE_LOCAL_ROUTE)
+        session.gui = object()
+        session.session_id = "hard_state_" + "a" * 24
+        session.capture_coordinator = RefusingCapture()
+        session.capture_count = 0
+        session.observation_count = 0
+        session.reached_milestones = set()
+        session.suffix = "refusal"
+        session.output = Path("/private/not-written")
+        sent = []
+        response = {
+            "type": "capture-ready", "version": 1, "session": session.session_id,
+            "sequence": session.sequence, "milestone": milestone, "observations": facts,
+        }
+        session.send = sent.append
+        session.receive = lambda _deadline: response
+        session.verify = lambda value, _keys: value
+        with (
+            mock.patch.object(self.module, "identity_matches", return_value=True),
+            mock.patch.object(self.module, "write_private_json"),
+            self.assertRaises(self.module.QualificationError) as raised,
+        ):
+            session.advance(milestone, time.monotonic() + 1, Path("/release"), Path("/game"))
+        self.assertEqual(raised.exception.code, "capture")
+        self.assertEqual([message["type"] for message in sent], ["advance"])
+
+    def test_capture_coordinator_derives_and_binds_exact_stager_inputs(self):
+        with self.temporary() as name:
+            base = Path(name)
+            output = base / "output"
+            package_root = base / "package-root"
+            game = base / "game"
+            for path in (output, package_root, game):
+                path.mkdir(mode=0o700)
+            package_path = base / f"SMAPI-{VERSION}-linux-x64-installer.zip"
+            package_path.write_bytes(b"package")
+            os.chmod(package_path, 0o600)
+            contract = {
+                "scenario": "E2-permission",
+                "release": {
+                    "tag": TAG,
+                    "url": f"https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/{TAG}",
+                    "expected_commit": "1" * 40,
+                    "expected_tree": "2" * 40,
+                },
+                "package": {"path": str(package_path), "sha256": "3" * 64},
+                "binaries": {"apphost_sha256": "4" * 64, "backend_sha256": "5" * 64},
+                "capture": {"environment_profile": "ubuntu-24.04-gnome-xwayland"},
+            }
+            gui = self.module.ProcessIdentity(1234, 5678, 1234, 8, 9, 10, "4" * 64)
+            coordinator = self.module.CaptureCoordinator(
+                contract, output, package_root, game, [], gui, "4" * 64, "5" * 64,
+                {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
+            )
+            observed_arguments = []
+
+            def fake_run(arguments, **options):
+                observed_arguments.extend(arguments)
+                values = {
+                    arguments[index]: arguments[index + 1]
+                    for index in range(2, len(arguments) - 1)
+                    if arguments[index].startswith("--") and not arguments[index + 1].startswith("--")
+                }
+                stage = Path(values["--stage-directory"])
+                filename = values["--filename"]
+                png = b"synthetic-png"
+                png_path = stage / filename
+                png_path.write_bytes(png)
+                os.chmod(png_path, 0o600)
+                identity = coordinator._production_identity()
+                record = {
+                    "status": "staged_pending_original_resolution_privacy_review",
+                    "id": "E2",
+                    "filename": filename,
+                    "evidence_class": "real_qualification",
+                    "production_identity": identity,
+                    "fixture_or_injection": "filesystem-eacces",
+                    "operation": "install",
+                    "durable_state": {"before": "unchanged", "after": "unchanged"},
+                    "qualification_reference": coordinator.spec.docs_anchor,
+                    "fault": "permission",
+                    "capture": {"source_window": {
+                        "process_id": gui.pid,
+                        "process_start_time": gui.start_time,
+                        "expected_title": coordinator.spec.window_title,
+                        "display": ":99",
+                        "unique_mapped_visible_client_verified": True,
+                    }},
+                    "privacy_review": {"status": "pending"},
+                }
+                record_name = f"{filename[:-4]}.capture.json"
+                record_path = stage / record_name
+                record_path.write_text(json.dumps(record), encoding="utf-8")
+                os.chmod(record_path, 0o600)
+                emitted = {
+                    "filename": filename,
+                    "record": record_name,
+                    "sha256": hashlib.sha256(png).hexdigest(),
+                    "pixel_sha256": "6" * 64,
+                    "width": 800,
+                    "height": 600,
+                }
+                options["stdout"].write((json.dumps(emitted) + "\n").encode("ascii"))
+                return SimpleNamespace(returncode=0)
+
+            with (
+                mock.patch.object(self.module, "read_runtime_metadata", return_value=("Avalonia 12.1.1", "self-contained", "Microsoft.NETCore.App 10.0.8")),
+                mock.patch.object(self.module, "hash_trusted_helper", return_value=("7" * 64, SimpleNamespace())),
+                mock.patch.object(self.module, "identity_matches", return_value=True),
+                mock.patch.object(self.module.subprocess, "run", side_effect=fake_run),
+            ):
+                coordinator._stage(time.monotonic() + 2)
+            self.assertIn("--discover-window", observed_arguments)
+            self.assertNotIn("--window-id", observed_arguments)
+            self.assertEqual(observed_arguments[observed_arguments.index("--expected-window-pid") + 1], "1234")
+            self.assertEqual(set((output / "capture").iterdir()), {
+                output / "capture/e2-permission.png",
+                output / "capture/e2-permission.capture.json",
+            })
 
     def test_boundary_session_binds_same_namespace_peer_and_fixed_stages(self):
         with tempfile.TemporaryDirectory(prefix="hs-", dir="/dev/shm") as name:
