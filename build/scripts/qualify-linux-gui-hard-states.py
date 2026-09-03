@@ -36,6 +36,7 @@ CONTROLLER_HELPER = REPOSITORY_ROOT / "build/scripts/arm-linux-gui-hard-state-bo
 STAGER_HELPER = REPOSITORY_ROOT / "build/scripts/stage-linux-gui-screenshot.py"
 CAPTURE_MODEL_PATH = REPOSITORY_ROOT / "build/scripts/linux_gui_hard_state_capture_contract.py"
 CLASSIFIER_PATH = REPOSITORY_ROOT / "build/scripts/classify-linux-gui-hard-state.py"
+ENVIRONMENT_VERIFIER_PATH = REPOSITORY_ROOT / "build/scripts/verify-linux-gui-capture-environment.py"
 SCHEMA_VERSION = 2
 BARRIER_SCENARIOS = frozenset({"C2", "C3", "E5", "E6"})
 E2_SCENARIOS = frozenset({"E2-permission", "E2-read-only", "E2-disk-full", "E2-cross-device"})
@@ -195,6 +196,11 @@ def load_capture_model() -> ModuleType:
 def load_classifier() -> ModuleType:
     load_capture_model()
     return load_support_module("smapi_linux_gui_hard_state_classifier", CLASSIFIER_PATH)
+
+
+def load_environment_verifier() -> ModuleType:
+    load_capture_model()
+    return load_support_module("smapi_linux_gui_capture_environment", ENVIRONMENT_VERIFIER_PATH)
 
 
 def read_sealed_bytes(descriptor: int, maximum: int) -> bytes:
@@ -873,6 +879,13 @@ class CaptureCoordinator:
             fail("capture")
         if environment.get("DISPLAY") is None:
             fail("capture")
+        try:
+            environment_facts = load_environment_verifier().verify_capture_environment(
+                profile.profile_id.value,
+                _environment_reader=lambda: environment,
+            )
+        except BaseException:
+            fail("capture")
         self.contract = contract
         self.output = output
         self.package_root = package_root
@@ -882,6 +895,7 @@ class CaptureCoordinator:
         self.gui_sha256 = gui_sha256
         self.backend_sha256 = backend_sha256
         self.environment = environment
+        self.environment_facts = environment_facts
         self.spec = spec
         self.profile = profile
         self.classifier = classifier
@@ -948,7 +962,7 @@ class CaptureCoordinator:
             ("\n".join(sorted(value for value in private_values if len(value) >= 4)) + "\n").encode("utf-8"),
         )
         avalonia, dotnet_sdk, dotnet_runtime = read_runtime_metadata(self.package_root)
-        profile = self.profile
+        facts = self.environment_facts
         arguments = [
             sys.executable, os.fspath(STAGER_HELPER), "--discover-window",
             "--expected-window-title", self.spec.window_title,
@@ -970,14 +984,14 @@ class CaptureCoordinator:
             "--durable-before", self.spec.durable_before.value,
             "--durable-after", self.spec.durable_at_capture.value,
             "--qualification-reference", self.spec.docs_anchor,
-            "--distribution", f"{profile.distribution.value} {profile.distribution_version}",
-            "--architecture", profile.architecture.value,
-            "--desktop-environment", profile.desktop.value,
-            "--session-type", profile.session.value,
-            "--display-backend", profile.window_backend.value,
-            "--display-scale-percent", str(profile.scale_percent),
-            "--theme", profile.theme.value,
-            "--resolution", f"{profile.resolution_width}x{profile.resolution_height}",
+            "--distribution", f"{facts.distribution} {facts.distribution_version}",
+            "--architecture", facts.architecture,
+            "--desktop-environment", facts.desktop,
+            "--session-type", facts.session,
+            "--display-backend", facts.window_backend,
+            "--display-scale-percent", str(facts.scale_percent),
+            "--theme", facts.theme,
+            "--resolution", f"{facts.resolution_width}x{facts.resolution_height}",
             "--avalonia", avalonia,
             "--dotnet-sdk", dotnet_sdk,
             "--dotnet-runtime", dotnet_runtime,
@@ -1038,14 +1052,14 @@ class CaptureCoordinator:
         privacy = record.get("privacy_review")
         executable = source_window.get("executable") if isinstance(source_window, dict) else None
         expected_environment = {
-            "distribution": f"{profile.distribution.value} {profile.distribution_version}",
-            "architecture": profile.architecture.value,
-            "desktop_environment": profile.desktop.value,
-            "session_type": profile.session.value,
-            "display_backend": profile.window_backend.value,
-            "display_scale_percent": profile.scale_percent,
-            "theme": profile.theme.value,
-            "resolution": f"{profile.resolution_width}x{profile.resolution_height}",
+            "distribution": f"{facts.distribution} {facts.distribution_version}",
+            "architecture": facts.architecture,
+            "desktop_environment": facts.desktop,
+            "session_type": facts.session,
+            "display_backend": facts.window_backend,
+            "display_scale_percent": facts.scale_percent,
+            "theme": facts.theme,
+            "resolution": f"{facts.resolution_width}x{facts.resolution_height}",
         }
         expected_runtime = {
             "avalonia": avalonia,
@@ -1166,6 +1180,13 @@ class CaptureCoordinator:
             fail("capture")
         self.gui = gui
         self.environment = environment
+        try:
+            self.environment_facts = load_environment_verifier().verify_capture_environment(
+                self.profile.profile_id.value,
+                _environment_reader=lambda: environment,
+            )
+        except BaseException:
+            fail("capture")
         self.fresh_session_observed = True
 
     def verify_after(
@@ -1997,7 +2018,10 @@ def compile_barrier(output: Path) -> Path:
 
 def minimal_environment(output: Path, barrier: Path | None, game: Path, control: Path, pid_file: Path) -> dict[str, str]:
     environment: dict[str, str] = {}
-    for key in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS", "XAUTHORITY", "LANG", "LC_ALL"):
+    for key in (
+        "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS",
+        "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "LANG", "LC_ALL",
+    ):
         if key in os.environ:
             environment[key] = os.environ[key]
     runtime_value = os.environ.get("XDG_RUNTIME_DIR")

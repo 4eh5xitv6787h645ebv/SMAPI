@@ -764,9 +764,23 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                 "capture": {"environment_profile": "ubuntu-24.04-gnome-xwayland"},
             }
             gui = self.module.ProcessIdentity(1234, 5678, 1234, 8, 9, 10, "4" * 64)
-            coordinator = self.module.CaptureCoordinator(
-                contract, output, package_root, game, [], gui, "4" * 64, "5" * 64,
-                {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
+            verified_environment = SimpleNamespace(
+                distribution="Ubuntu", distribution_version="24.04.4 LTS",
+                architecture="amd64", desktop="GNOME", session="wayland",
+                window_backend="xwayland", scale_percent=100, theme="light",
+                resolution_width=1920, resolution_height=1080,
+            )
+            environment_verifier = SimpleNamespace(
+                verify_capture_environment=mock.Mock(return_value=verified_environment),
+            )
+            with mock.patch.object(self.module, "load_environment_verifier", return_value=environment_verifier):
+                coordinator = self.module.CaptureCoordinator(
+                    contract, output, package_root, game, [], gui, "4" * 64, "5" * 64,
+                    {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
+                )
+            environment_verifier.verify_capture_environment.assert_called_once_with(
+                "ubuntu-24.04-gnome-xwayland",
+                _environment_reader=mock.ANY,
             )
             observed_arguments = []
 
@@ -909,10 +923,11 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                 with self.subTest(tamper=index):
                     rejected_output = base / f"rejected-{index}"
                     rejected_output.mkdir(mode=0o700)
-                    rejected = self.module.CaptureCoordinator(
-                        contract, rejected_output, package_root, game, [], gui,
-                        "4" * 64, "5" * 64, {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
-                    )
+                    with mock.patch.object(self.module, "load_environment_verifier", return_value=environment_verifier):
+                        rejected = self.module.CaptureCoordinator(
+                            contract, rejected_output, package_root, game, [], gui,
+                            "4" * 64, "5" * 64, {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
+                        )
                     with (
                         mock.patch.object(self.module, "read_runtime_metadata", return_value=("Avalonia 12.1.1", "self-contained", "Microsoft.NETCore.App 10.0.8")),
                         mock.patch.object(self.module, "hash_trusted_helper", return_value=("7" * 64, SimpleNamespace())),
