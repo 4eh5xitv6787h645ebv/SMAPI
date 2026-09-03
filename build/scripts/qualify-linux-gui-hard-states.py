@@ -32,6 +32,9 @@ VALIDATOR_PATH = REPOSITORY_ROOT / "build/scripts/validate-linux-gui-hard-state-
 BARRIER_SOURCE = REPOSITORY_ROOT / "build/scripts/linux-gui-hard-state-barrier.c"
 OPERATOR_HELPER = REPOSITORY_ROOT / "build/scripts/drive-linux-gui-hard-states-atspi.py"
 CONTROLLER_HELPER = REPOSITORY_ROOT / "build/scripts/arm-linux-gui-hard-state-boundary.py"
+STAGER_HELPER = REPOSITORY_ROOT / "build/scripts/stage-linux-gui-screenshot.py"
+CAPTURE_MODEL_PATH = REPOSITORY_ROOT / "build/scripts/linux_gui_hard_state_capture_contract.py"
+CLASSIFIER_PATH = REPOSITORY_ROOT / "build/scripts/classify-linux-gui-hard-state.py"
 SCHEMA_VERSION = 2
 BARRIER_SCENARIOS = frozenset({"C2", "C3", "E5", "E6"})
 E2_SCENARIOS = frozenset({"E2-permission", "E2-read-only", "E2-disk-full", "E2-cross-device"})
@@ -58,6 +61,61 @@ OBSERVATION_MILESTONES = frozenset({
     "state.e2-permission", "state.e2-read-only", "state.e2-disk-full", "state.e2-cross-device",
     "state.c2", "terminal.c3", "state.e5", "terminal.e6",
 })
+OBSERVATION_FACT_KEYS = frozenset({"name", "role", "visible", "enabled", "actionInterface"})
+EXPECTED_OBSERVATIONS: dict[str, tuple[tuple[str, frozenset[str], bool], ...]] = {
+    "state.e2-permission": (
+        ("Install failed before changing files", frozenset({"heading"}), False),
+        ("No mutation was reported. Check user permissions for the game folder; do not run as root.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Unchanged", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Not required", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e2-read-only": (
+        ("Install failed before changing files", frozenset({"heading"}), False),
+        ("No mutation was reported. Check that the game filesystem is writable by your user; do not run as root.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Unchanged", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Not required", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e2-disk-full": (
+        ("Install failed before changing files", frozenset({"heading"}), False),
+        ("No mutation was reported. Free disk space, then start a fresh verified session.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Unchanged", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Not required", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e2-cross-device": (
+        ("Install failed and changes were rolled back", frozenset({"heading"}), False),
+        ("The exact terminal reports rollback completed. Keep the game and installer recovery workspace on a supported filesystem boundary.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Rolled back", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Completed", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.c2": (
+        ("Cancellation requested — finishing safely", frozenset({"heading"}), False),
+        ("Rollback runs without further cancellation once it begins. The result may be unchanged, fully rolled back, committed if the final safe checkpoint already passed, or recovery-required if rollback cannot finish. Keep this window open for the exact durable result.", frozenset({"label", "static", "text"}), False),
+        ("Operation cancellation already requested", frozenset({"push button", "button"}), True),
+    ),
+    "terminal.c3": (
+        ("Cancellation completed and changes were rolled back", frozenset({"heading"}), False),
+        ("The exact terminal reports a rolled-back durable state.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Rolled back", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Completed", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+    "state.e5": (
+        ("Installer state could not be confirmed; recovery is required", frozenset({"heading"}), False),
+        ("A recovery session could not be prepared here. Close this screen and start a fresh installer session; do not retry the original operation.", frozenset({"label", "static", "text"}), False),
+        ("Close installer without starting recovery", frozenset({"push button", "button"}), True),
+    ),
+    "terminal.e6": (
+        ("Recovery completed; inspect again", frozenset({"heading"}), False),
+        ("The prior interrupted state was recovered. Start a fresh verified session and inspect the operation again.", frozenset({"label", "static", "text"}), False),
+        ("Durable state: Recovery completed", frozenset({"panel", "section"}), False),
+        ("Recovery disposition: Completed", frozenset({"panel", "section"}), False),
+        ("Next safe action: Inspect a fresh plan", frozenset({"panel", "section"}), False),
+    ),
+}
 PICKER_FIELDS = {"release.local-folder": "release_folder", "game.choose-folder": "game_folder"}
 MAX_ARCHIVE_ENTRIES = 20_000
 MAX_ARCHIVE_ENTRY_BYTES = 512 * 1024 * 1024
@@ -110,6 +168,32 @@ def load_validator() -> ModuleType:
     except BaseException:
         fail("admission")
     return module
+
+
+def load_support_module(name: str, path: Path) -> ModuleType:
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        fail("identity")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        fail("identity")
+    return module
+
+
+def load_capture_model() -> ModuleType:
+    return load_support_module("linux_gui_hard_state_capture_contract", CAPTURE_MODEL_PATH)
+
+
+def load_classifier() -> ModuleType:
+    load_capture_model()
+    return load_support_module("smapi_linux_gui_hard_state_classifier", CLASSIFIER_PATH)
 
 
 def read_sealed_bytes(descriptor: int, maximum: int) -> bytes:
@@ -1098,6 +1182,25 @@ def signed_message(token: bytes, value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def validate_observation_facts(milestone: str, value: Any) -> list[dict[str, Any]]:
+    expected = EXPECTED_OBSERVATIONS.get(milestone)
+    if not isinstance(value, list) or expected is None or len(value) != len(expected):
+        fail("operator")
+    result: list[dict[str, Any]] = []
+    for fact, (name, roles, action_interface) in zip(value, expected, strict=True):
+        if (
+            not isinstance(fact, dict) or set(fact) != OBSERVATION_FACT_KEYS
+            or fact.get("name") != name or fact.get("role") not in roles
+            or fact.get("visible") is not True
+            or type(fact.get("enabled")) is not bool
+            or fact.get("actionInterface") is not action_interface
+            or (action_interface and fact.get("enabled") is not True)
+        ):
+            fail("operator")
+        result.append(dict(fact))
+    return result
+
+
 class AtspiSession:
     """Authenticated controller for the separately reviewed AT-SPI action helper."""
 
@@ -1111,6 +1214,7 @@ class AtspiSession:
         environment: dict[str, str],
         suffix: str,
         deadline: float,
+        capture_coordinator: Any | None = None,
     ):
         if route not in AT_SPI_ROUTES or not re.fullmatch(r"[a-z0-9_-]{1,24}", suffix):
             fail("operator")
@@ -1148,6 +1252,9 @@ class AtspiSession:
         self.buffer = bytearray()
         self.sequence = 0
         self.observation_count = 0
+        self.capture_coordinator = capture_coordinator
+        self.capture_count = 0
+        self.reached_milestones: set[str] = set()
         try:
             self.process = subprocess.Popen(
                 [
@@ -1251,19 +1358,35 @@ class AtspiSession:
             body["operation"] = "install"
         self.send(body)
         response_keys = {"type", "version", "session", "sequence", "milestone"}
-        first = self.verify(self.receive(deadline), response_keys)
+        first = self.verify(
+            self.receive(deadline),
+            response_keys | ({"observations"} if milestone in OBSERVATION_MILESTONES else set()),
+        )
         if milestone in OBSERVATION_MILESTONES:
             capture_ready = {
                 "type": "capture-ready", "version": 1, "session": self.session_id,
                 "sequence": self.sequence, "milestone": milestone,
             }
-            if first != capture_ready or not identity_matches(self.gui):
+            observations = validate_observation_facts(milestone, first.get("observations"))
+            if (
+                {key: value for key, value in first.items() if key != "observations"} != capture_ready
+                or not identity_matches(self.gui)
+            ):
                 fail("operator")
             self.observation_count += 1
             write_private_json(
                 self.output / f"atspi-{self.suffix}-observation-{self.sequence:02d}.json",
-                {"milestone": milestone, "schemaVersion": 1, "sequence": self.sequence},
+                {
+                    "milestone": milestone, "observations": observations,
+                    "schemaVersion": 1, "sequence": self.sequence,
+                },
             )
+            if (
+                self.capture_coordinator is not None
+                and milestone == self.capture_coordinator.capture_milestone
+            ):
+                self.capture_coordinator.capture(milestone, observations, deadline)
+                self.capture_count += 1
             self.send({**capture_ready, "type": "continue"})
             reached = self.verify(self.receive(deadline), response_keys)
         else:
@@ -1273,11 +1396,17 @@ class AtspiSession:
             "sequence": self.sequence, "milestone": milestone,
         }:
             fail("operator")
+        self.reached_milestones.add(milestone)
         self.sequence += 1
 
     def complete(self, deadline: float) -> None:
         if self.sequence != len(AT_SPI_ROUTES[self.route]):
             fail("operator")
+        if self.capture_coordinator is not None and (
+            self.capture_count != 1
+            or self.capture_coordinator.required_terminal_milestone not in self.reached_milestones
+        ):
+            fail("capture")
         body = {"type": "complete", "version": 1, "session": self.session_id, "sequence": self.sequence}
         self.send(body)
         completed = self.verify(self.receive(deadline), {"type", "version", "session", "sequence"})

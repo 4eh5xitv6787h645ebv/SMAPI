@@ -584,7 +584,14 @@ for sequence,milestone in enumerate(milestones):
  command=receive(s); assert command["sequence"]==sequence and command["milestone"]==milestone
  if milestone=="plan.inspect": assert command["operation"]=="install"
  if milestone.startswith("state."):
-  send(s,{"type":"capture-ready","version":1,"session":a.session_id,"sequence":sequence,"milestone":milestone})
+  observations=[
+   {"name":"Install failed before changing files","role":"heading","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"No mutation was reported. Check user permissions for the game folder; do not run as root.","role":"text","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"Durable state: Unchanged","role":"panel","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"Recovery disposition: Not required","role":"panel","visible":True,"enabled":True,"actionInterface":False},
+   {"name":"Next safe action: Inspect a fresh plan","role":"panel","visible":True,"enabled":True,"actionInterface":False},
+  ]
+  send(s,{"type":"capture-ready","version":1,"session":a.session_id,"sequence":sequence,"milestone":milestone,"observations":observations})
   continued=receive(s); assert continued["type"]=="continue" and continued["milestone"]==milestone
  send(s,{"type":"reached","version":1,"session":a.session_id,"sequence":sequence,"milestone":milestone})
 done=receive(s); send(s,{"type":"completed","version":1,"session":a.session_id,"sequence":done["sequence"]})
@@ -616,6 +623,8 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                 session.complete(time.monotonic() + 5)
                 self.assertEqual(session.observation_count, 1)
                 self.assertTrue((output / "atspi-synthetic.trace.jsonl").is_file())
+                retained = json.loads((output / "atspi-synthetic-observation-07.json").read_text(encoding="utf-8"))
+                self.assertEqual(retained["observations"][0]["name"], "Install failed before changing files")
                 self.assertEqual(stat.S_IMODE((control / "atspi-synthetic.token").stat().st_mode), 0o600)
             finally:
                 self.module.OPERATOR_HELPER = previous
