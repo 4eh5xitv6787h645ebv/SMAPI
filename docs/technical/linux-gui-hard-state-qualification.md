@@ -19,12 +19,39 @@ the syscall result or journal bytes, and may hold only the calling backend worke
 complete durable `Applied` record. This disclosed scheduling aid is not part of the package and is
 not performance evidence. The supervisor may otherwise arrange real operating-system boundaries
 before launch, operate the real packaged GUI through its accessibility surface, observe the
-supervisor-owned filesystem and processes, capture an authentic window, and pause or terminate only
-processes it launched for a case.
+supervisor-owned filesystem and processes, and pause or terminate only processes it launched for a
+case. The later completed qualification supervisor may also stage an authentic window through the
+separately reviewed screenshot tool; the implemented preflight does not capture pixels.
 
 This is a qualification specification, not evidence that any case has passed. A checkbox, caption,
 or release claim remains pending until the exact public package has completed this protocol and the
 result has been independently reviewed.
+
+## Implemented preflight boundary
+
+The checked-in helpers currently implement a fail-closed **preflight**, not the completed screenshot
+qualification described by this document:
+
+- `run-linux-gui-hard-state-case.py` creates one private mount namespace and one root-owned direct
+  cgroup-v2 child, starts the root-only boundary controller there, and drops the supervisor and every
+  product/UI process to the admitted desktop user with no effective capabilities and `no_new_privs`
+  set. It copies the admitted contract and single-use boundary request into separately fully sealed
+  anonymous files before passing them to the children; neither child reopens the caller pathname;
+- `qualify-linux-gui-hard-states.py` binds the package and process identities, drives the packaged UI
+  through `drive-linux-gui-hard-states-atspi.py`, coordinates the real filesystem or scheduling
+  boundary, inventories the disposable root, and performs bounded process and mount cleanup;
+- the AT-SPI driver's signed `capture-ready` hold currently proves only that the exact accessibility
+  milestone was observed and held for the supervisor's acknowledgement. It does not prove pixels or
+  that a painted frame persisted. The supervisor does **not** yet invoke
+  `stage-linux-gui-screenshot.py`, and pixels are not evidence from this preflight; and
+- a successful current run emits one case-level `status: "preflighted"` record with
+  `exactWindowCaptured: false` and the fixed `capturePending`, `durableClassificationPending`, and
+  `publicAuthorityVerificationPending` fields set to true. It never emits `passed` or `qualified`.
+
+The current contract has exactly `schema_version`, `scenario`, `release`, `package`, `game_marker`,
+`binaries`, `isolation`, and `timeouts_seconds`. It intentionally has no caller-provided display,
+visible-state, durable-state, or screenshot-provenance prose. A later closed capture schema and
+state classifier must be reviewed before a PNG can be staged or a qualification checkbox checked.
 
 ## Trust and isolation boundary
 
@@ -37,10 +64,11 @@ network access only long enough to download and verify the pinned public release
 already verified six public assets through a read-only channel.
 
 Create one generic unprivileged desktop account for the run. Its home, state, cache, temporary,
-download, and game roots are new and contain no personal name. Root may be used by a separate setup
-controller only to create the VM, mount namespace, loop filesystems, quotas, ownership, and fault
-boundaries. Before application launch, the controller fixes the fixture ownership and drops to the
-generic account. The GUI, backend, terminal fallback, AT-SPI client, screenshot tool, and all child
+download, and game roots are new and contain no personal name. Root may be used by the fixed broker
+and separate setup controller only to create the private mount namespace, loop filesystems,
+ownership, and fault boundaries. The broker drops the supervisor to the generic account before any
+product or UI process starts; the controller remains root only inside that same namespace and never
+drives the UI. The GUI, backend, terminal fallback, AT-SPI client, screenshot tool, and all child
 processes must have that account's real and effective UID and must never have ambient, inheritable,
 or effective capabilities. A root-owned controller must not join the desktop D-Bus session or send
 installer actions.
@@ -78,14 +106,15 @@ identity changes, discard the case instead of rebinding it.
 
 ## Supervisor admission and bounds
 
-The supervisor accepts one immutable case manifest naming an allowed case ID, public identity,
-desktop environment, fixture profile, operation, expected visible state, and expected durable result.
-It rejects unknown fields, host paths, symlinks, relative traversal, an existing output directory,
-an unverified package, a non-disposable root, and any UID-zero application command. Case IDs and fault
-types are enums; no manifest field is interpreted as a shell fragment. The manifest and fixed helper
-executables are reviewed before the VM starts.
+The implemented preflight supervisor accepts the exact eight-field contract listed above. It rejects
+unknown fields, duplicate keys, host/live paths, symlinks, relative traversal, an existing output
+directory, an unverified caller-bound package identity, a non-disposable root, and any UID-zero
+application command. Scenarios are enums; no manifest field is interpreted as a shell fragment. The
+contract and fixed helper executables are reviewed before the VM starts. The future qualification
+contract must additionally bind the desktop environment, fixture profile, operation, expected
+visible state, and expected durable result through closed enums, not free text.
 
-The implementation must enforce explicit bounds no weaker than these:
+The completed qualification implementation must enforce explicit bounds no weaker than these:
 
 - one case and one application process group at a time, with at most 32 observed descendants;
 - one private mode-`0700` run root, at most eight supervisor-created mounts, and no mount outside its
@@ -97,19 +126,210 @@ The implementation must enforce explicit bounds no weaker than these:
 - one final capture per evidence row, except E2's exactly four retained source captures. Repeated
   diagnostic attempts remain private and cannot silently replace the admitted source.
 
+The current preflight enforces the process/mount/deadline/entry/per-file bounds and rejects a private
+output tree above 1 GiB at final inspection. It does not yet place the output on a quota-limited
+filesystem, so it does not claim that aggregate writes are stopped before crossing 1 GiB. That
+pre-write aggregate resource gate remains part of the later qualification work.
+
 The supervisor records its own monotonic event sequence. Timeouts, bound violations, ambiguous
 process/window/accessibility identity, missed trigger windows, incomplete cleanup, or unexpected
 extra processes fail the case. They are not converted into an installer success or failure.
+
+## Disposable Ubuntu/Kubuntu preflight invocation
+
+This invocation exercises the implemented preflight only. It cannot produce publishable screenshot
+evidence or a `qualified` result.
+
+Inside a disposable Ubuntu/Kubuntu 24.04 VM, install the external qualification dependencies:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends \
+  python3-pyatspi at-spi2-core gsettings-desktop-schemas \
+  imagemagick x11-utils xwayland gcc libc6-dev util-linux e2fsprogs git
+```
+
+From the generic user's logged-in graphical session, enable the desktop accessibility bus and fail
+closed unless the session and direct X11/XWayland capture prerequisites are present:
+
+```sh
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+test "$(id -u)" -ne 0
+test -n "${DISPLAY:-}"
+test -n "${DBUS_SESSION_BUS_ADDRESS:-}"
+test -n "${XDG_RUNTIME_DIR:-}"
+case "${XDG_SESSION_TYPE:-}" in x11|wayland) ;; *) exit 1 ;; esac
+command -v python3 unshare mount umount mkfs.ext4 \
+  xwininfo xprop import cc >/dev/null
+timeout 10s /usr/bin/python3 -c \
+  'import pyatspi; assert pyatspi.Registry.getDesktop(0) is not None'
+xprop -root _NET_CLIENT_LIST >/dev/null
+import -version >/dev/null
+```
+
+In the same shell, pin these values from the already reviewed public release record. Validate every
+value before it is used in a path, Git command, or privileged command. The package must already have
+been downloaded with exclusive creation into a fresh private runtime input directory; do not
+continue with a local build, caller-invented digest, or symlink:
+
+```sh
+set -euo pipefail
+: "${release_version:?exact fork prerelease version}"
+: "${release_commit:?exact 40-character release commit}"
+: "${release_tree:?exact 40-character release tree}"
+: "${package_sha256:?exact published package SHA-256}"
+: "${scenario:?one exact E2-permission/E2-read-only/E2-disk-full/E2-cross-device/C2/C3/E5/E6 value}"
+[[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-unofficial\.4eh5xitv6787h645ebv\.linux\.alpha\.[1-9][0-9]*$ ]]
+[[ "$release_commit" =~ ^[0-9a-f]{40}$ ]]
+[[ "$release_tree" =~ ^[0-9a-f]{40}$ ]]
+[[ "$package_sha256" =~ ^[0-9a-f]{64}$ ]]
+case "$scenario" in
+  E2-permission|E2-read-only|E2-disk-full|E2-cross-device|C2|C3|E5|E6) ;;
+  *) exit 1 ;;
+esac
+test "$XDG_RUNTIME_DIR" = "/run/user/$(id -u)"
+input_root="${XDG_RUNTIME_DIR}/smapi-hard-state-inputs"
+test -d "$input_root"
+test ! -L "$input_root"
+test -O "$input_root"
+test "$(stat -c %a -- "$input_root")" = 700
+package_path="${input_root}/SMAPI-${release_version}-linux-x64-installer.zip"
+test -f "$package_path"
+test ! -L "$package_path"
+test -O "$package_path"
+test "$(stat -c %h -- "$package_path")" = 1
+test "$(stat -c %a -- "$package_path")" = 600
+test "$(sha256sum -- "$package_path" | cut -d' ' -f1)" = "$package_sha256"
+```
+
+Install the exact reviewed harness tree at the release commit beneath
+`/opt/smapi-hard-state-harness`, owned by root and not writable by group or other users. These
+commands are for a newly reverted VM where the target does not exist:
+
+```sh
+sudo test ! -e /opt/smapi-hard-state-harness
+sudo git clone --no-checkout https://github.com/4eh5xitv6787h645ebv/SMAPI.git \
+  /opt/smapi-hard-state-harness
+sudo git -C /opt/smapi-hard-state-harness checkout --detach "$release_commit"
+test "$(sudo git -C /opt/smapi-hard-state-harness rev-parse HEAD)" = "$release_commit"
+test "$(sudo git -C /opt/smapi-hard-state-harness rev-parse 'HEAD^{tree}')" = "$release_tree"
+sudo chown -R root:root /opt/smapi-hard-state-harness
+sudo chmod -R go-w /opt/smapi-hard-state-harness
+test -z "$(sudo git -C /opt/smapi-hard-state-harness status --short)"
+```
+
+Create a new fixed root-owned prefix and one atomically new random case root. The parent is not
+writable by the desktop user, so another user process cannot pre-create or replace the generated
+child between `mkdir` and `chown`. Run the prefix creation once per newly reverted VM; for each later
+scenario in that VM, re-verify the existing prefix identity and repeat only the random case-root
+creation with a new name:
+
+```sh
+run_uid="$(id -u)"
+run_gid="$(id -g)"
+test "$run_uid" -ne 0
+sudo test ! -e /srv/smapi-hard-state
+sudo test ! -L /srv/smapi-hard-state
+sudo mkdir -m 0711 -- /srv/smapi-hard-state
+sudo chown root:root /srv/smapi-hard-state
+test "$(sudo stat -c '%u:%g:%a' -- /srv/smapi-hard-state)" = "0:0:711"
+case_name="smapi-hard-state-$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+case_root="/srv/smapi-hard-state/${case_name}"
+sudo mkdir -m 0700 -- "$case_root"
+sudo chown -- "${run_uid}:${run_gid}" "$case_root"
+test -O "$case_root"
+test "$(stat -c %a -- "$case_root")" = 700
+```
+
+Run the reviewed nonroot preparer. It stable-reads the checked-in reviewable Base64 fixture at
+`build/fixtures/linux-gui-hard-state/Stardew Valley.dll.base64`, verifies its exact encoded SHA-256
+`0d73da2d4c7e7c7553033e359a6e1808c0e0be5ccd5f0f6fa781c7efc23fd0cf`, decodes it, and verifies the
+exact 3,584-byte managed-assembly SHA-256
+`8617cb5b0132c275d2db285d7a6475ea326a2387f1fe98cb0c4d4218c6a15744`. That assembly was built from
+`src/SMAPI.Installer.TestGameMarker` using the repository-pinned SDK, `Release`,
+`DebugType=None`, `DebugSymbols=false`, `ContinuousIntegrationBuild=true`, and a `/source` path map;
+its assembly name is `Stardew Valley`, version `1.6.15.0`, and it contains no game code or assets.
+Reviewers can reproduce the decoded bytes from a clean checkout with the pinned `global.json` SDK:
+
+```sh
+dotnet clean src/SMAPI.Installer.TestGameMarker/SMAPI.Installer.TestGameMarker.csproj \
+  -c Release --nologo --verbosity quiet
+dotnet build src/SMAPI.Installer.TestGameMarker/SMAPI.Installer.TestGameMarker.csproj \
+  -c Release --nologo --verbosity quiet \
+  -p:DebugType=None -p:DebugSymbols=false -p:ContinuousIntegrationBuild=true \
+  -p:PathMap="$PWD=/source"
+test "$(sha256sum 'src/SMAPI.Installer.TestGameMarker/bin/Release/net6.0/Stardew Valley.dll' | cut -d' ' -f1)" = \
+  8617cb5b0132c275d2db285d7a6475ea326a2387f1fe98cb0c4d4218c6a15744
+cmp -- \
+  <(base64 -d 'build/fixtures/linux-gui-hard-state/Stardew Valley.dll.base64') \
+  'src/SMAPI.Installer.TestGameMarker/bin/Release/net6.0/Stardew Valley.dll'
+```
+
+The helper creates that immutable marker as mode `0600` inside the new private contract directory;
+there is no caller-supplied game-marker argument or path. It verifies ZIP structure and equality to
+the caller-supplied digest from the reviewed public record without extracting it, hashes the packaged
+GUI/backend entries, binds the case-root device/inode, creates the exact mode-`0600` disposable
+marker and eight-field contract, and chooses a new output basename. It never downloads a package or
+accepts the private modpack, save, or a caller-supplied game assembly. Public release authority
+remains pending until the separate final public-asset verification.
+
+```sh
+prepared_json="$(
+  /usr/bin/python3 \
+    /opt/smapi-hard-state-harness/build/scripts/prepare-linux-gui-hard-state-case.py \
+    --case-root "$case_root" \
+    --package "$package_path" \
+    --expected-package-sha256 "$package_sha256" \
+    --version "$release_version" \
+    --commit "$release_commit" \
+    --tree "$release_tree" \
+    --scenario "$scenario"
+)"
+contract_path="$(printf '%s' "$prepared_json" | python3 -c \
+  'import json,sys; value=json.load(sys.stdin); assert value["ok"] is True; print(value["contractPath"])')"
+output_path="$(printf '%s' "$prepared_json" | python3 -c \
+  'import json,sys; value=json.load(sys.stdin); assert value["ok"] is True; print(value["outputPath"])')"
+test -f "$contract_path"
+test ! -e "$output_path"
+```
+
+For E2, C2, C3, E5, and E6 use independent case roots and preparation records; never reuse a failed
+or completed root.
+
+Invoke the fixed broker from the graphical session so it can pass only the existing display/bus
+coordinates to the dropped child:
+
+```sh
+sudo --preserve-env=DISPLAY,WAYLAND_DISPLAY,DBUS_SESSION_BUS_ADDRESS,\
+AT_SPI_BUS_ADDRESS,XAUTHORITY,XDG_RUNTIME_DIR \
+  /usr/bin/python3 \
+  /opt/smapi-hard-state-harness/build/scripts/run-linux-gui-hard-state-case.py \
+  --contract "$contract_path" \
+  --output "$output_path" \
+  --execute
+```
+
+The broker unshares one mount namespace before forking and admits both children into one exact
+root-owned cgroup-v2 child before either can spawn. Only its controller child remains root; the
+supervisor, GUI, backend, AT-SPI operator, compiler, and future screenshot stage run as the contract
+owner with cleared supplementary groups, no effective capabilities, and `no_new_privs`. The broker
+stable-reads each user-owned protocol file once, copies those exact bytes into a fully sealed anonymous
+file, atomically consumes the matching single-use request, and binds the controller PID, command line,
+script, sealed descriptor, source-request inode, socket, and mount namespace before accepting an ACK.
+The root controller does not receive or connect to the desktop bus. A current `preflighted` record is
+useful private diagnostics only: capture, final durable classification, exact six-public-asset
+authority, and the pre-write aggregate resource gate remain pending.
 
 ## Authentic UI operation and capture
 
 All installer choices and actions must be reached through the packaged GUI. The AT-SPI driver finds
 the exact application/window subtree, records each target's role, accessible name, enabled/visible
-state, and action interface, then invokes the same exposed action a keyboard or assistive-technology
-user would invoke. It may use Tab, Shift+Tab, arrows, Enter, Space, Escape, and documented access keys
-when AT-SPI action invocation is unavailable. It must not call view-model methods, synthesize backend
-events, use a private protocol client, or bypass a confirmation. Destructive confirmation must begin
-with visible focus on Cancel.
+state, and action interface, then invokes that exact exposed action. It fails closed if the action is
+missing, disabled, ambiguous, or lacks its expected AT-SPI action interface. Fixed keyboard input is
+used only for the verified native folder picker (`Ctrl+L`, the already admitted path, and Enter); it
+is not a fallback for missing installer actions. The driver must not call view-model methods,
+synthesize backend events, use a private protocol client, or bypass a confirmation. Destructive
+confirmation must begin with visible focus on Cancel.
 
 An AT-SPI transcript proves only what the accessibility tree exposed and what action the driver
 requested. It does not prove pixels, filesystem effects, durable state, or that a request won a race.
@@ -217,12 +437,13 @@ recovery required and does not satisfy C3. Repeat only from a reverted root.
 ### E5 and E6: interruption and restart recovery
 
 For E5, start a real mutating operation through the GUI. The external controller watches only its
-disposable filesystem and process group. After it proves that a journaled mutation has occurred but
-before a terminal commit or completed rollback, terminate the exact verified GUI/backend process
-group with `SIGKILL`. This deliberate crash is the fault boundary; it must not be described as a
-product cancellation. Do not kill between intent publication and an individual filesystem operation
-merely to force corrupt data. The post-crash inventory must prove an incomplete durable transaction
-which the product classifies as requiring recovery after restart.
+disposable filesystem and process tree. After it proves that a journaled mutation has occurred but
+before a terminal commit or completed rollback, terminate only the exact verified backend with
+`SIGKILL`. This deliberate crash is the fault boundary; it must not be described as a product
+cancellation. Keeping the already bound GUI alive lets the production process client observe the
+lost backend and present its truthful state-unknown/recovery-required result. Do not kill between
+intent publication and an individual filesystem operation merely to force corrupt data. The
+post-crash inventory must independently prove an incomplete durable transaction requiring recovery.
 
 The same post-sync barrier may be used only to prove and hold that exact E5 boundary long enough for
 the supervisor to revalidate the backend identity and send `SIGKILL`; the worker is not released in
@@ -230,26 +451,39 @@ that case. The barrier does not manufacture the interruption or alter filesystem
 signal does. Record its use in the private provenance and do not present the timing as a naturally
 long application state.
 
-Restart the same unchanged packaged GUI against the same disposable root for E5's visible
-interrupted/recovery-required capture. Do not edit the journal, receipt, or files between crash and
-restart. Then explicitly invoke the product's offered authenticated recovery action for E6. The
-matrix's “automatic recovery” means the admitted Core recovery rolls back the interrupted journal; it
-does not mean the GUI silently starts a destructive action without user authorization. Capture the
-real completed recovery state only after the durable result reports recovery completed and requires a
-fresh inspection. The final inventory must match the proven pre-operation state at every managed
-location, preserve unrelated files, and show no incomplete transaction. If recovery fails, retain the
-private failure evidence, report E6 failed, and do not claim completion from a reassuring screen.
+Capture E5 in that surviving GUI only after it exposes the exact state-unknown heading, explains that
+a fresh session is required, offers Close rather than an unusable recovery action, and the private
+journal/inventory evidence agrees. Then close/reap the GUI and restart the same unchanged packaged
+GUI against the same disposable root for E6. Do not edit the journal, receipt, or files between crash
+and restart. Drive the normal verified selection, inspection, confirmation, and Run actions. The
+fresh backend automatically recovers the incomplete journal before attempting the newly confirmed
+operation and must return `AutomaticRecoveryCompletedFreshInspectionRequired` instead of continuing
+with a stale plan. Capture the real completed-recovery result only after it requires a fresh
+inspection. The final inventory must match the proven pre-operation state at every managed location,
+preserve unrelated files, and show no incomplete transaction. If recovery fails, retain the private
+failure evidence, report E6 failed, and do not claim completion from reassuring pixels.
 
 ## Private evidence and sanitized output
 
-Everything detailed remains inside the private mode-`0700` run root: package extraction, full process
-and AT-SPI transcripts, mount data, inventories, journals, receipts, diagnostic JSONL, console output,
-exception text, original and rejected images, screenshot sidecars, controller logs, and cleanup logs.
-Files are mode `0600`. Review them before sharing because console and diagnostic material may contain
-full paths or exception text even when the GUI is sanitized. Never commit or upload this run root.
+Everything retained as detailed evidence remains inside the private mode-`0700` run root: package
+extraction, full process and AT-SPI transcripts, mount data, inventories, journals, receipts,
+diagnostic JSONL, console output, exception text, original and rejected images, screenshot sidecars,
+and cleanup logs. Files are mode `0600`. The controller transiently writes two root-owned mode-`0600`
+ledger files beneath the root-owned mode-`0711` prefix so the unprivileged account cannot replace
+them. After the controller and its cgroup settle, the broker deletes only those exact captured
+inode/name/metadata pairs; an unsafe replacement or incomplete removal fails cleanup. Review retained
+files before sharing because console and diagnostic material may contain full paths or exception text
+even when the GUI is sanitized. Never commit or upload the run root.
 
-The supervisor emits one bounded JSON aggregate with a closed schema and no free-text fields. Its
-case list is exactly the four E2 sources plus C2, C3, E5, and E6. Its only allowed content is:
+The implemented supervisor emits one bounded, closed-schema record for one preflight case. A success
+contains the fixed identity and observation/cleanup booleans documented under
+[Implemented preflight boundary](#implemented-preflight-boundary); a failure contains only its fixed
+kind/schema/status and one reviewed failure-code enum. The root broker independently validates that
+closed result and returns a nonzero exit status for a failed child. The field `publicReleaseUrl`
+names the release page; it must not be mislabeled as a direct package URL.
+
+The later qualification aggregator must combine exactly the four E2 sources plus C2, C3, E5, and E6.
+Its only allowed content is:
 
 - schema version and the fixed qualification kind;
 - public release tag, source commit/tree, package URL and SHA-256, GUI/backend SHA-256;
@@ -261,7 +495,8 @@ case list is exactly the four E2 sources plus C2, C3, E5, and E6. Its only allow
 - fixed integer counts for admitted, passed, failed, captured, and cleaned cases; and
 - an overall `passed` boolean and one optional fixed failure-code enum.
 
-Reject unknown keys and out-of-range counts. Do not emit timestamps precise enough to identify a
+Reject unknown keys and out-of-range counts. Neither the preflight record nor final aggregate may
+emit timestamps precise enough to identify a
 private run, host/user names, paths, PIDs, device/inode/mount IDs, cgroup names, process arguments,
 environment variables, package extraction names, inventory hashes, screenshot hashes before privacy
 approval, URLs other than the pinned public release/package URL, exception or backend text, log or
@@ -280,8 +515,11 @@ supervisor aggregate alone neither publishes nor authenticates an image.
 
 Cleanup acts only on exact recorded identities. Stop the bound nonroot process group with `SIGTERM`,
 wait a bounded grace period, then use `SIGKILL` only for the same still-matching start-time/cgroup
-members. Never use name-based `pkill`, a broad UID kill, recursive host deletion, an unresolved
-variable, glob, or path inferred from application output. Refuse PID reuse and unexpected descendants.
+members. The root broker finally uses `cgroup.kill`, requires `populated 0`, and removes that exact
+root-owned cgroup child; failure remains failure. It removes only an exact captured residual request
+and exact root-ledger objects. Never use name-based `pkill`, a broad UID kill, recursive host deletion,
+an unresolved variable, glob, or path inferred from application output. Refuse PID reuse and
+unexpected descendants.
 
 Unmount the at-most-eight recorded guest mounts leaf-first by exact mount ID and validated target.
 Do not use lazy or forced unmount to turn an uncertain cleanup into success. If a mount or process
@@ -307,8 +545,9 @@ A hard-state qualification passes only when all of the following are true:
   durable state;
 - C2 shows truthful safe-finishing semantics and C3 proves an exact cancelled-and-rolled-back durable
   terminal plus restored managed state and preserved unrelated files;
-- E5 proves a real externally interrupted incomplete transaction after restart, and E6 proves the
-  unchanged public package completed recovery and required a fresh inspection;
+- E5 proves a real externally interrupted incomplete transaction and the surviving GUI's truthful
+  backend-loss/recovery-required state; E6 proves a fresh launch of the unchanged public package
+  automatically completed recovery and required a fresh inspection;
 - every timeout, identity, process, mount, filesystem, inventory, durable-state, accessibility,
   capture, privacy, and cleanup check passes within its bound;
 - private logs, inventories, images, and sidecars remain private; the fixed aggregate passes its

@@ -52,16 +52,50 @@ class FixedArgumentParser(argparse.ArgumentParser):
 class Milestone:
     name: str
     window_title: str
-    action_names: tuple[str, ...]
+    action_names: tuple[str, ...] = ()
     picker_title: str | None = None
     picker_field: str | None = None
     requires_operation: bool = False
+    observations: tuple["AccessibleObservation", ...] = ()
+    forbidden_observation_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AccessibleObservation:
+    """One exact, read-only production accessibility-tree fact."""
+
+    name: str
+    roles: frozenset[str]
+    require_enabled: bool = False
 
 
 RELEASE_TITLE = "SMAPI Linux Installer — Release verification"
 GAME_TITLE = "SMAPI Linux Installer — Choose game folder"
 PLAN_TITLE = "SMAPI Linux Installer — Plan review"
 EXECUTION_TITLE = "SMAPI Linux Installer — Run operation"
+HEADING_ROLES = frozenset({"heading"})
+TEXT_ROLES = frozenset({"label", "static", "text"})
+FACT_ROLES = frozenset({"panel", "section"})
+
+
+def observation(name: str, roles: frozenset[str], require_enabled: bool = False) -> AccessibleObservation:
+    return AccessibleObservation(name, roles, require_enabled)
+
+
+def terminal_observations(
+    heading: str,
+    message: str,
+    durable_state: str,
+    recovery_disposition: str,
+    next_action: str,
+) -> tuple[AccessibleObservation, ...]:
+    return (
+        observation(heading, HEADING_ROLES),
+        observation(message, TEXT_ROLES),
+        observation(f"Durable state: {durable_state}", FACT_ROLES),
+        observation(f"Recovery disposition: {recovery_disposition}", FACT_ROLES),
+        observation(f"Next safe action: {next_action}", FACT_ROLES),
+    )
 
 MILESTONES = {
     "release.local-folder": Milestone(
@@ -97,6 +131,77 @@ MILESTONES = {
     "execution.recover": Milestone(
         "execution.recover", EXECUTION_TITLE, ("Run interrupted recovery",),
     ),
+    "state.e2-permission": Milestone(
+        "state.e2-permission", EXECUTION_TITLE,
+        observations=terminal_observations(
+            "Install failed before changing files",
+            "No mutation was reported. Check user permissions for the game folder; do not run as root.",
+            "Unchanged", "Not required", "Inspect a fresh plan",
+        ),
+    ),
+    "state.e2-read-only": Milestone(
+        "state.e2-read-only", EXECUTION_TITLE,
+        observations=terminal_observations(
+            "Install failed before changing files",
+            "No mutation was reported. Check that the game filesystem is writable by your user; do not run as root.",
+            "Unchanged", "Not required", "Inspect a fresh plan",
+        ),
+    ),
+    "state.e2-disk-full": Milestone(
+        "state.e2-disk-full", EXECUTION_TITLE,
+        observations=terminal_observations(
+            "Install failed before changing files",
+            "No mutation was reported. Free disk space, then start a fresh verified session.",
+            "Unchanged", "Not required", "Inspect a fresh plan",
+        ),
+    ),
+    "state.e2-cross-device": Milestone(
+        "state.e2-cross-device", EXECUTION_TITLE,
+        observations=terminal_observations(
+            "Install failed and changes were rolled back",
+            "The exact terminal reports rollback completed. Keep the game and installer recovery workspace on a supported filesystem boundary.",
+            "Rolled back", "Completed", "Inspect a fresh plan",
+        ),
+    ),
+    "state.c2": Milestone(
+        "state.c2", EXECUTION_TITLE,
+        observations=(
+            observation("Cancellation requested — finishing safely", HEADING_ROLES),
+            observation(
+                "Rollback runs without further cancellation once it begins. The result may be unchanged, fully rolled back, committed if the final safe checkpoint already passed, or recovery-required if rollback cannot finish. Keep this window open for the exact durable result.",
+                TEXT_ROLES,
+            ),
+            observation("Operation cancellation already requested", BUTTON_ROLES, require_enabled=True),
+        ),
+    ),
+    "terminal.c3": Milestone(
+        "terminal.c3", EXECUTION_TITLE,
+        observations=terminal_observations(
+            "Cancellation completed and changes were rolled back",
+            "The exact terminal reports a rolled-back durable state.",
+            "Rolled back", "Completed", "Inspect a fresh plan",
+        ),
+    ),
+    "state.e5": Milestone(
+        "state.e5", EXECUTION_TITLE,
+        observations=(
+            observation("Installer state could not be confirmed; recovery is required", HEADING_ROLES),
+            observation(
+                "A recovery session could not be prepared here. Close this screen and start a fresh installer session; do not retry the original operation.",
+                TEXT_ROLES,
+            ),
+            observation("Close installer without starting recovery", BUTTON_ROLES, require_enabled=True),
+        ),
+        forbidden_observation_names=("Run interrupted recovery",),
+    ),
+    "terminal.e6": Milestone(
+        "terminal.e6", EXECUTION_TITLE,
+        observations=terminal_observations(
+            "Recovery completed; inspect again",
+            "The prior interrupted state was recovered. Start a fresh verified session and inspect the operation again.",
+            "Recovery completed", "Completed", "Inspect a fresh plan",
+        ),
+    ),
 }
 
 BASE_LOCAL = (
@@ -113,6 +218,13 @@ ROUTES = {
     "operation-download-run": BASE_DOWNLOAD,
     "operation-download-cancel": BASE_DOWNLOAD + ("execution.cancel",),
     "recovery": ("execution.recover",),
+    "e2-permission": BASE_LOCAL + ("state.e2-permission",),
+    "e2-read-only": BASE_LOCAL + ("state.e2-read-only",),
+    "e2-disk-full": BASE_LOCAL + ("state.e2-disk-full",),
+    "e2-cross-device": BASE_LOCAL + ("state.e2-cross-device",),
+    "c3-terminal": BASE_LOCAL + ("execution.cancel", "state.c2", "terminal.c3"),
+    "e5-backend-loss": BASE_LOCAL + ("state.e5",),
+    "e6-automatic-recovery": BASE_LOCAL + ("terminal.e6",),
 }
 OPERATION_ACCESSIBLE_NAMES = {
     "install": "Install. Inspect adding the verified release when no managed fork installation is present.",
@@ -262,6 +374,22 @@ class AuthenticatedProtocol:
             "sequence": sequence, "milestone": milestone.name,
         }))
 
+    def capture_ready(self, sequence: int, milestone: Milestone) -> None:
+        self.transport.send(signed(self.token, {
+            "type": "capture-ready", "version": PROTOCOL_VERSION, "session": self.session,
+            "sequence": sequence, "milestone": milestone.name,
+        }))
+        body = verify_signed(
+            self.token,
+            self.transport.receive(),
+            {"type", "version", "session", "sequence", "milestone"},
+        )
+        if body != {
+            "type": "continue", "version": PROTOCOL_VERSION, "session": self.session,
+            "sequence": sequence, "milestone": milestone.name,
+        }:
+            raise QualificationError("protocol-order")
+
     def complete(self, count: int) -> None:
         body = verify_signed(
             self.token,
@@ -344,6 +472,51 @@ def exact_action(window: Node, names: tuple[str, ...]) -> tuple[Node, int]:
     if len(safe) != 1:
         raise QualificationError("action-interface")
     return node, safe[0]
+
+
+def exact_observations(window: Node, requirements: tuple[AccessibleObservation, ...]) -> None:
+    nodes = tuple(walk_nodes((window,)))
+    matched: set[int] = set()
+    for requirement in requirements:
+        named = [(index, node) for index, node in enumerate(nodes) if node.name == requirement.name]
+        if not named:
+            raise QualificationError("observation-missing")
+        eligible = [(index, node) for index, node in named if node.role in requirement.roles and node.visible]
+        if not eligible:
+            raise QualificationError("observation-role")
+        if len(eligible) != 1 or eligible[0][0] in matched:
+            raise QualificationError("observation-ambiguous")
+        if requirement.require_enabled and not eligible[0][1].enabled:
+            raise QualificationError("observation-disabled")
+        matched.add(eligible[0][0])
+
+
+def wait_for_observations(
+    backend: AccessibilityBackend,
+    milestone: Milestone,
+    gui_pid: int,
+    deadline: float,
+    clock: Callable[[], float],
+    sleeper: Callable[[float], None],
+) -> Node:
+    if not milestone.observations:
+        raise QualificationError("observation-shape")
+    while clock() < deadline:
+        try:
+            window = exact_window(backend.roots(), milestone.window_title, gui_pid)
+            exact_observations(window, milestone.observations)
+            nodes = tuple(walk_nodes((window,)))
+            if any(
+                node.visible and node.name in milestone.forbidden_observation_names
+                for node in nodes
+            ):
+                raise QualificationError("observation-state")
+            return window
+        except QualificationError as exc:
+            if exc.code not in {"window-missing", "observation-missing"}:
+                raise
+            sleeper(0.05)
+    raise QualificationError("observation-timeout")
 
 
 def select_exact_operation(window: Node, operation: str) -> None:
@@ -472,6 +645,21 @@ class HardStateOperator:
             milestone = MILESTONES[name]
             command = self.protocol.advance(sequence, milestone)
             deadline = self.clock() + ACTION_TIMEOUT_SECONDS
+            if milestone.observations:
+                if milestone.action_names or milestone.picker_title or milestone.picker_field or milestone.requires_operation:
+                    raise QualificationError("observation-shape")
+                wait_for_observations(
+                    self.backend, milestone, gui_pid, deadline, self.clock, self.sleeper,
+                )
+                if self.binder.bind(gui_pid, gui_sha256) != bound_identity:
+                    raise QualificationError("process-rebound")
+                self.trace.event("capture-ready", sequence, milestone.name)
+                self.protocol.capture_ready(sequence, milestone)
+                if self.binder.bind(gui_pid, gui_sha256) != bound_identity:
+                    raise QualificationError("process-rebound")
+                self.trace.event("milestone-reached", sequence, milestone.name)
+                self.protocol.reached(sequence, milestone)
+                continue
             window = wait_for_window(
                 self.backend, milestone.window_title, gui_pid, deadline, self.clock, self.sleeper,
             )
@@ -570,8 +758,15 @@ class PrivateTrace:
             message["milestone"] = milestone
         payload = canonical_message(message) + b"\n"
         try:
-            os.write(self.descriptor, payload)
+            view = memoryview(payload)
+            while view:
+                written = os.write(self.descriptor, view)
+                if written <= 0:
+                    raise QualificationError("trace")
+                view = view[written:]
             os.fsync(self.descriptor)
+        except QualificationError:
+            raise
         except OSError:
             raise QualificationError("trace") from None
         self.count += 1

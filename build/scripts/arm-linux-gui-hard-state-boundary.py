@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -25,18 +26,23 @@ SCENARIOS = frozenset({
 })
 NO_FAULT_SCENARIOS = frozenset({"C2", "C3", "E5", "E6"})
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+SAFE_OUTPUT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{7,127}$")
 LOOP_DEVICE_RE = re.compile(r"^/dev/loop[0-9]{1,6}$")
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_MOUNTS = 8
 LOOP_IMAGE_BYTES = 32 * 1024 * 1024
 ACK_ARMED = b'{"ok":true,"status":"armed"}\n'
+ACK_PREPARED = b'{"ok":true,"status":"prepared"}\n'
+ACK_READY = b'{"ok":true,"status":"ready"}\n'
 ACK_CLEANED = b'{"ok":true,"status":"cleaned"}\n'
 ACK_REJECTED = b'{"ok":false,"status":"rejected"}\n'
 MOUNT = "/usr/bin/mount"
 UMOUNT = "/usr/bin/umount"
-LOSETUP = "/usr/bin/losetup"
 MKFS_EXT4 = "/usr/bin/mkfs.ext4"
 FIXED_ENVIRONMENT = {"PATH": "/usr/sbin:/usr/bin", "LC_ALL": "C", "LANG": "C"}
+REQUIRED_MEMFD_SEALS = (
+    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+)
 
 
 class BoundaryError(Exception):
@@ -59,12 +65,29 @@ class Identity:
 
 
 @dataclass(frozen=True)
+class SupervisorIdentity:
+    pid: int
+    start_time: int
+    mount_namespace_device: int
+    mount_namespace_inode: int
+
+
+@dataclass(frozen=True)
+class SocketIdentity:
+    relative_path: str
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
 class Request:
     scenario: str
     run_uid: int
     root: Identity
     output: Identity
     game: Identity
+    supervisor: SupervisorIdentity
+    supervisor_socket: SocketIdentity
     hold_timeout_seconds: int
     cleanup_timeout_seconds: int
 
@@ -104,6 +127,31 @@ def parse_identity(value: Any) -> Identity:
     return Identity(path, integer(item["device"], 0, 2**64 - 1), integer(item["inode"], 1, 2**64 - 1))
 
 
+def parse_supervisor_identity(value: Any) -> SupervisorIdentity:
+    item = exact_object(
+        value,
+        ("pid", "start_time", "mount_namespace_device", "mount_namespace_inode"),
+    )
+    return SupervisorIdentity(
+        integer(item["pid"], 2, 2**31 - 1),
+        integer(item["start_time"], 1, 2**64 - 1),
+        integer(item["mount_namespace_device"], 0, 2**64 - 1),
+        integer(item["mount_namespace_inode"], 1, 2**64 - 1),
+    )
+
+
+def parse_socket_identity(value: Any) -> SocketIdentity:
+    item = exact_object(value, ("relative_path", "device", "inode"))
+    path = item["relative_path"]
+    if not isinstance(path, str):
+        reject()
+    return SocketIdentity(
+        path,
+        integer(item["device"], 0, 2**64 - 1),
+        integer(item["inode"], 1, 2**64 - 1),
+    )
+
+
 def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -125,8 +173,26 @@ def validate_relative_layout(root: Identity, output: Identity, game: Identity) -
     game_parts = PurePosixPath(game.relative_path).parts
     if (
         len(root_parts) != 1
-        or output_parts != root_parts + ("output",)
+        or SAFE_OUTPUT_NAME_RE.fullmatch(root_parts[0]) is None
+        or len(output_parts) != 2
+        or SAFE_OUTPUT_NAME_RE.fullmatch(output_parts[-1]) is None
+        or output_parts[:-1] != root_parts
         or game_parts != output_parts + ("game",)
+    ):
+        reject()
+
+
+def validate_socket_layout(socket_identity: SocketIdentity, output: Identity) -> None:
+    path = PurePosixPath(socket_identity.relative_path)
+    output_parts = PurePosixPath(output.relative_path).parts
+    if (
+        path.is_absolute()
+        or str(path) != socket_identity.relative_path
+        or len(path.parts) != 4
+        or path.parts[:-2] != output_parts
+        or path.parts[-2] != "control"
+        or SAFE_NAME_RE.fullmatch(path.parts[-1]) is None
+        or not path.parts[-1].endswith(".sock")
     ):
         reject()
 
@@ -140,7 +206,10 @@ def parse_request(raw: bytes) -> Request:
         reject()
     value = exact_object(
         value,
-        ("schema_version", "scenario", "run_uid", "root", "output", "game", "timeouts_seconds"),
+        (
+            "schema_version", "scenario", "run_uid", "root", "output", "game",
+            "supervisor", "supervisor_socket", "timeouts_seconds",
+        ),
     )
     if value["schema_version"] != SCHEMA_VERSION or value["scenario"] not in SCENARIOS:
         reject()
@@ -148,49 +217,57 @@ def parse_request(raw: bytes) -> Request:
     root = parse_identity(value["root"])
     output = parse_identity(value["output"])
     game = parse_identity(value["game"])
+    supervisor = parse_supervisor_identity(value["supervisor"])
+    supervisor_socket = parse_socket_identity(value["supervisor_socket"])
     validate_relative_layout(root, output, game)
+    validate_socket_layout(supervisor_socket, output)
     timeouts = exact_object(value["timeouts_seconds"], ("hold", "cleanup"))
     hold = integer(timeouts["hold"], 5, 1800)
     cleanup = integer(timeouts["cleanup"], 5, 120)
-    return Request(value["scenario"], run_uid, root, output, game, hold, cleanup)
+    return Request(value["scenario"], run_uid, root, output, game, supervisor, supervisor_socket, hold, cleanup)
 
 
-def parse_cli(arguments: list[str]) -> tuple[Path, str, int]:
-    if len(arguments) != 6:
+def parse_cli(arguments: list[str]) -> tuple[Path, int, int, tuple[str, str, str, str]]:
+    if len(arguments) != 8:
         reject()
     values: dict[str, str] = {}
-    for index in (0, 2, 4):
+    for index in (0, 2, 4, 6):
         flag = arguments[index]
-        if flag not in ("--allowed-vm-prefix", "--request", "--ack-fd") or flag in values:
+        if flag not in ("--allowed-vm-prefix", "--request-fd", "--request-source-inode", "--supervisor-socket") or flag in values:
             reject()
         values[flag] = arguments[index + 1]
-    if set(values) != {"--allowed-vm-prefix", "--request", "--ack-fd"}:
+    if set(values) != {"--allowed-vm-prefix", "--request-fd", "--request-source-inode", "--supervisor-socket"}:
         reject()
     prefix = Path(values["--allowed-vm-prefix"])
     if not prefix.is_absolute() or str(prefix) != values["--allowed-vm-prefix"] or ".." in prefix.parts:
         reject()
-    request_name = values["--request"]
-    if SAFE_NAME_RE.fullmatch(request_name) is None or not request_name.endswith(".json"):
-        reject()
     try:
-        ack_fd = int(values["--ack-fd"], 10)
+        request_fd = int(values["--request-fd"], 10)
+        request_source_inode = int(values["--request-source-inode"], 10)
     except ValueError:
         reject()
-    if str(ack_fd) != values["--ack-fd"] or ack_fd < 3 or ack_fd > 1024:
+    if not 3 <= request_fd <= 1024 or request_source_inode <= 0:
         reject()
-    return prefix, request_name, ack_fd
+    socket_path = PurePosixPath(values["--supervisor-socket"])
+    if (
+        socket_path.is_absolute()
+        or str(socket_path) != values["--supervisor-socket"]
+        or len(socket_path.parts) != 4
+        or socket_path.parts[-2] != "control"
+        or SAFE_OUTPUT_NAME_RE.fullmatch(socket_path.parts[1]) is None
+        or SAFE_NAME_RE.fullmatch(socket_path.parts[-1]) is None
+        or not socket_path.parts[-1].endswith(".sock")
+    ):
+        reject()
+    return prefix, request_fd, request_source_inode, socket_path.parts
 
 
 def validate_prefix(prefix: Path) -> int:
     try:
         metadata = prefix.lstat()
-        if (
-            prefix.resolve(strict=True) != prefix
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != 0
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-        ):
+        if prefix.resolve(strict=True) != prefix:
             reject()
+        validate_prefix_metadata(metadata)
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
         descriptor = os.open(prefix, flags)
         opened = os.fstat(descriptor)
@@ -204,6 +281,15 @@ def validate_prefix(prefix: Path) -> int:
         reject()
 
 
+def validate_prefix_metadata(metadata: os.stat_result) -> None:
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o711
+    ):
+        reject()
+
+
 def validate_directory_identity(metadata: os.stat_result, expected: Identity, run_uid: int) -> None:
     if (
         not stat.S_ISDIR(metadata.st_mode)
@@ -214,20 +300,27 @@ def validate_directory_identity(metadata: os.stat_result, expected: Identity, ru
         reject()
 
 
-def open_bound_directories(prefix_fd: int, request: Request) -> tuple[int, int, int]:
+def open_request_root(prefix_fd: int, name: str) -> int:
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        return os.open(name, flags, dir_fd=prefix_fd)
+    except OSError:
+        reject()
+
+
+def open_bound_directories(root_fd: int, request: Request) -> tuple[int, int]:
     descriptors: list[int] = []
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
-        root_fd = os.open(request.root.relative_path, flags, dir_fd=prefix_fd)
-        descriptors.append(root_fd)
         validate_directory_identity(os.fstat(root_fd), request.root, request.run_uid)
-        output_fd = os.open("output", flags, dir_fd=root_fd)
+        output_name = PurePosixPath(request.output.relative_path).name
+        output_fd = os.open(output_name, flags, dir_fd=root_fd)
         descriptors.append(output_fd)
         validate_directory_identity(os.fstat(output_fd), request.output, request.run_uid)
         game_fd = os.open("game", flags, dir_fd=output_fd)
         descriptors.append(game_fd)
         validate_directory_identity(os.fstat(game_fd), request.game, request.run_uid)
-        return root_fd, output_fd, game_fd
+        return output_fd, game_fd
     except BoundaryError:
         for descriptor in descriptors:
             os.close(descriptor)
@@ -238,73 +331,84 @@ def open_bound_directories(prefix_fd: int, request: Request) -> tuple[int, int, 
         reject()
 
 
-def read_single_use_request(prefix_fd: int, name: str) -> tuple[Request, int]:
+def read_sealed_request(descriptor: int) -> Request:
     try:
-        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=prefix_fd)
-        try:
-            before = os.fstat(descriptor)
-            validate_request_file_identity(before)
-            raw = bytearray()
-            while len(raw) <= MAX_REQUEST_BYTES:
-                block = os.read(descriptor, min(4096, MAX_REQUEST_BYTES + 1 - len(raw)))
-                if not block:
-                    break
-                raw.extend(block)
-            after = os.fstat(descriptor)
-            if (
-                len(raw) != before.st_size
-                or (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_nlink,
-                    before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                != (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_nlink,
-                    after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-            ):
-                reject()
-            request = parse_request(bytes(raw))
-            if request.run_uid != before.st_uid:
-                reject()
-            return request, before.st_ino
-        finally:
-            os.close(descriptor)
-    except BoundaryError:
-        raise
-    except OSError:
-        reject()
-
-
-def validate_request_file_identity(metadata: os.stat_result) -> None:
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid == 0
-        or metadata.st_nlink != 1
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_size < 2
-        or metadata.st_size > MAX_REQUEST_BYTES
-    ):
-        reject()
-
-
-def consume_request(prefix_fd: int, name: str, inode: int) -> None:
-    try:
-        metadata = os.stat(name, dir_fd=prefix_fd, follow_symlinks=False)
-        if metadata.st_ino != inode or not stat.S_ISREG(metadata.st_mode):
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 0
+            or not 0 < before.st_size <= MAX_REQUEST_BYTES
+            or fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) != REQUIRED_MEMFD_SEALS
+        ):
             reject()
-        os.unlink(name, dir_fd=prefix_fd)
-        os.fsync(prefix_fd)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        raw = bytearray()
+        while len(raw) <= MAX_REQUEST_BYTES:
+            block = os.read(descriptor, min(4096, MAX_REQUEST_BYTES + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            len(raw) != before.st_size or len(raw) > MAX_REQUEST_BYTES
+            or any(getattr(before, field) != getattr(after, field) for field in fields)
+            or fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) != REQUIRED_MEMFD_SEALS
+        ):
+            reject()
+        return parse_request(bytes(raw))
     except BoundaryError:
         raise
-    except OSError:
+    except (OSError, ValueError):
         reject()
 
 
-def validate_ack_socket(descriptor: int, run_uid: int) -> socket.socket:
+def connect_supervisor_socket(
+    output_fd: int,
+    request: Request,
+    cli_parts: tuple[str, str, str, str],
+) -> socket.socket:
+    control_fd = -1
     try:
-        duplicate = os.dup(descriptor)
-        channel = socket.socket(fileno=duplicate)
-        if channel.family != socket.AF_UNIX or channel.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
+        expected_parts = PurePosixPath(request.supervisor_socket.relative_path).parts
+        if cli_parts != expected_parts:
+            reject()
+        control_fd = os.open(
+            "control",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=output_fd,
+        )
+        control = os.fstat(control_fd)
+        if (
+            not stat.S_ISDIR(control.st_mode)
+            or control.st_uid != request.run_uid
+            or stat.S_IMODE(control.st_mode) != 0o700
+        ):
+            reject()
+        socket_name = expected_parts[-1]
+        before = os.stat(socket_name, dir_fd=control_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISSOCK(before.st_mode)
+            or before.st_uid != request.run_uid
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or (before.st_dev, before.st_ino)
+            != (request.supervisor_socket.device, request.supervisor_socket.inode)
+        ):
+            reject()
+        channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+        channel.settimeout(request.cleanup_timeout_seconds)
+        channel.connect(f"/proc/self/fd/{control_fd}/{socket_name}")
+        after = os.stat(socket_name, dir_fd=control_fd, follow_symlinks=False)
+        if (after.st_dev, after.st_ino, after.st_mode, after.st_uid) != (
+            before.st_dev, before.st_ino, before.st_mode, before.st_uid,
+        ):
             channel.close()
             reject()
-        _pid, peer_uid, _gid = struct.unpack("3i", channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-        if peer_uid not in (0, run_uid):
+        peer_pid, peer_uid, _gid = struct.unpack(
+            "3i",
+            channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")),
+        )
+        if peer_pid != request.supervisor.pid or peer_uid != request.run_uid:
             channel.close()
             reject()
         channel.set_inheritable(False)
@@ -313,6 +417,9 @@ def validate_ack_socket(descriptor: int, run_uid: int) -> socket.socket:
         raise
     except (OSError, ValueError, struct.error):
         reject()
+    finally:
+        if control_fd >= 0:
+            os.close(control_fd)
 
 
 def build_command_plan(scenario: str, game: str) -> tuple[PlanStep, ...]:
@@ -323,42 +430,43 @@ def build_command_plan(scenario: str, game: str) -> tuple[PlanStep, ...]:
         return ()
     if scenario == "E2-permission":
         return (
-            PlanStep("mkdir", (f"{boundary}/permission",)),
-            PlanStep("chmod", ("000", f"{boundary}/permission")),
+            PlanStep("arm-chown", ("0:0", f"{game}/smapi-internal")),
+            PlanStep("arm-chmod", ("000", f"{game}/smapi-internal")),
         )
     if scenario == "E2-read-only":
-        source = f"{boundary}/read-only-source"
-        target = f"{boundary}/read-only-target"
         return (
-            PlanStep("mkdir", (source,)),
-            PlanStep("mkdir", (target,)),
-            PlanStep("exec", (MOUNT, "--bind", "--", source, target), target),
-            PlanStep("exec", (MOUNT, "-o", "remount,bind,ro", "--", target), target),
+            PlanStep(
+                "prepare-exec",
+                (MOUNT, "-t", "tmpfs", "-o", "size=32m,nosuid,nodev,noexec", "tmpfs", "--", game),
+                game,
+            ),
+            PlanStep("arm-exec", (MOUNT, "-o", "remount,ro,nosuid,nodev,noexec", "--", game), game),
         )
     if scenario == "E2-disk-full":
         image = f"{boundary}/disk-full.img"
-        target = f"{boundary}/disk-full-target"
         return (
-            PlanStep("mkdir", (target,)),
-            PlanStep("allocate", (str(LOOP_IMAGE_BYTES), image)),
+            PlanStep("prepare-mkdir", (boundary,)),
+            PlanStep("prepare-allocate", (str(LOOP_IMAGE_BYTES), image)),
+            *disk_full_dynamic_steps(image, game),
+            PlanStep("arm-fill", (game,)),
         )
     if scenario == "E2-cross-device":
-        target = f"{boundary}/cross-device-target"
+        target = f"{game}/smapi-internal"
         return (
-            PlanStep("mkdir", (target,)),
-            PlanStep("exec", (MOUNT, "-t", "tmpfs", "-o", "size=8m,nosuid,nodev,noexec", "tmpfs", "--", target), target),
+            PlanStep(
+                "seeded-exec",
+                (MOUNT, "-t", "tmpfs", "-o", "size=8m,nosuid,nodev,noexec", "tmpfs", "--", target),
+                target,
+            ),
+            PlanStep("arm-verify-device", (target,)),
         )
     reject()
 
 
-def disk_full_dynamic_steps(image: str, target: str, loop_device: str = "<loop-device>") -> tuple[PlanStep, ...]:
-    if LOOP_DEVICE_RE.fullmatch(loop_device) is None and loop_device != "<loop-device>":
-        reject()
+def disk_full_dynamic_steps(image: str, target: str) -> tuple[PlanStep, ...]:
     return (
-        PlanStep("exec-capture-loop", (LOSETUP, "--find", "--show", "--nooverlap", "--", image)),
-        PlanStep("exec", (MKFS_EXT4, "-q", "-F", "-m", "0", "--", loop_device)),
-        PlanStep("exec", (MOUNT, "-o", "nosuid,nodev,noexec", "--", loop_device, target), target),
-        PlanStep("fill", (target,)),
+        PlanStep("prepare-exec", (MKFS_EXT4, "-q", "-F", "-m", "0", "--", image)),
+        PlanStep("prepare-exec", (MOUNT, "-o", "loop,nosuid,nodev,noexec", "--", image, target), target),
     )
 
 
@@ -390,12 +498,49 @@ def cleanup_mount_plan(records: Iterable[MountRecord]) -> tuple[PlanStep, ...]:
     return tuple(PlanStep("exec", (UMOUNT, "--", record.target), record.target) for record in ordered)
 
 
-def assert_private_mount_namespace() -> None:
+def process_start_time(pid: int) -> int:
+    try:
+        value = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        fields = value[value.rfind(")") + 2:].split()
+        return int(fields[19], 10)
+    except (OSError, UnicodeError, ValueError, IndexError):
+        reject()
+
+
+def validate_nonroot_process_security(pid: int, run_uid: int) -> None:
+    try:
+        fields: dict[str, str] = {}
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                fields[key] = value.strip()
+        uids = tuple(int(value, 10) for value in fields["Uid"].split())
+        if uids != (run_uid, run_uid, run_uid, run_uid) or int(fields["CapEff"], 16) != 0:
+            reject()
+        if fields.get("NoNewPrivs") != "1":
+            reject()
+    except BoundaryError:
+        raise
+    except (OSError, UnicodeError, ValueError, KeyError):
+        reject()
+
+
+def validate_supervisor_namespace(supervisor: SupervisorIdentity, run_uid: int) -> None:
     try:
         current = os.stat("/proc/self/ns/mnt")
         initial = os.stat("/proc/1/ns/mnt")
-        if (current.st_dev, current.st_ino) == (initial.st_dev, initial.st_ino):
+        supervisor_process = os.stat(f"/proc/{supervisor.pid}")
+        supervisor_namespace = os.stat(f"/proc/{supervisor.pid}/ns/mnt")
+        expected_namespace = (supervisor.mount_namespace_device, supervisor.mount_namespace_inode)
+        if (
+            supervisor_process.st_uid != run_uid
+            or process_start_time(supervisor.pid) != supervisor.start_time
+            or (current.st_dev, current.st_ino) != expected_namespace
+            or (supervisor_namespace.st_dev, supervisor_namespace.st_ino) != expected_namespace
+            or (current.st_dev, current.st_ino) == (initial.st_dev, initial.st_ino)
+        ):
             reject()
+        validate_nonroot_process_security(supervisor.pid, run_uid)
     except BoundaryError:
         raise
     except OSError:
@@ -403,12 +548,22 @@ def assert_private_mount_namespace() -> None:
 
 
 class Controller:
-    def __init__(self, prefix_fd: int, prefix: Path, request: Request, request_inode: int, game_fd: int):
+    def __init__(
+        self,
+        prefix_fd: int,
+        prefix: Path,
+        request: Request,
+        request_inode: int,
+        output_fd: int,
+        game_fd: int,
+    ):
         self.prefix_fd = prefix_fd
         self.prefix = prefix
         self.request = request
         self.request_inode = request_inode
+        self.output_fd = output_fd
         self.game_fd = game_fd
+        self.current_game_fd = -1
         self.game = prefix / request.game.relative_path
         self.boundary = self.game / ".smapi-hard-state-e2"
         self.boundary_fd = -1
@@ -416,6 +571,11 @@ class Controller:
         self.log_name = f".smapi-hard-state-controller-{request_inode}.log"
         self.mounts: list[MountRecord] = []
         self.loop_device: str | None = None
+        self.loop_rdev: int | None = None
+        self.loop_backing_file: str | None = None
+        self.internal_fd = -1
+        self.internal_identity: tuple[int, int] | None = None
+        self.internal_original: tuple[int, int, int] | None = None
         self.boundary_identity: tuple[int, int] | None = None
         self.leaf_identities: dict[str, tuple[int, int, int]] = {}
         self.state_identity: tuple[int, int] | None = None
@@ -427,6 +587,9 @@ class Controller:
         if value <= 0:
             reject()
         return value
+
+    def reset_phase_deadline(self) -> None:
+        self.deadline = time.monotonic() + self.request.cleanup_timeout_seconds
 
     def private_log_fd(self) -> int:
         flags = os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -446,8 +609,8 @@ class Controller:
             reject()
         return descriptor
 
-    def run(self, arguments: tuple[str, ...], capture_loop: bool = False) -> str | None:
-        if not arguments or arguments[0] not in (MOUNT, UMOUNT, LOSETUP, MKFS_EXT4):
+    def run(self, arguments: tuple[str, ...]) -> None:
+        if not arguments or arguments[0] not in (MOUNT, UMOUNT, MKFS_EXT4):
             reject()
         log_fd = self.private_log_fd()
         try:
@@ -455,25 +618,20 @@ class Controller:
                 arguments,
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE if capture_loop else log_fd,
+                stdout=log_fd,
                 stderr=log_fd,
                 env=FIXED_ENVIRONMENT,
                 timeout=self.remaining(),
-                pass_fds=(() if self.boundary_fd < 0 else (self.boundary_fd,)),
+                pass_fds=tuple(
+                    descriptor
+                    for descriptor in (self.output_fd, self.game_fd, self.current_game_fd, self.boundary_fd)
+                    if descriptor >= 0
+                ),
             )
         finally:
             os.close(log_fd)
         if result.returncode != 0:
             reject()
-        if not capture_loop:
-            return None
-        try:
-            output = result.stdout.decode("ascii").strip()
-        except (AttributeError, UnicodeError):
-            reject()
-        if LOOP_DEVICE_RE.fullmatch(output) is None:
-            reject()
-        return output
 
     def create_boundary(self) -> None:
         validate_directory_identity(os.fstat(self.game_fd), self.request.game, self.request.run_uid)
@@ -511,6 +669,14 @@ class Controller:
             reject()
         return f"/proc/self/fd/{self.boundary_fd}/{name}"
 
+    def proc_game(self) -> str:
+        return f"/proc/self/fd/{self.output_fd}/game"
+
+    def proc_internal(self) -> str:
+        if self.current_game_fd < 0:
+            reject()
+        return f"/proc/self/fd/{self.current_game_fd}/smapi-internal"
+
     def actual_leaf(self, name: str) -> str:
         if SAFE_NAME_RE.fullmatch(name) is None:
             reject()
@@ -524,83 +690,279 @@ class Controller:
         finally:
             os.close(descriptor)
 
+    def open_internal(self) -> None:
+        if self.internal_fd >= 0:
+            return
+        if self.current_game_fd < 0:
+            reject()
+        self.internal_fd = os.open(
+            "smapi-internal",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=self.current_game_fd,
+        )
+        metadata = os.fstat(self.internal_fd)
+        game = os.fstat(self.current_game_fd)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != self.request.run_uid
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_dev != game.st_dev
+        ):
+            reject()
+        self.internal_identity = (metadata.st_dev, metadata.st_ino)
+        self.internal_original = (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode))
+
     def record_mount(self, target: str) -> None:
         try:
             mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             reject()
         matches = parse_mountinfo(mountinfo, {target})
-        if len(matches) != 1 or any(record.mount_id == matches[0].mount_id for record in self.mounts):
+        if len(matches) != 1:
             reject()
+        self.mounts = [record for record in self.mounts if record.mount_id != matches[0].mount_id]
         self.mounts.append(matches[0])
         if len(self.mounts) > MAX_MOUNTS:
             reject()
 
     def known_mount_targets(self) -> set[str]:
-        names = {
-            "E2-read-only": "read-only-target",
-            "E2-disk-full": "disk-full-target",
-            "E2-cross-device": "cross-device-target",
-        }
-        name = names.get(self.request.scenario)
-        return set() if name is None else {self.actual_leaf(name)}
+        if self.request.scenario == "E2-read-only":
+            return {str(self.game)}
+        if self.request.scenario == "E2-disk-full":
+            return {str(self.game)}
+        if self.request.scenario == "E2-cross-device":
+            return {str(self.game / "smapi-internal")}
+        return set()
 
-    def arm(self) -> None:
+    def mount_operand(self, target: str) -> str:
+        if target == str(self.game):
+            return self.proc_game()
+        if target == str(self.game / "smapi-internal"):
+            return self.proc_internal()
+        reject()
+
+    def prepare(self) -> None:
         if self.request.scenario in NO_FAULT_SCENARIOS:
             self.write_state(False)
             return
-        assert_private_mount_namespace()
-        self.create_boundary()
-        if self.request.scenario == "E2-permission":
-            self.make_leaf_directory("permission", owner=0, mode=0)
-        elif self.request.scenario == "E2-read-only":
-            self.make_leaf_directory("read-only-source")
-            self.make_leaf_directory("read-only-target")
-            source = self.proc_leaf("read-only-source")
-            target = self.proc_leaf("read-only-target")
-            self.run((MOUNT, "--bind", "--", source, target))
-            self.record_mount(self.actual_leaf("read-only-target"))
-            self.run((MOUNT, "-o", "remount,bind,ro", "--", target))
+        if self.request.scenario == "E2-read-only":
+            self.run((
+                MOUNT, "-t", "tmpfs", "-o", "size=32m,nosuid,nodev,noexec",
+                "tmpfs", "--", self.proc_game(),
+            ))
+            self.record_mount(str(self.game))
         elif self.request.scenario == "E2-disk-full":
-            self.make_leaf_directory("disk-full-target", owner=0)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
-            descriptor = os.open("disk-full.img", flags, 0o600, dir_fd=self.boundary_fd)
-            try:
-                os.posix_fallocate(descriptor, 0, LOOP_IMAGE_BYTES)
-                os.fsync(descriptor)
-                metadata = os.fstat(descriptor)
-                self.leaf_identities["disk-full.img"] = (
-                    metadata.st_dev,
-                    metadata.st_ino,
-                    stat.S_IFMT(metadata.st_mode),
-                )
-            finally:
-                os.close(descriptor)
-            image = self.proc_leaf("disk-full.img")
-            target = self.proc_leaf("disk-full-target")
-            self.loop_device = self.run(
-                (LOSETUP, "--find", "--show", "--nooverlap", "--", image),
-                capture_loop=True,
-            )
-            self.run((MKFS_EXT4, "-q", "-F", "-m", "0", "--", self.loop_device))
-            self.run((MOUNT, "-o", "nosuid,nodev,noexec", "--", self.loop_device, target))
-            self.record_mount(self.actual_leaf("disk-full-target"))
-            self.chown_mounted_leaf("disk-full-target")
-            self.fill_filesystem("disk-full-target")
-        elif self.request.scenario == "E2-cross-device":
-            self.make_leaf_directory("cross-device-target", owner=0)
-            target = self.proc_leaf("cross-device-target")
-            self.run((MOUNT, "-t", "tmpfs", "-o", "size=8m,nosuid,nodev,noexec", "tmpfs", "--", target))
-            self.record_mount(self.actual_leaf("cross-device-target"))
-            self.chown_mounted_leaf("cross-device-target")
-        else:
+            self.prepare_disk_full()
+        elif self.request.scenario not in ("E2-permission", "E2-cross-device"):
             reject()
-        os.fchown(self.boundary_fd, self.request.run_uid, 0)
-        os.fchmod(self.boundary_fd, 0o700)
+        if self.request.scenario in ("E2-read-only", "E2-disk-full"):
+            self.chown_current_game()
         self.write_state(False)
 
-    def fill_filesystem(self, target_name: str) -> None:
-        target_fd = os.open(target_name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=self.boundary_fd)
+    def seeded(self) -> None:
+        self.current_game_fd = os.open(
+            "game",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=self.output_fd,
+        )
+        metadata = os.fstat(self.current_game_fd)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != self.request.run_uid
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            reject()
+        if self.request.scenario not in ("E2-read-only", "E2-disk-full") and (
+            metadata.st_dev,
+            metadata.st_ino,
+        ) != (self.request.game.device, self.request.game.inode):
+            reject()
+        self.open_internal()
+        if self.request.scenario == "E2-cross-device":
+            self.run((
+                MOUNT, "-t", "tmpfs", "-o", "size=8m,nosuid,nodev,noexec",
+                "tmpfs", "--", self.proc_internal(),
+            ))
+            self.record_mount(str(self.game / "smapi-internal"))
+            mounted = os.open(
+                "smapi-internal",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=self.current_game_fd,
+            )
+            try:
+                os.fchown(mounted, self.request.run_uid, 0)
+                os.fchmod(mounted, 0o700)
+            finally:
+                os.close(mounted)
+        self.write_state(False)
+
+    def arm(self) -> None:
+        if self.request.scenario in NO_FAULT_SCENARIOS:
+            return
+        if self.request.scenario == "E2-permission":
+            if self.internal_fd < 0:
+                reject()
+            os.fchown(self.internal_fd, 0, 0)
+            os.fchmod(self.internal_fd, 0)
+        elif self.request.scenario == "E2-read-only":
+            self.run((MOUNT, "-o", "remount,ro,nosuid,nodev,noexec", "--", self.proc_game()))
+        elif self.request.scenario == "E2-disk-full":
+            if self.boundary_fd < 0 or self.loop_device is None or self.current_game_fd < 0:
+                reject()
+            self.fill_filesystem(self.current_game_fd)
+        elif self.request.scenario == "E2-cross-device":
+            if self.internal_fd < 0 or self.current_game_fd < 0:
+                reject()
+            internal = os.stat("smapi-internal", dir_fd=self.current_game_fd, follow_symlinks=False)
+            if internal.st_dev == os.fstat(self.current_game_fd).st_dev:
+                reject()
+            self.record_mount(str(self.game / "smapi-internal"))
+        else:
+            reject()
+        self.write_state(False)
+
+    def prepare_disk_full(self) -> None:
+        self.create_boundary()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        descriptor = os.open("disk-full.img", flags, 0o600, dir_fd=self.boundary_fd)
+        try:
+            os.posix_fallocate(descriptor, 0, LOOP_IMAGE_BYTES)
+            os.fsync(descriptor)
+            metadata = os.fstat(descriptor)
+            self.leaf_identities["disk-full.img"] = (
+                metadata.st_dev,
+                metadata.st_ino,
+                stat.S_IFMT(metadata.st_mode),
+            )
+        finally:
+            os.close(descriptor)
+        image = self.proc_leaf("disk-full.img")
+        self.run((MKFS_EXT4, "-q", "-F", "-m", "0", "--", image))
+        # util-linux mount allocates the loop device with LO_FLAGS_AUTOCLEAR.
+        # Ubuntu 24.04's losetup has no setup-time --autoclear option.
+        self.run((MOUNT, "-o", "loop,nosuid,nodev,noexec", "--", image, self.proc_game()))
+        self.record_mount(str(self.game))
+        self.capture_loop_identity()
+        self.remove_empty_lost_found()
+
+    def loop_backing_path(self) -> Path:
+        if self.loop_rdev is None:
+            reject()
+        return Path("/sys/dev/block") / f"{os.major(self.loop_rdev)}:{os.minor(self.loop_rdev)}" / "loop/backing_file"
+
+    def read_loop_backing_file(self) -> str | None:
+        try:
+            with self.loop_backing_path().open("rb") as stream:
+                raw = stream.read(4097)
+            if len(raw) > 4096:
+                reject()
+            return raw.decode("utf-8").rstrip("\n")
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError):
+            reject()
+
+    def read_loop_autoclear(self) -> bool | None:
+        if self.loop_rdev is None:
+            reject()
+        path = Path("/sys/dev/block") / f"{os.major(self.loop_rdev)}:{os.minor(self.loop_rdev)}" / "loop/autoclear"
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            reject()
+        if raw not in (b"0\n", b"1\n"):
+            reject()
+        return raw == b"1\n"
+
+    def capture_loop_identity(self) -> None:
+        matches = [record for record in self.mounts if record.target == str(self.game)]
+        if len(matches) != 1 or re.fullmatch(r"[0-9]+:[0-9]+", matches[0].device) is None:
+            reject()
+        major_text, minor_text = matches[0].device.split(":", 1)
+        self.loop_rdev = os.makedev(int(major_text, 10), int(minor_text, 10))
+        sysfs_device = Path("/sys/dev/block") / matches[0].device
+        try:
+            loop_name = sysfs_device.resolve(strict=True).name
+        except OSError:
+            reject()
+        self.loop_device = f"/dev/{loop_name}"
+        if LOOP_DEVICE_RE.fullmatch(self.loop_device) is None:
+            reject()
+        try:
+            device = os.lstat(self.loop_device)
+        except OSError:
+            reject()
+        if not stat.S_ISBLK(device.st_mode) or device.st_rdev != self.loop_rdev:
+            reject()
+        self.loop_backing_file = self.read_loop_backing_file()
+        expected = self.actual_leaf("disk-full.img")
+        if self.loop_backing_file != expected or self.read_loop_autoclear() is not True:
+            reject()
+
+    def wait_for_loop_autoclear(self) -> None:
+        if self.loop_device is None or self.loop_rdev is None or self.loop_backing_file is None:
+            reject()
+        while self.remaining() > 0:
+            current = self.read_loop_backing_file()
+            if current is None:
+                self.loop_device = None
+                self.loop_rdev = None
+                self.loop_backing_file = None
+                return
+            if current != self.loop_backing_file:
+                # The loop number was reassigned; never detach an unrelated association.
+                reject()
+            if self.read_loop_autoclear() is not True:
+                reject()
+            try:
+                device = os.lstat(self.loop_device)
+            except OSError:
+                reject()
+            if not stat.S_ISBLK(device.st_mode) or device.st_rdev != self.loop_rdev:
+                reject()
+            time.sleep(0.02)
+        reject()
+
+    def remove_empty_lost_found(self) -> None:
+        game = os.open(
+            "game",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=self.output_fd,
+        )
+        lost_found = -1
+        try:
+            lost_found = os.open(
+                "lost+found",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=game,
+            )
+            metadata = os.fstat(lost_found)
+            if metadata.st_uid != 0 or os.listdir(lost_found):
+                reject()
+            os.close(lost_found)
+            lost_found = -1
+            os.rmdir("lost+found", dir_fd=game)
+            os.fsync(game)
+        finally:
+            if lost_found >= 0:
+                os.close(lost_found)
+            os.close(game)
+
+    def chown_current_game(self) -> None:
+        descriptor = os.open(
+            "game",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=self.output_fd,
+        )
+        try:
+            os.fchown(descriptor, self.request.run_uid, 0)
+            os.fchmod(descriptor, 0o700)
+        finally:
+            os.close(descriptor)
+
+    def fill_filesystem(self, target_fd: int) -> None:
         descriptor = os.open(
             "capacity.bin",
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -621,7 +983,6 @@ class Controller:
                     raise
         finally:
             os.close(descriptor)
-            os.close(target_fd)
         if not full:
             reject()
 
@@ -634,6 +995,16 @@ class Controller:
             "root": {"device": self.request.root.device, "inode": self.request.root.inode},
             "output": {"device": self.request.output.device, "inode": self.request.output.inode},
             "game": {"device": self.request.game.device, "inode": self.request.game.inode},
+            "supervisor": {
+                "pid": self.request.supervisor.pid,
+                "start_time": self.request.supervisor.start_time,
+                "mount_namespace_device": self.request.supervisor.mount_namespace_device,
+                "mount_namespace_inode": self.request.supervisor.mount_namespace_inode,
+            },
+            "supervisor_socket": {
+                "device": self.request.supervisor_socket.device,
+                "inode": self.request.supervisor_socket.inode,
+            },
             "mounts": [record.__dict__ for record in self.mounts],
             "loop_device": self.loop_device,
             "cleanup_complete": cleaned,
@@ -670,37 +1041,48 @@ class Controller:
         if self.boundary_fd >= 0:
             os.fchown(self.boundary_fd, 0, 0)
             os.fchmod(self.boundary_fd, 0o700)
-            discovered = parse_mountinfo(
-                Path("/proc/self/mountinfo").read_text(encoding="utf-8"),
-                self.known_mount_targets(),
-            )
-            for record in discovered:
-                if all(existing.mount_id != record.mount_id for existing in self.mounts):
-                    self.mounts.append(record)
-            if len(self.mounts) > MAX_MOUNTS:
-                reject()
-            self.write_state(False)
+        if self.internal_fd >= 0:
+            if self.request.scenario == "E2-permission" and self.internal_original is not None:
+                original_uid, original_gid, original_mode = self.internal_original
+                os.fchown(self.internal_fd, original_uid, original_gid)
+                os.fchmod(self.internal_fd, original_mode)
+                current = os.stat("smapi-internal", dir_fd=self.current_game_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != self.internal_identity:
+                    reject()
+            os.close(self.internal_fd)
+            self.internal_fd = -1
+        if self.current_game_fd >= 0 and self.request.scenario != "E2-cross-device":
+            os.close(self.current_game_fd)
+            self.current_game_fd = -1
+        discovered = parse_mountinfo(
+            Path("/proc/self/mountinfo").read_text(encoding="utf-8"),
+            self.known_mount_targets(),
+        )
+        tracked_ids = {record.mount_id for record in self.mounts}
+        discovered_ids = {record.mount_id for record in discovered}
+        if self.mounts and discovered_ids != tracked_ids:
+            reject()
+        self.mounts = list(discovered)
+        self.write_state(False)
         for step in cleanup_mount_plan(self.mounts):
             current = parse_mountinfo(Path("/proc/self/mountinfo").read_text(encoding="utf-8"), {step.mount_target or ""})
             expected = next(record for record in self.mounts if record.target == step.mount_target)
             if len(current) != 1 or current[0].mount_id != expected.mount_id:
                 reject()
-            target_name = Path(expected.target).name
-            self.run((UMOUNT, "--", self.proc_leaf(target_name)))
+            self.run((UMOUNT, "--", self.mount_operand(expected.target)))
             after = parse_mountinfo(Path("/proc/self/mountinfo").read_text(encoding="utf-8"), {expected.target})
             if after:
                 reject()
+        if self.current_game_fd >= 0:
+            if self.request.scenario == "E2-cross-device" and self.internal_identity is not None:
+                current = os.stat("smapi-internal", dir_fd=self.current_game_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != self.internal_identity:
+                    reject()
+            os.close(self.current_game_fd)
+            self.current_game_fd = -1
         if self.loop_device is not None:
-            self.run((LOSETUP, "--detach", "--", self.loop_device))
+            self.wait_for_loop_autoclear()
         if self.boundary_fd >= 0:
-            try:
-                permission_fd = os.open("permission", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=self.boundary_fd)
-                try:
-                    os.fchmod(permission_fd, 0o700)
-                finally:
-                    os.close(permission_fd)
-            except FileNotFoundError:
-                pass
             try:
                 if "disk-full.img" in self.leaf_identities:
                     self.validate_leaf_identity("disk-full.img")
@@ -709,10 +1091,6 @@ class Controller:
                 if error.errno != errno.ENOENT:
                     raise
         if self.boundary_fd >= 0:
-            for name in ("permission", "read-only-target", "read-only-source", "disk-full-target", "cross-device-target"):
-                if name in self.leaf_identities:
-                    self.validate_leaf_identity(name)
-                    os.rmdir(name, dir_fd=self.boundary_fd)
             boundary = os.stat(".smapi-hard-state-e2", dir_fd=self.game_fd, follow_symlinks=False)
             if (boundary.st_dev, boundary.st_ino) != self.boundary_identity:
                 reject()
@@ -722,8 +1100,8 @@ class Controller:
         self.write_state(True)
 
 
-def receive_cleanup(channel: socket.socket, timeout: int) -> bool:
-    channel.settimeout(timeout)
+def receive_command(channel: socket.socket, expected: bytes, timeout: float) -> bool:
+    channel.settimeout(max(0.01, timeout))
     data = bytearray()
     try:
         while len(data) <= 16 and not data.endswith(b"\n"):
@@ -733,7 +1111,7 @@ def receive_cleanup(channel: socket.socket, timeout: int) -> bool:
             data.extend(block)
     except (OSError, socket.timeout):
         return False
-    return bytes(data) == b"cleanup\n"
+    return bytes(data) == expected
 
 
 def send_ack(channel: socket.socket | None, value: bytes) -> None:
@@ -748,17 +1126,26 @@ def send_ack(channel: socket.socket | None, value: bytes) -> None:
 def main(arguments: list[str]) -> int:
     channel: socket.socket | None = None
     prefix_fd = root_fd = output_fd = game_fd = -1
+    request_fd = -1
     controller: Controller | None = None
     if os.geteuid() != 0:
         return 77
     try:
-        prefix, request_name, ack_fd = parse_cli(arguments)
+        prefix, request_fd, request_source_inode, socket_path = parse_cli(arguments)
+        request = read_sealed_request(request_fd)
+        os.close(request_fd)
+        request_fd = -1
         prefix_fd = validate_prefix(prefix)
-        request, request_inode = read_single_use_request(prefix_fd, request_name)
-        channel = validate_ack_socket(ack_fd, request.run_uid)
-        root_fd, output_fd, game_fd = open_bound_directories(prefix_fd, request)
-        consume_request(prefix_fd, request_name, request_inode)
-        controller = Controller(prefix_fd, prefix, request, request_inode, game_fd)
+        root_name = request.root.relative_path
+        root_fd = open_request_root(prefix_fd, root_name)
+        if request.root.relative_path != root_name:
+            reject()
+        validate_directory_identity(os.fstat(root_fd), request.root, request.run_uid)
+        output_fd, game_fd = open_bound_directories(root_fd, request)
+        validate_supervisor_namespace(request.supervisor, request.run_uid)
+        channel = connect_supervisor_socket(output_fd, request, socket_path)
+        validate_supervisor_namespace(request.supervisor, request.run_uid)
+        controller = Controller(prefix_fd, prefix, request, request_source_inode, output_fd, game_fd)
         previous_handlers = {
             signal.SIGINT: signal.getsignal(signal.SIGINT),
             signal.SIGTERM: signal.getsignal(signal.SIGTERM),
@@ -768,9 +1155,21 @@ def main(arguments: list[str]) -> int:
         signal.signal(signal.SIGINT, stop)
         signal.signal(signal.SIGTERM, stop)
         try:
+            controller.reset_phase_deadline()
+            controller.prepare()
+            send_ack(channel, ACK_PREPARED)
+            hold_deadline = time.monotonic() + request.hold_timeout_seconds
+            if not receive_command(channel, b"seeded\n", hold_deadline - time.monotonic()):
+                reject()
+            controller.reset_phase_deadline()
+            controller.seeded()
+            send_ack(channel, ACK_READY)
+            if not receive_command(channel, b"arm\n", hold_deadline - time.monotonic()):
+                reject()
+            controller.reset_phase_deadline()
             controller.arm()
             send_ack(channel, ACK_ARMED)
-            requested = receive_cleanup(channel, request.hold_timeout_seconds)
+            requested = receive_command(channel, b"cleanup\n", hold_deadline - time.monotonic())
             controller.cleanup()
             if not requested:
                 send_ack(channel, ACK_REJECTED)
@@ -805,6 +1204,8 @@ def main(arguments: list[str]) -> int:
         send_ack(channel, ACK_REJECTED)
         return 70
     finally:
+        if request_fd >= 0:
+            os.close(request_fd)
         if channel is not None:
             channel.close()
         for descriptor in (game_fd, output_fd, root_fd, prefix_fd):

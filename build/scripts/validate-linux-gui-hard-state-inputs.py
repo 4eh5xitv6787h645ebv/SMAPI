@@ -49,6 +49,10 @@ LIVE_COMPONENTS = frozenset({
 MAX_CONTRACT_BYTES = 64 * 1024
 MAX_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_GAME_MARKER_BYTES = 16 * 1024 * 1024
+STABLE_FILE_FIELDS = (
+    "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size",
+    "st_mtime_ns", "st_ctime_ns",
+)
 
 
 class InputError(Exception):
@@ -128,7 +132,21 @@ def normalized_absolute_path(value: Any, code: str) -> Path:
     return candidate
 
 
+def parse_contract_bytes(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicate_object)
+    except InputError:
+        raise
+    except (UnicodeError, json.JSONDecodeError):
+        reject("contract-json")
+    if not isinstance(value, dict):
+        reject("contract-schema")
+    reject_private_inputs(value)
+    return value
+
+
 def read_contract(path: Path) -> dict[str, Any]:
+    descriptor = -1
     try:
         metadata = path.lstat()
         resolved = path.resolve(strict=True)
@@ -143,23 +161,29 @@ def read_contract(path: Path) -> dict[str, Any]:
             reject("contract-file")
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
-        try:
-            opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
-                reject("contract-file")
-            raw = os.read(descriptor, MAX_CONTRACT_BYTES + 1)
-        finally:
-            os.close(descriptor)
-        if len(raw) > MAX_CONTRACT_BYTES:
+        opened = os.fstat(descriptor)
+        raw = bytearray()
+        while len(raw) <= MAX_CONTRACT_BYTES:
+            block = os.read(descriptor, min(4096, MAX_CONTRACT_BYTES + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            len(raw) > MAX_CONTRACT_BYTES or len(raw) != metadata.st_size
+            or any(getattr(metadata, field) != getattr(opened, field) for field in fields)
+            or any(getattr(opened, field) != getattr(after, field) for field in fields)
+        ):
             reject("contract-file")
-        value = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicate_object)
+        value = parse_contract_bytes(bytes(raw))
     except InputError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError):
         reject("contract-json")
-    if not isinstance(value, dict):
-        reject("contract-schema")
-    reject_private_inputs(value)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     return value
 
 
@@ -211,7 +235,7 @@ def validate_regular_package(value: Any, version: str) -> None:
         prefix = b""
         try:
             opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            if any(getattr(metadata, field) != getattr(opened, field) for field in STABLE_FILE_FIELDS):
                 reject("package-file")
             while True:
                 block = os.read(descriptor, 1024 * 1024)
@@ -224,8 +248,7 @@ def validate_regular_package(value: Any, version: str) -> None:
         finally:
             os.close(descriptor)
         if (
-            (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            any(getattr(opened, field) != getattr(final, field) for field in STABLE_FILE_FIELDS)
             or prefix not in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
         ):
             reject("package-file")
@@ -263,7 +286,7 @@ def validate_game_marker(value: Any) -> None:
         prefix = b""
         try:
             opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            if any(getattr(metadata, field) != getattr(opened, field) for field in STABLE_FILE_FIELDS):
                 reject("game-marker")
             while True:
                 block = os.read(descriptor, 1024 * 1024)
@@ -276,8 +299,7 @@ def validate_game_marker(value: Any) -> None:
         finally:
             os.close(descriptor)
         if (
-            (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            any(getattr(opened, field) != getattr(final, field) for field in STABLE_FILE_FIELDS)
             or prefix != b"MZ"
         ):
             reject("game-marker")
@@ -449,9 +471,8 @@ def create_output(root_fd: int, output: Path, expected_root: tuple[int, int]) ->
         reject("output-create")
 
 
-def validate(contract_path: Path, output: Path) -> str:
+def validate_contract(contract: dict[str, Any], output: Path) -> str:
     repository_root = Path(__file__).resolve().parents[2]
-    contract = read_contract(contract_path)
     contract = exact_object(
         contract,
         ("schema_version", "scenario", "release", "package", "game_marker", "binaries", "isolation", "timeouts_seconds"),
@@ -476,6 +497,10 @@ def validate(contract_path: Path, output: Path) -> str:
     finally:
         os.close(root_fd)
     return scenario
+
+
+def validate(contract_path: Path, output: Path) -> str:
+    return validate_contract(read_contract(contract_path), output)
 
 
 def parse_cli(arguments: list[str]) -> tuple[Path, Path]:

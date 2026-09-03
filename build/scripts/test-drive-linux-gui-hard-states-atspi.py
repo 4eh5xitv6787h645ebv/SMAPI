@@ -89,6 +89,12 @@ class FakeBackend:
         duplicate_picker: bool = False,
         duplicate_window_at: int | None = None,
         wrong_window_at: int | None = None,
+        missing_observation_at: int | None = None,
+        duplicate_observation_at: int | None = None,
+        wrong_observation_role_at: int | None = None,
+        wrong_observation_state_at: int | None = None,
+        forbidden_observation_at: int | None = None,
+        disabled_observation_at: int | None = None,
     ):
         self.milestones = [tool.MILESTONES[name] for name in tool.ROUTES[route]]
         self.index = 0
@@ -100,6 +106,12 @@ class FakeBackend:
         self.duplicate_picker = duplicate_picker
         self.duplicate_window_at = duplicate_window_at
         self.wrong_window_at = wrong_window_at
+        self.missing_observation_at = missing_observation_at
+        self.duplicate_observation_at = duplicate_observation_at
+        self.wrong_observation_role_at = wrong_observation_role_at
+        self.wrong_observation_state_at = wrong_observation_state_at
+        self.forbidden_observation_at = forbidden_observation_at
+        self.disabled_observation_at = disabled_observation_at
         self.picker_open = False
         self.invoked: list[str] = []
         self.picker_paths: list[str] = []
@@ -114,7 +126,24 @@ class FakeBackend:
             return (picker, FakeNode(picker.name, "dialog", pid=7002)) if self.duplicate_picker else (picker,)
         title = "Unexpected isolated window" if self.wrong_window_at == self.index else milestone.window_title
         nodes: list[FakeNode] = []
-        if self.missing_action_at != self.index:
+        if milestone.observations:
+            for requirement_index, requirement in enumerate(milestone.observations):
+                if self.missing_observation_at == self.index and requirement_index == 0:
+                    continue
+                name = "Unexpected production state" if self.wrong_observation_state_at == self.index and requirement_index == 0 else requirement.name
+                role = "unknown" if self.wrong_observation_role_at == self.index and requirement_index == 0 else sorted(requirement.roles)[0]
+                nodes.append(FakeNode(
+                    name, role,
+                    enabled=not (
+                        self.disabled_observation_at == self.index
+                        and requirement.require_enabled
+                    ),
+                ))
+                if self.duplicate_observation_at == self.index and requirement_index == 0:
+                    nodes.append(FakeNode(name, role))
+            if self.forbidden_observation_at == self.index and milestone.forbidden_observation_names:
+                nodes.append(FakeNode(milestone.forbidden_observation_names[0], "push button"))
+        elif self.missing_action_at != self.index:
             action_name = milestone.action_names[0]
 
             def invoke() -> bool:
@@ -149,6 +178,11 @@ class FakeBackend:
             return window, FakeNode(title, "frame", pid=self.window_pid, children=nodes)
         return (window,)
 
+    def continue_capture(self) -> None:
+        if self.index >= len(self.milestones) or not self.milestones[self.index].observations:
+            raise AssertionError("capture continuation used outside an observation milestone")
+        self.index += 1
+
     def choose_folder_with_fixed_keys(self, path: str) -> None:
         if not self.picker_open:
             raise AssertionError("fixed picker keys used without a verified picker")
@@ -158,9 +192,10 @@ class FakeBackend:
 
 
 class MemoryTransport:
-    def __init__(self, incoming: Iterable[dict[str, Any]]):
+    def __init__(self, incoming: Iterable[dict[str, Any]], on_receive: Callable[[dict[str, Any]], None] | None = None):
         self.incoming = list(incoming)
         self.outgoing: list[dict[str, Any]] = []
+        self.on_receive = on_receive
 
     def send(self, message: dict[str, Any]) -> None:
         self.outgoing.append(message)
@@ -168,7 +203,10 @@ class MemoryTransport:
     def receive(self) -> dict[str, Any]:
         if not self.incoming:
             raise tool.QualificationError("test-eof")
-        return self.incoming.pop(0)
+        message = self.incoming.pop(0)
+        if self.on_receive is not None:
+            self.on_receive(message)
+        return message
 
 
 class FakeBinder:
@@ -240,6 +278,15 @@ def completion(count: int) -> dict[str, Any]:
     })
 
 
+def continue_capture(sequence: int, milestone: Any, **changes: Any) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "type": "continue", "version": tool.PROTOCOL_VERSION,
+        "session": SESSION, "sequence": sequence, "milestone": milestone.name,
+    }
+    message.update(changes)
+    return tool.signed(TOKEN, message)
+
+
 def make_operator(
     route: str,
     backend: FakeBackend,
@@ -258,10 +305,15 @@ def make_operator(
             picker_path = folders[folder_index]
             folder_index += 1
         incoming.append(advance(sequence, milestone, picker_path))
+        if milestone.observations:
+            incoming.append(continue_capture(sequence, milestone))
     incoming.append(completion(len(milestones)))
     if mutate_messages:
         mutate_messages(incoming)
-    transport = MemoryTransport(incoming)
+    transport = MemoryTransport(
+        incoming,
+        on_receive=lambda message: backend.continue_capture() if message.get("type") == "continue" else None,
+    )
     protocol = tool.AuthenticatedProtocol(transport, TOKEN, SESSION, nonce_factory=lambda: NONCE)
     trace = FakeTrace()
     fast = clock or FastClock()
@@ -311,6 +363,39 @@ def test_success_routes(root: Path) -> int:
     return count
 
 
+def test_success_observation_routes(root: Path) -> int:
+    release = root / "release"
+    game = root / "game"
+    count = 0
+    for route in (
+        "e2-permission", "e2-read-only", "e2-disk-full", "e2-cross-device",
+        "c3-terminal", "e5-backend-loss", "e6-automatic-recovery",
+    ):
+        backend = FakeBackend(route)
+        operator, transport, trace = make_operator(route, backend, (str(release), str(game)))
+        operator.run()
+        milestones = [tool.MILESTONES[name] for name in tool.ROUTES[route]]
+        expected_actions = [item.name for item in milestones if not item.observations]
+        if backend.invoked != expected_actions:
+            raise AssertionError(f"{route}: wrong accessible action sequence {backend.invoked!r}")
+        expected_types = ["hello"]
+        for milestone in milestones:
+            if milestone.observations:
+                expected_types.append("capture-ready")
+            expected_types.append("reached")
+        expected_types.append("completed")
+        if [message["type"] for message in transport.outgoing] != expected_types:
+            raise AssertionError(f"{route}: wrong capture handshake sequence")
+        if not any(event[0] == "capture-ready" for event in trace.events):
+            raise AssertionError(f"{route}: did not retain a fixed capture-ready trace event")
+        serialized = json.dumps(transport.outgoing, sort_keys=True)
+        forbidden = (str(root), TOKEN.hex(), "No mutation was reported", "recovery is required")
+        if any(value in serialized for value in forbidden):
+            raise AssertionError(f"{route}: outbound protocol leaked path, token, or visible state text")
+        count += 1
+    return count
+
+
 def main() -> int:
     cases = 0
     with tempfile.TemporaryDirectory(prefix="smapi-hard-state-atspi-test.") as temporary:
@@ -321,6 +406,7 @@ def main() -> int:
         game.mkdir()
         folders = (str(release), str(game))
         cases += test_success_routes(root)
+        cases += test_success_observation_routes(root)
 
         def run_backend(**options: Any) -> None:
             backend = FakeBackend("operation-local-run", **options)
@@ -335,6 +421,57 @@ def main() -> int:
         expect_error("missing exact action", "action-missing", lambda: run_backend(missing_action_at=0))
         expect_error("wrong action interface", "action-interface", lambda: run_backend(wrong_action_interface_at=0))
         cases += 7
+
+        def run_observation(route: str = "e2-permission", **options: Any) -> None:
+            backend = FakeBackend(route, **options)
+            operator, _, _ = make_operator(route, backend, folders)
+            operator.run()
+
+        expect_error(
+            "ambiguous observed state", "observation-ambiguous",
+            lambda: run_observation(duplicate_observation_at=len(tool.BASE_LOCAL)),
+        )
+        expect_error(
+            "wrong observed role", "observation-role",
+            lambda: run_observation(wrong_observation_role_at=len(tool.BASE_LOCAL)),
+        )
+        expect_error(
+            "missing observed state", "observation-timeout",
+            lambda: run_observation(missing_observation_at=len(tool.BASE_LOCAL)),
+        )
+        expect_error(
+            "wrong terminal state", "observation-timeout",
+            lambda: run_observation(wrong_observation_state_at=len(tool.BASE_LOCAL)),
+        )
+        cases += 4
+
+        e5_observation_index = len(tool.BASE_LOCAL)
+        expect_error(
+            "forbidden recovery action in backend-loss state", "observation-state",
+            lambda: run_observation("e5-backend-loss", forbidden_observation_at=e5_observation_index),
+        )
+        expect_error(
+            "disabled required observed control", "observation-disabled",
+            lambda: run_observation("e5-backend-loss", disabled_observation_at=e5_observation_index),
+        )
+        cases += 2
+
+        capture_backend = FakeBackend("e2-permission")
+
+        def wrong_capture_continue(messages: list[dict[str, Any]]) -> None:
+            observation_index = len(tool.BASE_LOCAL)
+            incoming_index = 1 + len(tool.BASE_LOCAL) + 1
+            wrong = {
+                "type": "continue", "version": tool.PROTOCOL_VERSION,
+                "session": SESSION, "sequence": observation_index, "milestone": "terminal.c3",
+            }
+            messages[incoming_index] = tool.signed(TOKEN, wrong)
+
+        capture_operator, _, _ = make_operator(
+            "e2-permission", capture_backend, folders, mutate_messages=wrong_capture_continue,
+        )
+        expect_error("wrong capture continuation", "protocol-order", capture_operator.run)
+        cases += 1
 
         picker_backend = FakeBackend("operation-local-run", duplicate_picker=True)
         picker_operator, _, _ = make_operator("operation-local-run", picker_backend, folders)
@@ -418,13 +555,28 @@ def main() -> int:
         os.chmod(private_root, 0o700)
         trace_path = private_root / "trace.jsonl"
         trace = tool.PrivateTrace.create(trace_path)
+        original_write = tool.os.write
+        short_writes = 0
+
+        def write_one_byte(descriptor: int, payload: bytes | memoryview) -> int:
+            nonlocal short_writes
+            if descriptor == trace.descriptor and len(payload) > 1:
+                short_writes += 1
+                return original_write(descriptor, payload[:1])
+            return original_write(descriptor, payload)
+
+        tool.os.write = write_one_byte
         try:
             trace.event("starting")
             trace.event("milestone-reached", 0, "release.download")
         finally:
+            tool.os.write = original_write
             trace.close()
         content = trace_path.read_text(encoding="ascii")
-        if stat.S_IMODE(trace_path.stat().st_mode) != 0o600 or "/" in content or TOKEN.hex() in content:
+        if (
+            short_writes == 0 or stat.S_IMODE(trace_path.stat().st_mode) != 0o600
+            or "/" in content or TOKEN.hex() in content
+        ):
             raise AssertionError("private trace mode or path/token exclusion failed")
     cases += 1
 

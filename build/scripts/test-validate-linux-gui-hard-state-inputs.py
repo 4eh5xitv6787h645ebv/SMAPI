@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from typing import Any, Callable
 
 
@@ -28,6 +30,19 @@ PRIVATE_SENTINEL = "fixture-private-sentinel-should-never-appear"
 ALLOWED_TEMP_PARENT = Path(f"/run/user/{os.geteuid()}")
 if not ALLOWED_TEMP_PARENT.is_dir() or not os.access(ALLOWED_TEMP_PARENT, os.W_OK | os.X_OK):
     ALLOWED_TEMP_PARENT = Path("/dev/shm")
+
+
+def load_validator():
+    spec = importlib.util.spec_from_file_location("hard_state_input_validator", VALIDATOR)
+    if spec is None or spec.loader is None:
+        raise AssertionError("validator could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+VALIDATOR_MODULE = load_validator()
 
 
 class Fixture:
@@ -286,6 +301,34 @@ class HardStateInputValidatorTests(unittest.TestCase):
             lambda fixture: fixture.contract["game_marker"].__setitem__("sha256", "f" * 64),
             "game-marker-mismatch",
         )
+
+    def test_rejects_file_metadata_change_between_name_and_descriptor_binding(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hs-validator-race-", dir=ALLOWED_TEMP_PARENT) as name:
+            fixture = Fixture(Path(name))
+            cases = (
+                (fixture.package, VALIDATOR_MODULE.validate_regular_package, fixture.contract["package"], VERSION),
+                (fixture.game_marker, VALIDATOR_MODULE.validate_game_marker, fixture.contract["game_marker"], None),
+            )
+            for path, validator, value, version in cases:
+                with self.subTest(path=path.name):
+                    os.chmod(path, 0o600)
+                    real_open = VALIDATOR_MODULE.os.open
+                    changed = False
+
+                    def raced_open(candidate, *arguments, **keywords):
+                        nonlocal changed
+                        if not changed and Path(candidate) == path:
+                            changed = True
+                            os.chmod(path, 0o400)
+                        return real_open(candidate, *arguments, **keywords)
+
+                    with mock.patch.object(VALIDATOR_MODULE.os, "open", side_effect=raced_open):
+                        with self.assertRaises(VALIDATOR_MODULE.InputError):
+                            if version is None:
+                                validator(value)
+                            else:
+                                validator(value, version)
+                    self.assertTrue(changed)
 
     def test_rejects_release_commit_digest_and_binary_digest_mismatches(self) -> None:
         self.assert_rejected(lambda fixture: fixture.contract["release"].__setitem__("tag", TAG + "-moved"), "release")

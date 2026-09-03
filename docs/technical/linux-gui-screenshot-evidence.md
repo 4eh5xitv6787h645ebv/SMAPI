@@ -84,7 +84,7 @@ Every evidence ID must have its own distinct final PNG filename and pixel hash, 
 | E2 | <a id="evidence-e2"></a>Exactly four visible failure states—permission, read-only, disk-full, and cross-device—each stating whether files changed and one safe next step | One four-source controlled real-filesystem fault contact sheet retaining all four original PNGs |
 | E3 | <a id="evidence-e3"></a>Stale plan, selected-root replacement, or concurrent-installer rejection | Controlled adversarial filesystem/concurrency fixture |
 | E4 | <a id="evidence-e4"></a>Backend, protocol, or writer failure before mutation | Controlled adapter failure |
-| E5 | <a id="evidence-e5"></a>Interrupted mutation requiring recovery after restart | Real fault-injected lifecycle qualification |
+| E5 | <a id="evidence-e5"></a>Interrupted mutation with the surviving GUI reporting backend state unknown and recovery required | Real fault-injected lifecycle qualification |
 | E6 | <a id="evidence-e6"></a>Automatic recovery completed with a fresh inspection required | Real restart/recovery qualification |
 
 ### Logs, accessibility, desktop behavior, and fallback
