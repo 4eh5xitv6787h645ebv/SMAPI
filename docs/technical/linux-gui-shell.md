@@ -93,6 +93,12 @@ confirm with Cancel focused by default, and then run it. The sanitized diagnosti
 for safe next steps, but the local private log and every displayed path or report should still be
 reviewed before sharing.
 
+The release-only permission, read-only, disk-full, cross-device, post-mutation cancellation, and
+interrupted-recovery checks use the separate
+[external hard-state qualification protocol](linux-gui-hard-state-qualification.md). Its helpers are
+not shipped in the installer, run only in a disposable VM, and never authorize work against a live
+game folder.
+
 Run the focused tests with:
 
 ```sh
