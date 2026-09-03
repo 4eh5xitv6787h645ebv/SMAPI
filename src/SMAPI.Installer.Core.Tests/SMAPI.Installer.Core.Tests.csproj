@@ -20,4 +20,10 @@
     <ProjectReference Include="..\SMAPI.Installer.Core\SMAPI.Installer.Core.csproj" />
     <ProjectReference Include="..\SMAPI.Installer.TestGameMarker\SMAPI.Installer.TestGameMarker.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\build\fixtures\linux-gui-hard-state\Stardew Valley.dll.base64"
+          Link="Fixtures\LinuxGuiHardState\Stardew Valley.dll.base64"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -84,7 +84,7 @@ Every evidence ID must have its own distinct final PNG filename and pixel hash, 
 | E2 | <a id="evidence-e2"></a>Exactly four visible failure states—permission, read-only, disk-full, and cross-device—each stating whether files changed and one safe next step | One four-source controlled real-filesystem fault contact sheet retaining all four original PNGs |
 | E3 | <a id="evidence-e3"></a>Stale plan, selected-root replacement, or concurrent-installer rejection | Controlled adversarial filesystem/concurrency fixture |
 | E4 | <a id="evidence-e4"></a>Backend, protocol, or writer failure before mutation | Controlled adapter failure |
-| E5 | <a id="evidence-e5"></a>Interrupted mutation requiring recovery after restart | Real fault-injected lifecycle qualification |
+| E5 | <a id="evidence-e5"></a>Interrupted mutation with the surviving GUI reporting backend state unknown and recovery required | Real fault-injected lifecycle qualification |
 | E6 | <a id="evidence-e6"></a>Automatic recovery completed with a fresh inspection required | Real restart/recovery qualification |
 
 ### Logs, accessibility, desktop behavior, and fallback
@@ -141,6 +141,13 @@ and requires a byte-identical pixel digest. Only `IHDR`, `IDAT`, and `IEND` rema
 sidecar binds the PNG to one matrix ID, production identity, evidence class, environment, runtime,
 capture method, fault/fixture context, durable-state statements, and qualification reference without
 recording the input, identity-file, private-string-file, or staging paths.
+
+After all four E2 originals pass source-specific review, use
+`build/scripts/assemble-linux-gui-e2-contact-sheet.py` in the same private staging root. It accepts
+exactly one mode-`0600` source in the fixed `permission`, `read-only`, `disk-full`, `cross-device`
+order, never overwrites output, and creates a deterministic two-by-two RGB/RGBA contact sheet plus a
+private source-digest sidecar. The neutral gutters do not alter source pixels. The four original PNGs
+remain authoritative and must still be retained, declared, and independently privacy-reviewed.
 
 Staging is not qualification or manifest publication. The sidecar always leaves original-resolution
 privacy review pending, is forbidden from the final asset directory, and must be replaced by a

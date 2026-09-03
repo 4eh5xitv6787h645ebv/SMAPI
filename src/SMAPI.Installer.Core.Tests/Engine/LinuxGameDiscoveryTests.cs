@@ -44,6 +44,35 @@ public sealed class LinuxGameDiscoveryTests
         result.GameVersion.Should().NotBeNull();
     }
 
+    [Test]
+    public void Validate_AcceptsPinnedLinuxHardStateSyntheticAssemblyFixture()
+    {
+        string game = Path.Combine(this.TempRoot, $"game-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(game);
+        string fixturePath = Path.Combine(
+            TestContext.CurrentContext.TestDirectory,
+            "Fixtures",
+            "LinuxGuiHardState",
+            "Stardew Valley.dll.base64"
+        );
+        string encoded = File.ReadAllText(fixturePath);
+        byte[] assembly = Convert.FromBase64String(string.Concat(encoded.Where(character => !char.IsWhiteSpace(character))));
+        File.WriteAllBytes(Path.Combine(game, "Stardew Valley.dll"), assembly);
+        this.WriteDependencies(game);
+        string launcher = Path.Combine(game, "StardewValley");
+        File.WriteAllText(launcher, "#!/bin/sh\nexit 0\n");
+        File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        LinuxGameFolderCandidate result = LinuxGameDiscovery.Validate(
+            game,
+            new Version(1, 6, 14),
+            CancellationToken.None
+        );
+
+        result.Status.Should().Be(LinuxGameFolderStatus.Valid);
+        result.GameVersion.Should().Be(new Version(1, 6, 15, 0));
+    }
+
     [TestCase("Stardew Valley.dll", LinuxGameFolderStatus.MissingGameAssembly)]
     [TestCase("Stardew Valley.deps.json", LinuxGameFolderStatus.MissingGameDependencies)]
     [TestCase("StardewValley", LinuxGameFolderStatus.MissingLauncher)]
