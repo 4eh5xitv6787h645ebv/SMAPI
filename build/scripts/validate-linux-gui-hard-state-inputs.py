@@ -53,6 +53,8 @@ LIVE_COMPONENTS = frozenset({
 MAX_CONTRACT_BYTES = 64 * 1024
 MAX_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_GAME_MARKER_BYTES = 16 * 1024 * 1024
+MAX_MOUNTINFO_BYTES = 4 * 1024 * 1024
+MAX_SYSFS_BYTES = 4096
 CAPTURE_POLICY = "exact-window-v1"
 OUTPUT_BYTES_LIMIT = 1024 * 1024 * 1024
 OUTPUT_QUOTA_ENV = "SMAPI_HARD_STATE_OUTPUT_QUOTA_TOKEN"
@@ -526,10 +528,37 @@ def mountinfo_unescape(value: str) -> str:
     return re.sub(r"\\([0-7]{3})", replace, value)
 
 
+def read_bounded_pseudo(path: Path, maximum: int, encoding: str) -> str:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK,
+        )
+        raw = bytearray()
+        while len(raw) <= maximum:
+            block = os.read(descriptor, min(4096, maximum + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        if not raw or len(raw) > maximum:
+            reject("output-quota")
+        return bytes(raw).decode(encoding)
+    except InputError:
+        raise
+    except (OSError, UnicodeError):
+        reject("output-quota")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def prepared_mount_record(output: Path) -> tuple[str, str, frozenset[str], tuple[int, int]]:
     try:
         records: list[tuple[str, str, frozenset[str], tuple[int, int]]] = []
-        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        for line in read_bounded_pseudo(
+            Path("/proc/self/mountinfo"), MAX_MOUNTINFO_BYTES, "utf-8",
+        ).splitlines():
             before, separator, after = line.partition(" - ")
             fields = before.split()
             filesystem = after.split()
@@ -563,9 +592,11 @@ def loop_device_facts(source: str, device: tuple[int, int]) -> tuple[os.stat_res
         ):
             reject("output-quota")
         sysfs = Path(f"/sys/dev/block/{device[0]}:{device[1]}")
-        size_raw = (sysfs / "size").read_text(encoding="ascii")
-        autoclear_raw = (sysfs / "loop/autoclear").read_text(encoding="ascii")
-        backing_raw = (sysfs / "loop/backing_file").read_text(encoding="utf-8").rstrip("\n")
+        size_raw = read_bounded_pseudo(sysfs / "size", MAX_SYSFS_BYTES, "ascii")
+        autoclear_raw = read_bounded_pseudo(sysfs / "loop/autoclear", MAX_SYSFS_BYTES, "ascii")
+        backing_raw = read_bounded_pseudo(
+            sysfs / "loop/backing_file", MAX_SYSFS_BYTES, "utf-8",
+        ).rstrip("\n")
         if re.fullmatch(r"[0-9]+\n", size_raw) is None or autoclear_raw != "1\n" or not backing_raw:
             reject("output-quota")
         backing_text = mountinfo_unescape(backing_raw)
@@ -577,6 +608,39 @@ def loop_device_facts(source: str, device: tuple[int, int]) -> tuple[os.stat_res
         raise
     except (OSError, UnicodeError, ValueError):
         reject("output-quota")
+
+
+def prepared_observation(output_fd: int, output: Path) -> tuple[Any, ...]:
+    output_status = os.fstat(output_fd)
+    filesystem, source, options, device = prepared_mount_record(output)
+    source_status, source_bytes, autoclear, backing_status = loop_device_facts(source, device)
+    values = os.statvfs(output_fd)
+    return (
+        output_status, filesystem, source, options, device, values,
+        source_status, source_bytes, autoclear, backing_status,
+    )
+
+
+def observation_signature(observation: tuple[Any, ...]) -> tuple[Any, ...]:
+    (
+        output_status, filesystem, source, options, device, values,
+        source_status, source_bytes, autoclear, backing_status,
+    ) = observation
+    return (
+        tuple(getattr(output_status, field) for field in STABLE_FILE_FIELDS),
+        filesystem, source, options, device,
+        tuple(getattr(values, field) for field in (
+            "f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail", "f_files",
+            "f_ffree", "f_favail", "f_flag", "f_namemax",
+        )),
+        tuple(getattr(source_status, field) for field in (
+            "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_rdev",
+        )),
+        source_bytes, autoclear,
+        tuple(getattr(backing_status, field) for field in (
+            "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size",
+        )),
+    )
 
 
 def validate_prepared_output_facts(
@@ -648,16 +712,17 @@ def validate_prepared_output(root_fd: int, output: Path, expected_root: tuple[in
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=root_fd,
         )
-        output_status = os.fstat(output_fd)
+        first = prepared_observation(output_fd, output)
+        (
+            output_status, filesystem, source, options, device, values,
+            source_status, source_bytes, autoclear, backing_status,
+        ) = first
         named = os.stat(output.name, dir_fd=root_fd, follow_symlinks=False)
         if (
             (output_status.st_dev, output_status.st_ino) != (named.st_dev, named.st_ino)
             or (os.fstat(root_fd).st_dev, os.fstat(root_fd).st_ino) != expected_root
         ):
             reject("output-quota")
-        filesystem, source, options, device = prepared_mount_record(output)
-        source_status, source_bytes, autoclear, backing_status = loop_device_facts(source, device)
-        values = os.statvfs(output_fd)
         marker_fd = os.open(
             OUTPUT_QUOTA_MARKER,
             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -680,6 +745,27 @@ def validate_prepared_output(root_fd: int, output: Path, expected_root: tuple[in
             output_status, filesystem, source, options, device, values,
             marker_status, flags[0], marker, token,
             source_status, source_bytes, autoclear, backing_status,
+        )
+        second = prepared_observation(output_fd, output)
+        (
+            repeated_output, repeated_filesystem, repeated_source, repeated_options,
+            repeated_device, repeated_values, repeated_source_status, repeated_source_bytes,
+            repeated_autoclear, repeated_backing_status,
+        ) = second
+        repeated_named = os.stat(output.name, dir_fd=root_fd, follow_symlinks=False)
+        repeated_root = os.fstat(root_fd)
+        if (
+            observation_signature(first) != observation_signature(second)
+            or (repeated_output.st_dev, repeated_output.st_ino)
+                != (repeated_named.st_dev, repeated_named.st_ino)
+            or (repeated_root.st_dev, repeated_root.st_ino) != expected_root
+        ):
+            reject("output-quota")
+        validate_prepared_output_facts(
+            repeated_output, repeated_filesystem, repeated_source, repeated_options,
+            repeated_device, repeated_values, marker_status, flags[0], marker, token,
+            repeated_source_status, repeated_source_bytes, repeated_autoclear,
+            repeated_backing_status,
         )
         if os.environ.pop(OUTPUT_QUOTA_ENV, None) != token:
             reject("output-quota")

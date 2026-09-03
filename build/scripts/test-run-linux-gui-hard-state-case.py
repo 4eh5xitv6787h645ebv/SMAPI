@@ -330,6 +330,47 @@ class BrokerTests(unittest.TestCase):
                 with self.assertRaises(self.module.BrokerError):
                     self.module.validate_output_mount_facts(*changed)
 
+    def test_pseudo_file_reads_are_bounded_and_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="hs-pseudo-read-", dir="/dev/shm") as name:
+            path = Path(name) / "pseudo"
+            path.write_bytes(b"bounded\n")
+            self.assertEqual("bounded\n", self.module._read_bounded_pseudo(path, 8, "ascii"))
+            path.write_bytes(b"x" * 9)
+            with self.assertRaises(self.module.BrokerError):
+                self.module._read_bounded_pseudo(path, 8, "ascii")
+            path.write_bytes(b"")
+            with self.assertRaises(self.module.BrokerError):
+                self.module._read_bounded_pseudo(path, 8, "ascii")
+
+    def test_logical_output_bound_rejects_sparse_links_special_files_and_excess_entries(self):
+        with tempfile.TemporaryDirectory(prefix="hs-logical-output-", dir="/dev/shm") as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            nested = root / "nested"
+            nested.mkdir(mode=0o700)
+            (root / "first").write_bytes(b"1234")
+            (nested / "second").write_bytes(b"56789")
+            self.assertEqual(9, self.module.logical_output_bytes(root, 9, os.geteuid()))
+            sparse = nested / "sparse"
+            sparse.touch(mode=0o600)
+            os.truncate(sparse, 1024 * 1024)
+            with self.assertRaises(self.module.BrokerError):
+                self.module.logical_output_bytes(root, 1024, os.geteuid())
+            sparse.unlink()
+            link = nested / "link"
+            link.symlink_to(root / "first")
+            with self.assertRaises(self.module.BrokerError):
+                self.module.logical_output_bytes(root, 1024, os.geteuid())
+            link.unlink()
+            fifo = nested / "fifo"
+            os.mkfifo(fifo, 0o600)
+            with self.assertRaises(self.module.BrokerError):
+                self.module.logical_output_bytes(root, 1024, os.geteuid())
+            fifo.unlink()
+            with mock.patch.object(self.module, "MAX_OUTPUT_ENTRIES", 1):
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.logical_output_bytes(root, 1024, os.geteuid())
+
     def test_output_quota_cleanup_unmounts_exact_target_and_unlinks_only_bound_objects(self):
         with tempfile.TemporaryDirectory(prefix="hs-quota-cleanup-", dir="/dev/shm") as name:
             root = Path(name)

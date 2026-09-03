@@ -32,6 +32,9 @@ MAX_CONTRACT_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 16 * 1024
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_LEDGER_BYTES = 64 * 1024 * 1024
+MAX_MOUNTINFO_BYTES = 4 * 1024 * 1024
+MAX_SYSFS_BYTES = 4096
+MAX_OUTPUT_ENTRIES = 65536
 OUTPUT_BYTES_LIMIT = 1024 * 1024 * 1024
 OUTPUT_QUOTA_ENV = "SMAPI_HARD_STATE_OUTPUT_QUOTA_TOKEN"
 OUTPUT_QUOTA_MARKER = ".smapi-hard-state-output-quota-v1.json"
@@ -128,7 +131,9 @@ def process_cgroup(pid: int) -> str:
 def validate_cgroup2_mount(root: Path) -> None:
     try:
         matches = []
-        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        for line in _read_bounded_pseudo(
+            Path("/proc/self/mountinfo"), MAX_MOUNTINFO_BYTES, "utf-8",
+        ).splitlines():
             before, separator, after = line.partition(" - ")
             fields = before.split()
             filesystem = after.split()
@@ -578,11 +583,37 @@ def _mountinfo_unescape(value: str) -> str:
     return re.sub(r"\\([0-7]{3})", replace, value)
 
 
+def _read_bounded_pseudo(path: Path, maximum: int, encoding: str) -> str:
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        raw = bytearray()
+        while len(raw) <= maximum:
+            block = os.read(descriptor, min(4096, maximum + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        if not raw or len(raw) > maximum:
+            raise BrokerError()
+        return bytes(raw).decode(encoding)
+    except FileNotFoundError:
+        raise
+    except BrokerError:
+        raise
+    except (OSError, UnicodeError):
+        raise BrokerError() from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def mounted_output_record(output: Path) -> tuple[str, str, frozenset[str], tuple[int, int]]:
     """Return the single exact mount record for output, rejecting aliases and ambiguity."""
     try:
         records: list[tuple[str, str, frozenset[str], tuple[int, int]]] = []
-        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        for line in _read_bounded_pseudo(
+            Path("/proc/self/mountinfo"), MAX_MOUNTINFO_BYTES, "utf-8",
+        ).splitlines():
             before, separator, after = line.partition(" - ")
             fields = before.split()
             filesystem = after.split()
@@ -606,8 +637,10 @@ def mounted_output_record(output: Path) -> tuple[str, str, frozenset[str], tuple
 
 def _backing_file_from_sysfs(device: tuple[int, int]) -> Path:
     try:
-        raw = Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/backing_file").read_text(
-            encoding="utf-8",
+        raw = _read_bounded_pseudo(
+            Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/backing_file"),
+            MAX_SYSFS_BYTES,
+            "utf-8",
         ).rstrip("\n")
     except (OSError, UnicodeError):
         raise BrokerError() from None
@@ -622,8 +655,10 @@ def _backing_file_from_sysfs(device: tuple[int, int]) -> Path:
 
 def _loop_autoclear(device: tuple[int, int]) -> bool:
     try:
-        raw = Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/autoclear").read_text(
-            encoding="ascii",
+        raw = _read_bounded_pseudo(
+            Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/autoclear"),
+            MAX_SYSFS_BYTES,
+            "ascii",
         )
         return raw.strip() == "1"
     except (OSError, UnicodeError):
@@ -633,7 +668,7 @@ def _loop_autoclear(device: tuple[int, int]) -> bool:
 def _loop_still_backs(device: tuple[int, int], image_path: Path) -> bool:
     path = Path(f"/sys/dev/block/{device[0]}:{device[1]}/loop/backing_file")
     try:
-        raw = path.read_text(encoding="utf-8").rstrip("\n")
+        raw = _read_bounded_pseudo(path, MAX_SYSFS_BYTES, "utf-8").rstrip("\n")
     except FileNotFoundError:
         return False
     except (OSError, UnicodeError):
@@ -641,6 +676,73 @@ def _loop_still_backs(device: tuple[int, int], image_path: Path) -> bool:
     decoded = _mountinfo_unescape(raw)
     current = Path(decoded if decoded.startswith("/") else "/" + decoded)
     return current == image_path
+
+
+def logical_output_bytes(root: Path, limit: int, expected_uid: int) -> int:
+    """Count logical file bytes without following links or crossing the quota filesystem."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise BrokerError()
+    root_fd = -1
+    descriptors: list[tuple[int, int]] = []
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        root_status = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_status.st_mode) or root_status.st_uid != expected_uid
+            or stat.S_IMODE(root_status.st_mode) != 0o700
+        ):
+            raise BrokerError()
+        descriptors.append((root_fd, 0))
+        root_fd = -1
+        total = 0
+        entries = 0
+        while descriptors:
+            directory_fd, depth = descriptors.pop()
+            try:
+                if depth > 64:
+                    raise BrokerError()
+                names = os.listdir(directory_fd)
+                entries += len(names)
+                if entries > MAX_OUTPUT_ENTRIES:
+                    raise BrokerError()
+                for name in names:
+                    metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if metadata.st_dev != root_status.st_dev or metadata.st_uid != expected_uid:
+                        raise BrokerError()
+                    if stat.S_ISDIR(metadata.st_mode):
+                        child = os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                        opened = os.fstat(child)
+                        if (
+                            (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+                            or opened.st_uid != expected_uid
+                        ):
+                            os.close(child)
+                            raise BrokerError()
+                        descriptors.append((child, depth + 1))
+                    elif stat.S_ISREG(metadata.st_mode):
+                        if metadata.st_nlink != 1 or metadata.st_size < 0:
+                            raise BrokerError()
+                        total += metadata.st_size
+                        if total > limit:
+                            raise BrokerError()
+                    else:
+                        raise BrokerError()
+            finally:
+                os.close(directory_fd)
+        return total
+    except BrokerError:
+        raise
+    except OSError:
+        raise BrokerError() from None
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
+        for descriptor, _depth in descriptors:
+            os.close(descriptor)
 
 
 def validate_output_mount_facts(
@@ -940,7 +1042,7 @@ class OutputQuota:
             if output_fd >= 0:
                 os.close(output_fd)
 
-    def _preserve(self) -> tuple[Path, tuple[int, int]]:
+    def _preserve(self, expected_logical_bytes: int) -> tuple[Path, tuple[int, int]]:
         retained_name = f".{self.output.name}.retained-{os.urandom(12).hex()}"
         os.mkdir(retained_name, 0o700, dir_fd=self.root_fd)
         os.chown(retained_name, self.run_uid, self.run_gid, dir_fd=self.root_fd, follow_symlinks=False)
@@ -954,7 +1056,11 @@ class OutputQuota:
 
         try:
             result = subprocess.run(
-                ["/usr/bin/cp", "-a", "--one-file-system", "--no-preserve=ownership", os.fspath(self.output) + "/.", os.fspath(retained)],
+                [
+                    "/usr/bin/cp", "-R", "--no-dereference", "--one-file-system",
+                    "--preserve=mode,timestamps,links", "--no-preserve=ownership",
+                    os.fspath(self.output) + "/.", os.fspath(retained),
+                ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -974,6 +1080,8 @@ class OutputQuota:
                 or stat.S_IMODE(repeated.st_mode) != 0o700
             ):
                 raise BrokerError()
+            if logical_output_bytes(retained, self.limit, self.run_uid) != expected_logical_bytes:
+                raise BrokerError()
             return retained, retained_identity
         except BrokerError:
             raise
@@ -990,7 +1098,8 @@ class OutputQuota:
                 self.validate()
                 self._remove_marker()
                 if preserve:
-                    retained = self._preserve()
+                    logical_bytes = logical_output_bytes(self.output, self.limit, self.run_uid)
+                    retained = self._preserve(logical_bytes)
             except BrokerError:
                 error = True
             try:

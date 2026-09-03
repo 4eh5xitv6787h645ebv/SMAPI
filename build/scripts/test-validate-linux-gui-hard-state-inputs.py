@@ -52,6 +52,17 @@ def load_validator():
 VALIDATOR_MODULE = load_validator()
 
 
+class StatProxy:
+    def __init__(self, source: os.stat_result, **changes: Any):
+        self._source = source
+        self._changes = changes
+
+    def __getattr__(self, name: str):
+        if name in self._changes:
+            return self._changes[name]
+        return getattr(self._source, name)
+
+
 class Fixture:
     def __init__(self, base: Path, scenario: str = "C3"):
         self.base = base
@@ -181,6 +192,79 @@ class HardStateInputValidatorTests(unittest.TestCase):
             self.assertEqual("output-quota", raised.exception.code)
             self.assertFalse(fixture.output.exists())
 
+    def test_quota_pseudo_file_reads_are_bounded_and_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="smapi-quota-pseudo-", dir=ALLOWED_TEMP_PARENT) as name:
+            path = Path(name) / "pseudo"
+            path.write_bytes(b"bounded\n")
+            self.assertEqual("bounded\n", VALIDATOR_MODULE.read_bounded_pseudo(path, 8, "ascii"))
+            path.write_bytes(b"x" * 9)
+            with self.assertRaises(VALIDATOR_MODULE.InputError) as error:
+                VALIDATOR_MODULE.read_bounded_pseudo(path, 8, "ascii")
+            self.assertEqual("output-quota", error.exception.code)
+            path.write_bytes(b"")
+            with self.assertRaises(VALIDATOR_MODULE.InputError):
+                VALIDATOR_MODULE.read_bounded_pseudo(path, 8, "ascii")
+
+    def test_prepared_output_repeats_observation_before_consuming_quota_token(self):
+        with tempfile.TemporaryDirectory(prefix="smapi-quota-repeat-", dir=ALLOWED_TEMP_PARENT) as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            output = root / "output-name"
+            output.mkdir(mode=0o700)
+            marker = output / VALIDATOR_MODULE.OUTPUT_QUOTA_MARKER
+            marker.write_text("{}\n", encoding="ascii")
+            os.chmod(marker, 0o444)
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            output_status = output.stat()
+            observation = (
+                output_status, "ext4", "/dev/loop4", frozenset({"rw", "nosuid", "nodev"}),
+                (7, 4), object(), object(), VALIDATOR_MODULE.OUTPUT_BYTES_LIMIT, True, object(),
+            )
+            actual_fstat = VALIDATOR_MODULE.os.fstat
+
+            def root_owned_marker(descriptor):
+                value = actual_fstat(descriptor)
+                if stat.S_ISREG(value.st_mode):
+                    return StatProxy(value, st_uid=0, st_mode=stat.S_IFREG | 0o444)
+                return value
+
+            def immutable(_descriptor, _request, flags, _mutate):
+                flags[0] = VALIDATOR_MODULE.FS_IMMUTABLE_FL
+                return 0
+
+            token = "a" * 64
+            try:
+                with (
+                    mock.patch.dict(os.environ, {VALIDATOR_MODULE.OUTPUT_QUOTA_ENV: token}, clear=False),
+                    mock.patch.object(VALIDATOR_MODULE, "prepared_observation", side_effect=(observation, observation)) as observe,
+                    mock.patch.object(VALIDATOR_MODULE, "observation_signature", return_value=("stable",)),
+                    mock.patch.object(VALIDATOR_MODULE, "validate_prepared_output_facts", return_value=None) as validate_facts,
+                    mock.patch.object(VALIDATOR_MODULE.os, "fstat", side_effect=root_owned_marker),
+                    mock.patch.object(VALIDATOR_MODULE.fcntl, "ioctl", side_effect=immutable),
+                ):
+                    VALIDATOR_MODULE.validate_prepared_output(
+                        root_fd, output, (root.stat().st_dev, root.stat().st_ino),
+                    )
+                    self.assertNotIn(VALIDATOR_MODULE.OUTPUT_QUOTA_ENV, os.environ)
+                    self.assertEqual(2, observe.call_count)
+                    self.assertEqual(2, validate_facts.call_count)
+
+                os.environ[VALIDATOR_MODULE.OUTPUT_QUOTA_ENV] = token
+                with (
+                    mock.patch.object(VALIDATOR_MODULE, "prepared_observation", side_effect=(observation, observation)),
+                    mock.patch.object(VALIDATOR_MODULE, "observation_signature", side_effect=(("first",), ("second",))),
+                    mock.patch.object(VALIDATOR_MODULE, "validate_prepared_output_facts", return_value=None),
+                    mock.patch.object(VALIDATOR_MODULE.os, "fstat", side_effect=root_owned_marker),
+                    mock.patch.object(VALIDATOR_MODULE.fcntl, "ioctl", side_effect=immutable),
+                ):
+                    with self.assertRaises(VALIDATOR_MODULE.InputError):
+                        VALIDATOR_MODULE.validate_prepared_output(
+                            root_fd, output, (root.stat().st_dev, root.stat().st_ino),
+                        )
+                    self.assertEqual(token, os.environ[VALIDATOR_MODULE.OUTPUT_QUOTA_ENV])
+            finally:
+                os.environ.pop(VALIDATOR_MODULE.OUTPUT_QUOTA_ENV, None)
+                os.close(root_fd)
     def fixture(self, scenario: str = "C3") -> tuple[tempfile.TemporaryDirectory[str], Fixture]:
         temporary = tempfile.TemporaryDirectory(prefix="smapi-hard-state-test-", dir=ALLOWED_TEMP_PARENT)
         return temporary, Fixture(Path(temporary.name), scenario)
