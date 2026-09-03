@@ -8,7 +8,7 @@ The release-selection boundary is important: R1 may show bounded public prerelea
 
 ## Validation
 
-Create a temporary newline-delimited private-string file outside the repository. Include every private fixture name, username, local root, and other capture-specific token which must not appear. Do not commit that file or its contents. Each value must contain at least four characters.
+Create a temporary newline-delimited private-string file outside the repository. Include every private fixture name, username, local root, and other capture-specific token which must not appear. Keep it current-user-owned at exact mode `0600`; do not commit that file or its contents. Each value must contain at least four characters.
 
 Run:
 
@@ -38,10 +38,80 @@ generic path/credential patterns, hashes, PNG structure, identity, and matrix co
 know private capture-specific names without improperly uploading them. Its sentinel run never
 substitutes for the required local run with the complete uncommitted private-string file above.
 
+## Private capture staging
+
+Use `build/scripts/stage-linux-gui-screenshot.py` to create a canonical PNG and a capture-provenance
+sidecar in a private directory **outside the repository**. The staging directory must
+already exist, be owned by the current user, and have mode `0700`. The tool creates both outputs at
+mode `0600` and never overwrites either one.
+
+The direct mode accepts one visible X11 or XWayland client-window ID, checks that the window is
+viewable, its title and process ID match, and the retained `/proc` executable bytes match the reviewed
+GUI SHA-256 before and after ImageMagick capture. The executable may be at most 256 MiB. No executable
+path is recorded. X window properties and `_NET_WM_PID` are advisory values which another client on
+the same display can spoof. Capture on a controlled isolated display, keep unrelated clients out of
+that session, and visually confirm the exact application, title, and state at original resolution.
+
+The import mode accepts an already captured app-window PNG plus a path-free capture-tool and command
+description. The imported PNG must be outside the repository, current-user-owned, single-link, and
+exact mode `0600`. In either mode, the source must be a bounded, noninterlaced, 8-bit RGB or RGBA PNG.
+The tool decodes the pixels, writes a canonical `IHDR`/`IDAT`/`IEND` PNG, decodes that result again,
+and refuses it unless the source and result pixels are byte-identical. The sidecar records both the
+PNG and decoded-pixel SHA-256 digests, removed chunk types, exact production identity, environment,
+runtime, evidence context, durable-state claims, and qualification reference.
+
+Write the exact eight-field `production_identity` JSON object defined by the manifest schema to a
+JSON file outside the repository. Prepare the complete mode-`0600` private-string file there too,
+then run `--help` for the required evidence, environment, and runtime arguments. Record the SDK
+version actually installed in the capture environment; if none is installed because the package is
+self-contained, record that exact not-installed/not-used state instead of inventing a version. For
+direct G1 capture, the exact production window title and source-specific arguments are:
+
+```sh
+python3 build/scripts/stage-linux-gui-screenshot.py \
+  --window-id "$window_id" \
+  --expected-window-pid "$window_pid" \
+  --expected-window-title "SMAPI Linux Installer — Local diagnostics" \
+  --stage-directory "$private_capture_stage" \
+  --filename "g1-real-diagnostics.png" \
+  --evidence-id G1 \
+  --evidence-class real_qualification \
+  --production-identity "$production_identity_file" \
+  --private-strings-file "$private_strings_file" \
+  --fixture-or-injection "No injected fault; real successful lifecycle" \
+  --operation "View diagnostics after committed install" \
+  --durable-before "Clean isolated game copy" \
+  --durable-after "Authenticated alpha installation committed" \
+  --qualification-reference "docs/technical/linux-gui-alpha3-screenshot-qualification.md#evidence-g1" \
+  --distribution "Ubuntu 24.04 LTS" \
+  --architecture x86_64 \
+  --desktop-environment GNOME \
+  --session-type wayland \
+  --display-backend xwayland \
+  --display-scale-percent 100 \
+  --theme light \
+  --resolution 1920x1080 \
+  --avalonia 12.1.1 \
+  --dotnet-sdk "not installed; self-contained package" \
+  --dotnet-runtime 10.0.11
+```
+
+When staging each of the four retained E2 source PNGs, also pass exactly one of `--fault permission`,
+`--fault read-only`, `--fault disk-full`, or `--fault cross-device`. `--fault` is rejected for every
+other evidence ID. Contact-sheet assembly remains a later reviewed step.
+
+The sidecar deliberately sets privacy review to `pending`. It is not a manifest entry and must not
+be copied into this directory. Inspect the canonical PNG at original resolution, complete the
+independent privacy review, and then copy its bytes unchanged into the final bundle while checking
+the recorded SHA-256. Contact sheets, lossless crops, final captions/alt text, and manifest assembly
+remain separate reviewed steps. The tool does not OCR pixels, prove the visible workflow state,
+qualify filesystem effects, fabricate fixtures, or support native-Wayland window capture.
+
 Run the validator's fixture-free self-tests with:
 
 ```sh
 python3 build/scripts/test-linux-gui-screenshot-evidence.py
+python3 build/scripts/test-stage-linux-gui-screenshot.py
 ```
 
 The self-tests create all data under private temporary directories and cover a valid 57-ID bundle, rejection of cross-ID filename or pixel reuse, production-identity mixing, exact inventory failures, environment-matrix gaps, invalid or bomb-like PNG streams, unknown metadata/critical chunks, privacy leaks, and other tampered or broken-provenance cases.

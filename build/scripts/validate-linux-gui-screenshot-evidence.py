@@ -34,6 +34,8 @@ EXPECTED_IDS = (
     "M1", "M2", "M3",
 )
 
+E2_FAULTS = ("permission", "read-only", "disk-full", "cross-device")
+
 REAL_QUALIFICATION_IDS = frozenset({
     "D1", "D5",
     "R2", "R4", "R5",
@@ -461,12 +463,36 @@ def validate_schema_contract(schema: Any) -> None:
         maximum = root["properties"]["captures"]["maxItems"]
         root_required = root["required"]
         identity_reference = root["properties"]["production_identity"]["$ref"]
+        e2_faults = root["$defs"]["e2Fault"]["enum"]
+        original_source = root["$defs"]["capture"]["properties"]["editing"]["properties"]["original_sources"]["items"]
+        e2_contract = next(
+            contract for contract in root["$defs"]["capture"]["allOf"]
+            if contract.get("if", {}).get("properties", {}).get("id", {}).get("const") == "E2"
+        )
+        e2_editing = e2_contract["then"]["properties"]["editing"]["properties"]
+        e2_sources = e2_editing["original_sources"]
+        e2_contains = [item["contains"]["properties"]["fault"]["const"] for item in e2_sources["allOf"]]
     except (KeyError, TypeError) as exc:
         fail(f"schema does not expose the required capture-ID contract: {exc}")
+    except StopIteration:
+        fail("schema does not expose the required E2 fault-gallery contract")
     if ids != list(EXPECTED_IDS) or minimum != len(EXPECTED_IDS) or maximum != len(EXPECTED_IDS):
         fail("schema capture IDs or count do not exactly match the 57-ID contract")
     if "production_identity" not in root_required or identity_reference != "#/$defs/productionIdentity":
         fail("schema does not require the reviewed production identity")
+    source_required = {"filename", "sha256", "width", "height", "environment", "capture", "privacy_review"}
+    e2_source_required = {"fault", "fixture_or_injection", "operation", "durable_state"}
+    if (
+        e2_faults != list(E2_FAULTS)
+        or not source_required.issubset(original_source["required"])
+        or original_source["properties"].get("fault", {}).get("$ref") != "#/$defs/e2Fault"
+        or e2_editing.get("contact_sheet", {}).get("const") is not True
+        or e2_sources.get("minItems") != len(E2_FAULTS)
+        or e2_sources.get("maxItems") != len(E2_FAULTS)
+        or not e2_source_required.issubset(e2_sources.get("items", {}).get("required", []))
+        or e2_contains != list(E2_FAULTS)
+    ):
+        fail("schema does not require the exact four-source E2 fault-gallery provenance contract")
 
 
 def validate_spec_contract(spec_path: Path) -> None:
@@ -493,6 +519,18 @@ def validate_spec_contract(spec_path: Path) -> None:
     )
     if any(phrase not in r1_text for phrase in required_r1_phrases):
         fail("R1 must remain pre-receipt catalog/local-route evidence; authenticated relationships belong to U1-U2")
+    e2_match = re.search(r"^\| E2 \| (.+?) \| (.+?) \|", text, flags=re.MULTILINE)
+    if e2_match is None:
+        fail("screenshot evidence specification is missing E2 semantics")
+    e2_text = " ".join(e2_match.groups()).casefold()
+    required_e2_phrases = (
+        "exactly four visible failure states",
+        "permission, read-only, disk-full, and cross-device",
+        "four-source controlled real-filesystem fault contact sheet",
+        "retaining all four original pngs",
+    )
+    if any(phrase not in e2_text for phrase in required_e2_phrases):
+        fail("E2 must remain an exact four-source permission/read-only/disk-full/cross-device contact sheet")
 
 
 def validate_environment(value: Any, context: str) -> dict[str, Any]:
@@ -650,22 +688,53 @@ def validate_capture(
     original_sources = editing["original_sources"]
     if not isinstance(original_sources, list) or len(original_sources) > 16:
         fail(f"{context}.editing.original_sources must be an array of no more than 16 entries")
+    if evidence_id == "E2" and not editing["contact_sheet"]:
+        fail("E2 must be a contact sheet retaining every matrix source PNG")
+    if evidence_id == "E2" and len(original_sources) != len(E2_FAULTS):
+        fail("E2 original sources must provide exactly permission/read-only/disk-full/cross-device faults")
     minimum_sources = 2 if editing["contact_sheet"] else (1 if editing["lossless_crop"] else 0)
     if len(original_sources) < minimum_sources or (minimum_sources == 0 and original_sources):
         fail(f"{context}.editing.original_sources does not match the crop/contact-sheet declaration")
     original_names: list[str] = []
     original_provenance: list[tuple[str, tuple[Any, ...]]] = []
-    original_fields = ("filename", "sha256", "width", "height", "environment", "capture", "privacy_review")
+    original_base_fields = (
+        "filename", "sha256", "width", "height", "environment", "capture", "privacy_review",
+    )
+    original_e2_fields = original_base_fields + (
+        "fault", "fixture_or_injection", "operation", "durable_state",
+    )
     original_environments: list[dict[str, Any]] = []
+    original_faults: list[str] = []
     for source_index, source_item in enumerate(original_sources):
         source_context = f"{context}.editing.original_sources[{source_index}]"
-        source = require_object(source_item, source_context, original_fields, original_fields)
+        required_source_fields = original_e2_fields if evidence_id == "E2" else original_base_fields
+        source = require_object(source_item, source_context, required_source_fields, required_source_fields)
         source_filename = require_pattern(source["filename"], FILENAME_RE, f"{source_context}.filename")
         if source_filename == filename:
             fail(f"{source_context}.filename must identify a separately retained source PNG")
         expected_source_sha256 = require_sha256(source["sha256"], f"{source_context}.sha256")
         expected_source_width = require_int(source["width"], 1, 32768, f"{source_context}.width")
         expected_source_height = require_int(source["height"], 1, 32768, f"{source_context}.height")
+        source_fault = source.get("fault")
+        source_fixture = source.get("fixture_or_injection")
+        source_operation = source.get("operation")
+        source_durable: dict[str, Any] | None = None
+        if evidence_id == "E2":
+            if source_fault not in E2_FAULTS:
+                fail(f"{source_context}.fault must identify an exact E2 fault class")
+            original_faults.append(source_fault)
+            source_fixture = require_nonempty(
+                source_fixture, f"{source_context}.fixture_or_injection", 1200
+            )
+            source_operation = require_nonempty(source_operation, f"{source_context}.operation", 240)
+            source_durable = require_object(
+                source["durable_state"],
+                f"{source_context}.durable_state",
+                ("before", "after"),
+                ("before", "after"),
+            )
+            require_nonempty(source_durable["before"], f"{source_context}.durable_state.before", 1200)
+            require_nonempty(source_durable["after"], f"{source_context}.durable_state.after", 1200)
         source_environment = validate_environment(source["environment"], f"{source_context}.environment")
         source_capture_fields = ("timestamp", "tool", "command")
         source_capture = require_object(
@@ -686,14 +755,18 @@ def validate_capture(
         original_environments.append(source_environment)
         original_provenance.append((source_filename, (
             expected_source_sha256, expected_source_width, expected_source_height,
+            source_fault, source_fixture, source_operation,
+            json.dumps(source_durable, sort_keys=True) if source_durable is not None else None,
             json.dumps(source_environment, sort_keys=True), json.dumps(source_capture, sort_keys=True),
             json.dumps(source_privacy, sort_keys=True),
         )))
     if len(set(original_names)) != len(original_names):
         fail(f"{context}.editing.original_sources contains duplicate filenames")
 
-    if evidence_id in {"A4", "A5", "A6", "A7"} and not editing["contact_sheet"]:
+    if evidence_id in {"E2", "A4", "A5", "A6", "A7"} and not editing["contact_sheet"]:
         fail(f"{evidence_id} must be a contact sheet retaining every matrix source PNG")
+    if evidence_id == "E2" and sorted(original_faults) != sorted(E2_FAULTS):
+        fail("E2 original sources must provide exactly permission/read-only/disk-full/cross-device faults")
     if evidence_id == "A4":
         scales = [item["display_scale_percent"] for item in original_environments]
         if sorted(scales) != [100, 125, 150, 200]:

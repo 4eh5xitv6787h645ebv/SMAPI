@@ -17,7 +17,7 @@ Each `qualification_reference` is evidence-ID-specific. A real-qualification row
 
 ## Capture matrix
 
-Every evidence ID must have its own distinct final PNG filename and pixel hash, so one image cannot silently satisfy semantically different rows by being copied or renamed. A contact sheet may cover the environment or scale variants within one A4, A5, A6, or A7 row only when its individual source PNGs are also retained, hashed, and recorded with their own complete environment, capture method/time, and original-resolution privacy review.
+Every evidence ID must have its own distinct final PNG filename and pixel hash, so one image cannot silently satisfy semantically different rows by being copied or renamed. E2 must be one four-source contact sheet whose permission, read-only, disk-full, and cross-device source PNGs are individually retained. A contact sheet may otherwise cover the environment or scale variants within one A4, A5, A6, or A7 row only when its individual source PNGs are also retained, hashed, and recorded with their own complete environment, capture method/time, and original-resolution privacy review.
 
 ### Detection and selection
 
@@ -81,7 +81,7 @@ Every evidence ID must have its own distinct final PNG filename and pixel hash, 
 | C2 | <a id="evidence-c2"></a>Cancel requested, rollback in progress, or Finishing safely where immediate cancellation is no longer promised | Real fault-injected lifecycle qualification |
 | C3 | <a id="evidence-c3"></a>Cancelled-and-rolled-back terminal state with an exact durable-state explanation | Real fault-injected lifecycle qualification |
 | E1 | <a id="evidence-e1"></a>Network interruption or timeout with retry and confirmation that no incomplete package was published | Controlled transport failure |
-| E2 | <a id="evidence-e2"></a>Permission/read-only, disk-full, and cross-device failures, each stating whether files changed and one safe next step | Controlled real-filesystem fault gallery |
+| E2 | <a id="evidence-e2"></a>Exactly four visible failure states—permission, read-only, disk-full, and cross-device—each stating whether files changed and one safe next step | One four-source controlled real-filesystem fault contact sheet retaining all four original PNGs |
 | E3 | <a id="evidence-e3"></a>Stale plan, selected-root replacement, or concurrent-installer rejection | Controlled adversarial filesystem/concurrency fixture |
 | E4 | <a id="evidence-e4"></a>Backend, protocol, or writer failure before mutation | Controlled adapter failure |
 | E5 | <a id="evidence-e5"></a>Interrupted mutation requiring recovery after restart | Real fault-injected lifecycle qualification |
@@ -120,6 +120,35 @@ Every individual source image must remain available even when the guide displays
 
 The evidence assets directory is a closed inventory. It contains only `README.md`, `manifest.schema.json`, `manifest.json`, and each referenced final or retained-original PNG directly in that directory. Nested directories, orphan files, undeclared PNGs, and other file types are forbidden.
 
+## Capture staging boundary
+
+Use the fixture-neutral `build/scripts/stage-linux-gui-screenshot.py` helper only to capture or import
+an authentic application-window PNG into a private mode-`0700` staging directory outside the
+repository. Direct capture verifies one visible X11/XWayland client, exact expected window title
+and process ID, and the retained process executable's reviewed GUI SHA-256 before and after
+invoking ImageMagick. Import mode records the supplied path-free capture method without claiming
+that raster inspection proves which application produced it.
+
+X window properties and `_NET_WM_PID` are advisory and can be spoofed by another client with access
+to the same display. Use a controlled isolated display with no unrelated clients, and independently
+inspect the original-resolution image to confirm the exact production application, title, and
+visible state. The PID/current-user check and bounded executable hash narrow accidental selection;
+they do not make the pixels self-authenticating.
+
+The helper accepts only bounded, static, noninterlaced, 8-bit RGB/RGBA input. It removes incidental
+metadata by decoding and canonically re-encoding the image, then independently decodes the result
+and requires a byte-identical pixel digest. Only `IHDR`, `IDAT`, and `IEND` remain. Its mode-`0600`
+sidecar binds the PNG to one matrix ID, production identity, evidence class, environment, runtime,
+capture method, fault/fixture context, durable-state statements, and qualification reference without
+recording the input, identity-file, private-string-file, or staging paths.
+
+Staging is not qualification or manifest publication. The sidecar always leaves original-resolution
+privacy review pending, is forbidden from the final asset directory, and must be replaced by a
+reviewed manifest entry. The helper does not OCR rendered pixels, establish filesystem effects,
+assemble contact sheets, crop images, generate fixtures, or fabricate screenshots. Promote the
+canonical PNG later without changing its bytes and verify its staged SHA-256 before manifesting it.
+See the [evidence-bundle README](../screenshots/linux-gui/README.md#private-capture-staging) for usage.
+
 ## Privacy and provenance
 
 Capture only the application window unless packaged root refusal or a manual console fallback specifically requires a terminal. Use a dedicated generic isolated account and public release data. No capture may expose a desktop background, panel, notification, terminal history, username, real home/game/Mods/save path, mod or save name, private fixture identity, authentication token, cookie, signed query URL, clipboard, or raw environment.
@@ -135,15 +164,21 @@ The manifest or provenance record for every PNG must include:
 - fixture or fault-injection description, without private fixture data;
 - operation and durable state before and after a real lifecycle capture;
 - distribution, architecture, desktop environment, session type, X11/XWayland backend, display scale, theme, and resolution;
-- Avalonia, .NET SDK, and .NET runtime versions;
+- Avalonia and .NET runtime versions, plus the installed .NET SDK version or an explicit
+  not-installed/not-used state for a self-contained package;
 - capture timestamp with timezone, capture tool and command, PNG dimensions, and final PNG SHA-256;
-- crop/edit statement and each original source's hash, dimensions, complete environment, capture timestamp/method, and privacy review when a contact sheet or lossless crop is used;
+- crop/edit statement and each retained original source's hash, dimensions, complete environment,
+  capture timestamp/method, and privacy review when a contact sheet or lossless crop is used;
+- for E2, each original source's exact `fault` discriminator (`permission`, `read-only`, `disk-full`,
+  or `cross-device`), with every value present exactly once and with the source-specific fixture or
+  injection, operation, and durable state before and after describing that actual fault rather than
+  the assembled sheet generally;
 - original-resolution privacy inspection and the reviewer;
 - evidence-ID-specific qualification run/log reference under the trusted anchored-record or exact fork Actions-run policy, and public release link where applicable.
 
 Final and retained-original files must be static, noninterlaced, 8-bit RGB or RGBA PNGs within the documented dimension, pixel, file-size, and decoded-byte bounds. Only the validator's minimal structural/color chunk allowlist is permitted; strip color profiles, text, EXIF, time, custom ancillary metadata, and other incidental chunks before the final hash. The validator bounded-decompresses the complete IDAT stream and verifies its exact scanline size and end-of-stream. If privacy inspection finds personal or private data, discard the image and recapture it; do not commit the unsafe source. Captions and alt text should describe what is visible and avoid claiming that pixels prove filesystem safety, provenance, or accessibility.
 
-The retained-source matrices are exact, not minimum examples: A4 has exactly 100%, 125%, 150%, and 200% source environments; A5 has exactly `light`, `dark`, and `high_contrast`; A6 has exactly `GNOME` and `KDE` with session/backend `x11`/`x11`; and A7 has exactly `GNOME` and `KDE` with session/backend `wayland`/`xwayland`.
+The retained-source matrices are exact, not minimum examples: E2 has exactly one `permission`, `read-only`, `disk-full`, and `cross-device` fault source; A4 has exactly 100%, 125%, 150%, and 200% source environments; A5 has exactly `light`, `dark`, and `high_contrast`; A6 has exactly `GNOME` and `KDE` with session/backend `x11`/`x11`; and A7 has exactly `GNOME` and `KDE` with session/backend `wayland`/`xwayland`.
 
 ## Completion gates
 

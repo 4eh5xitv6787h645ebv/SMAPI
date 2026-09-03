@@ -41,6 +41,7 @@ REAL_IDS = frozenset({
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPOSITORY_ROOT / "build/scripts/validate-linux-gui-screenshot-evidence.py"
 PRIVATE_TOKEN = "fixture-secret-needle"
+E2_FAULTS = ("permission", "read-only", "disk-full", "cross-device")
 
 
 def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
@@ -143,8 +144,14 @@ def make_capture(evidence_id: str, filename: str, digest: str) -> dict[str, Any]
     }
 
 
-def make_original_source(filename: str, digest: str, environment: dict[str, Any]) -> dict[str, Any]:
-    return {
+def make_original_source(
+    filename: str,
+    digest: str,
+    environment: dict[str, Any],
+    *,
+    fault: str | None = None,
+) -> dict[str, Any]:
+    source = {
         "filename": filename,
         "sha256": digest,
         "width": 1,
@@ -162,6 +169,15 @@ def make_original_source(filename: str, digest: str, environment: dict[str, Any]
             "notes": "Original-resolution fixture inspected; no private data present.",
         },
     }
+    if fault is not None:
+        source["fault"] = fault
+        source["fixture_or_injection"] = f"Controlled {fault} injection in a disposable filesystem."
+        source["operation"] = f"Exercise the {fault} failure path"
+        source["durable_state"] = {
+            "before": "Disposable state recorded before the source fault.",
+            "after": "Disposable state recorded after the source fault; no unrelated files changed.",
+        }
+    return source
 
 
 def environment(*, scale: int = 100, theme: str = "light", desktop: str = "Example Desktop", session: str = "x11", backend: str = "x11") -> dict[str, Any]:
@@ -198,6 +214,21 @@ def add_matrix_sources(captures: list[dict[str, Any]], assets: Path) -> None:
             )
 
 
+def add_e2_sources(captures: list[dict[str, Any]], assets: Path) -> None:
+    entry = next(item for item in captures if item["id"] == "E2")
+    entry["editing"]["contact_sheet"] = True
+    entry["editing"]["statement"] = (
+        "Four-source fault contact sheet assembled without altering application pixels; all sources retained."
+    )
+    for index, fault in enumerate(E2_FAULTS, start=1):
+        filename = f"e2-{fault}-source.png"
+        data = make_png(90 + index)
+        (assets / filename).write_bytes(data)
+        entry["editing"]["original_sources"].append(
+            make_original_source(filename, hashlib.sha256(data).hexdigest(), environment(), fault=fault)
+        )
+
+
 def write_fixture(root: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
     assets = root / "assets"
     assets.mkdir(parents=True)
@@ -207,6 +238,7 @@ def write_fixture(root: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
         data = make_png(index + 1)
         (assets / filename).write_bytes(data)
         captures.append(make_capture(evidence_id, filename, hashlib.sha256(data).hexdigest()))
+    add_e2_sources(captures, assets)
     add_matrix_sources(captures, assets)
     manifest = {
         "schema_version": 1,
@@ -304,6 +336,10 @@ def main() -> int:
             raise AssertionError(f"valid evidence was rejected:\n{result.stdout}{result.stderr}")
 
     expect_success("retained lossless-crop source", add_lossless_crop_source)
+    expect_success(
+        "E2 source order is not authority",
+        lambda manifest, _assets: manifest["captures"][38]["editing"]["original_sources"].reverse(),
+    )
 
     expect_failure(
         "missing ID",
@@ -378,6 +414,44 @@ def main() -> int:
         manifest["captures"][1]["editing"]["original_sources"][0]["sha256"] = "f" * 64
 
     expect_failure("original source hash", tamper_original_source_hash, "does not match retained PNG")
+    expect_failure(
+        "E2 not a contact sheet",
+        lambda manifest, _assets: manifest["captures"][38]["editing"].__setitem__("contact_sheet", False),
+        "E2 must be a contact sheet",
+    )
+    expect_failure(
+        "E2 missing retained fault source",
+        lambda manifest, assets: (
+            (assets / manifest["captures"][38]["editing"]["original_sources"].pop()["filename"]).unlink()
+        ),
+        "permission/read-only/disk-full/cross-device faults",
+    )
+    expect_failure(
+        "E2 duplicate fault class",
+        lambda manifest, _assets: manifest["captures"][38]["editing"]["original_sources"][3].__setitem__(
+            "fault", "disk-full"
+        ),
+        "permission/read-only/disk-full/cross-device faults",
+    )
+    expect_failure(
+        "E2 missing per-source injection provenance",
+        lambda manifest, _assets: manifest["captures"][38]["editing"]["original_sources"][0].pop(
+            "fixture_or_injection"
+        ),
+        "missing required fields: fixture_or_injection",
+    )
+    expect_failure(
+        "E2 missing per-source durable-state provenance",
+        lambda manifest, _assets: manifest["captures"][38]["editing"]["original_sources"][0][
+            "durable_state"
+        ].pop("after"),
+        "missing required fields: after",
+    )
+    expect_failure(
+        "E2 missing per-source operation provenance",
+        lambda manifest, _assets: manifest["captures"][38]["editing"]["original_sources"][0].pop("operation"),
+        "missing required fields: operation",
+    )
     expect_failure(
         "missing alt text",
         lambda manifest, _assets: manifest["captures"][1].__setitem__("alt_text", ""),
@@ -591,7 +665,7 @@ def main() -> int:
         lambda manifest, _assets: manifest["captures"][52]["editing"]["original_sources"][1]["environment"].__setitem__("display_backend", "x11"),
         "GNOME+KDE wayland/xwayland",
     )
-    print("Linux GUI screenshot evidence validator self-tests passed (2 success and 43 negative cases).")
+    print("Linux GUI screenshot evidence validator self-tests passed (3 success and 49 negative cases).")
     return 0
 
 

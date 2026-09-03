@@ -96,6 +96,9 @@
         "command": { "$ref": "#/$defs/nonEmpty" }
       }
     },
+    "e2Fault": {
+      "enum": ["permission", "read-only", "disk-full", "cross-device"]
+    },
     "privacyReview": {
       "type": "object",
       "additionalProperties": false,
@@ -328,6 +331,18 @@
                     "minimum": 1,
                     "maximum": 32768
                   },
+                  "fault": { "$ref": "#/$defs/e2Fault" },
+                  "fixture_or_injection": { "$ref": "#/$defs/nonEmpty" },
+                  "operation": { "$ref": "#/$defs/nonEmpty" },
+                  "durable_state": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["before", "after"],
+                    "properties": {
+                      "before": { "$ref": "#/$defs/nonEmpty" },
+                      "after": { "$ref": "#/$defs/nonEmpty" }
+                    }
+                  },
                   "environment": { "$ref": "#/$defs/environment" },
                   "capture": { "$ref": "#/$defs/sourceCapture" },
                   "privacy_review": { "$ref": "#/$defs/privacyReview" }
@@ -404,6 +419,72 @@
                   { "$ref": "#/$defs/actionsRunReference" },
                   { "$ref": "#/$defs/anchoredQualificationRecordReference" }
                 ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": { "const": "E2" }
+            },
+            "required": ["id"]
+          },
+          "then": {
+            "properties": {
+              "editing": {
+                "properties": {
+                  "contact_sheet": { "const": true },
+                  "original_sources": {
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {
+                      "required": ["fault", "fixture_or_injection", "operation", "durable_state"]
+                    },
+                    "allOf": [
+                      {
+                        "contains": { "properties": { "fault": { "const": "permission" } }, "required": ["fault"] },
+                        "minContains": 1,
+                        "maxContains": 1
+                      },
+                      {
+                        "contains": { "properties": { "fault": { "const": "read-only" } }, "required": ["fault"] },
+                        "minContains": 1,
+                        "maxContains": 1
+                      },
+                      {
+                        "contains": { "properties": { "fault": { "const": "disk-full" } }, "required": ["fault"] },
+                        "minContains": 1,
+                        "maxContains": 1
+                      },
+                      {
+                        "contains": { "properties": { "fault": { "const": "cross-device" } }, "required": ["fault"] },
+                        "minContains": 1,
+                        "maxContains": 1
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "editing": {
+                "properties": {
+                  "original_sources": {
+                    "items": {
+                      "not": {
+                        "anyOf": [
+                          { "required": ["fault"] },
+                          { "required": ["fixture_or_injection"] },
+                          { "required": ["operation"] },
+                          { "required": ["durable_state"] }
+                        ]
+                      }
+                    }
+                  }
+                }
               }
             }
           }
