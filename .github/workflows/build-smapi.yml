@@ -66,7 +66,10 @@ jobs:
                     bash -n build/scripts/qualify-published-linux-alpha.sh
                     bash -n build/scripts/test-qualify-published-linux-alpha.sh
                     build/scripts/test-qualify-published-linux-alpha.sh
+                    python3 benchmarks/linux-real-world/test_qualify_candidate.py
+                    python3 benchmarks/linux-real-world/test_harness.py
                     python3 build/scripts/test-linux-gui-screenshot-evidence.py
+                    python3 build/scripts/test-stage-linux-gui-screenshot.py
                     python3 build/scripts/test-check-linux-gui-screenshot-evidence.py
                     # CI rechecks generic privacy/path rules with a sentinel. The complete
                     # capture-specific private denylist remains local and is never committed or uploaded.
