@@ -854,7 +854,7 @@ class OutputQuota:
         finally:
             os.close(prefix_fd)
 
-        _run_root_command(["/usr/bin/mkfs.ext4", "-q", "-F", "-m", "0", os.fspath(self.image_path)], 120)
+        _run_root_command(["/usr/sbin/mkfs.ext4", "-q", "-F", "-m", "0", os.fspath(self.image_path)], 120)
         self._validate_image()
         os.mkdir(self.output.name, 0o700, dir_fd=self.root_fd)
         os.chown(self.output.name, self.run_uid, self.run_gid, dir_fd=self.root_fd, follow_symlinks=False)
