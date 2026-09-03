@@ -366,7 +366,13 @@ def _gnome_scale(output: str) -> int:
 
 
 def _kde_scale(output: str) -> int:
-    scales = re.findall(r"^\s*Scale:\s*([^\s]+)\s*$", output, re.MULTILINE)
+    # kscreen-doctor emits SGR color escapes even when stdout isn't a terminal
+    # on Kubuntu 24.04. Accept only that bounded formatting vocabulary, then
+    # parse the semantic text.
+    plain = re.sub(r"\x1b\[[0-9;]{1,32}m", "", output)
+    if "\x1b" in plain or any(ord(character) < 0x20 and character not in "\n\r\t" for character in plain):
+        raise CaptureEnvironmentError("malformed KDE compositor output")
+    scales = re.findall(r"\bScale:\s*([^\s]+)", plain)
     if not scales or any(not re.fullmatch(r"1(?:\.0+)?", value) for value in scales):
         raise CaptureEnvironmentError("KDE compositor scale is not exactly 100 percent")
     return 100
@@ -383,7 +389,7 @@ def _light_theme(desktop: str, theme_output: str, app_environment: Mapping[str, 
     if desktop == "GNOME":
         if value not in {"'default'", "'prefer-light'"}:
             raise CaptureEnvironmentError("GNOME application theme is not explicitly light")
-    elif value != "BreezeLight":
+    elif value not in {"BreezeLight", "KubuntuLight"}:
         # Arbitrary KDE color-scheme names do not prove luminance.  The closed
         # capture image profile therefore accepts the stock explicit light scheme.
         raise CaptureEnvironmentError("KDE application theme is not explicitly light")

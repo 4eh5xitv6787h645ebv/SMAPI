@@ -51,9 +51,9 @@ class FakeProbe:
         elif name == verifier.GSETTINGS:
             output = "'prefer-light'\n"
         elif name == verifier.KSCREEN_DOCTOR:
-            output = "Output: 1 HDMI-1 enabled connected\n  Geometry: 0,0 1920x1080\n  Scale: 1\n"
+            output = "\x1b[01;32mOutput: \x1b[0;0m1 HDMI-1 enabled connected\n  Geometry: 0,0 1920x1080  \x1b[01;33mScale: \x1b[0;0m1 Rotation: 1\n"
         elif name == verifier.KREADCONFIG5:
-            output = "BreezeLight\n"
+            output = "KubuntuLight\n"
         else:
             raise AssertionError(f"unexpected command: {command}")
         return verifier._CommandResult(0, output.encode(), b"")
@@ -155,6 +155,8 @@ class CaptureEnvironmentTests(unittest.TestCase):
             probe.malformed_command = command
             with self.subTest(command=command), self.assertRaises(verifier.CaptureEnvironmentError):
                 self.verify("ubuntu-24.04-kde-x11", probe=probe)
+        with self.assertRaises(verifier.CaptureEnvironmentError):
+            verifier._kde_scale("Scale: 1 \x1b]private-terminal-sequence")
 
     def test_unbounded_environment_and_command_output_fail(self) -> None:
         environment = {"DISPLAY": ":1", "XDG_SESSION_TYPE": "x11", "XDG_CURRENT_DESKTOP": "X" * 5000}
