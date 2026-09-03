@@ -602,7 +602,7 @@ def prepare(
 def parse_arguments(arguments: list[str]) -> dict[str, Any]:
     flags = (
         "--case-root", "--package", "--expected-package-sha256", "--version",
-        "--commit", "--tree", "--scenario",
+        "--commit", "--tree", "--scenario", "--environment-profile",
     )
     if len(arguments) != len(flags) * 2:
         reject("usage")
@@ -622,6 +622,7 @@ def parse_arguments(arguments: list[str]) -> dict[str, Any]:
         "commit": parsed["--commit"],
         "tree": parsed["--tree"],
         "scenario": parsed["--scenario"],
+        "environment_profile": parsed["--environment-profile"],
     }
 
 

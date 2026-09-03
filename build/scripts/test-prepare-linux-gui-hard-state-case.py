@@ -344,6 +344,23 @@ class PreparationTests(unittest.TestCase):
             "schemaVersion": 2, "status": "prepared",
         })
 
+    def test_cli_requires_one_explicit_closed_environment_profile(self):
+        base = [
+            "--case-root", "/srv/smapi-hard-state/smapi-hard-state-" + "a" * 32,
+            "--package", f"/run/user/1000/SMAPI-{VERSION}-linux-x64-installer.zip",
+            "--expected-package-sha256", "3" * 64,
+            "--version", VERSION,
+            "--commit", COMMIT,
+            "--tree", TREE,
+            "--scenario", "C3",
+        ]
+        for profile in sorted(self.module.ENVIRONMENT_PROFILES):
+            with self.subTest(profile=profile):
+                values = self.module.parse_arguments([*base, "--environment-profile", profile])
+                self.assertEqual(values["environment_profile"], profile)
+        with self.assertRaisesRegex(self.module.PreparationError, "usage"):
+            self.module.parse_arguments(base)
+
     def test_cli_rejects_unknown_arguments_with_one_sanitized_json_line(self):
         for arguments in (
             ["--unknown", "/private/fixture/token"],
