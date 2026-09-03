@@ -15,7 +15,7 @@ import socket
 import stat
 import sys
 import time
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Iterator, Protocol
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +23,7 @@ PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 16 * 1024
 MAX_TREE_NODES = 4096
 MAX_TREE_DEPTH = 32
+MAX_ACTIONS_PER_NODE = 64
 MAX_TRACE_EVENTS = 64
 MAX_OBSERVATIONS_PER_MILESTONE = 8
 MAX_OBSERVATION_NAME_BYTES = 1024
@@ -441,20 +442,56 @@ def validate_picker_path(value: Any) -> str:
     return value
 
 
+def _node_children(node: Node, remaining: int) -> Iterable[Node]:
+    bounded = getattr(node, "bounded_children", None)
+    try:
+        return bounded(remaining) if bounded is not None else node.children
+    except QualificationError:
+        raise
+    except Exception:
+        raise QualificationError("accessibility-tree") from None
+
+
 def walk_nodes(roots: Iterable[Node]) -> Iterable[Node]:
-    stack = [(node, 0) for node in reversed(tuple(roots))]
-    count = 0
+    """Walk a tree without materializing attacker-controlled root or child counts."""
+
+    remaining = MAX_TREE_NODES
+    try:
+        root_iterator = iter(roots)
+    except Exception:
+        raise QualificationError("accessibility-tree") from None
+    stack: list[tuple[Iterator[Node], int]] = [(root_iterator, MAX_TREE_DEPTH)]
     while stack:
-        node, depth = stack.pop()
-        count += 1
-        if count > MAX_TREE_NODES or depth > MAX_TREE_DEPTH:
-            raise QualificationError("accessibility-tree-bound")
-        yield node
+        iterator, depth_remaining = stack[-1]
         try:
-            children = tuple(node.children)
+            node = next(iterator)
+        except StopIteration:
+            stack.pop()
+            continue
+        except QualificationError:
+            raise
         except Exception:
             raise QualificationError("accessibility-tree") from None
-        stack.extend((child, depth + 1) for child in reversed(children))
+        if remaining == 0:
+            raise QualificationError("accessibility-tree-bound")
+        remaining -= 1
+        yield node
+        children = _node_children(node, remaining)
+        try:
+            child_iterator = iter(children)
+        except Exception:
+            raise QualificationError("accessibility-tree") from None
+        if depth_remaining == 0:
+            try:
+                next(child_iterator)
+            except StopIteration:
+                continue
+            except QualificationError:
+                raise
+            except Exception:
+                raise QualificationError("accessibility-tree") from None
+            raise QualificationError("accessibility-tree-bound")
+        stack.append((child_iterator, depth_remaining - 1))
 
 
 def exact_window(roots: Iterable[Node], title: str, gui_pid: int | None) -> Node:
@@ -842,6 +879,59 @@ class PrivateTrace:
             pass
 
 
+def _reported_count(
+    owner: Any,
+    attribute: str,
+    maximum: int,
+    error_code: str,
+    bound_code: str,
+) -> int:
+    try:
+        value = getattr(owner, attribute)
+    except Exception:
+        raise QualificationError(error_code) from None
+    if type(value) is not int or value < 0:
+        raise QualificationError(error_code)
+    if value > maximum:
+        raise QualificationError(bound_code)
+    return value
+
+
+def _stable_reported_count(
+    owner: Any,
+    attribute: str,
+    maximum: int,
+    error_code: str,
+    bound_code: str,
+) -> int:
+    count = _reported_count(owner, attribute, maximum, error_code, bound_code)
+    if _reported_count(owner, attribute, maximum, error_code, bound_code) != count:
+        raise QualificationError(error_code)
+    return count
+
+
+def _bounded_atspi_children(
+    accessible: Any,
+    pyatspi: Any,
+    maximum: int,
+) -> Iterable[Node]:
+    count = _stable_reported_count(
+        accessible, "childCount", maximum,
+        "accessibility-tree", "accessibility-tree-bound",
+    )
+    for index in range(count):
+        try:
+            child = accessible[index]
+        except Exception:
+            raise QualificationError("accessibility-tree") from None
+        yield AtspiNode(child, pyatspi)
+    if _reported_count(
+        accessible, "childCount", maximum,
+        "accessibility-tree", "accessibility-tree-bound",
+    ) != count:
+        raise QualificationError("accessibility-tree")
+
+
 class AtspiNode:
     def __init__(self, accessible: Any, pyatspi: Any):
         self.accessible = accessible
@@ -897,9 +987,27 @@ class AtspiNode:
     def action_names(self) -> tuple[str, ...]:
         try:
             action = self.accessible.queryAction()
-            return tuple(str(action.getName(index)) for index in range(action.nActions))
         except Exception:
+            # Most static AT-SPI nodes don't expose the optional Action
+            # interface.  Treat that as an empty action set; callers which
+            # require an actionable control still fail closed below.
             return ()
+        count = _stable_reported_count(
+            action, "nActions", MAX_ACTIONS_PER_NODE,
+            "action-interface", "action-interface",
+        )
+        names: list[str] = []
+        for index in range(count):
+            try:
+                names.append(str(action.getName(index)))
+            except Exception:
+                raise QualificationError("action-interface") from None
+        if _reported_count(
+            action, "nActions", MAX_ACTIONS_PER_NODE,
+            "action-interface", "action-interface",
+        ) != count:
+            raise QualificationError("action-interface")
+        return tuple(names)
 
     @property
     def selected(self) -> bool:
@@ -907,10 +1015,12 @@ class AtspiNode:
 
     @property
     def children(self) -> Iterable[Node]:
-        try:
-            return tuple(AtspiNode(self.accessible[index], self.pyatspi) for index in range(self.accessible.childCount))
-        except Exception:
-            raise QualificationError("accessibility-tree") from None
+        return self.bounded_children(MAX_TREE_NODES)
+
+    def bounded_children(self, maximum: int) -> Iterable[Node]:
+        if type(maximum) is not int or maximum < 0 or maximum > MAX_TREE_NODES:
+            raise QualificationError("accessibility-tree-bound")
+        return _bounded_atspi_children(self.accessible, self.pyatspi, maximum)
 
     def invoke_action(self, index: int) -> bool:
         try:
@@ -946,9 +1056,9 @@ class AtspiBackend:
         pyatspi = self._module()
         try:
             desktop = pyatspi.Registry.getDesktop(0)
-            return tuple(AtspiNode(desktop[index], pyatspi) for index in range(desktop.childCount))
         except Exception:
             raise QualificationError("accessibility-tree") from None
+        return _bounded_atspi_children(desktop, pyatspi, MAX_TREE_NODES)
 
     def choose_folder_with_fixed_keys(self, path: str) -> None:
         validate_picker_path(path)
