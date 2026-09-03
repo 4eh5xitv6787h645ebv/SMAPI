@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ def make_bootstrap(root: Path) -> tuple[Path, Path]:
         shutil.copy2(SOURCE_ASSETS / name, assets / name)
     private_strings = root / "private-strings.txt"
     private_strings.write_text("fixture-private-sentinel\n", encoding="utf-8")
+    os.chmod(private_strings, 0o600)
     return assets, private_strings
 
 
@@ -128,8 +130,13 @@ def main() -> int:
         lambda _assets, private: private.unlink(),
         "can't inspect private-string file",
     )
+    expect_failure(
+        "group-readable private-string file",
+        lambda _assets, private: os.chmod(private, 0o640),
+        "exact mode 0600",
+    )
 
-    print("Linux GUI screenshot repository-state tests passed (1 success and 10 negative cases).")
+    print("Linux GUI screenshot repository-state tests passed (1 success and 11 negative cases).")
     return 0
 
 

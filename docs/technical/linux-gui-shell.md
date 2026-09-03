@@ -231,11 +231,12 @@ The corrected alpha 3 source is still a non-public candidate. Its planned embedd
 the current download until the candidate is merged, qualified, tagged, published, freshly
 downloaded, independently verified, and exercised with the authorized trusted workload.
 
-The exact reviewed source, tagged release workflow, six public assets, fresh public-download
-verification, packaged GUI smoke, and disposable install/update/uninstall/failure lifecycle have
-passed. The exact-source merge candidate also passed the authorized trusted workload, but the tag
-workflow rebuilt the public ZIP and byte-for-byte reproducibility is not claimed; the public ZIP is
-not described as having run that private workload. The historical safe-demo screenshot is still not
-production evidence. Genuine GNOME/KDE, X11/XWayland, AT-SPI, scaling, and the complete authenticated
-production screenshot set remain pending. See the
+For alpha 2, the exact reviewed source, tagged release workflow, six public assets, fresh
+public-download verification, packaged GUI smoke, and disposable
+install/update/uninstall/failure lifecycle passed. Its exact-source merge candidate also passed the
+authorized trusted workload, but the tag workflow rebuilt the public ZIP and byte-for-byte
+reproducibility is not claimed; the public ZIP is not described as having run that private
+workload. The historical safe-demo screenshot is still not production evidence. Genuine GNOME/KDE,
+X11/XWayland, AT-SPI, scaling, and the complete authenticated production screenshot set remain
+pending. See the
 [sanitized public qualification record](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5515036792).

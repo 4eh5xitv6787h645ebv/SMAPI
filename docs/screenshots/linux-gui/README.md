@@ -21,6 +21,8 @@ python3 build/scripts/validate-linux-gui-screenshot-evidence.py \
 
 The validator fails closed on:
 
+- a private-string file which is inside the repository, linked, not current-user-owned, or not exact
+  mode `0600`;
 - any missing, duplicate, or unknown matrix ID, or anything other than exactly 57 entries;
 - an incomplete assets-root inventory: only `README.md`, `manifest.schema.json`, `manifest.json`, and every referenced final/original PNG are allowed; directories, nested assets, orphan files, symlinks, and multiply-linked files fail;
 - unsafe filenames, any final PNG filename or pixel hash reused across evidence IDs, bad PNG structure or CRCs, interlacing, unsupported color encodings, unknown/needless chunks, animation, trailing bytes, invalid zlib data, decoded-size excess, or malformed scanlines;

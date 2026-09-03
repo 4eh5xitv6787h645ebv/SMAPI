@@ -138,6 +138,7 @@ jobs:
                     # capture-specific private denylist remains local and is never committed or uploaded.
                     private_strings="$RUNNER_TEMP/linux-gui-screenshot-private-strings.txt"
                     printf '%s\n' 'smapi-evidence-ci-private-sentinel' > "$private_strings"
+                    chmod 600 "$private_strings"
                     python3 build/scripts/check-linux-gui-screenshot-evidence.py \
                         --private-strings-file "$private_strings"
                     bash -n build/scripts/finalize-install-package.sh

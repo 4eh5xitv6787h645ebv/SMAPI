@@ -66,7 +66,7 @@ ACTIONS_RUN_RE = re.compile(
 )
 
 FORBIDDEN_TEXT_PATTERNS = (
-    (re.compile(r"(?:^|[\s'\"=(])/(?:home|Users)/[^\s'\"<>]+", re.IGNORECASE), "personal absolute path"),
+    (re.compile(r"(?:(?:^|[\s'\"=(])/(?!/)|:(?!//)/)[^\s'\"<>]+"), "absolute path"),
     (re.compile(r"\bfile://", re.IGNORECASE), "file URL"),
     (re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b"), "GitHub token"),
     (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{8,}", re.IGNORECASE), "bearer credential"),
@@ -245,9 +245,23 @@ def iter_strings(value: Any) -> Iterable[str]:
             yield from iter_strings(nested)
 
 
-def load_private_strings(path: Path) -> tuple[str, ...]:
+def load_private_strings(path: Path, repository_root: Path) -> tuple[str, ...]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        absolute = path.absolute()
+        metadata = absolute.lstat()
+        resolved = absolute.resolve(strict=True)
+        if (
+            absolute.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or resolved != absolute
+        ):
+            fail("private-string file must be one normalized current-user single-link file at exact mode 0600")
+        if resolved == repository_root or repository_root in resolved.parents:
+            fail("private-string file must be outside the repository")
+        lines = read_single_link_text(resolved, "private-string file").splitlines()
     except (OSError, UnicodeError) as exc:
         fail(f"can't read private-string file: {exc}")
     values: list[str] = []
@@ -838,7 +852,7 @@ def validate_manifest(
 
     validate_schema_contract(schema)
     validate_spec_contract(spec_path)
-    private_strings = load_private_strings(private_strings_path)
+    private_strings = load_private_strings(private_strings_path, repository_root)
     scan_private_text(iter_strings(manifest), private_strings)
 
     root_fields = ("schema_version", "screenshot_spec", "production_identity", "captures")

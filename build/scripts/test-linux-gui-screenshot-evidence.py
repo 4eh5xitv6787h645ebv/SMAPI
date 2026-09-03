@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -251,6 +252,7 @@ def write_fixture(root: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
     shutil.copy2(REPOSITORY_ROOT / "docs/screenshots/linux-gui/README.md", assets / "README.md")
     private_path = root / "private-strings.txt"
     private_path.write_text(PRIVATE_TOKEN + "\n", encoding="utf-8")
+    os.chmod(private_path, 0o600)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest_path, assets, private_path, manifest
 
@@ -480,11 +482,11 @@ def main() -> int:
         "configured private string",
     )
     expect_failure(
-        "personal path",
+        "absolute path",
         lambda manifest, _assets: manifest["captures"][1]["capture"].__setitem__(
-            "command", "capture /home/example/private.png"
+            "command", "capture png32:/var/tmp/private.png"
         ),
-        "personal absolute path",
+        "absolute path",
     )
     expect_failure(
         "bad release link",
