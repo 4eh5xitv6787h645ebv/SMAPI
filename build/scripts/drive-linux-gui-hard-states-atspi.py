@@ -24,6 +24,8 @@ MAX_MESSAGE_BYTES = 16 * 1024
 MAX_TREE_NODES = 4096
 MAX_TREE_DEPTH = 32
 MAX_TRACE_EVENTS = 64
+MAX_OBSERVATIONS_PER_MILESTONE = 8
+MAX_OBSERVATION_NAME_BYTES = 1024
 ACTION_TIMEOUT_SECONDS = 120.0
 PROTOCOL_TIMEOUT_SECONDS = 120.0
 MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024
@@ -374,11 +376,20 @@ class AuthenticatedProtocol:
             "sequence": sequence, "milestone": milestone.name,
         }))
 
-    def capture_ready(self, sequence: int, milestone: Milestone) -> None:
-        self.transport.send(signed(self.token, {
+    def capture_ready(
+        self,
+        sequence: int,
+        milestone: Milestone,
+        observations: list[dict[str, Any]],
+    ) -> None:
+        validate_observation_facts(milestone.observations, observations)
+        message = signed(self.token, {
             "type": "capture-ready", "version": PROTOCOL_VERSION, "session": self.session,
-            "sequence": sequence, "milestone": milestone.name,
-        }))
+            "sequence": sequence, "milestone": milestone.name, "observations": observations,
+        })
+        if len(canonical_message(message)) + 1 > MAX_MESSAGE_BYTES:
+            raise QualificationError("protocol-bound")
+        self.transport.send(message)
         body = verify_signed(
             self.token,
             self.transport.receive(),
@@ -474,13 +485,53 @@ def exact_action(window: Node, names: tuple[str, ...]) -> tuple[Node, int]:
     return node, safe[0]
 
 
-def exact_observations(window: Node, requirements: tuple[AccessibleObservation, ...]) -> None:
+def validate_observation_facts(
+    requirements: tuple[AccessibleObservation, ...],
+    facts: Any,
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(facts, list)
+        or not requirements
+        or len(requirements) > MAX_OBSERVATIONS_PER_MILESTONE
+        or len(facts) != len(requirements)
+    ):
+        raise QualificationError("observation-payload")
+    for requirement, fact in zip(requirements, facts, strict=True):
+        if not isinstance(fact, dict) or set(fact) != {
+            "name", "role", "visible", "enabled", "actionInterface",
+        }:
+            raise QualificationError("observation-payload")
+        if (
+            fact["name"] != requirement.name
+            or not isinstance(fact["name"], str)
+            or len(fact["name"].encode("utf-8")) > MAX_OBSERVATION_NAME_BYTES
+            or not isinstance(fact["role"], str)
+            or fact["role"] not in requirement.roles
+            or fact["visible"] is not True
+            or type(fact["enabled"]) is not bool
+            or type(fact["actionInterface"]) is not bool
+            or fact["actionInterface"] is not requirement.require_enabled
+            or (requirement.require_enabled and fact["enabled"] is not True)
+        ):
+            raise QualificationError("observation-payload")
+    return facts
+
+
+def exact_observations(
+    window: Node,
+    requirements: tuple[AccessibleObservation, ...],
+) -> list[dict[str, Any]]:
+    if not requirements or len(requirements) > MAX_OBSERVATIONS_PER_MILESTONE:
+        raise QualificationError("observation-shape")
     nodes = tuple(walk_nodes((window,)))
     matched: set[int] = set()
+    facts: list[dict[str, Any]] = []
     for requirement in requirements:
         named = [(index, node) for index, node in enumerate(nodes) if node.name == requirement.name]
         if not named:
             raise QualificationError("observation-missing")
+        if len(named) != 1:
+            raise QualificationError("observation-ambiguous")
         eligible = [(index, node) for index, node in named if node.role in requirement.roles and node.visible]
         if not eligible:
             raise QualificationError("observation-role")
@@ -488,7 +539,20 @@ def exact_observations(window: Node, requirements: tuple[AccessibleObservation, 
             raise QualificationError("observation-ambiguous")
         if requirement.require_enabled and not eligible[0][1].enabled:
             raise QualificationError("observation-disabled")
+        node = eligible[0][1]
+        safe_actions = [name for name in node.action_names if name.casefold() in SAFE_ACTIONS]
+        if requirement.require_enabled:
+            if node.role not in BUTTON_ROLES or len(safe_actions) != 1:
+                raise QualificationError("observation-action-interface")
+        facts.append({
+            "name": requirement.name,
+            "role": node.role,
+            "visible": True,
+            "enabled": bool(node.enabled),
+            "actionInterface": requirement.require_enabled,
+        })
         matched.add(eligible[0][0])
+    return validate_observation_facts(requirements, facts)
 
 
 def wait_for_observations(
@@ -498,20 +562,20 @@ def wait_for_observations(
     deadline: float,
     clock: Callable[[], float],
     sleeper: Callable[[float], None],
-) -> Node:
+) -> list[dict[str, Any]]:
     if not milestone.observations:
         raise QualificationError("observation-shape")
     while clock() < deadline:
         try:
             window = exact_window(backend.roots(), milestone.window_title, gui_pid)
-            exact_observations(window, milestone.observations)
+            facts = exact_observations(window, milestone.observations)
             nodes = tuple(walk_nodes((window,)))
             if any(
                 node.visible and node.name in milestone.forbidden_observation_names
                 for node in nodes
             ):
                 raise QualificationError("observation-state")
-            return window
+            return facts
         except QualificationError as exc:
             if exc.code not in {"window-missing", "observation-missing"}:
                 raise
@@ -648,13 +712,13 @@ class HardStateOperator:
             if milestone.observations:
                 if milestone.action_names or milestone.picker_title or milestone.picker_field or milestone.requires_operation:
                     raise QualificationError("observation-shape")
-                wait_for_observations(
+                observations = wait_for_observations(
                     self.backend, milestone, gui_pid, deadline, self.clock, self.sleeper,
                 )
                 if self.binder.bind(gui_pid, gui_sha256) != bound_identity:
                     raise QualificationError("process-rebound")
                 self.trace.event("capture-ready", sequence, milestone.name)
-                self.protocol.capture_ready(sequence, milestone)
+                self.protocol.capture_ready(sequence, milestone, observations)
                 if self.binder.bind(gui_pid, gui_sha256) != bound_identity:
                     raise QualificationError("process-rebound")
                 self.trace.event("milestone-reached", sequence, milestone.name)

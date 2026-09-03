@@ -95,6 +95,7 @@ class FakeBackend:
         wrong_observation_state_at: int | None = None,
         forbidden_observation_at: int | None = None,
         disabled_observation_at: int | None = None,
+        wrong_observation_action_interface_at: int | None = None,
     ):
         self.milestones = [tool.MILESTONES[name] for name in tool.ROUTES[route]]
         self.index = 0
@@ -112,6 +113,7 @@ class FakeBackend:
         self.wrong_observation_state_at = wrong_observation_state_at
         self.forbidden_observation_at = forbidden_observation_at
         self.disabled_observation_at = disabled_observation_at
+        self.wrong_observation_action_interface_at = wrong_observation_action_interface_at
         self.picker_open = False
         self.invoked: list[str] = []
         self.picker_paths: list[str] = []
@@ -137,6 +139,12 @@ class FakeBackend:
                     enabled=not (
                         self.disabled_observation_at == self.index
                         and requirement.require_enabled
+                    ),
+                    actions=(
+                        ("toggle",)
+                        if self.wrong_observation_action_interface_at == self.index
+                        and requirement.require_enabled
+                        else (("click",) if requirement.require_enabled else ())
                     ),
                 ))
                 if self.duplicate_observation_at == self.index and requirement_index == 0:
@@ -386,12 +394,27 @@ def test_success_observation_routes(root: Path) -> int:
         expected_types.append("completed")
         if [message["type"] for message in transport.outgoing] != expected_types:
             raise AssertionError(f"{route}: wrong capture handshake sequence")
+        capture_messages = [message for message in transport.outgoing if message["type"] == "capture-ready"]
+        observation_milestones = [item for item in milestones if item.observations]
+        for message, milestone in zip(capture_messages, observation_milestones, strict=True):
+            expected_facts = [
+                {
+                    "name": requirement.name,
+                    "role": sorted(requirement.roles)[0],
+                    "visible": True,
+                    "enabled": True,
+                    "actionInterface": requirement.require_enabled,
+                }
+                for requirement in milestone.observations
+            ]
+            if message.get("observations") != expected_facts:
+                raise AssertionError(f"{route}: wrong bounded accessibility evidence")
         if not any(event[0] == "capture-ready" for event in trace.events):
             raise AssertionError(f"{route}: did not retain a fixed capture-ready trace event")
         serialized = json.dumps(transport.outgoing, sort_keys=True)
-        forbidden = (str(root), TOKEN.hex(), "No mutation was reported", "recovery is required")
+        forbidden = (str(root), TOKEN.hex())
         if any(value in serialized for value in forbidden):
-            raise AssertionError(f"{route}: outbound protocol leaked path, token, or visible state text")
+            raise AssertionError(f"{route}: outbound protocol leaked a path or token")
         count += 1
     return count
 
@@ -454,6 +477,50 @@ def main() -> int:
             "disabled required observed control", "observation-disabled",
             lambda: run_observation("e5-backend-loss", disabled_observation_at=e5_observation_index),
         )
+        expect_error(
+            "unsafe required observed control", "observation-action-interface",
+            lambda: run_observation(
+                "e5-backend-loss", wrong_observation_action_interface_at=e5_observation_index,
+            ),
+        )
+        cases += 3
+
+        evidence_milestone = tool.MILESTONES["state.e5"]
+        valid_facts = [
+            {
+                "name": requirement.name,
+                "role": sorted(requirement.roles)[0],
+                "visible": True,
+                "enabled": True,
+                "actionInterface": requirement.require_enabled,
+            }
+            for requirement in evidence_milestone.observations
+        ]
+        tampered_facts = [dict(fact) for fact in valid_facts]
+        tampered_facts[-1]["actionInterface"] = False
+        tampered_transport = MemoryTransport(())
+        tampered_protocol = tool.AuthenticatedProtocol(
+            tampered_transport, TOKEN, SESSION, nonce_factory=lambda: NONCE,
+        )
+        expect_error(
+            "tampered observation payload", "observation-payload",
+            lambda: tampered_protocol.capture_ready(0, evidence_milestone, tampered_facts),
+        )
+        if tampered_transport.outgoing:
+            raise AssertionError("tampered observation payload was transmitted")
+
+        extra_field_facts = [dict(fact) for fact in valid_facts]
+        extra_field_facts[0]["unexpected"] = True
+        extra_field_transport = MemoryTransport(())
+        extra_field_protocol = tool.AuthenticatedProtocol(
+            extra_field_transport, TOKEN, SESSION, nonce_factory=lambda: NONCE,
+        )
+        expect_error(
+            "observation payload extra field", "observation-payload",
+            lambda: extra_field_protocol.capture_ready(0, evidence_milestone, extra_field_facts),
+        )
+        if extra_field_transport.outgoing:
+            raise AssertionError("observation payload with an extra field was transmitted")
         cases += 2
 
         capture_backend = FakeBackend("e2-permission")
