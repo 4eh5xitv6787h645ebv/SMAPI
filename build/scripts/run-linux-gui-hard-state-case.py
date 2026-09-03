@@ -865,11 +865,53 @@ class OutputQuota:
             os.fspath(self.image_path), os.fspath(self.output),
         ])
         self.mounted = True
+        self._remove_initial_lost_found()
         os.chown(self.output, self.run_uid, self.run_gid)
         os.chmod(self.output, 0o700)
         self.validate()
         self._write_marker()
         self._restore_root()
+
+    def _remove_initial_lost_found(self) -> None:
+        """Remove only mkfs.ext4's exact empty root-owned recovery directory."""
+        output_fd = child_fd = -1
+        try:
+            output_fd = os.open(
+                self.output,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+            output_status = os.fstat(output_fd)
+            child_fd = os.open(
+                "lost+found",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=output_fd,
+            )
+            child = os.fstat(child_fd)
+            named = os.stat("lost+found", dir_fd=output_fd, follow_symlinks=False)
+            if (
+                output_status.st_dev != child.st_dev
+                or (child.st_dev, child.st_ino) != (named.st_dev, named.st_ino)
+                or not stat.S_ISDIR(child.st_mode) or child.st_uid != 0 or child.st_gid != 0
+                or stat.S_IMODE(child.st_mode) != 0o700 or child.st_nlink != 2
+                or os.listdir(child_fd)
+            ):
+                raise BrokerError()
+            os.close(child_fd)
+            child_fd = -1
+            repeated = os.stat("lost+found", dir_fd=output_fd, follow_symlinks=False)
+            if (repeated.st_dev, repeated.st_ino) != (child.st_dev, child.st_ino):
+                raise BrokerError()
+            os.rmdir("lost+found", dir_fd=output_fd)
+            os.fsync(output_fd)
+        except BrokerError:
+            raise
+        except OSError:
+            raise BrokerError() from None
+        finally:
+            if child_fd >= 0:
+                os.close(child_fd)
+            if output_fd >= 0:
+                os.close(output_fd)
 
     def _restrict_root(self) -> None:
         if self.root_fd < 0 or self.root_identity is None:
