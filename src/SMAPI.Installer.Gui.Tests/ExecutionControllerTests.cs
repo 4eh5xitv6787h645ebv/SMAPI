@@ -615,6 +615,12 @@ internal sealed class ExecutionControllerTests
         viewModel.ResultRows.Any(row => row.Label.Contains("committed", StringComparison.OrdinalIgnoreCase)).Should().Be(committed);
         if (committed)
             viewModel.PlanDetail.Contains("Nothing has run", StringComparison.OrdinalIgnoreCase).Should().BeFalse();
+        if (outcome == ProtocolExecutionOutcome.CancelledAndRolledBack)
+        {
+            viewModel.ResultRows.Should().ContainEquivalentOf(new ExecutionFactRow("Recovery disposition", "Completed"));
+            viewModel.ResultRows.Should().ContainEquivalentOf(new ExecutionFactRow("Managed files changed", "1"));
+            viewModel.ResultRows.Should().ContainEquivalentOf(new ExecutionFactRow("Managed files rolled back", "1"));
+        }
     }
 
     [Test]
@@ -756,6 +762,8 @@ internal sealed class ExecutionControllerTests
         cancel.IsFocused.Should().BeTrue();
         cancel.TabIndex.Should().BeLessThan(run.TabIndex);
         AutomationProperties.GetAccessKey(cancel).Should().Be("Alt+C");
+        AutomationProperties.GetName(cancel).Should().Be(viewModel.CancelAccessibleName).And.Contain("without running");
+        AutomationProperties.GetHelpText(cancel).Should().Be(viewModel.CancelHelpText).And.Contain("without starting");
         AutomationProperties.GetAccessKey(run).Should().Be("Alt+R");
         AutomationProperties.GetAccessKey(recover).Should().Be("Alt+V");
         session.ExecuteCalls.Should().Be(0);
@@ -769,6 +777,19 @@ internal sealed class ExecutionControllerTests
         window.IsNarrowLayout.Should().BeFalse();
         window.ApplyResponsiveLayout(980);
         window.IsNarrowLayout.Should().BeFalse();
+
+        viewModel.ApplySnapshotForTesting(Snapshot(10, ExecutionState.Running));
+        Dispatcher.UIThread.RunJobs();
+        AutomationProperties.GetName(cancel).Should().Be("Request safe operation cancellation");
+        AutomationProperties.GetHelpText(cancel).Should().Contain("unchanged").And.Contain("rolled back").And.Contain("committed");
+        viewModel.ApplySnapshotForTesting(Snapshot(11, ExecutionState.CancellationRequested));
+        Dispatcher.UIThread.RunJobs();
+        AutomationProperties.GetName(cancel).Should().Be("Operation cancellation already requested");
+        viewModel.Message.Should().Contain("unchanged").And.Contain("rolled back").And.Contain("committed");
+        viewModel.ApplySnapshotForTesting(Snapshot(12, ExecutionState.RecoveryRequired, canRecover: true));
+        Dispatcher.UIThread.RunJobs();
+        AutomationProperties.GetName(cancel).Should().Be("Close installer without starting recovery");
+        AutomationProperties.GetHelpText(cancel).Should().Contain("without running");
         window.Close();
     }
 
@@ -1183,12 +1204,15 @@ internal sealed class ExecutionControllerTests
             ProtocolExecutionOutcome.SucceededWithCleanupWarning => (ProtocolDurableState.Committed, (ProtocolTerminalErrorCode?)null, ProtocolRecoveryDisposition.CleanupPending, ProtocolNextAction.InspectAgain),
             ProtocolExecutionOutcome.FailedBeforeMutation => (ProtocolDurableState.Unchanged, ProtocolTerminalErrorCode.PermissionDenied, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.ReviewFilesystem),
             ProtocolExecutionOutcome.CancelledBeforeMutation => (ProtocolDurableState.Unchanged, (ProtocolTerminalErrorCode?)null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain),
-            ProtocolExecutionOutcome.CancelledAndRolledBack => (ProtocolDurableState.RolledBack, (ProtocolTerminalErrorCode?)null, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain),
+            ProtocolExecutionOutcome.CancelledAndRolledBack => (ProtocolDurableState.RolledBack, (ProtocolTerminalErrorCode?)null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain),
             ProtocolExecutionOutcome.FailedAndRolledBack => (ProtocolDurableState.RolledBack, ProtocolTerminalErrorCode.IoFailure, ProtocolRecoveryDisposition.NotRequired, ProtocolNextAction.InspectAgain),
             ProtocolExecutionOutcome.AutomaticRecoveryCompletedFreshInspectionRequired => (ProtocolDurableState.RecoveryCompleted, (ProtocolTerminalErrorCode?)null, ProtocolRecoveryDisposition.Completed, ProtocolNextAction.InspectAgain),
             _ => (ProtocolDurableState.Unknown, ProtocolTerminalErrorCode.UnexpectedCoreFailure, ProtocolRecoveryDisposition.InterruptedRecoveryRequired, ProtocolNextAction.RecoverInterrupted)
         };
-        return new(outcome, durable, error, recovery, next, new(null, null, null, null, null, null), InstallerBackendSettlement.ConfirmedClosed);
+        InstallerExecutionSummary summary = outcome == ProtocolExecutionOutcome.CancelledAndRolledBack
+            ? new(1, 1, 0, 0, 0, 0)
+            : new(null, null, null, null, null, null);
+        return new(outcome, durable, error, recovery, next, summary, InstallerBackendSettlement.ConfirmedClosed);
     }
 
     private static InstallerRecoveryTerminalResult RecoveryForCopy(ProtocolInterruptedRecoveryOutcome outcome, ProtocolNextAction next)

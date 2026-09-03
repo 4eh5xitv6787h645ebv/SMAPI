@@ -230,6 +230,76 @@ public sealed class TransactionOutcomeTests
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.xml")).Should().Be("second-old");
     }
 
+    [TestCase(true)]
+    [TestCase(false)]
+    public void DetailedOutcome_CancellationRequestedInsideMutationIsObservedOnlyAfterAppliedDurability(bool beforeMutation)
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        const string path = "smapi-internal/cancel-boundary/runtime.dll";
+        Write(payload, "new", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[] { Write(path, null, "new", "new") });
+        using CancellationTokenSource source = new();
+        CancelInsideMutation injector = new(source, beforeMutation);
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(
+            game,
+            payload,
+            plan,
+            new InstallerTransactionExecutor(faultInjector: injector),
+            source.Token
+        );
+
+        injector.AfterAppliedReached.Should().BeTrue("cancellation must not interrupt the atomic mutation or Applied journal publication");
+        outcome.Status.Should().Be(TransactionOutcomeStatus.CancelledAndRolledBack);
+        outcome.ChangedPaths.Should().Equal(new TransactionPathChange(path, TransactionOperationKind.WriteFile));
+        outcome.RolledBackPaths.Should().Equal(outcome.ChangedPaths);
+        File.Exists(Path.Combine(game, path)).Should().BeFalse();
+        System.IO.Directory.Exists(Path.Combine(game, "smapi-internal")).Should().BeFalse();
+    }
+
+    [Test]
+    public void DetailedOutcome_CancellationRollbackFailureRemainsRecoveryRequired()
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "new", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[] { Write("StardewModdingAPI.dll", Hash("old"), "new", "new") });
+        using CancellationTokenSource source = new();
+        InstallerTransactionExecutor executor = new(faultInjector: new CancelAndTamperAfterApplied(source, game));
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, executor, source.Token);
+
+        outcome.Status.Should().Be(TransactionOutcomeStatus.RollbackFailedRecoveryRequired);
+        outcome.RequiresRecovery.Should().BeTrue();
+        outcome.Cancellation.Should().Be(TransactionCancellationDisposition.None);
+        outcome.ChangedPaths.Should().Equal(new TransactionPathChange("StardewModdingAPI.dll", TransactionOperationKind.WriteFile));
+        outcome.RolledBackPaths.Should().BeEmpty();
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("tampered");
+    }
+
+    [Test]
+    public void DetailedOutcome_NonCancellationFailureWinsWhenTokenIsAlsoRequested()
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        Write(game, "StardewModdingAPI.dll", "old");
+        Write(payload, "new", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[] { Write("StardewModdingAPI.dll", Hash("old"), "new", "new") });
+        using CancellationTokenSource source = new();
+        InstallerTransactionExecutor executor = new(faultInjector: new CancelAndFailAfterApplied(source));
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, executor, source.Token);
+
+        outcome.Status.Should().Be(TransactionOutcomeStatus.FailedAndRolledBack);
+        outcome.Cancellation.Should().Be(TransactionCancellationDisposition.None);
+        outcome.ErrorCode.Should().Be(TransactionErrorCode.IoFailure);
+        outcome.ChangedPaths.Should().Equal(new TransactionPathChange("StardewModdingAPI.dll", TransactionOperationKind.WriteFile));
+        outcome.RolledBackPaths.Should().Equal(outcome.ChangedPaths);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("old");
+    }
+
     [Test]
     public void DetailedOutcome_ObservesMutationBeforeAppliedJournalEvent()
     {
@@ -446,6 +516,24 @@ public sealed class TransactionOutcomeTests
         File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
     }
 
+    [Test]
+    public void DetailedOutcome_CancellationAfterFinalCheckpointStillCommitsTruthfully()
+    {
+        string game = this.Directory();
+        string payload = this.Directory();
+        Write(payload, "new", "new");
+        TransactionPlan plan = new(Guid.NewGuid(), new[] { Write("StardewModdingAPI.dll", null, "new", "new") });
+        using CancellationTokenSource source = new();
+        InstallerTransactionExecutor executor = new(new CancelOnProgressStage(source, TransactionStage.Verifying));
+
+        TransactionExecutionOutcome outcome = ApplyDetailed(game, payload, plan, executor, source.Token);
+
+        outcome.Status.Should().Be(TransactionOutcomeStatus.Committed);
+        outcome.DurableStatus.Should().Be(TransactionStatus.Committed);
+        outcome.Cancellation.Should().Be(TransactionCancellationDisposition.RequestedAfterMutationStartedAndCommitted);
+        File.ReadAllText(Path.Combine(game, "StardewModdingAPI.dll")).Should().Be("new");
+    }
+
     private static TransactionExecutionOutcome ApplyDetailed(
         string game,
         string payload,
@@ -511,6 +599,57 @@ public sealed class TransactionOutcomeTests
         {
             if (operationIndex == this.OperationIndex)
                 this.Source.Cancel();
+        }
+    }
+
+    private sealed class CancelInsideMutation(CancellationTokenSource source, bool beforeMutation) : ITransactionFaultInjector
+    {
+        public bool AfterAppliedReached { get; private set; }
+
+        public void BeforeMutation(Guid transactionId, int operationIndex)
+        {
+            if (beforeMutation)
+                source.Cancel();
+        }
+
+        public void AfterMutationBeforeAppliedEvent(Guid transactionId, int operationIndex)
+        {
+            if (!beforeMutation)
+                source.Cancel();
+        }
+
+        public void AfterMutation(Guid transactionId, int operationIndex)
+            => this.AfterAppliedReached = true;
+    }
+
+    private sealed class CancelAndTamperAfterApplied(CancellationTokenSource source, string gameRoot) : ITransactionFaultInjector
+    {
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+
+        public void AfterMutation(Guid transactionId, int operationIndex)
+        {
+            source.Cancel();
+            File.WriteAllText(Path.Combine(gameRoot, "StardewModdingAPI.dll"), "tampered");
+        }
+    }
+
+    private sealed class CancelAndFailAfterApplied(CancellationTokenSource source) : ITransactionFaultInjector
+    {
+        public void BeforeMutation(Guid transactionId, int operationIndex) { }
+
+        public void AfterMutation(Guid transactionId, int operationIndex)
+        {
+            source.Cancel();
+            throw new IOException("failure wins");
+        }
+    }
+
+    private sealed class CancelOnProgressStage(CancellationTokenSource source, TransactionStage stage) : ITransactionProgressSink
+    {
+        public void Report(TransactionProgress progress)
+        {
+            if (progress.Stage == stage)
+                source.Cancel();
         }
     }
 

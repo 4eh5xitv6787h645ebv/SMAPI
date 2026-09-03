@@ -115,6 +115,26 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
         ExecutionState.RecoveryRequired => "_Close installer",
         _ => "_Cancel"
     };
+    public string CancelAccessibleName => this.snapshot.State switch
+    {
+        ExecutionState.Ready => "Cancel and close without running the confirmed plan",
+        ExecutionState.Starting or ExecutionState.Running => "Request safe operation cancellation",
+        ExecutionState.CancellationRequested => "Operation cancellation already requested",
+        ExecutionState.RecoveryStarting => "Cancel recovery preparation before admission",
+        ExecutionState.RecoveryCancellationRequested => "Recovery preparation cancellation already requested",
+        ExecutionState.RecoveryRequired => "Close installer without starting recovery",
+        _ => "Cancel safely"
+    };
+    public string CancelHelpText => this.snapshot.State switch
+    {
+        ExecutionState.Ready => "Closes this screen without starting the confirmed installer operation.",
+        ExecutionState.Starting or ExecutionState.Running => "Requests cancellation without killing the installer. The result may be unchanged, fully rolled back, or committed if the final safe checkpoint already passed.",
+        ExecutionState.CancellationRequested => "Cancellation is already requested. Keep this window open until the exact durable result appears.",
+        ExecutionState.RecoveryStarting => "Requests cancellation only while recovery is still being prepared. Recovery cannot be stopped after admission.",
+        ExecutionState.RecoveryCancellationRequested => "Recovery preparation cancellation is already requested. Wait for the exact result.",
+        ExecutionState.RecoveryRequired => "Closes this screen without running the available recovery action.",
+        _ => "Cancels the current safe action when available."
+    };
     public AutomationLiveSetting StageLiveSetting => this.HasProgressStage && this.snapshot.State is ExecutionState.Running or ExecutionState.RecoveryRunning
         ? AutomationLiveSetting.Polite
         : AutomationLiveSetting.Off;
@@ -310,7 +330,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
             ExecutionState.Starting => ($"Starting {operation}…", "Submitting the exact confirmed plan. Cancellation can still be requested safely."),
             ExecutionState.Running when value.Plan.Operation == InstallerOperation.Rollback => ("Rollback is running", "Restoring the selected previous managed state. Keep this window open; progress may coalesce intermediate updates."),
             ExecutionState.Running => ($"{operation} is running", "Keep this window open. Progress may coalesce intermediate updates."),
-            ExecutionState.CancellationRequested => ("Cancellation requested — finishing safely", "The installer may be rolling back; keep this window open."),
+            ExecutionState.CancellationRequested => ("Cancellation requested — finishing safely", "The result may be unchanged, fully rolled back, or committed if the final safe checkpoint already passed. Keep this window open for the exact durable result."),
             ExecutionState.Terminal => GetExecutionTerminalCopy(value.Plan.Operation, value.ExecutionResult),
             ExecutionState.RecoveryRequired when value.RecoveryResult is not null => GetRecoveryCopy(value.RecoveryResult),
             ExecutionState.RecoveryRequired when value.ExecutionResult is InstallerExecutionStateUnknownResult && !value.CanRecover => ("Installer state could not be confirmed; recovery is required", "A recovery session could not be prepared here. Close this screen and start a fresh installer session; do not retry the original operation."),
@@ -540,6 +560,7 @@ internal sealed class ExecutionViewModel : ObservableObject, IAsyncDisposable
             nameof(this.HasProgressStage),
             nameof(this.IsRunVisible), nameof(this.IsCancelVisible), nameof(this.IsRecoverVisible), nameof(this.IsExitVisible),
             nameof(this.IsResultVisible), nameof(this.IsProblemVisible), nameof(this.IsSettlementWarningVisible), nameof(this.CancelLabel),
+            nameof(this.CancelAccessibleName), nameof(this.CancelHelpText),
             nameof(this.StatusLiveSetting), nameof(this.ResultLiveSetting), nameof(this.StageLiveSetting)
         })
             this.OnPropertyChanged(property);
