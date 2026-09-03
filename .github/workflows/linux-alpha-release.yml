@@ -137,6 +137,8 @@ jobs:
                     python3 build/scripts/test-validate-linux-gui-hard-state-inputs.py
                     python3 build/scripts/test-linux-gui-hard-state-barrier.py
                     python3 build/scripts/test-assemble-linux-gui-e2-contact-sheet.py
+                    python3 build/scripts/test-drive-linux-gui-hard-states-atspi.py
+                    python3 build/scripts/test-arm-linux-gui-hard-state-boundary.py
                     # CI rechecks generic privacy/path rules with a sentinel. The complete
                     # capture-specific private denylist remains local and is never committed or uploaded.
                     private_strings="$RUNNER_TEMP/linux-gui-screenshot-private-strings.txt"
