@@ -25,6 +25,7 @@ import time
 from types import ModuleType
 from typing import Any, NoReturn
 import zipfile
+import zlib
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -704,6 +705,95 @@ def read_bounded_regular(
             os.close(descriptor)
 
 
+def strict_json(raw: bytes, *, ascii_only: bool = False) -> Any:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                fail("capture")
+            result[key] = value
+        return result
+
+    try:
+        text = raw.decode("ascii" if ascii_only else "utf-8", errors="strict")
+        return json.loads(
+            text,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda _value: fail("capture"),
+        )
+    except QualificationError:
+        raise
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        fail("capture")
+
+
+def validate_canonical_png(data: bytes) -> tuple[int, int, str]:
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        fail("capture")
+    offset = len(signature)
+    chunks: list[tuple[bytes, bytes]] = []
+    while offset < len(data):
+        if len(chunks) >= 3 or len(data) - offset < 12:
+            fail("capture")
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            fail("capture")
+        payload = data[offset + 8:offset + 8 + length]
+        expected_crc = struct.unpack(">I", data[offset + 8 + length:end])[0]
+        if zlib.crc32(payload, zlib.crc32(kind)) & 0xffffffff != expected_crc:
+            fail("capture")
+        chunks.append((kind, payload))
+        offset = end
+    if tuple(kind for kind, _payload in chunks) != (b"IHDR", b"IDAT", b"IEND"):
+        fail("capture")
+    header, compressed, end_payload = (payload for _kind, payload in chunks)
+    if len(header) != 13 or end_payload:
+        fail("capture")
+    width, height, depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", header)
+    channels = 3 if color_type == 2 else 4 if color_type == 6 else 0
+    if (
+        not 0 < width <= 32768 or not 0 < height <= 32768
+        or width * height > 64_000_000 or depth != 8 or channels == 0
+        or compression != 0 or filtering != 0 or interlace != 0
+    ):
+        fail("capture")
+    expected_size = height * (1 + width * channels)
+    if expected_size > 256 * 1024 * 1024:
+        fail("capture")
+    decompressor = zlib.decompressobj()
+    try:
+        scanlines = decompressor.decompress(compressed, expected_size + 1)
+        scanlines += decompressor.flush(max(0, expected_size + 1 - len(scanlines)))
+    except (ValueError, zlib.error):
+        fail("capture")
+    row_size = width * channels
+    if (
+        len(scanlines) != expected_size or not decompressor.eof
+        or decompressor.unused_data or decompressor.unconsumed_tail
+        or any(scanlines[row * (row_size + 1)] != 0 for row in range(height))
+    ):
+        fail("capture")
+    pixels = b"".join(
+        scanlines[row * (row_size + 1) + 1:(row + 1) * (row_size + 1)]
+        for row in range(height)
+    )
+    canonical = (
+        signature
+        + struct.pack(">I", len(header)) + b"IHDR" + header
+        + struct.pack(">I", zlib.crc32(header, zlib.crc32(b"IHDR")) & 0xffffffff)
+        + struct.pack(">I", len(compressed)) + b"IDAT" + compressed
+        + struct.pack(">I", zlib.crc32(compressed, zlib.crc32(b"IDAT")) & 0xffffffff)
+        + struct.pack(">I", 0) + b"IEND"
+        + struct.pack(">I", zlib.crc32(b"", zlib.crc32(b"IEND")) & 0xffffffff)
+    )
+    if canonical != data or zlib.compress(scanlines, 9) != compressed:
+        fail("capture")
+    return width, height, hashlib.sha256(pixels).hexdigest()
+
+
 @dataclass(frozen=True)
 class ProcessIdentity:
     pid: int
@@ -906,7 +996,10 @@ class CaptureCoordinator:
                 result = subprocess.run(
                     arguments, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                     env=self.environment, timeout=max(0.01, deadline - time.monotonic()), check=False,
-                    preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024)),
+                    preexec_fn=lambda: resource.setrlimit(
+                        resource.RLIMIT_FSIZE,
+                        (64 * 1024 * 1024, 64 * 1024 * 1024),
+                    ),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 fail("capture")
@@ -919,10 +1012,7 @@ class CaptureCoordinator:
         stdout_bytes = read_bounded_regular(stdout_path, 64 * 1024)
         if read_bounded_regular(stderr_path, 64 * 1024, allow_empty=True):
             fail("capture")
-        try:
-            emitted = json.loads(stdout_bytes.decode("ascii"))
-        except (UnicodeError, json.JSONDecodeError):
-            fail("capture")
+        emitted = strict_json(stdout_bytes, ascii_only=True)
         expected_png = f"{self.spec.output_basename}.png"
         expected_record = f"{self.spec.output_basename}.capture.json"
         if (
@@ -935,14 +1025,46 @@ class CaptureCoordinator:
             fail("capture")
         png = read_bounded_regular(stage / expected_png, 64 * 1024 * 1024)
         record_raw = read_bounded_regular(stage / expected_record, 1024 * 1024)
-        try:
-            record = json.loads(record_raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError):
+        record = strict_json(record_raw)
+        if not isinstance(record, dict):
             fail("capture")
+        width, height, pixel_sha256 = validate_canonical_png(png)
         expected_identity = self._production_identity()
-        source_window = record.get("capture", {}).get("source_window", {}) if isinstance(record, dict) else {}
+        capture = record.get("capture")
+        source_window = capture.get("source_window") if isinstance(capture, dict) else None
+        environment_record = record.get("environment")
+        runtime_record = record.get("runtime")
+        normalization = record.get("normalization")
+        privacy = record.get("privacy_review")
+        executable = source_window.get("executable") if isinstance(source_window, dict) else None
+        expected_environment = {
+            "distribution": f"{profile.distribution.value} {profile.distribution_version}",
+            "architecture": profile.architecture.value,
+            "desktop_environment": profile.desktop.value,
+            "session_type": profile.session.value,
+            "display_backend": profile.window_backend.value,
+            "display_scale_percent": profile.scale_percent,
+            "theme": profile.theme.value,
+            "resolution": f"{profile.resolution_width}x{profile.resolution_height}",
+        }
+        expected_runtime = {
+            "avalonia": avalonia,
+            "dotnet_sdk": dotnet_sdk,
+            "dotnet_runtime": dotnet_runtime,
+        }
+        expected_keys = {
+            "staging_schema_version", "status", "id", "filename", "evidence_class",
+            "production_identity", "fixture_or_injection", "operation", "durable_state",
+            "environment", "runtime", "capture", "normalization", "privacy_review",
+            "qualification_reference",
+        } | ({"fault"} if self.spec.fault is not None else set())
         if (
-            hashlib.sha256(png).hexdigest() != emitted["sha256"]
+            set(record) != expected_keys
+            or record_raw != (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            or record.get("staging_schema_version") != 1
+            or hashlib.sha256(png).hexdigest() != emitted["sha256"]
+            or emitted["pixel_sha256"] != pixel_sha256
+            or emitted["width"] != width or emitted["height"] != height
             or record.get("status") != "staged_pending_original_resolution_privacy_review"
             or record.get("id") != self.spec.evidence_id.value
             or record.get("filename") != expected_png
@@ -954,13 +1076,60 @@ class CaptureCoordinator:
                 "before": self.spec.durable_before.value,
                 "after": self.spec.durable_at_capture.value,
             }
+            or environment_record != expected_environment
+            or runtime_record != expected_runtime
             or record.get("qualification_reference") != self.spec.docs_anchor
+            or not isinstance(capture, dict)
+            or set(capture) != {
+                "timestamp", "tool", "command", "input_mode", "source_window",
+                "width", "height", "sha256", "decoded_pixel_sha256",
+            }
+            or not isinstance(capture.get("timestamp"), str)
+            or re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})",
+                capture["timestamp"],
+            ) is None
+            or not isinstance(capture.get("tool"), str) or not 0 < len(capture["tool"]) <= 160
+            or capture.get("input_mode") != "discovered_exact_x11_client_window"
+            or capture.get("width") != width or capture.get("height") != height
+            or capture.get("sha256") != emitted["sha256"]
+            or capture.get("decoded_pixel_sha256") != pixel_sha256
+            or not isinstance(source_window, dict)
+            or set(source_window) != {
+                "window_id", "process_id", "process_start_time", "expected_title",
+                "display", "executable", "unique_mapped_visible_client_verified",
+            }
+            or not isinstance(source_window.get("window_id"), str)
+            or re.fullmatch(r"(?:0x[0-9a-fA-F]+|[1-9][0-9]*)", source_window["window_id"]) is None
             or source_window.get("process_id") != self.gui.pid
             or source_window.get("process_start_time") != self.gui.start_time
             or source_window.get("expected_title") != self.spec.window_title
             or source_window.get("display") != self.environment["DISPLAY"]
             or source_window.get("unique_mapped_visible_client_verified") is not True
-            or record.get("privacy_review", {}).get("status") != "pending"
+            or not isinstance(executable, dict)
+            or executable != {
+                "device": self.gui.executable_device,
+                "inode": self.gui.executable_inode,
+                "size": self.gui.executable_size,
+                "sha256_verified": True,
+            }
+            or capture.get("command") != (
+                f"import -window {source_window.get('window_id')} png32:<private-temporary-file>; "
+                "canonical metadata normalization"
+            )
+            or normalization != {
+                "application_pixels_altered": False,
+                "input_chunks": ["IHDR", "IDAT", "IEND"],
+                "output_chunks": ["IHDR", "IDAT", "IEND"],
+                "statement": (
+                    "Incidental PNG metadata was removed; decoded RGB/RGBA application pixels "
+                    "are byte-identical."
+                ),
+            }
+            or privacy != {
+                "status": "pending",
+                "requirement": "Inspect the staged PNG at original resolution before manifest promotion.",
+            }
             or (self.spec.fault is None and "fault" in record)
             or (self.spec.fault is not None and record.get("fault") != self.spec.fault.value)
         ):

@@ -13,6 +13,7 @@ import socket
 import stat
 import signal
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import zipfile
+import zlib
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -777,7 +779,17 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                 }
                 stage = Path(values["--stage-directory"])
                 filename = values["--filename"]
-                png = b"synthetic-png"
+                pixels = b"\x10\x20\x30\xff"
+                header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+
+                def chunk(kind, payload):
+                    checksum = zlib.crc32(payload, zlib.crc32(kind)) & 0xffffffff
+                    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+                png = (
+                    b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+                    + chunk(b"IDAT", zlib.compress(b"\0" + pixels, 9)) + chunk(b"IEND", b"")
+                )
                 png_path = stage / filename
                 png_path.write_bytes(png)
                 os.chmod(png_path, 0o600)
@@ -791,28 +803,70 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                     "fixture_or_injection": "filesystem-eacces",
                     "operation": "install",
                     "durable_state": {"before": "unchanged", "after": "unchanged"},
+                    "environment": {
+                        "distribution": "Ubuntu 24.04.4 LTS",
+                        "architecture": "amd64",
+                        "desktop_environment": "GNOME",
+                        "session_type": "wayland",
+                        "display_backend": "xwayland",
+                        "display_scale_percent": 100,
+                        "theme": "light",
+                        "resolution": "1920x1080",
+                    },
+                    "runtime": {
+                        "avalonia": "Avalonia 12.1.1",
+                        "dotnet_sdk": "self-contained",
+                        "dotnet_runtime": "Microsoft.NETCore.App 10.0.8",
+                    },
                     "qualification_reference": coordinator.spec.docs_anchor,
                     "fault": "permission",
-                    "capture": {"source_window": {
-                        "process_id": gui.pid,
-                        "process_start_time": gui.start_time,
-                        "expected_title": coordinator.spec.window_title,
-                        "display": ":99",
-                        "unique_mapped_visible_client_verified": True,
-                    }},
-                    "privacy_review": {"status": "pending"},
+                    "staging_schema_version": 1,
+                    "capture": {
+                        "timestamp": "2026-09-03T12:00:00+08:00",
+                        "tool": "ImageMagick 7",
+                        "command": "import -window 0x123 png32:<private-temporary-file>; canonical metadata normalization",
+                        "input_mode": "discovered_exact_x11_client_window",
+                        "source_window": {
+                            "window_id": "0x123",
+                            "process_id": gui.pid,
+                            "process_start_time": gui.start_time,
+                            "expected_title": coordinator.spec.window_title,
+                            "display": ":99",
+                            "executable": {
+                                "device": gui.executable_device,
+                                "inode": gui.executable_inode,
+                                "size": gui.executable_size,
+                                "sha256_verified": True,
+                            },
+                            "unique_mapped_visible_client_verified": True,
+                        },
+                        "width": 1,
+                        "height": 1,
+                        "sha256": hashlib.sha256(png).hexdigest(),
+                        "decoded_pixel_sha256": hashlib.sha256(pixels).hexdigest(),
+                    },
+                    "normalization": {
+                        "application_pixels_altered": False,
+                        "input_chunks": ["IHDR", "IDAT", "IEND"],
+                        "output_chunks": ["IHDR", "IDAT", "IEND"],
+                        "statement": "Incidental PNG metadata was removed; decoded RGB/RGBA application pixels are byte-identical.",
+                    },
+                    "privacy_review": {
+                        "status": "pending",
+                        "requirement": "Inspect the staged PNG at original resolution before manifest promotion.",
+                    },
                 }
                 record_name = f"{filename[:-4]}.capture.json"
                 record_path = stage / record_name
-                record_path.write_text(json.dumps(record), encoding="utf-8")
+                record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 os.chmod(record_path, 0o600)
                 emitted = {
                     "filename": filename,
                     "record": record_name,
                     "sha256": hashlib.sha256(png).hexdigest(),
-                    "pixel_sha256": "6" * 64,
-                    "width": 800,
-                    "height": 600,
+                    "pixel_sha256": hashlib.sha256(pixels).hexdigest(),
+                    "width": 1,
+                    "height": 1,
                 }
                 options["stdout"].write((json.dumps(emitted) + "\n").encode("ascii"))
                 return SimpleNamespace(returncode=0)
@@ -831,6 +885,43 @@ f=open(a.trace_file,"x",encoding="ascii"); f.write('{"event":"synthetic-complete
                 output / "capture/e2-permission.png",
                 output / "capture/e2-permission.capture.json",
             })
+
+            def missing_environment(arguments, **options):
+                result = fake_run(arguments, **options)
+                stage = Path(arguments[arguments.index("--stage-directory") + 1])
+                path = stage / "e2-permission.capture.json"
+                value = json.loads(path.read_text(encoding="utf-8"))
+                value.pop("environment")
+                path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                return result
+
+            def corrupt_png(arguments, **options):
+                result = fake_run(arguments, **options)
+                stage = Path(arguments[arguments.index("--stage-directory") + 1])
+                path = stage / "e2-permission.png"
+                value = bytearray(path.read_bytes())
+                value[-1] ^= 1
+                path.write_bytes(value)
+                os.chmod(path, 0o600)
+                return result
+
+            for index, tampered_run in enumerate((missing_environment, corrupt_png)):
+                with self.subTest(tamper=index):
+                    rejected_output = base / f"rejected-{index}"
+                    rejected_output.mkdir(mode=0o700)
+                    rejected = self.module.CaptureCoordinator(
+                        contract, rejected_output, package_root, game, [], gui,
+                        "4" * 64, "5" * 64, {"PATH": "/usr/bin:/bin", "DISPLAY": ":99"},
+                    )
+                    with (
+                        mock.patch.object(self.module, "read_runtime_metadata", return_value=("Avalonia 12.1.1", "self-contained", "Microsoft.NETCore.App 10.0.8")),
+                        mock.patch.object(self.module, "hash_trusted_helper", return_value=("7" * 64, SimpleNamespace())),
+                        mock.patch.object(self.module, "identity_matches", return_value=True),
+                        mock.patch.object(self.module.subprocess, "run", side_effect=tampered_run),
+                        self.assertRaises(self.module.QualificationError) as raised,
+                    ):
+                        rejected._stage(time.monotonic() + 2)
+                    self.assertEqual(raised.exception.code, "capture")
 
     def test_boundary_session_binds_same_namespace_peer_and_fixed_stages(self):
         with tempfile.TemporaryDirectory(prefix="hs-", dir="/dev/shm") as name:
