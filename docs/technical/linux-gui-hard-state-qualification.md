@@ -323,19 +323,20 @@ authority, and the pre-write aggregate resource gate remain pending.
 ## Authentic UI operation and capture
 
 All installer choices and actions must be reached through the packaged GUI. The AT-SPI driver finds
-the exact application/window subtree, records each target's role, accessible name, enabled/visible
-state, and action interface, then invokes that exact exposed action. It fails closed if the action is
-missing, disabled, ambiguous, or lacks its expected AT-SPI action interface. Fixed keyboard input is
-used only for the verified native folder picker (`Ctrl+L`, the already admitted path, and Enter); it
-is not a fallback for missing installer actions. The driver must not call view-model methods,
+the exact application/window subtree; validates each target's role, accessible name, enabled/visible
+state, and action interface in memory; then invokes that exact exposed action. It fails closed if the
+action is missing, disabled, ambiguous, or lacks its expected AT-SPI action interface. Fixed keyboard
+input is used only for the verified native folder picker (`Ctrl+L`, the already admitted path, and
+Enter); it is not a fallback for missing installer actions. The driver must not call view-model methods,
 synthesize backend events, use a private protocol client, or bypass a confirmation. Destructive
 confirmation must begin with visible focus on Cancel.
 
-An AT-SPI transcript proves only what the accessibility tree exposed and what action the driver
-requested. It does not prove pixels, filesystem effects, durable state, or that a request won a race.
-Record the relevant heading/status/live-region text immediately before capture and correlate its
-monotonic observation with the private supervisor timeline. Separately prove filesystem and durable
-state from the before/after records below.
+The implemented preflight retains a milestone-only AT-SPI trace; detailed bounded role, name, state,
+action, and relevant heading/status/live-region recording remains pending for final qualification.
+Even that detailed transcript would prove only what the accessibility tree exposed and what action
+the driver requested. It would not prove pixels, filesystem effects, durable state, or that a request
+won a race. Correlate the final bounded observations with the private supervisor timeline and
+separately prove filesystem and durable state from the before/after records below.
 
 Capture only the exact application window with
 `build/scripts/stage-linux-gui-screenshot.py` in its direct X11/XWayland mode. Supply the exact
@@ -466,11 +467,12 @@ failure evidence, report E6 failed, and do not claim completion from reassuring 
 ## Private evidence and sanitized output
 
 Everything retained as detailed evidence remains inside the private mode-`0700` run root: package
-extraction, full process and AT-SPI transcripts, mount data, inventories, journals, receipts,
-diagnostic JSONL, console output, exception text, original and rejected images, screenshot sidecars,
-and cleanup logs. Files are mode `0600`. The controller transiently writes two root-owned mode-`0600`
-ledger files beneath the root-owned mode-`0711` prefix so the unprivileged account cannot replace
-them. After the controller and its cgroup settle, the broker deletes only those exact captured
+extraction, full process transcripts, the milestone-only AT-SPI trace, mount data, inventories,
+journals, receipts, diagnostic JSONL, console output, exception text, original and rejected images,
+screenshot sidecars, and cleanup logs. Files are mode `0600`. The controller transiently writes two
+root-owned mode-`0600` ledger files beneath the root-owned mode-`0711` prefix so the unprivileged
+account cannot replace them. After the controller and its cgroup settle, the broker deletes only
+those exact captured
 inode/name/metadata pairs; an unsafe replacement or incomplete removal fails cleanup. Review retained
 files before sharing because console and diagnostic material may contain full paths or exception text
 even when the GUI is sanitized. Never commit or upload the run root.
