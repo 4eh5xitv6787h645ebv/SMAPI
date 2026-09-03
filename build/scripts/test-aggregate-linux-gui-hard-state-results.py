@@ -219,6 +219,12 @@ class AggregateResultsTests(unittest.TestCase):
         self.assert_rejected()
         self.rewrite(spec, lambda value: value.pop("fault"))
         self.assert_rejected()
+        self.rewrite(spec, lambda value: value.__setitem__("schemaVersion", 2.0))
+        self.assert_rejected()
+        path = self.fixture.root / f"{spec.output_basename}.result.json"
+        path.write_text(json.dumps(case_record(spec), indent=2) + "\n", encoding="ascii")
+        os.chmod(path, 0o600)
+        self.assert_rejected()
 
     def test_private_sentinel_never_appears_in_failure(self) -> None:
         sentinel = "wife-private-modpack-Blossom-secret"

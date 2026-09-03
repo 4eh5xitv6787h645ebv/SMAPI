@@ -98,7 +98,11 @@ def parse_case(raw: bytes) -> dict[str, Any]:
         value = json.loads(raw.decode("ascii"), object_pairs_hook=no_duplicate_object)
     except (UnicodeError, json.JSONDecodeError):
         reject()
-    if not isinstance(value, dict) or set(value) != CASE_KEYS:
+    if (
+        not isinstance(value, dict)
+        or set(value) != CASE_KEYS
+        or raw != canonical_bytes(value)
+    ):
         reject()
     return value
 
@@ -113,6 +117,7 @@ def validate_case(value: dict[str, Any], expected: Any, model: ModuleType) -> di
     expected_fault = None if expected.fault is None else expected.fault.value
     if (
         value["kind"] != CASE_KIND
+        or type(value["schemaVersion"]) is not int
         or value["schemaVersion"] != SCHEMA_VERSION
         or value["status"] != CAPTURED_STATUS
         or value["ok"] is not True
