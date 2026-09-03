@@ -24,6 +24,10 @@ MAX_DIMENSION = 8192
 GUTTER = 16
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{7,127}\.png$")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+STABLE_FILE_FIELDS = (
+    "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size",
+    "st_mtime_ns", "st_ctime_ns",
+)
 
 
 class ContactSheetError(Exception):
@@ -93,7 +97,7 @@ def read_private_png(path: Path) -> bytes:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
             opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            if any(getattr(metadata, field) != getattr(opened, field) for field in STABLE_FILE_FIELDS):
                 reject("source")
             chunks: list[bytes] = []
             total = 0
@@ -108,9 +112,10 @@ def read_private_png(path: Path) -> bytes:
             final = os.fstat(descriptor)
         finally:
             os.close(descriptor)
+        named = os.stat(path, follow_symlinks=False)
         if (
-            (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            any(getattr(opened, field) != getattr(final, field) for field in STABLE_FILE_FIELDS)
+            or any(getattr(final, field) != getattr(named, field) for field in STABLE_FILE_FIELDS)
         ):
             reject("source")
         data = b"".join(chunks)
@@ -152,22 +157,65 @@ def encode(width: int, height: int, pixels: bytes) -> bytes:
     return result
 
 
-def write_new(path: Path, data: bytes) -> None:
+def write_new(path: Path, data: bytes) -> os.stat_result:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    created = False
+    succeeded = False
     try:
         descriptor = os.open(path, flags, 0o600)
-        try:
-            os.fchmod(descriptor, 0o600)
-            offset = 0
-            while offset < len(data):
-                offset += os.write(descriptor, data[offset:])
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        created = True
+        os.fchmod(descriptor, 0o600)
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                reject("output")
+            offset += written
+        os.fsync(descriptor)
+        identity = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(identity.st_mode) or identity.st_uid != os.geteuid()
+            or identity.st_nlink != 1 or stat.S_IMODE(identity.st_mode) != 0o600
+            or any(getattr(identity, field) != getattr(named, field) for field in STABLE_FILE_FIELDS)
+        ):
+            reject("output")
+        succeeded = True
+        return identity
     except FileExistsError:
         reject("output-exists")
+    except ContactSheetError:
+        raise
     except OSError:
         reject("output")
+    finally:
+        cleanup_identity = None
+        if descriptor >= 0 and created and not succeeded:
+            try:
+                cleanup_identity = os.fstat(descriptor)
+            except OSError:
+                pass
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if cleanup_identity is not None:
+            unlink_exact(path, cleanup_identity)
+
+
+def unlink_exact(path: Path, expected: os.stat_result) -> None:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or any(getattr(expected, field) != getattr(current, field) for field in STABLE_FILE_FIELDS)
+        ):
+            return
+        os.unlink(path)
+    except OSError:
+        return
 
 
 def assemble(sources: dict[str, Path], output_directory: Path, filename: str) -> tuple[bytes, dict[str, object]]:
@@ -229,14 +277,11 @@ def assemble(sources: dict[str, Path], output_directory: Path, filename: str) ->
     sidecar = output_directory / f"{filename[:-4]}.sources.json"
     if output.exists() or sidecar.exists():
         reject("output-exists")
-    write_new(output, result)
+    output_identity = write_new(output, result)
     try:
         write_new(sidecar, (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
     except BaseException:
-        try:
-            output.unlink()
-        except OSError:
-            pass
+        unlink_exact(output, output_identity)
         raise
     return result, record
 

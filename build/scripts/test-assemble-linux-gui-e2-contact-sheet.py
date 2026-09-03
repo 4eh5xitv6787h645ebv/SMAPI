@@ -108,6 +108,85 @@ def main() -> None:
         if rejected.returncode != 2 or json.loads(rejected.stdout).get("code") != "source":
             raise AssertionError("linked source was not rejected")
 
+        raced_source = sources["permission"]
+        real_open = assembler.os.open
+        changed = False
+
+        def raced_open(path, *open_arguments, **open_keywords):
+            nonlocal changed
+            if not changed and Path(path) == raced_source:
+                changed = True
+                raced_source.chmod(0o400)
+            return real_open(path, *open_arguments, **open_keywords)
+
+        assembler.os.open = raced_open
+        try:
+            try:
+                assembler.read_private_png(raced_source)
+            except assembler.ContactSheetError as error:
+                if error.code != "source" or not changed:
+                    raise AssertionError("metadata race produced the wrong rejection") from error
+            else:
+                raise AssertionError("metadata race was accepted")
+        finally:
+            assembler.os.open = real_open
+            raced_source.chmod(0o600)
+
+        cleanup_output = root / "cleanup-output"
+        cleanup_output.mkdir(mode=0o700)
+        replacement = cleanup_output / "e2-filesystem-failures.png"
+        real_write_new = assembler.write_new
+        writes = 0
+
+        def fail_after_replacement(path: Path, data: bytes):
+            nonlocal writes
+            writes += 1
+            if writes == 1:
+                return real_write_new(path, data)
+            replacement.unlink()
+            replacement.write_bytes(b"same-user replacement")
+            replacement.chmod(0o600)
+            raise assembler.ContactSheetError("output")
+
+        assembler.write_new = fail_after_replacement
+        try:
+            try:
+                assembler.assemble(sources, cleanup_output, "e2-filesystem-failures.png")
+            except assembler.ContactSheetError as error:
+                if error.code != "output":
+                    raise AssertionError("sidecar failure produced the wrong rejection") from error
+            else:
+                raise AssertionError("sidecar failure was accepted")
+        finally:
+            assembler.write_new = real_write_new
+        if replacement.read_bytes() != b"same-user replacement":
+            raise AssertionError("failure cleanup deleted a replaced output path")
+
+        partial = cleanup_output / "partial-output.png"
+        real_os_write = assembler.os.write
+        partial_calls = 0
+
+        def interrupted_write(descriptor: int, data: bytes) -> int:
+            nonlocal partial_calls
+            partial_calls += 1
+            if partial_calls == 1:
+                return real_os_write(descriptor, data[:1])
+            return 0
+
+        assembler.os.write = interrupted_write
+        try:
+            try:
+                assembler.write_new(partial, b"private partial output")
+            except assembler.ContactSheetError as error:
+                if error.code != "output":
+                    raise AssertionError("partial write produced the wrong rejection") from error
+            else:
+                raise AssertionError("partial write was accepted")
+        finally:
+            assembler.os.write = real_os_write
+        if partial.exists():
+            raise AssertionError("partial owned output survived failure cleanup")
+
     print("Linux GUI E2 contact-sheet tests passed.")
 
 
