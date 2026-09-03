@@ -384,6 +384,40 @@ def read_bootstrap(contract_path: Path, output: Path) -> tuple[dict[str, Any], b
     return contract, bytes(raw), root, metadata.st_uid, primary_gid, total
 
 
+def acquire_root_lock(root: Path, run_uid: int, run_gid: int) -> tuple[int, tuple[int, int]]:
+    """Hold an exclusive inode lock so one disposable case root has exactly one broker."""
+    descriptor = -1
+    try:
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        opened = os.fstat(descriptor)
+        named = root.lstat()
+        if (
+            root.resolve(strict=True) != root
+            or not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(named.st_mode)
+            or opened.st_uid != run_uid or opened.st_gid != run_gid
+            or stat.S_IMODE(opened.st_mode) != 0o700
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise BrokerError()
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        repeated = os.fstat(descriptor)
+        current = root.lstat()
+        if (
+            (repeated.st_dev, repeated.st_ino) != (opened.st_dev, opened.st_ino)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise BrokerError()
+        return descriptor, (opened.st_dev, opened.st_ino)
+    except BrokerError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise BrokerError() from None
+
+
 def sealed_memfd(name: str, content: bytes, maximum: int) -> int:
     """Copy admitted bytes to an immutable anonymous file and verify every required seal."""
     if (
@@ -699,6 +733,8 @@ def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
         CONTROLLER: fixed_file_hash(CONTROLLER, 4 * 1024 * 1024),
     }
     make_namespace_private()
+    root_lock_fd = -1
+    root_identity = (0, 0)
     scope: CgroupScope | None = None
     contract_fd = -1
     request_fd = -1
@@ -710,6 +746,10 @@ def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
     deadline = time.monotonic() + total
     request = root / REQUEST_NAME
     try:
+        root_lock_fd, root_identity = acquire_root_lock(root, uid, gid)
+        current_root = root.lstat()
+        if (current_root.st_dev, current_root.st_ino) != root_identity:
+            raise BrokerError()
         scope = CgroupScope(uid)
         contract_fd = sealed_memfd("smapi-hard-state-contract", contract_bytes, MAX_CONTRACT_BYTES)
         environment = child_environment(uid)
@@ -837,6 +877,15 @@ def run_case(contract_path: Path, output: Path) -> tuple[bytes, bool]:
                     os.close(descriptor)
                 except OSError:
                     cleanup_failed = True
+        if root_lock_fd >= 0:
+            try:
+                current_root = root.lstat()
+                if (current_root.st_dev, current_root.st_ino) != root_identity:
+                    cleanup_failed = True
+                os.close(root_lock_fd)
+                root_lock_fd = -1
+            except OSError:
+                cleanup_failed = True
         if cleanup_failed:
             raise BrokerError()
 

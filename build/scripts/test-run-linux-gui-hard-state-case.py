@@ -251,6 +251,27 @@ class BrokerTests(unittest.TestCase):
             with self.assertRaises(self.module.BrokerError):
                 self.module.read_bootstrap(contract, output)
 
+    def test_case_root_lock_allows_exactly_one_broker_and_rechecks_identity(self):
+        with tempfile.TemporaryDirectory(prefix="hs-root-lock-", dir="/dev/shm") as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            uid = os.geteuid()
+            gid = os.getegid()
+            first, identity = self.module.acquire_root_lock(root, uid, gid)
+            try:
+                self.assertEqual(identity, (root.stat().st_dev, root.stat().st_ino))
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.acquire_root_lock(root, uid, gid)
+            finally:
+                os.close(first)
+            second, repeated = self.module.acquire_root_lock(root, uid, gid)
+            try:
+                self.assertEqual(repeated, identity)
+            finally:
+                os.close(second)
+            with self.assertRaises(self.module.BrokerError):
+                self.module.acquire_root_lock(root, uid + 1, gid)
+
     def test_admitted_identity_requires_nonzero_system_primary_gid_everywhere(self):
         uid = os.geteuid()
         primary_gid = self.module.pwd.getpwuid(uid).pw_gid
@@ -464,29 +485,33 @@ class BrokerTests(unittest.TestCase):
                 self.assertTrue(scope.cleaned)
 
     def test_sealed_contract_failure_still_removes_the_new_cgroup_scope(self):
-        root = Path("/safe-prefix/run-component")
+        with tempfile.TemporaryDirectory(prefix="hs-sealed-failure-", dir="/dev/shm") as name:
+            root = Path(name)
+            os.chmod(root, 0o700)
+            run_uid = os.geteuid()
+            run_gid = os.getegid()
 
-        class FakeScope:
-            cleaned = False
+            class FakeScope:
+                cleaned = False
 
-            def kill_and_remove(self, _deadline):
-                self.cleaned = True
+                def kill_and_remove(self, _deadline):
+                    self.cleaned = True
 
-        scope = FakeScope()
-        with (
-            mock.patch.object(self.module.os, "geteuid", return_value=0),
-            mock.patch.object(self.module.os, "getuid", return_value=0),
-            mock.patch.object(self.module, "read_bootstrap", return_value=({}, b"{}", root, 1000, 1000, 25)),
-            mock.patch.object(self.module, "fixed_file_hash", return_value="a" * 64),
-            mock.patch.object(self.module, "make_namespace_private", return_value=None),
-            mock.patch.object(self.module, "CgroupScope", return_value=scope),
-            mock.patch.object(self.module, "sealed_memfd", side_effect=self.module.BrokerError),
-            mock.patch.object(self.module, "cleanup_residual_request", return_value=None),
-            mock.patch.object(self.module, "cleanup_controller_ledgers", return_value=None),
-        ):
-            with self.assertRaises(self.module.BrokerError):
-                self.module.run_case(Path("/contract"), root / "output-name")
-        self.assertTrue(scope.cleaned)
+            scope = FakeScope()
+            with (
+                mock.patch.object(self.module.os, "geteuid", return_value=0),
+                mock.patch.object(self.module.os, "getuid", return_value=0),
+                mock.patch.object(self.module, "read_bootstrap", return_value=({}, b"{}", root, run_uid, run_gid, 25)),
+                mock.patch.object(self.module, "fixed_file_hash", return_value="a" * 64),
+                mock.patch.object(self.module, "make_namespace_private", return_value=None),
+                mock.patch.object(self.module, "CgroupScope", return_value=scope),
+                mock.patch.object(self.module, "sealed_memfd", side_effect=self.module.BrokerError),
+                mock.patch.object(self.module, "cleanup_residual_request", return_value=None),
+                mock.patch.object(self.module, "cleanup_controller_ledgers", return_value=None),
+            ):
+                with self.assertRaises(self.module.BrokerError):
+                    self.module.run_case(Path("/contract"), root / "output-name")
+            self.assertTrue(scope.cleaned)
 
 
 if __name__ == "__main__":
