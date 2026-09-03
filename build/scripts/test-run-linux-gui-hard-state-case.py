@@ -58,7 +58,7 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(json.loads(result.stdout), {
             "code": "broker", "kind": "linux-gui-hard-state-qualification",
-            "ok": False, "schemaVersion": 1, "status": "failed",
+            "ok": False, "schemaVersion": 2, "status": "failed",
         })
         self.assertNotIn("/private", result.stdout)
 
@@ -333,7 +333,7 @@ class BrokerTests(unittest.TestCase):
     def test_result_schema_is_closed_and_failed_child_never_becomes_success(self):
         failure = {
             "code": "boundary", "kind": "linux-gui-hard-state-qualification",
-            "ok": False, "schemaVersion": 1, "status": "failed",
+            "ok": False, "schemaVersion": 2, "status": "failed",
         }
         self.assertFalse(self.module.validate_result((json.dumps(failure, separators=(",", ":")) + "\n").encode("ascii")))
         failure["details"] = "/private/leak"
@@ -343,7 +343,7 @@ class BrokerTests(unittest.TestCase):
         success = {key: False for key in self.module.PREFLIGHT_KEYS}
         success.update({
             "kind": "linux-gui-hard-state-qualification", "ok": True,
-            "scenario": "C3", "schemaVersion": 1, "status": "preflighted",
+            "scenario": "C3", "schemaVersion": 2, "status": "preflighted",
             "releaseTag": "fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3", "sourceCommit": "1" * 40, "sourceTree": "2" * 40,
             "publicReleaseUrl": "https://github.com/4eh5xitv6787h645ebv/SMAPI/releases/tag/fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3", "packageSha256": "3" * 64,
             "guiSha256": "4" * 64, "backendSha256": "5" * 64,
@@ -358,7 +358,7 @@ class BrokerTests(unittest.TestCase):
     def test_main_propagates_valid_child_failure_without_leaking_or_returning_success(self):
         failure = (
             b'{"code":"boundary","kind":"linux-gui-hard-state-qualification",'
-            b'"ok":false,"schemaVersion":1,"status":"failed"}\n'
+            b'"ok":false,"schemaVersion":2,"status":"failed"}\n'
         )
         writes = []
 
@@ -391,7 +391,7 @@ class BrokerTests(unittest.TestCase):
             os.chmod(request, 0o600)
             failure = (
                 b'{"code":"boundary","kind":"linux-gui-hard-state-qualification",'
-                b'"ok":false,"schemaVersion":1,"status":"failed"}\n'
+                b'"ok":false,"schemaVersion":2,"status":"failed"}\n'
             )
             launched = []
 

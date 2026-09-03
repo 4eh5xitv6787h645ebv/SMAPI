@@ -31,6 +31,7 @@ MAX_CONTRACT_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 16 * 1024
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_LEDGER_BYTES = 64 * 1024 * 1024
+SCHEMA_VERSION = 2
 SAFE_COMPONENT = re.compile(r"^[a-z0-9][a-z0-9._-]{7,127}$")
 PR_SET_NO_NEW_PRIVS = 38
 PR_CAP_AMBIENT = 47
@@ -267,7 +268,7 @@ class SilentParser(argparse.ArgumentParser):
 def emit_failure() -> None:
     payload = {
         "code": "broker", "kind": "linux-gui-hard-state-qualification",
-        "ok": False, "schemaVersion": 1, "status": "failed",
+        "ok": False, "schemaVersion": SCHEMA_VERSION, "status": "failed",
     }
     os.write(sys.stdout.fileno(), (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
 
@@ -692,7 +693,11 @@ def validate_result(result: bytes) -> bool:
         value = json.loads(result.decode("ascii"))
     except (UnicodeError, json.JSONDecodeError):
         raise BrokerError() from None
-    if not isinstance(value, dict) or value.get("kind") != "linux-gui-hard-state-qualification" or value.get("schemaVersion") != 1:
+    if (
+        not isinstance(value, dict)
+        or value.get("kind") != "linux-gui-hard-state-qualification"
+        or value.get("schemaVersion") != SCHEMA_VERSION
+    ):
         raise BrokerError()
     if set(value) == FAILED_KEYS:
         if value["ok"] is not False or value["status"] != "failed" or value["code"] not in FAILURE_CODES:

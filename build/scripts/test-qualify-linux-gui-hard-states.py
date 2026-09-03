@@ -52,7 +52,7 @@ class Fixture:
             "purpose": "smapi-linux-gui-hard-state-disposable-root",
             "root_device": root_stat.st_dev,
             "root_inode": root_stat.st_ino,
-            "schema_version": 1,
+            "schema_version": 2,
         }
         marker_path = self.root / VALIDATOR_MARKER
         marker_path.write_text(json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8")
@@ -66,7 +66,7 @@ class Fixture:
         os.chmod(self.game_marker, 0o600)
         self.output = self.root / "hard-state-output-00000001"
         self.contract = {
-            "schema_version": 1,
+            "schema_version": 2,
             "scenario": scenario,
             "release": {
                 "version": VERSION,
@@ -86,6 +86,10 @@ class Fixture:
                 "sha256": hashlib.sha256(self.game_marker.read_bytes()).hexdigest(),
             },
             "binaries": {"apphost_sha256": "3" * 64, "backend_sha256": "4" * 64},
+            "capture": {
+                "policy": "exact-window-v1",
+                "environment_profile": "ubuntu-24.04-gnome-xwayland",
+            },
             "isolation": {
                 "disposable_root": str(self.root),
                 "root_device": root_stat.st_dev,
@@ -97,6 +101,7 @@ class Fixture:
                 "allow_privileged_fault_setup": scenario.startswith("E2-"),
             },
             "timeouts_seconds": {"startup": 5, "operation": 10, "settlement": 5, "cleanup": 5, "total": 25},
+            "resource_limits": {"output_bytes": 1024 * 1024 * 1024},
         }
         self.contract_path = base / "contract.json"
         self.write()
@@ -153,7 +158,7 @@ class SupervisorTests(unittest.TestCase):
                     "kind": "linux-gui-hard-state-qualification",
                     "ok": True,
                     "scenario": scenario,
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "status": "admitted",
                 })
                 self.assertNotIn(str(fixture.base), result.stdout)
@@ -212,9 +217,14 @@ class SupervisorTests(unittest.TestCase):
                     "package": {"path": str(package), "sha256": "1" * 64},
                     "release": {"version": VERSION},
                     "binaries": {"apphost_sha256": "2" * 64, "backend_sha256": "3" * 64},
+                    "capture": {
+                        "policy": "exact-window-v1",
+                        "environment_profile": "ubuntu-24.04-gnome-xwayland",
+                    },
                     "game_marker": {"path": str(base / "marker"), "size_bytes": 32, "sha256": "4" * 64},
                     "isolation": {"disposable_root": str(base)},
                     "timeouts_seconds": {"startup": 5, "operation": 10, "settlement": 5, "cleanup": 5, "total": 25},
+                    "resource_limits": {"output_bytes": 1024 * 1024 * 1024},
                 }
                 sessions = []
                 boundaries = []
