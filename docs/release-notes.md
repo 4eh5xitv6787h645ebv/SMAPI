@@ -7,7 +7,15 @@ title: Release notes
 
 # Release notes
 
-## Next Linux alpha — unreleased corrective work
+## Linux fork 4.5.3 alpha 3 — release candidate, not public
+
+The planned embedded version is
+`4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.3`, reserved for annotated tag
+`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3`. This is a source candidate only: alpha 3 is
+not a published release until the reviewed change is merged, the exact merge commit and trusted
+workload pass qualification, the annotated-tag workflow publishes its six assets, and a fresh
+public download passes independent verification. Until then, alpha 2 below remains the current
+public package.
 
 * Replaced the generic graphical-installer terminal diagnostic with stable outcome-specific event
   codes and truthful severity for install/update/repair/uninstall/backup/rollback, interrupted

@@ -61,6 +61,19 @@ def main() -> int:
     ):
         fail("the screenshot assets root must be one real normalized directory")
     require_regular_single_link(private_strings_file, "private-string file")
+    private_metadata = private_strings_file.lstat()
+    try:
+        resolved_private_strings = private_strings_file.resolve(strict=True)
+    except OSError as exc:
+        fail(f"can't inspect private-string file: {exc}")
+    if (
+        private_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(private_metadata.st_mode) != 0o600
+        or resolved_private_strings != private_strings_file
+    ):
+        fail("private-string file must be normalized, current-user-owned, and exact mode 0600")
+    if resolved_private_strings == repository_root or repository_root in resolved_private_strings.parents:
+        fail("private-string file must be outside the repository")
 
     try:
         entries = list(os.scandir(assets_root))

@@ -168,3 +168,9 @@ Its six freshly downloaded public assets passed inventory, checksum, metadata, m
 attestation, package, GUI-smoke, and disposable lifecycle qualification; see the
 [sanitized record](https://github.com/4eh5xitv6787h645ebv/SMAPI/issues/168#issuecomment-5515036792).
 The authentic multi-desktop accessibility and screenshot evidence is the remaining delivery slice.
+
+Alpha 3 is currently a non-public source candidate with planned embedded version
+`4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.3` and reserved annotated tag
+`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3`. It does not replace the alpha 2 public delivery
+record until exact-merge qualification, trusted-workload qualification, immutable annotated-tag
+publication, fresh public-download verification, and a public-package trusted smoke all pass.

@@ -24,6 +24,13 @@ official stable release:
 | Release title | `Experimental SMAPI Linux Fork 4.5.3 alpha 2` |
 | Installer | `SMAPI-4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.2-linux-x64-installer.zip` |
 
+Alpha 3 is currently a **non-public source candidate** with planned embedded version
+`4.5.3-unofficial.4eh5xitv6787h645ebv.linux.alpha.3` and reserved annotated tag
+`fork-4eh5xitv6787h645ebv-linux-v4.5.3-alpha.3`. Do not use that identity as a download or
+verification claim until the exact merged commit, tag workflow, six public assets, fresh-download
+qualification, and trusted-workload smoke are linked here. Alpha 2 remains the only current public
+package while that sequence is incomplete.
+
 Later alphas increment the final number. A published tag is never reused or moved. The public
 release assets are built from the exact tag commit by GitHub Actions; the build records its source
 commit, tree, pinned game-reference commit, runner, SDKs, package size, and SHA-256. Recorded inputs
